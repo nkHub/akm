@@ -227,3 +227,23 @@ def pick_key(model: str) -> dict | None:
 async def pick_key_async(model: str) -> dict | None:
     """异步版本的 pick_key，在线程池中执行数据库查询"""
     return await asyncio.to_thread(pick_key, model)
+
+
+def pick_wildcard_key() -> dict | None:
+    """选择 models='*' 的通配符 active key（兜底用）"""
+    clear_expired_rate_limits()
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM keys WHERE status = 'active' AND models = '*' ORDER BY priority ASC",
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return None
+    d = dict(rows[0])
+    d["api_key"] = _decrypt(d["api_key"])
+    return d
+
+
+async def pick_wildcard_key_async() -> dict | None:
+    """异步版本的 pick_wildcard_key"""
+    return await asyncio.to_thread(pick_wildcard_key)

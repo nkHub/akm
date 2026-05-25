@@ -17,7 +17,7 @@ def _do_write(data: dict) -> None:
         """INSERT INTO audit_logs
            (timestamp, provider, key_alias, model, request_body,
             response_body, status_code, latency_ms, error)
-           VALUES (datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data.get("provider", ""),
             data.get("key_alias", ""),
