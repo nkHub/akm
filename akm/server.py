@@ -14,6 +14,7 @@ from akm.key_pool import (
     set_priority, set_base_url, set_status, remove_key,
 )
 from akm.audit import write_log_async, list_logs, count_logs
+from akm.config import load_config, save_config, get as config_get
 
 app = FastAPI(title="AI Key Manager", version="0.1.0")
 logger = logging.getLogger("akm")
@@ -358,6 +359,20 @@ async def api_clean_logs(request: Request):
         return {"ok": True, "deleted": count}
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
+@app.get("/api/config")
+async def api_get_config():
+    """获取配置"""
+    return load_config()
+
+
+@app.post("/api/config")
+async def api_save_config(request: Request):
+    """保存配置"""
+    body = await request.json()
+    save_config(body)
+    return {"ok": True}
 
 
 @app.get("/logs")
