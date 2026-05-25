@@ -94,7 +94,7 @@ akm-menubar
 | 页面 | 功能 |
 |------|------|
 | 统计 | Token 用量仪表盘（按供应商/模型/日期） |
-| 审计 | 请求日志（分页、抽屉详情、自动刷新） |
+| 审计 | 请求日志（分页、正序/倒序切换、仅对话过滤、聊天气泡抽屉、自动刷新） |
 | Key管理 | 增删改查、启用/禁用、连通性测试 |
 | 设置 | 服务端口、日志保留天数、清空日志、自动打开管理台 |
 | 关于 | 版本与功能简介 |
@@ -122,11 +122,11 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
 | GET | `/health` | 健康检查 |
 | GET | `/api/keys` | Key 列表（脱敏） |
 | POST | `/api/keys` | 添加 Key |
-| PUT | `/api/keys/{alias}` | 编辑 Key（支持 provider/priority/models/base_url） |
+| PUT | `/api/keys/{alias}` | 编辑 Key（支持 provider/models/base_url/auth_header/priority） |
 | PATCH | `/api/keys/{alias}/status` | 启用/禁用 Key |
 | DELETE | `/api/keys/{alias}` | 删除 Key |
 | POST | `/api/keys/{alias}/test` | 测试连通性 |
-| GET | `/api/logs` | 审计日志（分页） |
+| GET | `/api/logs` | 审计日志（分页，支持 provider/order/hide_empty 筛选） |
 | POST | `/api/logs/clean` | 清空日志 |
 | GET | `/api/stats` | Token 统计 |
 | GET/POST | `/api/config` | 配置读写 |
@@ -138,12 +138,33 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
 | 429 | 标记限流，60 秒冷却后恢复 |
 | 401/403 | 禁用 Key |
 | 402 | 禁用 Key（余额不足） |
-| 5xx | 同 Key 重试 2 次后切换 |
+| 5xx | 指数退避重试（同 Key 最多 3 次），失败后切换 Key |
+| 连接/超时 | 指数退避重试后切换 Key |
+
+> 应用重启后，数据库中残留的 `rate_limited` 状态会自动恢复为 `active`。
+
+## 流式转发
+
+代理自动检测请求中的 `"stream": true` 参数，启用流式转发模式：
+- 上游返回的 SSE 数据逐块实时转发给客户端，不缓存全量响应
+- 流式结束后异步写入审计日志（包含完整响应体用于统计和对话回放）
+- 流式请求不重试，失败直接切换 Key
+
+## 认证头配置
+
+Key 编辑表单支持自定义认证头模板，`{api_key}` 占位符会被替换为实际 Key：
+
+| 场景 | auth_header |
+|------|------------|
+| OpenAI / DeepSeek 官方 | `Bearer {api_key}` |
+| 第三方中转（如 dmxapi.cn） | `{api_key}` |
+| 其他自定义 | `Api-Key {api_key}` 等 |
 
 ## 技术栈
 
 - Python 3.10+ / FastAPI / uvicorn
-- SQLite（审计日志持久化）
+- httpx 共享连接池（lifespan 管理，TCP keep-alive 复用）
+- SQLite（审计日志持久化，WAL 模式）
 - Fernet 加密（Key 存储）
 - rumps（macOS 菜单栏）
 - Tailwind CSS（Web UI）
