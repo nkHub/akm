@@ -1,5 +1,6 @@
 import tempfile
 import pytest
+from unittest.mock import AsyncMock
 from httpx import ASGITransport, AsyncClient
 from akm.db import get_connection, init_db
 from akm.server import app
@@ -29,7 +30,7 @@ async def test_chat_completions_success(monkeypatch):
             "latency_ms": 100,
         }
     monkeypatch.setattr("akm.server.forward_request", mock_forward)
-    monkeypatch.setattr("akm.server.write_log", lambda x: None)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -56,7 +57,7 @@ async def test_chat_completions_no_keys(monkeypatch):
             "latency_ms": 0,
         }
     monkeypatch.setattr("akm.server.forward_request", mock_forward)
-    monkeypatch.setattr("akm.server.write_log", lambda x: None)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

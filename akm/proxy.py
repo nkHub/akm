@@ -3,7 +3,7 @@
 import time
 import json
 import httpx
-from akm.key_pool import pick_key, mark_rate_limited, set_status
+from akm.key_pool import pick_key_async, mark_rate_limited, set_status
 
 
 # 最大尝试 key 数量，防止无限循环
@@ -35,7 +35,7 @@ async def forward_request(
     tries = 0
 
     while tries < MAX_KEY_TRIES:
-        key = pick_key(model)
+        key = await pick_key_async(model)
         if key is None:
             return {
                 "status_code": 503,
