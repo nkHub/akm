@@ -20,7 +20,7 @@
     <form id="key-form" onsubmit="submitForm(event)" class="p-4 space-y-3">
       <input type="hidden" id="edit-alias" value="">
       <div><label class="block text-xs text-gray-400 mb-1">别名 *</label><input id="key-alias" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="例如: my-key"></div>
-      <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">选择供应商</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="codex">Codex</option><option value="custom">自定义</option></select></div>
+      <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">选择供应商</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="custom">自定义</option></select></div>
       <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
       <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
       <div><label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示全部）</label><input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
@@ -156,7 +156,7 @@ function testConnect(alias) {
 
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('key-provider').addEventListener('change', function() {
-    var urls = { openai: 'https://api.openai.com', deepseek: 'https://api.deepseek.com', codex: 'https://api.openai.com' };
+    var urls = { openai: 'https://api.openai.com', deepseek: 'https://api.deepseek.com' };
     var el = document.getElementById('key-baseurl');
     if (this.value in urls && !el.value) el.value = urls[this.value];
   });
