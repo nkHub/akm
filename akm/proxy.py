@@ -4,7 +4,7 @@ import time
 import json
 import asyncio
 import httpx
-from akm.key_pool import pick_key_async, mark_rate_limited, set_status
+from akm.key_pool import pick_key_async, pick_wildcard_key_async, mark_rate_limited, set_status
 
 
 # 最大尝试 key 数量，防止无限循环
@@ -41,10 +41,22 @@ async def forward_request(
     model = body.get("model", "")
     is_stream = body.get("stream", False)
     tries = 0
+    tried_aliases: set[str] = set()
+    use_fallback = False  # 精确匹配耗尽后启用通配符兜底
 
     while tries < MAX_KEY_TRIES:
-        key = await pick_key_async(model)
+        # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
+        if use_fallback:
+            key = await pick_wildcard_key_async()
+        else:
+            key = await pick_key_async(model)
+
         if key is None:
+            if not use_fallback:
+                # 精确匹配无可用 key，尝试通配符兜底
+                use_fallback = True
+                continue
+            # 兜底也无可用 key
             return {
                 "status_code": 503,
                 "body": "",
@@ -54,6 +66,13 @@ async def forward_request(
                 "error": "没有可用的 API key",
                 "latency_ms": 0,
             }
+
+        # 避免重复尝试同一个 key（5xx 不会禁用 key，可能被反复选中）
+        if key["alias"] in tried_aliases:
+            if not use_fallback:
+                use_fallback = True
+            continue
+        tried_aliases.add(key["alias"])
 
         tries += 1
         url = _build_upstream_url(key.get("base_url") or "https://api.openai.com")

@@ -40,7 +40,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS audit_logs (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp    TEXT NOT NULL DEFAULT (datetime('now')),
+            timestamp    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             provider     TEXT DEFAULT '',
             key_alias    TEXT DEFAULT '',
             model        TEXT DEFAULT '',

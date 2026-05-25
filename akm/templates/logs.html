@@ -26,7 +26,7 @@
       <span class="text-xs text-gray-400">仅对话</span>
       <div class="switch-track bg-indigo-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
     </label>
-    <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↑ 正序</button>
+    <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↓ 倒序</button>
     <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off">
       <span class="text-xs text-gray-400">自动刷新</span>
       <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
@@ -71,7 +71,7 @@ var _currentPage = 1;
 var autoRefresh = false, refreshTimer = null;
 var _currentProvider = '';
 var _providerDropdownOpen = false;
-var _orderAsc = true;
+var _orderAsc = false;
 var _hideEmpty = true;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -219,53 +219,50 @@ function renderChatView(log) {
 
   // 2. 解析响应体
   try { respBody = JSON.parse(log.response_body||'{}'); } catch(e) {}
+  var reasoning = '';
+  var reply = '';
 
-  if (respBody) {
-    var reasoning = '';
-    var reply = '';
+  // 普通 JSON 响应
+  if (respBody && respBody.choices && respBody.choices.length) {
+    var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
+    reasoning = msg.reasoning_content || '';
+    reply = msg.content || '';
+  }
 
-    // 普通 JSON 响应
-    if (respBody.choices && respBody.choices.length) {
-      var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
-      reasoning = msg.reasoning_content || '';
-      reply = msg.content || '';
-    }
+  // SSE 流式响应：从 data: 行中提取内容和思考过程
+  if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
+    var sseContent = '';
+    var sseReasoning = '';
+    var lines = log.response_body.split('\n');
+    lines.forEach(function(line){
+      line = line.trim();
+      if (line.startsWith('data: ') && !line.startsWith('data: [DONE]')) {
+        try {
+          var chunk = JSON.parse(line.substring(6));
+          if (chunk.choices && chunk.choices[0]) {
+            var delta = chunk.choices[0].delta || {};
+            if (delta.content) sseContent += delta.content;
+            if (delta.reasoning_content) sseReasoning += delta.reasoning_content;
+          }
+        } catch(e) {}
+      }
+    });
+    reply = sseContent;
+    reasoning = sseReasoning;
+  }
 
-    // 如果是 SSE 流式响应，从多行 data: 中提取内容
-    if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
-      var sseContent = '';
-      var sseReasoning = '';
-      var lines = log.response_body.split('\n');
-      lines.forEach(function(line){
-        line = line.trim();
-        if (line.startsWith('data: ') && !line.startsWith('data: [DONE]')) {
-          try {
-            var chunk = JSON.parse(line.substring(6));
-            if (chunk.choices && chunk.choices[0]) {
-              var delta = chunk.choices[0].delta || {};
-              if (delta.content) sseContent += delta.content;
-              if (delta.reasoning_content) sseReasoning += delta.reasoning_content;
-            }
-          } catch(e) {}
-        }
-      });
-      reply = sseContent;
-      reasoning = sseReasoning;
-    }
+  // 渲染思考过程
+  if (reasoning) {
+    html += '<details class="group"><summary class="text-xs text-amber-400/70 cursor-pointer hover:text-amber-300 select-none">💭 思考过程</summary><div class="mt-1 bg-amber-950/20 border border-amber-800/30 rounded-lg px-3 py-2 text-xs text-amber-300/70 whitespace-pre-wrap max-w-[90%]">'+esc(reasoning)+'</div></details>';
+  }
 
-    // 渲染思考过程
-    if (reasoning) {
-      html += '<details class="group"><summary class="text-xs text-amber-400/70 cursor-pointer hover:text-amber-300 select-none">💭 思考过程</summary><div class="mt-1 bg-amber-950/20 border border-amber-800/30 rounded-lg px-3 py-2 text-xs text-amber-300/70 whitespace-pre-wrap max-w-[90%]">'+esc(reasoning)+'</div></details>';
-    }
-
-    // 渲染回复
-    if (reply) {
-      html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%]">'+esc(reply)+'</div></div>';
-    } else if (!reasoning) {
-      var errCode = log.status_code || 0;
-      var errMsg = esc(log.error||'');
-      html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';
-    }
+  // 渲染回复
+  if (reply) {
+    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%]">'+esc(reply)+'</div></div>';
+  } else if (!reasoning && respBody) {
+    var errCode = log.status_code || 0;
+    var errMsg = esc(log.error||'');
+    html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';
   }
 
   // 3. 底部显示元信息
