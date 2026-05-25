@@ -1,0 +1,62 @@
+"""SQLite 数据库连接和建表"""
+
+import os
+import sqlite3
+from pathlib import Path
+
+# 数据目录：~/.akm/
+DB_DIR = os.path.expanduser("~/.akm")
+
+
+def get_db_path() -> str:
+    """返回数据库文件完整路径，并确保目录存在"""
+    os.makedirs(DB_DIR, exist_ok=True)
+    return os.path.join(DB_DIR, "akm.db")
+
+
+def get_connection() -> sqlite3.Connection:
+    """获取数据库连接，启用 WAL 模式和外键"""
+    conn = sqlite3.connect(get_db_path())
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    """创建 keys 和 audit_logs 表（如果不存在）"""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS keys (
+            alias       TEXT PRIMARY KEY,
+            provider    TEXT NOT NULL,
+            api_key     TEXT NOT NULL,
+            base_url    TEXT,
+            models      TEXT DEFAULT '*',
+            auth_header TEXT DEFAULT 'Bearer {api_key}',
+            priority    INTEGER DEFAULT 0,
+            status      TEXT DEFAULT 'active',
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp    TEXT NOT NULL DEFAULT (datetime('now')),
+            provider     TEXT DEFAULT '',
+            key_alias    TEXT DEFAULT '',
+            model        TEXT DEFAULT '',
+            request_body TEXT DEFAULT '',
+            response_body TEXT DEFAULT '',
+            status_code  INTEGER DEFAULT 0,
+            latency_ms   INTEGER DEFAULT 0,
+            error        TEXT DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_audit_timestamp
+            ON audit_logs(timestamp);
+    """)
+    # 迁移：旧表可能没有 auth_header 列，忽略已存在的错误
+    try:
+        conn.execute("ALTER TABLE keys ADD COLUMN auth_header TEXT DEFAULT 'Bearer {api_key}'")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
