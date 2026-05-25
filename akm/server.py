@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse
+from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse, StreamingResponse
 from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
@@ -371,10 +371,12 @@ async def api_logs(
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     provider: str = Query(default=None),
+    order: str = Query(default="DESC"),
+    hide_empty: bool = Query(default=False),
 ):
-    """查询审计日志 API，支持分页，返回 JSON"""
-    logs = list_logs(provider=provider, limit=limit, offset=offset)
-    total = count_logs(provider=provider)
+    """查询审计日志 API，支持分页、排序、过滤空记录，返回 JSON"""
+    logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty)
+    total = count_logs(provider=provider, hide_empty=hide_empty)
     return {"data": logs, "total": total}
 
 
@@ -474,6 +476,47 @@ async def chat_completions(request: Request):
     body = await request.json()
     result = await forward_request(body, request.app.state.http_client)
 
+    # ── 流式响应：逐块转发，边收边发 ──
+    if result.get("stream"):
+        resp = result["response"]
+        key_alias = result["key_alias"]
+        provider = result["provider"]
+        model = result["model"]
+
+        async def stream_generator():
+            chunks = []
+            t0 = __import__("time").time()
+            try:
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+                    yield chunk
+            finally:
+                await resp.aclose()
+                latency = int((__import__("time").time() - t0) * 1000)
+                body_str = b"".join(chunks).decode("utf-8", errors="replace")
+                # 异步写入审计日志
+                asyncio.create_task(write_log_async({
+                    "provider": provider, "key_alias": key_alias, "model": model,
+                    "request_body": json.dumps(body, ensure_ascii=False),
+                    "response_body": body_str, "status_code": 200,
+                    "latency_ms": latency, "error": "",
+                }))
+                logger.info(
+                    f"[{key_alias}] {provider} model={model} → 200 {latency}ms (stream)"
+                )
+
+        return StreamingResponse(
+            stream_generator(),
+            status_code=200,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ── 非流式响应：原有逻辑 ──
     # 异步写入审计日志（fire-and-forget，不阻塞响应）
     asyncio.create_task(write_log_async({
         "provider": result["provider"],

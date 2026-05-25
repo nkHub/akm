@@ -42,36 +42,50 @@ def list_logs(
     provider: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    order: str = "DESC",
+    hide_empty: bool = False,
 ) -> list[dict]:
-    """查询日志，支持分页和供应商筛选"""
+    """查询日志，支持分页、供应商筛选、排序和过滤空记录
+
+    order: "ASC" 按时间正序（旧→新），"DESC" 倒序（新→旧），默认 DESC
+    hide_empty: True 时过滤掉没有 request_body 的记录（纯错误/空记录）
+    """
+    order_clause = "ORDER BY id ASC" if order.upper() == "ASC" else "ORDER BY id DESC"
+    empty_filter = "AND request_body != ''" if hide_empty else ""
     conn = get_connection()
     if provider:
         rows = conn.execute(
-            """SELECT * FROM audit_logs
-               WHERE provider = ?
-               ORDER BY id DESC LIMIT ? OFFSET ?""",
+            f"""SELECT * FROM audit_logs
+               WHERE provider = ? {empty_filter}
+               {order_clause} LIMIT ? OFFSET ?""",
             (provider, limit, offset),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+            f"""SELECT * FROM audit_logs
+               WHERE 1=1 {empty_filter}
+               {order_clause} LIMIT ? OFFSET ?""",
             (limit, offset),
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def count_logs(provider: str | None = None) -> int:
-    """统计日志总数，可按供应商筛选"""
+def count_logs(
+    provider: str | None = None,
+    hide_empty: bool = False,
+) -> int:
+    """统计日志总数，可按供应商筛选，可选过滤空记录"""
+    empty_filter = "AND request_body != ''" if hide_empty else ""
     conn = get_connection()
     if provider:
         row = conn.execute(
-            "SELECT COUNT(*) FROM audit_logs WHERE provider = ?",
+            f"SELECT COUNT(*) FROM audit_logs WHERE provider = ? {empty_filter}",
             (provider,),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT COUNT(*) FROM audit_logs",
+            f"SELECT COUNT(*) FROM audit_logs WHERE 1=1 {empty_filter}",
         ).fetchone()
     conn.close()
     return row[0] if row else 0

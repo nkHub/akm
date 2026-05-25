@@ -22,6 +22,11 @@
     <span id="log-count" class="text-xs text-gray-500"></span>
   </div>
   <div class="flex items-center gap-3">
+    <label id="hide-empty-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-on" onclick="toggleHideEmpty()">
+      <span class="text-xs text-gray-400">仅对话</span>
+      <div class="switch-track bg-indigo-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+    </label>
+    <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↑ 正序</button>
     <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off">
       <span class="text-xs text-gray-400">自动刷新</span>
       <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
@@ -45,11 +50,14 @@
     </button>
   </div>
   <div class="flex border-b border-border shrink-0">
-    <button onclick="switchDrawerTab('request')" id="dtab-request" class="flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50">请求体</button>
+    <button onclick="switchDrawerTab('chat')" id="dtab-chat" class="flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50">对话视图</button>
+    <button onclick="switchDrawerTab('request')" id="dtab-request" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">请求体</button>
     <button onclick="switchDrawerTab('response')" id="dtab-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">响应体</button>
   </div>
-  <div class="flex-1 overflow-y-auto p-4">
-    <pre id="drawer-body" class="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
+  <div class="flex-1 overflow-y-auto p-4" id="drawer-content">
+    <div id="drawer-chat" class="space-y-3"></div>
+    <pre id="drawer-request" class="hidden text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
+    <pre id="drawer-response" class="hidden text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
   </div>
 </div>
 {% endblock %}
@@ -63,6 +71,8 @@ var _currentPage = 1;
 var autoRefresh = false, refreshTimer = null;
 var _currentProvider = '';
 var _providerDropdownOpen = false;
+var _orderAsc = true;
+var _hideEmpty = true;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
@@ -79,6 +89,8 @@ async function refreshLogs(page) {
   var offset = (_currentPage - 1) * _pageSize;
   var url = '/api/logs?limit=' + _pageSize + '&offset=' + offset;
   if (_currentProvider) url += '&provider=' + encodeURIComponent(_currentProvider);
+  url += '&order=' + (_orderAsc ? 'ASC' : 'DESC');
+  if (_hideEmpty) url += '&hide_empty=true';
 
   try {
     var res = await fetch(url);
@@ -144,7 +156,11 @@ function openDrawer(idx) {
   _drawerLog = _logsData[idx];
   if (!_drawerLog) return;
   document.getElementById('drawer-title').textContent = '['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-');
-  switchDrawerTab('request');
+  // 预渲染
+  document.getElementById('drawer-chat').innerHTML = renderChatView(_drawerLog);
+  document.getElementById('drawer-request').textContent = formatJson(_drawerLog.request_body)||'(空)';
+  document.getElementById('drawer-response').textContent = formatJson(_drawerLog.response_body)||'(空)';
+  switchDrawerTab('chat');
   document.getElementById('log-drawer-overlay').classList.remove('hidden');
   var drawer = document.getElementById('log-drawer');
   drawer.classList.remove('hidden');
@@ -165,17 +181,97 @@ function closeDrawer() {
 }
 function switchDrawerTab(tab) {
   if (!_drawerLog) return;
-  var treq = document.getElementById('dtab-request'), tres = document.getElementById('dtab-response');
-  var body = document.getElementById('drawer-body');
-  if (tab==='request') {
-    treq.className='flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50';
-    tres.className='flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
-    body.textContent = formatJson(_drawerLog.request_body)||'(空)';
-  } else {
-    tres.className='flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50';
-    treq.className='flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
-    body.textContent = formatJson(_drawerLog.response_body)||'(空)';
+  var tabs = {chat:'dtab-chat', request:'dtab-request', response:'dtab-response'};
+  var views = {chat:'drawer-chat', request:'drawer-request', response:'drawer-response'};
+  for (var k in tabs) {
+    var tb = document.getElementById(tabs[k]);
+    var vw = document.getElementById(views[k]);
+    if (k === tab) {
+      tb.className = 'flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50';
+      vw.classList.remove('hidden');
+    } else {
+      tb.className = 'flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
+      vw.classList.add('hidden');
+    }
   }
+}
+
+function renderChatView(log) {
+  /* 将请求/响应解析为聊天气泡 HTML */
+  var html = '';
+  var reqBody = null, respBody = null;
+
+  // 1. 解析请求体中的 messages
+  try { reqBody = JSON.parse(log.request_body||'{}'); } catch(e) {}
+  var msgs = (reqBody && reqBody.messages) ? reqBody.messages : [];
+
+  msgs.forEach(function(m){
+    var role = m.role || 'user';
+    var content = esc(m.content||'') || '(空)';
+    if (role === 'system') {
+      html += '<div class="flex justify-center"><div class="bg-amber-950/30 border border-amber-800/50 rounded-lg px-3 py-2 text-xs text-amber-300/80 max-w-lg text-center italic">'+content+'</div></div>';
+    } else if (role === 'user' || role === 'human') {
+      html += '<div class="flex justify-end"><div class="bg-indigo-600/30 border border-indigo-500/40 rounded-2xl rounded-br-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%]">'+content+'</div></div>';
+    } else {
+      html += '<div class="flex justify-start"><div class="bg-surface border border-border rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-300 max-w-[80%]">'+content+'</div></div>';
+    }
+  });
+
+  // 2. 解析响应体
+  try { respBody = JSON.parse(log.response_body||'{}'); } catch(e) {}
+
+  if (respBody) {
+    var reasoning = '';
+    var reply = '';
+
+    // 普通 JSON 响应
+    if (respBody.choices && respBody.choices.length) {
+      var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
+      reasoning = msg.reasoning_content || '';
+      reply = msg.content || '';
+    }
+
+    // 如果是 SSE 流式响应，从多行 data: 中提取内容
+    if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
+      var sseContent = '';
+      var sseReasoning = '';
+      var lines = log.response_body.split('\n');
+      lines.forEach(function(line){
+        line = line.trim();
+        if (line.startsWith('data: ') && !line.startsWith('data: [DONE]')) {
+          try {
+            var chunk = JSON.parse(line.substring(6));
+            if (chunk.choices && chunk.choices[0]) {
+              var delta = chunk.choices[0].delta || {};
+              if (delta.content) sseContent += delta.content;
+              if (delta.reasoning_content) sseReasoning += delta.reasoning_content;
+            }
+          } catch(e) {}
+        }
+      });
+      reply = sseContent;
+      reasoning = sseReasoning;
+    }
+
+    // 渲染思考过程
+    if (reasoning) {
+      html += '<details class="group"><summary class="text-xs text-amber-400/70 cursor-pointer hover:text-amber-300 select-none">💭 思考过程</summary><div class="mt-1 bg-amber-950/20 border border-amber-800/30 rounded-lg px-3 py-2 text-xs text-amber-300/70 whitespace-pre-wrap max-w-[90%]">'+esc(reasoning)+'</div></details>';
+    }
+
+    // 渲染回复
+    if (reply) {
+      html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%]">'+esc(reply)+'</div></div>';
+    } else if (!reasoning) {
+      var errCode = log.status_code || 0;
+      var errMsg = esc(log.error||'');
+      html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';
+    }
+  }
+
+  // 3. 底部显示元信息
+  html += '<div class="text-center pt-3"><span class="text-xs text-gray-600">'+esc(log.model||'-')+' &middot; '+(log.latency_ms||0)+'ms &middot; HTTP '+(log.status_code||'-')+'</span></div>';
+
+  return html || '<div class="text-center text-gray-500 text-xs py-8">无对话数据</div>';
 }
 
 function loadProviders() {
@@ -245,6 +341,26 @@ document.addEventListener('click', function(e){
     toggleProviderDropdown();
   }
 });
+
+function toggleOrder() {
+  _orderAsc = !_orderAsc;
+  var btn = document.getElementById('btn-order');
+  btn.textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
+  refreshLogs(1);
+}
+
+function toggleHideEmpty() {
+  _hideEmpty = !_hideEmpty;
+  var t = document.getElementById('hide-empty-toggle');
+  if (_hideEmpty) {
+    t.classList.add('switch-on'); t.classList.remove('switch-off');
+    t.querySelector('.switch-track').classList.replace('bg-gray-600','bg-indigo-600');
+  } else {
+    t.classList.remove('switch-on'); t.classList.add('switch-off');
+    t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
+  }
+  refreshLogs(1);
+}
 
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('auto-refresh-toggle').addEventListener('click', toggleAutoRefresh);

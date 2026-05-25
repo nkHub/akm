@@ -33,10 +33,13 @@ async def forward_request(
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
-    返回: {"status_code": int, "body": str, "key_alias": str,
-           "provider": str, "model": str, "error": str, "latency_ms": int}
+    非流式返回: {"status_code": int, "body": str, "key_alias": str,
+                 "provider": str, "model": str, "error": str, "latency_ms": int}
+    流式返回:   {"stream": True, "status_code": 200, "response": httpx.Response,
+                 "key_alias": str, "provider": str, "model": str}
     """
     model = body.get("model", "")
+    is_stream = body.get("stream", False)
     tries = 0
 
     while tries < MAX_KEY_TRIES:
@@ -60,6 +63,61 @@ async def forward_request(
             "Content-Type": "application/json",
         }
 
+        if is_stream:
+            # ── 流式请求：不重试，直接逐块转发 ──
+            req = client.build_request("POST", url, json=body, headers=headers, timeout=120)
+            try:
+                resp = await client.send(req, stream=True)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                if log_callback:
+                    log_callback({
+                        "provider": key["provider"], "key_alias": key["alias"],
+                        "model": model, "request_body": json.dumps(body, ensure_ascii=False),
+                        "response_body": "", "status_code": 0, "latency_ms": 0, "error": str(e),
+                    })
+                continue  # 换 key
+            except Exception as e:
+                if log_callback:
+                    log_callback({
+                        "provider": key["provider"], "key_alias": key["alias"],
+                        "model": model, "request_body": json.dumps(body, ensure_ascii=False),
+                        "response_body": "", "status_code": 0, "latency_ms": 0, "error": str(e),
+                    })
+                continue
+
+            if resp.status_code == 200:
+                return {
+                    "stream": True,
+                    "status_code": 200,
+                    "response": resp,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                }
+
+            # 流式请求出错，读取错误体后关闭
+            try:
+                err_body = await resp.aread()
+                err_text = err_body.decode("utf-8", errors="replace")[:500]
+            except Exception:
+                err_text = ""
+            await resp.aclose()
+
+            if resp.status_code == 429:
+                mark_rate_limited(key["alias"])
+            elif resp.status_code in (401, 403, 402):
+                set_status(key["alias"], "disabled")
+
+            if log_callback:
+                log_callback({
+                    "provider": key["provider"], "key_alias": key["alias"],
+                    "model": model, "request_body": json.dumps(body, ensure_ascii=False),
+                    "response_body": err_text, "status_code": resp.status_code,
+                    "latency_ms": 0, "error": f"{resp.status_code} {err_text}",
+                })
+            continue  # 换 key
+
+        # ── 非流式请求：原有逻辑 ──
         last_error = ""
         for attempt in range(1 + MAX_RETRIES_PER_KEY):
             t0 = time.time()
