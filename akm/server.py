@@ -272,7 +272,10 @@ def _extract_tokens(response_body: str) -> dict | None:
         total = usage.get("total_tokens", 0)
         prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
         completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-        cached = (usage.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
+        cached = (
+            (usage.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
+            or (usage.get("input_tokens_details", {}) or {}).get("cached_tokens", 0)
+        )
         if total == 0 and (prompt > 0 or completion > 0):
             total = prompt + completion
         if total > 0:
