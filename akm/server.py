@@ -401,10 +401,11 @@ async def api_logs(
     hide_empty: bool = Query(default=False),
     status: str = Query(default="all"),
     key_alias: str = Query(default=""),
+    days: int = Query(default=0, ge=0, le=365),
 ):
-    """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选和 Key 筛选，返回 JSON"""
-    logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias)
-    total = count_logs(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias)
+    """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
+    logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
+    total = count_logs(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
     return {"data": logs, "total": total}
 
 

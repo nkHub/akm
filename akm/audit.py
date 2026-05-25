@@ -46,17 +46,22 @@ def list_logs(
     hide_empty: bool = False,
     status: str = "all",
     key_alias: str = "",
+    days: int = 0,
 ) -> list[dict]:
-    """查询日志，支持分页、供应商筛选、排序、过滤空记录和状态筛选
+    """查询日志，支持分页、供应商筛选、排序、过滤空记录、状态筛选和时间范围
 
     order: "ASC" 按时间正序（旧→新），"DESC" 倒序（新→旧），默认 DESC
     hide_empty: True 时过滤掉没有 request_body 的记录（纯错误/空记录）
     status: "all" 全部, "success" 仅成功(2xx), "failed" 仅失败(非2xx)
     key_alias: 按 Key 别名筛选
+    days: 时间范围（天），0 表示不限制
     """
     order_clause = "ORDER BY id ASC" if order.upper() == "ASC" else "ORDER BY id DESC"
     filters = ""
     params = []
+    if days > 0:
+        filters += " AND timestamp >= datetime('now', 'localtime', ? || ' days')"
+        params.append(f"-{days}")
     if hide_empty:
         filters += " AND request_body != ''"
     if status == "success":
@@ -90,10 +95,14 @@ def count_logs(
     hide_empty: bool = False,
     status: str = "all",
     key_alias: str = "",
+    days: int = 0,
 ) -> int:
-    """统计日志总数，可按供应商筛选，可选过滤空记录和状态"""
+    """统计日志总数，可按供应商筛选，可选过滤空记录、状态和时间范围"""
     filters = ""
     params = []
+    if days > 0:
+        filters += " AND timestamp >= datetime('now', 'localtime', ? || ' days')"
+        params.append(f"-{days}")
     if hide_empty:
         filters += " AND request_body != ''"
     if status == "success":
