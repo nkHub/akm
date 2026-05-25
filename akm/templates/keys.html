@@ -24,6 +24,7 @@
       <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
       <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
       <div><label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示全部）</label><input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
+      <div><label class="block text-xs text-gray-400 mb-1">认证头模板 ({api_key} 会被替换为实际 key)</label><input id="key-authheader" value="Bearer {api_key}" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500" placeholder="Bearer {api_key}"></div>
       <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
       <div class="flex gap-2 pt-2"><button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
     </form>
@@ -83,6 +84,7 @@ function openAddModal() {
   document.getElementById('key-apikey').type = 'password';
   document.getElementById('key-apikey').placeholder = 'sk-...';
   document.getElementById('key-baseurl').value = '';
+  document.getElementById('key-authheader').value = 'Bearer {api_key}';
   document.getElementById('key-models').value = '*';
   document.getElementById('key-priority').value = '0';
   document.getElementById('key-modal').classList.remove('hidden');
@@ -102,6 +104,7 @@ function editKey(alias) {
     document.getElementById('key-apikey').value = '';
     document.getElementById('key-apikey').placeholder = '(不修改则留空)';
     document.getElementById('key-baseurl').value = key.base_url||'';
+    document.getElementById('key-authheader').value = key.auth_header||'Bearer {api_key}';
     document.getElementById('key-models').value = key.models||'*';
     document.getElementById('key-priority').value = key.priority||0;
     document.getElementById('key-modal').classList.remove('hidden');
@@ -116,6 +119,7 @@ function submitForm(e) {
     provider: document.getElementById('key-provider').value,
     api_key: document.getElementById('key-apikey').value.trim(),
     base_url: document.getElementById('key-baseurl').value.trim()||null,
+    auth_header: document.getElementById('key-authheader').value.trim()||'Bearer {api_key}',
     models: document.getElementById('key-models').value.trim()||'*',
     priority: parseInt(document.getElementById('key-priority').value)||0,
   };

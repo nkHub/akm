@@ -2,6 +2,7 @@
 
 import time
 import json
+import asyncio
 import httpx
 from akm.key_pool import pick_key_async, mark_rate_limited, set_status
 
@@ -10,10 +11,14 @@ from akm.key_pool import pick_key_async, mark_rate_limited, set_status
 MAX_KEY_TRIES = 20
 # 5xx 最大重试次数（单个 key）
 MAX_RETRIES_PER_KEY = 2
+# 重试退避基础等待秒数
+RETRY_BACKOFF_BASE = 0.5
 
 
-def _build_upstream_url(base_url: str) -> str:
+def _build_upstream_url(base_url: str | None) -> str:
     """从供应商 base_url 拼接 chat/completions 路径"""
+    if not base_url:
+        base_url = "https://api.openai.com"  # 兜底默认值
     base = base_url.rstrip("/")
     # 如果 base_url 已经包含 /v1，则直接追加
     if base.endswith("/v1"):
@@ -48,7 +53,7 @@ async def forward_request(
             }
 
         tries += 1
-        url = _build_upstream_url(key["base_url"])
+        url = _build_upstream_url(key.get("base_url") or "https://api.openai.com")
         auth_template = key.get("auth_header", "Bearer {api_key}")
         headers = {
             "Authorization": auth_template.format(api_key=key["api_key"]),
@@ -86,9 +91,11 @@ async def forward_request(
                 if 500 <= resp.status_code < 600:
                     last_error = f"{resp.status_code} Server Error"
                     if attempt < MAX_RETRIES_PER_KEY:
-                        continue  # 重试同一 key
+                        # 退避延迟，避免连接池复用同一个坏连接
+                        await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                        continue
                     else:
-                        break  # 重试耗尽，换 key
+                        break
 
                 # 成功
                 return {
@@ -103,8 +110,11 @@ async def forward_request(
 
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 last_error = str(e)
-                if attempt >= MAX_RETRIES_PER_KEY:
-                    break
+                if attempt < MAX_RETRIES_PER_KEY:
+                    # 连接/超时错误，退避后重试同一 key
+                    await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                    continue
+                break
 
             except Exception as e:
                 last_error = str(e)
