@@ -1,0 +1,188 @@
+{% extends "_layout.html" %}
+{% block content %}
+<div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+  <div class="flex items-center gap-3">
+    <select id="log-provider-filter" class="bg-surface-light border border-border text-gray-300 text-sm rounded px-3 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
+      <option value="">全部供应商</option>
+    </select>
+    <span id="log-count" class="text-xs text-gray-500"></span>
+  </div>
+  <div class="flex items-center gap-3">
+    <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off">
+      <span class="text-xs text-gray-400">自动刷新</span>
+      <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+      <span class="text-xs text-gray-500">5s</span>
+    </label>
+    <button onclick="refreshLogs(1)" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">刷新</button>
+  </div>
+</div>
+<div id="log-table-container" class="rounded-lg border border-border overflow-x-auto"></div>
+<div id="log-empty" class="hidden text-center py-16 text-gray-500">暂无日志</div>
+<div id="log-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></div>
+{% endblock %}
+
+{% block extra_html %}
+<div id="log-drawer-overlay" class="hidden fixed inset-0 z-40 bg-black/50" onclick="closeDrawer()"></div>
+<div id="log-drawer" class="hidden fixed top-0 right-0 z-50 h-full w-full max-w-2xl bg-surface-light border-l border-border shadow-2xl flex flex-col" style="transform:translateX(100%); transition: transform 0.25s ease" style="transform:translateX(100%)">
+  <div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
+    <h3 id="drawer-title" class="text-sm font-semibold text-white"></h3>
+    <button onclick="closeDrawer()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="flex border-b border-border shrink-0">
+    <button onclick="switchDrawerTab('request')" id="dtab-request" class="flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50">请求体</button>
+    <button onclick="switchDrawerTab('response')" id="dtab-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">响应体</button>
+  </div>
+  <div class="flex-1 overflow-y-auto p-4">
+    <pre id="drawer-body" class="text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+var _logsData = [];
+var _totalLogs = 0;
+var _pageSize = 20;
+var _currentPage = 1;
+var autoRefresh = false, refreshTimer = null;
+
+function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
+
+function toggleAutoRefresh() {
+  autoRefresh = !autoRefresh;
+  var t = document.getElementById('auto-refresh-toggle');
+  if (autoRefresh) { t.classList.add('switch-on'); t.classList.remove('switch-off'); t.querySelector('.switch-track').classList.replace('bg-gray-600','bg-indigo-600'); refreshTimer = setInterval(function(){refreshLogs(_currentPage);}, 5000); }
+  else { t.classList.remove('switch-on'); t.classList.add('switch-off'); t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600'); clearInterval(refreshTimer); refreshTimer = null; }
+}
+
+async function refreshLogs(page) {
+  _currentPage = page || 1;
+  var prov = document.getElementById('log-provider-filter').value;
+  var offset = (_currentPage - 1) * _pageSize;
+  var url = '/api/logs?limit=' + _pageSize + '&offset=' + offset;
+  if (prov) url += '&provider=' + encodeURIComponent(prov);
+
+  try {
+    var res = await fetch(url);
+    var json = await res.json();
+    _logsData = json.data || [];
+    _totalLogs = json.total || 0;
+    document.getElementById('log-count').textContent = '共 ' + _totalLogs + ' 条，第 ' + _currentPage + ' 页';
+    renderLogTable();
+    renderPagination();
+  } catch(e) { console.error(e); }
+}
+
+function renderLogTable() {
+  var container = document.getElementById('log-table-container');
+  var empty = document.getElementById('log-empty');
+  if (!_logsData.length) { container.innerHTML=''; empty.classList.remove('hidden'); document.getElementById('log-pagination').classList.add('hidden'); return; }
+  empty.classList.add('hidden');
+
+  var html = '<table class="w-full text-sm"><thead><tr class="bg-surface-light text-gray-400 text-xs"><th class="text-left px-4 py-2.5 font-medium">时间</th><th class="text-left px-4 py-2.5 font-medium">Alias</th><th class="text-left px-4 py-2.5 font-medium">供应商</th><th class="text-left px-4 py-2.5 font-medium">模型</th><th class="text-center px-4 py-2.5 font-medium w-20">状态</th><th class="text-right px-4 py-2.5 font-medium w-24">延迟</th><th class="text-center px-4 py-2.5 font-medium w-16">详情</th></tr></thead><tbody>';
+
+  _logsData.forEach(function(log, i){
+    var code = log.status_code;
+    var sc = 'status-err';
+    if (code>=200&&code<300) sc='status-2xx'; else if(code>=400&&code<500) sc='status-4xx'; else if(code>=500) sc='status-5xx';
+    var lat = log.latency_ms||0;
+    var ds = lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms';
+    var dc = lat>5000?'text-red-400':lat>2000?'text-yellow-400':'text-gray-400';
+    var hasBody = log.request_body||log.response_body;
+
+    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 whitespace-nowrap text-xs">'+esc(log.timestamp||'-')+'</td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs">'+esc(log.key_alias||'-')+'</td><td class="px-4 py-2.5 text-gray-300 text-xs">'+esc(log.provider||'-')+'</td><td class="px-4 py-2.5 text-gray-400 text-xs">'+esc(log.model||'-')+'</td><td class="px-4 py-2.5 text-center"><span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-4 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-4 py-2.5 text-center">'+(hasBody?'<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>':'<span class="text-gray-600">-</span>')+'</td></tr>';
+    if (log.error) html += '<tr class="border-t border-border bg-red-950/20"><td colspan="7" class="px-4 py-1.5 text-xs text-red-400">'+esc(log.error)+'</td></tr>';
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function renderPagination() {
+  var totalPages = Math.ceil(_totalLogs / _pageSize);
+  var pg = document.getElementById('log-pagination');
+  if (totalPages <= 1) { pg.classList.add('hidden'); return; }
+  pg.classList.remove('hidden');
+
+  var html = '';
+  html += '<button onclick="refreshLogs(1)" class="px-2 py-1 text-xs rounded ' + (_currentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===1?'disabled':'') + '>首页</button>';
+  html += '<button onclick="refreshLogs(' + (_currentPage-1) + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===1?'disabled':'') + '>上一页</button>';
+
+  var start = Math.max(1, _currentPage - 2);
+  var end = Math.min(totalPages, _currentPage + 2);
+  for (var p = start; p <= end; p++) {
+    html += '<button onclick="refreshLogs(' + p + ')" class="px-3 py-1 text-xs rounded ' + (p===_currentPage?'bg-indigo-600 text-white':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '">' + p + '</button>';
+  }
+
+  html += '<button onclick="refreshLogs(' + (_currentPage+1) + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===totalPages?'disabled':'') + '>下一页</button>';
+  html += '<button onclick="refreshLogs(' + totalPages + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===totalPages?'disabled':'') + '>末页</button>';
+  html += '<span class="text-xs text-gray-500 ml-2">共 ' + totalPages + ' 页</span>';
+  pg.innerHTML = html;
+}
+
+var _drawerLog = null;
+var _drawerOpening = false;
+function openDrawer(idx) {
+  if (_drawerOpening) return;
+  _drawerLog = _logsData[idx];
+  if (!_drawerLog) return;
+  document.getElementById('drawer-title').textContent = '['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-');
+  switchDrawerTab('request');
+  document.getElementById('log-drawer-overlay').classList.remove('hidden');
+  var drawer = document.getElementById('log-drawer');
+  drawer.classList.remove('hidden');
+  drawer.style.transform = 'translateX(100%)';
+  _drawerOpening = true;
+  requestAnimationFrame(function(){
+    requestAnimationFrame(function(){
+      drawer.style.transform = 'translateX(0)';
+      _drawerOpening = false;
+    });
+  });
+}
+function closeDrawer() {
+  _drawerOpening = false;
+  var drawer = document.getElementById('log-drawer');
+  drawer.style.transform = 'translateX(100%)';
+  setTimeout(function(){ drawer.classList.add('hidden'); document.getElementById('log-drawer-overlay').classList.add('hidden'); }, 250);
+}
+function switchDrawerTab(tab) {
+  if (!_drawerLog) return;
+  var treq = document.getElementById('dtab-request'), tres = document.getElementById('dtab-response');
+  var body = document.getElementById('drawer-body');
+  if (tab==='request') {
+    treq.className='flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50';
+    tres.className='flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
+    body.textContent = formatJson(_drawerLog.request_body)||'(空)';
+  } else {
+    tres.className='flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50';
+    treq.className='flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
+    body.textContent = formatJson(_drawerLog.response_body)||'(空)';
+  }
+}
+
+function loadProviders() {
+  fetch('/api/logs?limit=1&offset=0').then(function(r){return r.json()}).then(function(json){
+    fetch('/api/logs?limit=500&offset=0').then(function(r2){return r2.json()}).then(function(j2){
+      var providers = [];
+      var seen = {};
+      (j2.data||[]).forEach(function(l){
+        if (l.provider && !seen[l.provider]) { seen[l.provider]=true; providers.push(l.provider); }
+      });
+      var sel = document.getElementById('log-provider-filter');
+      providers.forEach(function(p){ var o=document.createElement('option'); o.value=p; o.textContent=p; sel.appendChild(o); });
+    });
+  }).catch(function(){});
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('log-provider-filter').addEventListener('change', function(){ refreshLogs(1); });
+  document.getElementById('auto-refresh-toggle').addEventListener('click', toggleAutoRefresh);
+  document.addEventListener('keydown', function(e) { if (e.key==='Escape') closeDrawer(); });
+  loadProviders();
+  refreshLogs(1);
+});
+</script>
+{% endblock %}

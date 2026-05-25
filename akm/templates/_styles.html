@@ -1,0 +1,23 @@
+<style>
+  body { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
+  .status-2xx { background: #166534; color: #86efac; }
+  .status-4xx { background: #854d0e; color: #fde68a; }
+  .status-5xx { background: #991b1b; color: #fecaca; }
+  .status-err { background: #4a044e; color: #e9d5ff; }
+  .status-active { background: #166534; color: #86efac; }
+  .status-disabled { background: #991b1b; color: #fecaca; }
+  .status-rate_limited { background: #854d0e; color: #fde68a; }
+  .sidebar-transition { transition: width 0.2s ease; }
+  .switch-track { width: 44px; height: 24px; border-radius: 12px; transition: background 0.2s; }
+  .switch-thumb { width: 18px; height: 18px; border-radius: 50%; transition: transform 0.2s; transform: translateX(3px); }
+  .switch-on .switch-thumb { transform: translateX(23px); }
+  .drawer { transition: transform 0.25s ease; }
+  .drawer-open { transform: translateX(0); }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #404060; border-radius: 3px; }
+  .fade-in { animation: fadeIn 0.15s ease; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+  .token-number { font-variant-numeric: tabular-nums; }
+</style>

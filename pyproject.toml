@@ -20,3 +20,6 @@ akm = "akm.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.setuptools.package-data]
+akm = ["templates/*.html"]
