@@ -5,6 +5,7 @@ import json
 import asyncio
 import httpx
 from akm.key_pool import pick_key_async, pick_wildcard_key_async, mark_rate_limited, set_status
+from akm.db import get_connection
 
 
 # 最大尝试 key 数量，防止无限循环
@@ -13,6 +14,43 @@ MAX_KEY_TRIES = 20
 MAX_RETRIES_PER_KEY = 2
 # 重试退避基础等待秒数
 RETRY_BACKOFF_BASE = 0.5
+
+
+def _diagnose_no_key(model: str) -> str:
+    """诊断为什么没有可用的 key，返回详细错误信息"""
+    conn = get_connection()
+    total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
+    active = conn.execute(
+        "SELECT COUNT(*) FROM keys WHERE status = 'active'"
+    ).fetchone()[0]
+    disabled = conn.execute(
+        "SELECT COUNT(*) FROM keys WHERE status = 'disabled'"
+    ).fetchone()[0]
+    limited = conn.execute(
+        "SELECT COUNT(*) FROM keys WHERE status = 'rate_limited'"
+    ).fetchone()[0]
+    # 查有哪些 model 匹配的 key 但被禁用了
+    matching_disabled = conn.execute(
+        """SELECT alias FROM keys
+           WHERE status != 'active'
+             AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')""",
+        (model,),
+    ).fetchall()
+    conn.close()
+
+    parts = [f"没有可用的 API key (model={model})"]
+    if total == 0:
+        parts.append("数据库中没有配置任何 Key")
+    else:
+        parts.append(f"共{total}个Key: active={active}, disabled={disabled}, rate_limited={limited}")
+        if matching_disabled:
+            aliases = [r["alias"] for r in matching_disabled]
+            parts.append(f"模型匹配但不可用: {', '.join(aliases)}")
+        elif active == 0:
+            parts.append("所有 Key 均被禁用或限流")
+        else:
+            parts.append("没有 Key 的 models 匹配该模型，也没有 models='*' 的通配 Key")
+    return " | ".join(parts)
 
 
 def _sse_to_json(sse_text: str) -> str:
@@ -64,21 +102,21 @@ def _sse_to_json(sse_text: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def _build_upstream_url(base_url: str | None) -> str:
-    """从供应商 base_url 拼接 chat/completions 路径"""
+def _build_upstream_url(base_url: str | None, api_path: str = "chat/completions") -> str:
+    """从供应商 base_url 拼接 API 路径"""
     if not base_url:
         base_url = "https://api.openai.com"  # 兜底默认值
     base = base_url.rstrip("/")
-    # 如果 base_url 已经包含 /v1，则直接追加
     if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+        return f"{base}/{api_path}"
+    return f"{base}/v1/{api_path}"
 
 
 async def forward_request(
     body: dict,
     client: httpx.AsyncClient,
     log_callback=None,
+    api_path: str = "chat/completions",
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
@@ -110,7 +148,7 @@ async def forward_request(
                 "key_alias": "",
                 "provider": "",
                 "model": model,
-                "error": "没有可用的 API key",
+                "error": _diagnose_no_key(model),
                 "latency_ms": 0,
             }
 
@@ -122,7 +160,7 @@ async def forward_request(
         tried_aliases.add(key["alias"])
 
         tries += 1
-        url = _build_upstream_url(key.get("base_url") or "https://api.openai.com")
+        url = _build_upstream_url(key.get("base_url") or "https://api.openai.com", api_path)
         auth_template = key.get("auth_header", "Bearer {api_key}")
         headers = {
             "Authorization": auth_template.format(api_key=key["api_key"]),
@@ -203,8 +241,11 @@ async def forward_request(
 
             latency = int((time.time() - t0) * 1000)
             resp_body = b"".join(chunks).decode("utf-8", errors="replace")
-            # 将 SSE 流转为 JSON 格式返回给非流式客户端
-            json_body = _sse_to_json(resp_body)
+            # chat/completions 将 SSE 流转为 JSON，其他路径透传原始响应
+            if api_path == "chat/completions":
+                json_body = _sse_to_json(resp_body)
+            else:
+                json_body = resp_body
             return {
                 "status_code": resp.status_code,
                 "body": json_body,

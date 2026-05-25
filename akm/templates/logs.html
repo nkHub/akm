@@ -6,14 +6,14 @@
     <div class="relative" id="provider-dropdown">
       <button onclick="toggleProviderDropdown()"
               class="flex items-center justify-between gap-2 bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-sm rounded px-3 py-1.5 transition-colors cursor-pointer min-w-[140px]">
-        <span id="provider-label">全部供应商</span>
+        <span id="provider-label">全部 Key</span>
         <svg class="w-3.5 h-3.5 text-gray-500 transition-transform" id="provider-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </button>
       <div id="provider-menu" class="hidden absolute top-full left-0 mt-1 w-48 bg-surface-light border border-border rounded-lg shadow-xl z-30 py-1 max-h-60 overflow-y-auto">
-        <div class="px-3 py-1.5 text-xs text-gray-400">供应商</div>
-        <button onclick="selectProvider('')" data-provider=""
+        <div class="px-3 py-1.5 text-xs text-gray-400">Key</div>
+        <button onclick="selectAlias('')" data-alias=""
                 class="w-full text-left px-3 py-1.5 text-sm text-indigo-400 bg-indigo-400/10 hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between">
-          <span>全部供应商</span>
+          <span>全部 Key</span>
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
         </button>
         <div id="provider-options"></div>
@@ -27,6 +27,7 @@
       <div class="switch-track bg-indigo-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
     </label>
     <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↓ 倒序</button>
+    <button onclick="toggleStatusFilter()" id="btn-status" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">全部</button>
     <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off">
       <span class="text-xs text-gray-400">自动刷新</span>
       <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
@@ -70,9 +71,11 @@ var _pageSize = 20;
 var _currentPage = 1;
 var autoRefresh = false, refreshTimer = null;
 var _currentProvider = '';
+var _currentAlias = '';
 var _providerDropdownOpen = false;
 var _orderAsc = false;
 var _hideEmpty = true;
+var _statusFilter = 'all';  // all | success | failed
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
@@ -89,8 +92,10 @@ async function refreshLogs(page) {
   var offset = (_currentPage - 1) * _pageSize;
   var url = '/api/logs?limit=' + _pageSize + '&offset=' + offset;
   if (_currentProvider) url += '&provider=' + encodeURIComponent(_currentProvider);
+  if (_currentAlias) url += '&key_alias=' + encodeURIComponent(_currentAlias);
   url += '&order=' + (_orderAsc ? 'ASC' : 'DESC');
   if (_hideEmpty) url += '&hide_empty=true';
+  if (_statusFilter !== 'all') url += '&status=' + _statusFilter;
 
   try {
     var res = await fetch(url);
@@ -156,8 +161,12 @@ function openDrawer(idx) {
   _drawerLog = _logsData[idx];
   if (!_drawerLog) return;
   document.getElementById('drawer-title').textContent = '['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-');
-  // 预渲染
-  document.getElementById('drawer-chat').innerHTML = renderChatView(_drawerLog);
+  // 预渲染（防崩）
+  try {
+    document.getElementById('drawer-chat').innerHTML = renderChatView(_drawerLog);
+  } catch(e) {
+    document.getElementById('drawer-chat').innerHTML = '<div class="text-red-400 text-xs">渲染失败: '+esc(String(e))+'</div>';
+  }
   document.getElementById('drawer-request').textContent = formatJson(_drawerLog.request_body)||'(空)';
   document.getElementById('drawer-response').textContent = formatJson(_drawerLog.response_body)||'(空)';
   switchDrawerTab('chat');
@@ -197,19 +206,48 @@ function switchDrawerTab(tab) {
 }
 
 function renderChatView(log) {
-  /* 将请求/响应解析为聊天气泡 HTML */
+  /* 将请求/响应解析为聊天气泡 HTML，兼容 chat/completions 和 responses 格式 */
   var html = '';
-  var reqBody = null, respBody = null;
+  var reqBody = null;
 
-  // 1. 解析请求体中的 messages
+  // 1. 解析请求体
   try { reqBody = JSON.parse(log.request_body||'{}'); } catch(e) {}
-  var msgs = (reqBody && reqBody.messages) ? reqBody.messages : [];
+  var msgs = [];
+
+  if (reqBody) {
+    // chat/completions 格式：直接取 messages
+    if (reqBody.messages && reqBody.messages.length) {
+      msgs = reqBody.messages;
+    }
+    // responses 格式：从 input + instructions 构造伪 messages
+    else if (reqBody.input !== undefined || reqBody.instructions) {
+      if (reqBody.instructions) {
+        msgs.push({role: 'system', content: reqBody.instructions});
+      }
+      var input = reqBody.input;
+      if (typeof input === 'string') {
+        msgs.push({role: 'user', content: input});
+      } else if (Array.isArray(input)) {
+        input.forEach(function(item){
+          if (item.role) {
+            msgs.push({role: item.role, content: item.content || ''});
+          } else if (item.type === 'input_text') {
+            msgs.push({role: 'user', content: item.text || ''});
+          }
+        });
+      }
+    }
+  }
 
   msgs.forEach(function(m){
     var role = m.role || 'user';
     var content = m.content || '';
-    var mdHtml = content ? marked.parse(content) : '<span class="text-gray-500">(空)</span>';
-    if (role === 'system') {
+    // content 可能是数组（responses 格式），提取文本
+    if (Array.isArray(content)) {
+      content = content.map(function(c){ return c.text || c.content || ''; }).join('');
+    }
+    var mdHtml = content ? marked.parse(String(content)) : '<span class="text-gray-500">(空)</span>';
+    if (role === 'system' || role === 'developer') {
       html += '<div class="flex justify-center"><div class="bg-amber-950/30 border border-amber-800/50 rounded-lg px-3 py-2 text-xs text-amber-300/80 max-w-lg text-center italic chat-md">'+mdHtml+'</div></div>';
     } else if (role === 'user' || role === 'human') {
       html += '<div class="flex justify-end"><div class="bg-indigo-600/30 border border-indigo-500/40 rounded-2xl rounded-br-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+mdHtml+'</div></div>';
@@ -219,34 +257,65 @@ function renderChatView(log) {
   });
 
   // 2. 解析响应体
+  var respBody = null;
   try { respBody = JSON.parse(log.response_body||'{}'); } catch(e) {}
   var reasoning = '';
   var reply = '';
 
-  // 普通 JSON 响应
-  if (respBody && respBody.choices && respBody.choices.length) {
-    var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
-    reasoning = msg.reasoning_content || '';
-    reply = msg.content || '';
+  if (respBody) {
+    // chat/completions 格式
+    if (respBody.choices && respBody.choices.length) {
+      var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
+      reasoning = msg.reasoning_content || '';
+      reply = msg.content || '';
+    }
+    // responses 格式：从 output 提取文本
+    else if (respBody.output && respBody.output.length) {
+      var outputTexts = [];
+      respBody.output.forEach(function(item){
+        // reasoning 项
+        if (item.type === 'reasoning' && item.summary && item.summary.length) {
+          item.summary.forEach(function(s){
+            if (s.type === 'summary_text') reasoning += (reasoning ? '\n' : '') + s.text;
+          });
+        }
+        // message 项
+        if (item.type === 'message' && item.role === 'assistant' && item.content) {
+          var contents = Array.isArray(item.content) ? item.content : [item.content];
+          contents.forEach(function(c){
+            if (c.type === 'output_text') outputTexts.push(c.text);
+            else if (typeof c === 'string') outputTexts.push(c);
+          });
+        }
+      });
+      reply = outputTexts.join('\n');
+    }
   }
 
-  // SSE 流式响应：从 data: 行中提取内容和思考过程
+  // SSE 流式响应解析
   if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
     var sseContent = '';
     var sseReasoning = '';
     var lines = log.response_body.split('\n');
     lines.forEach(function(line){
       line = line.trim();
-      if (line.startsWith('data: ') && !line.startsWith('data: [DONE]')) {
-        try {
-          var chunk = JSON.parse(line.substring(6));
-          if (chunk.choices && chunk.choices[0]) {
-            var delta = chunk.choices[0].delta || {};
-            if (delta.content) sseContent += delta.content;
-            if (delta.reasoning_content) sseReasoning += delta.reasoning_content;
-          }
-        } catch(e) {}
-      }
+      if (!line.startsWith('data: ') || line.startsWith('data: [DONE]')) return;
+      try {
+        var chunk = JSON.parse(line.substring(6));
+        // chat/completions SSE 格式
+        if (chunk.choices && chunk.choices[0]) {
+          var delta = chunk.choices[0].delta || {};
+          if (delta.content) sseContent += delta.content;
+          if (delta.reasoning_content) sseReasoning += delta.reasoning_content;
+        }
+        // responses SSE 格式
+        else if (chunk.type === 'response.output_text.delta') {
+          sseContent += (chunk.delta || '');
+        }
+        else if (chunk.type === 'response.reasoning_summary_text.delta') {
+          sseReasoning += (chunk.delta || '');
+        }
+      } catch(e) {}
     });
     reply = sseContent;
     reasoning = sseReasoning;
@@ -259,8 +328,8 @@ function renderChatView(log) {
 
   // 渲染回复
   if (reply) {
-    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+marked.parse(reply)+'</div></div>';
-  } else if (!reasoning && respBody) {
+    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+marked.parse(String(reply))+'</div></div>';
+  } else if (!reasoning && (respBody || log.response_body)) {
     var errCode = log.status_code || 0;
     var errMsg = esc(log.error||'');
     html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';
@@ -274,23 +343,18 @@ function renderChatView(log) {
 
 function loadProviders() {
   fetch('/api/keys').then(function(r){return r.json()}).then(function(keyJson){
-    var seen = {};
+    var aliases = [];
     (keyJson.data||[]).forEach(function(k){
-      if (k.provider && !seen[k.provider]) { seen[k.provider]=true; }
+      if (k.alias && aliases.indexOf(k.alias) === -1) aliases.push(k.alias);
     });
-    return fetch('/api/logs?limit=500&offset=0').then(function(r){return r.json()}).then(function(logJson){
-      (logJson.data||[]).forEach(function(l){
-        if (l.provider && !seen[l.provider]) { seen[l.provider]=true; }
-      });
-      var providers = Object.keys(seen).sort();
-      var container = document.getElementById('provider-options');
-      var html = '';
-      providers.forEach(function(p){
-        html += '<button onclick="selectProvider(\'' + esc(p) + '\')" data-provider="' + esc(p) + '" class="w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer">' + esc(p) + '</button>';
-      });
-      container.innerHTML = html;
+    aliases.sort();
+    var container = document.getElementById('provider-options');
+    var html = '';
+    aliases.forEach(function(a){
+      html += '<button onclick="selectAlias(\'' + esc(a) + '\')" data-alias="' + esc(a) + '" class="w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer">' + esc(a) + '</button>';
     });
-  }).catch(function(){});
+    container.innerHTML = html || '<div class="px-3 py-1.5 text-xs text-gray-500">暂无 Key</div>';
+  }).catch(function(e){ console.error(e); });
 }
 
 function toggleProviderDropdown() {
@@ -306,10 +370,36 @@ function toggleProviderDropdown() {
   }
 }
 
+function selectAlias(alias) {
+  _currentAlias = alias;
+  var label = document.getElementById('provider-label');
+  label.textContent = alias || '全部 Key';
+
+  var menu = document.getElementById('provider-menu');
+  var buttons = menu.querySelectorAll('button[data-alias]:not([data-alias=""])');
+  buttons.forEach(function(btn){
+    if (btn.getAttribute('data-alias') === alias) {
+      btn.className = 'w-full text-left px-3 py-1.5 text-sm text-indigo-400 bg-indigo-400/10 hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between';
+      btn.innerHTML = '<span>' + esc(alias) + '</span><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+    } else {
+      btn.className = 'w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer';
+      btn.innerHTML = esc(btn.getAttribute('data-alias'));
+    }
+  });
+
+  var arrow = document.getElementById('provider-arrow');
+  menu.classList.add('hidden');
+  arrow.style.transform = 'rotate(0deg)';
+  _providerDropdownOpen = false;
+
+  refreshLogs(1);
+}
+
 function selectProvider(prov) {
   _currentProvider = prov;
+  _currentAlias = '';  // 重置 alias 筛选
   var label = document.getElementById('provider-label');
-  label.textContent = prov || '全部供应商';
+  label.textContent = prov || '全部 Key';
 
   // 更新选中样式
   var menu = document.getElementById('provider-menu');
@@ -360,9 +450,20 @@ function toggleHideEmpty() {
   refreshLogs(1);
 }
 
+function toggleStatusFilter() {
+  var labels = {all: '全部', success: '成功', failed: '失败'};
+  var next = {all: 'success', success: 'failed', failed: 'all'};
+  _statusFilter = next[_statusFilter];
+  document.getElementById('btn-status').textContent = labels[_statusFilter];
+  refreshLogs(1);
+}
+
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('auto-refresh-toggle').addEventListener('click', toggleAutoRefresh);
   document.addEventListener('keydown', function(e) { if (e.key==='Escape') closeDrawer(); });
+  // 调试：确认 JS 加载
+  var cnt = document.getElementById('log-count');
+  if (cnt) cnt.textContent = '加载中...';
   loadProviders();
   refreshLogs(1);
 });

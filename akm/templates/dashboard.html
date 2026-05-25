@@ -21,7 +21,7 @@
 </div>
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
   <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-    <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按供应商</div>
+    <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按 Key</div>
     <div class="overflow-x-auto"><table class="w-full text-sm"><tbody id="tbl-provider"></tbody></table></div>
   </div>
   <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
@@ -60,7 +60,7 @@ async function loadDashboard() {
     document.getElementById('stat-completion').textContent = fmtNum(s.total_completion_tokens);
 
     var html = '';
-    Object.entries(s.by_provider||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
+    Object.entries(s.by_key||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
       html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
     });
