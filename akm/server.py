@@ -4,10 +4,10 @@ import json
 import logging
 import asyncio
 import os
+from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse
-from fastapi.templating import Jinja2Templates
 from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
@@ -16,7 +16,22 @@ from akm.key_pool import (
 from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
 
-app = FastAPI(title="AI Key Manager", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：维护共享 HTTP 连接池"""
+    limits = httpx.Limits(max_keepalive_connections=10, max_connections=50)
+    app.state.http_client = httpx.AsyncClient(
+        limits=limits,
+        timeout=httpx.Timeout(120.0, connect=10.0),
+    )
+    try:
+        yield
+    finally:
+        await app.state.http_client.aclose()
+
+
+app = FastAPI(title="AI Key Manager", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger("akm")
 
 # 简易模板引擎 — 读取模板文件并做变量替换
@@ -170,6 +185,12 @@ async def api_update_key(alias: str, request: Request):
         set_priority(alias, body["priority"])
     if "base_url" in body:
         set_base_url(alias, body["base_url"])
+    if "provider" in body and body["provider"]:
+        from akm.db import get_connection
+        conn = get_connection()
+        conn.execute("UPDATE keys SET provider = ? WHERE alias = ?", (body["provider"], alias))
+        conn.commit()
+        conn.close()
     if "models" in body:
         from akm.db import get_connection
         conn = get_connection()
@@ -443,7 +464,6 @@ async def list_models():
 @app.post("/chat/completions")
 async def chat_completions(request: Request):
     """OpenAI 兼容的 chat completions 端点"""
-    # 检查 Content-Type 请求头，确保是 application/json
     content_type = request.headers.get("Content-Type", "")
     if "application/json" not in content_type:
         return JSONResponse(
@@ -452,9 +472,8 @@ async def chat_completions(request: Request):
         )
 
     body = await request.json()
-
-    async with httpx.AsyncClient() as client:
-        result = await forward_request(body, client)
+    client = request.app.state.http_client
+    result = await forward_request(body, client)
 
     # 异步写入审计日志（fire-and-forget，不阻塞响应）
     asyncio.create_task(write_log_async({
@@ -468,7 +487,6 @@ async def chat_completions(request: Request):
         "error": result["error"],
     }))
 
-    # 控制台打印请求日志，包含 key alias 信息
     if result["key_alias"]:
         status = result["status_code"]
         elapsed = f"{result['latency_ms']}ms"
@@ -481,18 +499,10 @@ async def chat_completions(request: Request):
         logger.warning(f"请求失败 model={result['model']} → {result['error']}")
 
     if result["status_code"] == 503:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": result["error"]},
-        )
-
+        return JSONResponse(status_code=503, content={"detail": result["error"]})
     if result["status_code"] == 502:
-        return JSONResponse(
-            status_code=502,
-            content={"detail": result["error"]},
-        )
+        return JSONResponse(status_code=502, content={"detail": result["error"]})
 
-    # 透传上游响应
     return Response(
         content=result["body"],
         status_code=result["status_code"],

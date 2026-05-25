@@ -69,10 +69,23 @@ akm log clean --before YYYY-MM-DD # 清理旧日志
 ## 菜单栏应用
 
 ```bash
-akm-menubar                    # 启动菜单栏应用
+# 开发模式
+python -m akm.menubar
+
+# 安装后
+akm-menubar
 ```
 
-状态栏显示图标，下拉菜单可查看运行状态（🟢🟡🔴）、打开管理台。
+状态栏显示 logo 图标，下拉菜单：
+
+| 菜单项 | 说明 |
+|--------|------|
+| 🟢/🟡/🔴 状态 | 运行中 / 启动中 / 失败 |
+| 打开管理 | 浏览器打开 Web 管理台 |
+| 重启服务 | 停止并重新启动代理（端口变更后生效） |
+| 退出 | 退出应用 |
+
+启动时从 `~/.akm/config.json` 读取配置（端口、是否自动打开管理台等）。
 
 ## Web 管理台
 
@@ -83,8 +96,22 @@ akm-menubar                    # 启动菜单栏应用
 | 统计 | Token 用量仪表盘（按供应商/模型/日期） |
 | 审计 | 请求日志（分页、抽屉详情、自动刷新） |
 | Key管理 | 增删改查、启用/禁用、连通性测试 |
-| 设置 | 日志保留天数、清空日志、自动打开管理台 |
+| 设置 | 服务端口、日志保留天数、清空日志、自动打开管理台 |
 | 关于 | 版本与功能简介 |
+
+## 配置
+
+配置文件位于 `~/.akm/config.json`，可通过 Web 设置页面修改：
+
+```json
+{
+  "auto_open_admin": true,
+  "log_retention_days": 30,
+  "server_port": 8800
+}
+```
+
+Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
 
 ## API 端点
 
@@ -95,6 +122,8 @@ akm-menubar                    # 启动菜单栏应用
 | GET | `/health` | 健康检查 |
 | GET | `/api/keys` | Key 列表（脱敏） |
 | POST | `/api/keys` | 添加 Key |
+| PUT | `/api/keys/{alias}` | 编辑 Key（支持 provider/priority/models/base_url） |
+| PATCH | `/api/keys/{alias}/status` | 启用/禁用 Key |
 | DELETE | `/api/keys/{alias}` | 删除 Key |
 | POST | `/api/keys/{alias}/test` | 测试连通性 |
 | GET | `/api/logs` | 审计日志（分页） |

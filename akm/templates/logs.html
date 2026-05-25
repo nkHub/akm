@@ -2,9 +2,23 @@
 {% block content %}
 <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
   <div class="flex items-center gap-3">
-    <select id="log-provider-filter" class="bg-surface-light border border-border text-gray-300 text-sm rounded px-3 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
-      <option value="">全部供应商</option>
-    </select>
+    <!-- 自定义供应商下拉 -->
+    <div class="relative" id="provider-dropdown">
+      <button onclick="toggleProviderDropdown()"
+              class="flex items-center justify-between gap-2 bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-sm rounded px-3 py-1.5 transition-colors cursor-pointer min-w-[140px]">
+        <span id="provider-label">全部供应商</span>
+        <svg class="w-3.5 h-3.5 text-gray-500 transition-transform" id="provider-arrow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+      </button>
+      <div id="provider-menu" class="hidden absolute top-full left-0 mt-1 w-48 bg-surface-light border border-border rounded-lg shadow-xl z-30 py-1 max-h-60 overflow-y-auto">
+        <div class="px-3 py-1.5 text-xs text-gray-400">供应商</div>
+        <button onclick="selectProvider('')" data-provider=""
+                class="w-full text-left px-3 py-1.5 text-sm text-indigo-400 bg-indigo-400/10 hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between">
+          <span>全部供应商</span>
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+        </button>
+        <div id="provider-options"></div>
+      </div>
+    </div>
     <span id="log-count" class="text-xs text-gray-500"></span>
   </div>
   <div class="flex items-center gap-3">
@@ -47,6 +61,8 @@ var _totalLogs = 0;
 var _pageSize = 20;
 var _currentPage = 1;
 var autoRefresh = false, refreshTimer = null;
+var _currentProvider = '';
+var _providerDropdownOpen = false;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
@@ -60,10 +76,9 @@ function toggleAutoRefresh() {
 
 async function refreshLogs(page) {
   _currentPage = page || 1;
-  var prov = document.getElementById('log-provider-filter').value;
   var offset = (_currentPage - 1) * _pageSize;
   var url = '/api/logs?limit=' + _pageSize + '&offset=' + offset;
-  if (prov) url += '&provider=' + encodeURIComponent(prov);
+  if (_currentProvider) url += '&provider=' + encodeURIComponent(_currentProvider);
 
   try {
     var res = await fetch(url);
@@ -164,21 +179,74 @@ function switchDrawerTab(tab) {
 }
 
 function loadProviders() {
-  fetch('/api/logs?limit=1&offset=0').then(function(r){return r.json()}).then(function(json){
-    fetch('/api/logs?limit=500&offset=0').then(function(r2){return r2.json()}).then(function(j2){
-      var providers = [];
-      var seen = {};
-      (j2.data||[]).forEach(function(l){
-        if (l.provider && !seen[l.provider]) { seen[l.provider]=true; providers.push(l.provider); }
+  fetch('/api/keys').then(function(r){return r.json()}).then(function(keyJson){
+    var seen = {};
+    (keyJson.data||[]).forEach(function(k){
+      if (k.provider && !seen[k.provider]) { seen[k.provider]=true; }
+    });
+    return fetch('/api/logs?limit=500&offset=0').then(function(r){return r.json()}).then(function(logJson){
+      (logJson.data||[]).forEach(function(l){
+        if (l.provider && !seen[l.provider]) { seen[l.provider]=true; }
       });
-      var sel = document.getElementById('log-provider-filter');
-      providers.forEach(function(p){ var o=document.createElement('option'); o.value=p; o.textContent=p; sel.appendChild(o); });
+      var providers = Object.keys(seen).sort();
+      var container = document.getElementById('provider-options');
+      var html = '';
+      providers.forEach(function(p){
+        html += '<button onclick="selectProvider(\'' + esc(p) + '\')" data-provider="' + esc(p) + '" class="w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer">' + esc(p) + '</button>';
+      });
+      container.innerHTML = html;
     });
   }).catch(function(){});
 }
 
+function toggleProviderDropdown() {
+  var menu = document.getElementById('provider-menu');
+  var arrow = document.getElementById('provider-arrow');
+  _providerDropdownOpen = !_providerDropdownOpen;
+  if (_providerDropdownOpen) {
+    menu.classList.remove('hidden');
+    arrow.style.transform = 'rotate(180deg)';
+  } else {
+    menu.classList.add('hidden');
+    arrow.style.transform = 'rotate(0deg)';
+  }
+}
+
+function selectProvider(prov) {
+  _currentProvider = prov;
+  var label = document.getElementById('provider-label');
+  label.textContent = prov || '全部供应商';
+
+  // 更新选中样式
+  var menu = document.getElementById('provider-menu');
+  var buttons = menu.querySelectorAll('button');
+  buttons.forEach(function(btn){
+    if (btn.getAttribute('data-provider') === prov) {
+      btn.className = 'w-full text-left px-3 py-1.5 text-sm text-indigo-400 bg-indigo-400/10 hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between';
+      btn.innerHTML = '<span>' + esc(prov || '全部供应商') + '</span><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+    } else {
+      btn.className = 'w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer';
+      btn.innerHTML = esc((btn.getAttribute('data-provider') || '全部供应商'));
+    }
+  });
+
+  // 关闭下拉
+  var arrow = document.getElementById('provider-arrow');
+  menu.classList.add('hidden');
+  arrow.style.transform = 'rotate(0deg)';
+  _providerDropdownOpen = false;
+
+  refreshLogs(1);
+}
+
+// 点击外部关闭下拉
+document.addEventListener('click', function(e){
+  if (_providerDropdownOpen && !document.getElementById('provider-dropdown').contains(e.target)) {
+    toggleProviderDropdown();
+  }
+});
+
 document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('log-provider-filter').addEventListener('change', function(){ refreshLogs(1); });
   document.getElementById('auto-refresh-toggle').addEventListener('click', toggleAutoRefresh);
   document.addEventListener('keydown', function(e) { if (e.key==='Escape') closeDrawer(); });
   loadProviders();

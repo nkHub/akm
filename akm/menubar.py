@@ -59,6 +59,7 @@ class AKMApp(rumps.App):
         self.port = config_get("server_port", 8800)
         self.host = "127.0.0.1"
         self._uvicorn_server = None  # uvicorn.Server 实例，用于优雅关闭
+        self._first_start = True     # 首次启动标记，仅首次自动打开浏览器
 
         # 动态菜单项
         self.status_item = rumps.MenuItem(title="🟡 启动中...")
@@ -133,7 +134,8 @@ class AKMApp(rumps.App):
                 if self._check_port():
                     self.server_ready = True
                     self.status_item.title = "🟢 运行中"
-                    if config_get("auto_open_admin", True):
+                    if config_get("auto_open_admin", True) and self._first_start:
+                        self._first_start = False
                         threading.Timer(
                             0.5,
                             lambda: webbrowser.open(f"http://{self.host}:{self.port}/admin"),
