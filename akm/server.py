@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import os
+from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse
@@ -16,7 +17,21 @@ from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
 
 
-app = FastAPI(title="AI Key Manager", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：维护共享 HTTP 连接池，避免每次请求重新建立 TCP 连接"""
+    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+    app.state.http_client = httpx.AsyncClient(
+        limits=limits,
+        timeout=httpx.Timeout(120.0, connect=10.0),
+    )
+    try:
+        yield
+    finally:
+        await app.state.http_client.aclose()
+
+
+app = FastAPI(title="AI Key Manager", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger("akm")
 
 # 简易模板引擎 — 读取模板文件并做变量替换
@@ -457,8 +472,7 @@ async def chat_completions(request: Request):
         )
 
     body = await request.json()
-    async with httpx.AsyncClient() as client:
-        result = await forward_request(body, client)
+    result = await forward_request(body, request.app.state.http_client)
 
     # 异步写入审计日志（fire-and-forget，不阻塞响应）
     asyncio.create_task(write_log_async({
