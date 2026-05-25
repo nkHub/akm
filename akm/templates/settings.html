@@ -1,0 +1,166 @@
+{% extends "_layout.html" %}
+{% block content %}
+<div class="flex justify-end mb-4">
+  <button onclick="openAddModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">添加 Key</button>
+</div>
+<div id="key-list-container"></div>
+<div id="key-empty" class="hidden text-center py-16 text-gray-500">暂无 Key</div>
+{% endblock %}
+
+{% block extra_html %}
+<div id="key-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 fade-in">
+  <div class="absolute inset-0 bg-black/60" onclick="closeModal()"></div>
+  <div class="relative bg-surface-light border border-border rounded-lg w-full max-w-lg shadow-2xl" style="animation: slideUp 0.2s ease">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-border">
+      <h3 id="modal-title" class="text-sm font-semibold text-white">添加 Key</h3>
+      <button onclick="closeModal()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form id="key-form" onsubmit="submitForm(event)" class="p-4 space-y-3">
+      <input type="hidden" id="edit-alias" value="">
+      <div><label class="block text-xs text-gray-400 mb-1">别名 *</label><input id="key-alias" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="例如: my-key"></div>
+      <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">选择供应商</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="codex">Codex</option><option value="custom">自定义</option></select></div>
+      <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
+      <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
+      <div><label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示全部）</label><input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
+      <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
+      <div class="flex gap-2 pt-2"><button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+var _keysData = [];
+
+function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function loadKeys() {
+  fetch('/api/keys').then(function(r){ return r.json(); }).then(function(json){
+    _keysData = json.data || [];
+    renderKeys();
+  }).catch(function(e){ console.error('Keys:', e); });
+}
+
+function renderKeys() {
+  var container = document.getElementById('key-list-container');
+  var empty = document.getElementById('key-empty');
+  if (!_keysData.length) { container.innerHTML=''; empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+
+  var html = '';
+  _keysData.forEach(function(k){
+    var sc = 'status-'+k.status;
+    var sl = { active:'启用', disabled:'禁用', rate_limited:'限流' }[k.status]||k.status;
+    html += '<div class="border border-border rounded-lg mb-3 bg-surface-light/50 overflow-hidden">'+
+      '<div class="flex items-center justify-between px-4 py-3 flex-wrap gap-2">'+
+      '<div class="flex items-center gap-3 min-w-0">'+
+      '<span class="text-indigo-300 font-medium text-sm truncate">'+esc(k.alias)+'</span>'+
+      '<span class="text-gray-500 text-xs">'+esc(k.provider)+'</span>'+
+      '<span class="text-gray-600 text-xs truncate" style="max-width:150px">'+esc(k.models)+'</span>'+
+      '<span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+sl+'</span>'+
+      '<span class="text-gray-500 text-xs">优先级 '+k.priority+'</span></div>'+
+      '<div class="flex items-center gap-1.5 shrink-0">'+
+      '<span class="text-gray-600 text-xs font-mono">'+esc(k.api_key||'')+'</span>'+
+      '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" class="px-2 py-1 text-xs rounded cursor-pointer transition-colors '+(k.status==='active'?'bg-red-950/30 hover:bg-red-950/50 text-red-400':'bg-green-950/30 hover:bg-green-950/50 text-green-400')+'">'+(k.status==='active'?'禁用':'启用')+'</button>'+
+      '<button onclick="editKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-gray-200 cursor-pointer transition-colors">编辑</button>'+
+      '<button onclick="testConnect(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-indigo-400 cursor-pointer transition-colors">测试</button>'+
+      '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">删除</button></div></div>'+
+      (k.base_url?'<div class="px-4 pb-2 text-xs text-gray-600">URL: '+esc(k.base_url)+'</div>':'')+'</div>';
+  });
+  container.innerHTML = html;
+}
+
+function openAddModal() {
+  document.getElementById('modal-title').textContent = '添加 Key';
+  document.getElementById('edit-alias').value = '';
+  document.getElementById('key-alias').value = '';
+  document.getElementById('key-alias').disabled = false;
+  document.getElementById('key-provider').value = '';
+  document.getElementById('key-apikey').value = '';
+  document.getElementById('key-apikey').type = 'password';
+  document.getElementById('key-apikey').placeholder = 'sk-...';
+  document.getElementById('key-baseurl').value = '';
+  document.getElementById('key-models').value = '*';
+  document.getElementById('key-priority').value = '0';
+  document.getElementById('key-modal').classList.remove('hidden');
+}
+
+function closeModal() { document.getElementById('key-modal').classList.add('hidden'); }
+
+function editKey(alias) {
+  fetch('/api/keys').then(function(r){ return r.json(); }).then(function(json){
+    var key = (json.data||[]).find(function(k){ return k.alias===alias; });
+    if (!key) return;
+    document.getElementById('modal-title').textContent = '编辑 Key - '+alias;
+    document.getElementById('edit-alias').value = alias;
+    document.getElementById('key-alias').value = alias;
+    document.getElementById('key-alias').disabled = true;
+    document.getElementById('key-provider').value = key.provider||'';
+    document.getElementById('key-apikey').value = '';
+    document.getElementById('key-apikey').placeholder = '(不修改则留空)';
+    document.getElementById('key-baseurl').value = key.base_url||'';
+    document.getElementById('key-models').value = key.models||'*';
+    document.getElementById('key-priority').value = key.priority||0;
+    document.getElementById('key-modal').classList.remove('hidden');
+  }).catch(function(e){ console.error(e); });
+}
+
+function submitForm(e) {
+  e.preventDefault();
+  var editing = document.getElementById('edit-alias').value;
+  var body = {
+    alias: document.getElementById('key-alias').value.trim(),
+    provider: document.getElementById('key-provider').value,
+    api_key: document.getElementById('key-apikey').value.trim(),
+    base_url: document.getElementById('key-baseurl').value.trim()||null,
+    models: document.getElementById('key-models').value.trim()||'*',
+    priority: parseInt(document.getElementById('key-priority').value)||0,
+  };
+  if (editing && !body.api_key) delete body.api_key;
+
+  var url = editing ? '/api/keys/'+encodeURIComponent(editing) : '/api/keys';
+  var method = editing ? 'PUT' : 'POST';
+  fetch(url, { method: method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
+    .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,data:d}; }); })
+    .then(function(r){
+      if (r.ok) { closeModal(); loadKeys(); }
+      else alert('操作失败: '+(r.data.detail||'未知错误'));
+    }).catch(function(e){ alert('请求失败: '+e.message); });
+}
+
+function toggleStatus(alias, currentStatus) {
+  var ns = currentStatus==='active'?'disabled':'active';
+  fetch('/api/keys/'+encodeURIComponent(alias)+'/status', { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:ns}) })
+    .then(function(r){ if(r.ok) loadKeys(); }).catch(function(e){ console.error(e); });
+}
+
+function deleteKey(alias) {
+  if (!confirm('确认删除 Key "'+alias+'"?')) return;
+  fetch('/api/keys/'+encodeURIComponent(alias), { method:'DELETE' })
+    .then(function(r){ if(r.ok) loadKeys(); }).catch(function(e){ console.error(e); });
+}
+
+function testConnect(alias) {
+  fetch('/api/keys/'+encodeURIComponent(alias)+'/test', { method:'POST' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var msg = '测试 '+alias+':\\n';
+      msg += 'URL: '+(d.url||'-')+'\\n模型: '+(d.model||'-')+'\\n';
+      msg += d.ok ? '成功 ('+(d.latency_ms||0)+'ms)' : '失败\\n状态码: '+(d.status_code||'-')+'\\n错误: '+(d.error||'-');
+      alert(msg);
+    }).catch(function(e){ alert('请求失败: '+e.message); });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('key-provider').addEventListener('change', function() {
+    var urls = { openai: 'https://api.openai.com', deepseek: 'https://api.deepseek.com', codex: 'https://api.openai.com' };
+    var el = document.getElementById('key-baseurl');
+    if (this.value in urls && !el.value) el.value = urls[this.value];
+  });
+  loadKeys();
+});
+</script>
+{% endblock %}

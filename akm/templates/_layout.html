@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AKM - {{ title }}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        surface: { DEFAULT: '#1e1e2e', light: '#262637', hover: '#2d2d40' },
+        border: { DEFAULT: '#33334d', light: '#404060' },
+      }
+    }
+  }
+}
+</script>
+{% include "_styles.html" %}
+</head>
+<body class="bg-surface text-gray-200 min-h-screen flex">
+{% include "_sidebar.html" %}
+<div class="flex-1 flex flex-col min-w-0">
+{% include "_header.html" %}
+<main class="flex-1 overflow-y-auto p-6">
+{% block content %}{% endblock %}
+</main>
+</div>
+{% block extra_html %}{% endblock %}
+{% block extra_js %}{% endblock %}
+{% include "_toggle_sidebar.html" %}
+</body>
+</html>

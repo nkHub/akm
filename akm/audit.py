@@ -34,23 +34,40 @@ def write_log(data: dict) -> None:
 def list_logs(
     provider: str | None = None,
     limit: int = 50,
+    offset: int = 0,
 ) -> list[dict]:
-    """查询最近日志，可按供应商筛选"""
+    """查询日志，支持分页和供应商筛选"""
     conn = get_connection()
     if provider:
         rows = conn.execute(
             """SELECT * FROM audit_logs
                WHERE provider = ?
-               ORDER BY id DESC LIMIT ?""",
-            (provider, limit),
+               ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (provider, limit, offset),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def count_logs(provider: str | None = None) -> int:
+    """统计日志总数，可按供应商筛选"""
+    conn = get_connection()
+    if provider:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE provider = ?",
+            (provider,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs",
+        ).fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 
 def clean_logs(before: str) -> int:

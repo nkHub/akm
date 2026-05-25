@@ -1,0 +1,83 @@
+{% extends "_layout.html" %}
+{% block content %}
+<!-- 统计概览 -->
+<div id="stats-cards" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+  <div class="bg-surface-light border border-border rounded-lg p-4">
+    <div class="text-xs text-gray-500 mb-1">总请求</div>
+    <div id="stat-requests" class="text-2xl font-semibold text-white token-number">-</div>
+  </div>
+  <div class="bg-surface-light border border-border rounded-lg p-4">
+    <div class="text-xs text-gray-500 mb-1">总 Token</div>
+    <div id="stat-total" class="text-2xl font-semibold text-indigo-400 token-number">-</div>
+  </div>
+  <div class="bg-surface-light border border-border rounded-lg p-4">
+    <div class="text-xs text-gray-500 mb-1">输入 Token</div>
+    <div id="stat-prompt" class="text-2xl font-semibold text-emerald-400 token-number">-</div>
+  </div>
+  <div class="bg-surface-light border border-border rounded-lg p-4">
+    <div class="text-xs text-gray-500 mb-1">输出 Token</div>
+    <div id="stat-completion" class="text-2xl font-semibold text-amber-400 token-number">-</div>
+  </div>
+</div>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+  <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
+    <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按供应商</div>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><tbody id="tbl-provider"></tbody></table></div>
+  </div>
+  <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
+    <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按模型</div>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><tbody id="tbl-model"></tbody></table></div>
+  </div>
+</div>
+<div id="daily-section" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
+  <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">每日用量</div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead><tr class="text-gray-500 text-xs"><th class="text-left px-4 py-2 font-medium">日期</th><th class="text-right px-4 py-2 font-medium">请求</th><th class="text-right px-4 py-2 font-medium">输入</th><th class="text-right px-4 py-2 font-medium">输出</th><th class="text-right px-4 py-2 font-medium">总计</th></tr></thead>
+      <tbody id="tbl-daily"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function loadDashboard() {
+  try {
+    var res = await fetch('/api/stats');
+    var s = await res.json();
+    document.getElementById('stat-requests').textContent = s.total_requests.toLocaleString();
+    document.getElementById('stat-total').textContent = s.total_tokens.toLocaleString();
+    document.getElementById('stat-prompt').textContent = s.total_prompt_tokens.toLocaleString();
+    document.getElementById('stat-completion').textContent = s.total_completion_tokens.toLocaleString();
+
+    var html = '';
+    Object.entries(s.by_provider||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
+      var k=e[0], v=e[1];
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.prompt.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.completion.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+v.total.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
+    });
+    document.getElementById('tbl-provider').innerHTML = html || '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
+
+    html = '';
+    Object.entries(s.by_model||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
+      var k=e[0], v=e[1];
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.prompt.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.completion.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+v.total.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
+    });
+    document.getElementById('tbl-model').innerHTML = html || '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
+
+    var dailyEntries = Object.entries(s.daily||{});
+    document.getElementById('daily-section').classList.toggle('hidden', dailyEntries.length === 0);
+    html = '';
+    dailyEntries.forEach(function(e){
+      var k=e[0], v=e[1];
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.prompt.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.completion.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+v.total.toLocaleString()+'</td></tr>';
+    });
+    document.getElementById('tbl-daily').innerHTML = html;
+  } catch(e) { console.error('Dashboard:', e); }
+}
+
+document.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
+{% endblock %}
