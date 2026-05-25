@@ -44,28 +44,42 @@ def list_logs(
     offset: int = 0,
     order: str = "DESC",
     hide_empty: bool = False,
+    status: str = "all",
+    key_alias: str = "",
 ) -> list[dict]:
-    """查询日志，支持分页、供应商筛选、排序和过滤空记录
+    """查询日志，支持分页、供应商筛选、排序、过滤空记录和状态筛选
 
     order: "ASC" 按时间正序（旧→新），"DESC" 倒序（新→旧），默认 DESC
     hide_empty: True 时过滤掉没有 request_body 的记录（纯错误/空记录）
+    status: "all" 全部, "success" 仅成功(2xx), "failed" 仅失败(非2xx)
+    key_alias: 按 Key 别名筛选
     """
     order_clause = "ORDER BY id ASC" if order.upper() == "ASC" else "ORDER BY id DESC"
-    empty_filter = "AND request_body != ''" if hide_empty else ""
+    filters = ""
+    params = []
+    if hide_empty:
+        filters += " AND request_body != ''"
+    if status == "success":
+        filters += " AND status_code >= 200 AND status_code < 300"
+    elif status == "failed":
+        filters += " AND (status_code < 200 OR status_code >= 300)"
+    if key_alias:
+        filters += " AND key_alias = ?"
+        params.append(key_alias)
     conn = get_connection()
     if provider:
         rows = conn.execute(
             f"""SELECT * FROM audit_logs
-               WHERE provider = ? {empty_filter}
+               WHERE provider = ? {filters}
                {order_clause} LIMIT ? OFFSET ?""",
-            (provider, limit, offset),
+            (provider, *params, limit, offset),
         ).fetchall()
     else:
         rows = conn.execute(
             f"""SELECT * FROM audit_logs
-               WHERE 1=1 {empty_filter}
+               WHERE 1=1 {filters}
                {order_clause} LIMIT ? OFFSET ?""",
-            (limit, offset),
+            (*params, limit, offset),
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -74,18 +88,31 @@ def list_logs(
 def count_logs(
     provider: str | None = None,
     hide_empty: bool = False,
+    status: str = "all",
+    key_alias: str = "",
 ) -> int:
-    """统计日志总数，可按供应商筛选，可选过滤空记录"""
-    empty_filter = "AND request_body != ''" if hide_empty else ""
+    """统计日志总数，可按供应商筛选，可选过滤空记录和状态"""
+    filters = ""
+    params = []
+    if hide_empty:
+        filters += " AND request_body != ''"
+    if status == "success":
+        filters += " AND status_code >= 200 AND status_code < 300"
+    elif status == "failed":
+        filters += " AND (status_code < 200 OR status_code >= 300)"
+    if key_alias:
+        filters += " AND key_alias = ?"
+        params.append(key_alias)
     conn = get_connection()
     if provider:
         row = conn.execute(
-            f"SELECT COUNT(*) FROM audit_logs WHERE provider = ? {empty_filter}",
-            (provider,),
+            f"SELECT COUNT(*) FROM audit_logs WHERE provider = ? {filters}",
+            (provider, *params),
         ).fetchone()
     else:
         row = conn.execute(
-            f"SELECT COUNT(*) FROM audit_logs WHERE 1=1 {empty_filter}",
+            f"SELECT COUNT(*) FROM audit_logs WHERE 1=1 {filters}",
+            (*params,),
         ).fetchone()
     conn.close()
     return row[0] if row else 0

@@ -21,7 +21,7 @@ def setup(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_success(monkeypatch):
     """正常请求返回上游响应"""
-    async def mock_forward(body, client, log_callback=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions"):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"hello"}}]}',
@@ -48,7 +48,7 @@ async def test_chat_completions_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_no_keys(monkeypatch):
     """没有可用 key 时返回 503"""
-    async def mock_forward(body, client, log_callback=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions"):
         return {
             "status_code": 503,
             "body": "",

@@ -250,21 +250,28 @@ async def api_test_key(alias: str):
 # ── 统计 API ───────────────────────────────────────────────
 
 def _extract_tokens(response_body: str) -> dict | None:
-    """从响应体中提取 token 用量，支持普通 JSON 和 SSE 流式响应"""
+    """从响应体中提取 token 用量，兼容 chat/completions 和 responses 格式"""
     if not response_body:
+        return None
+
+    def _parse_usage(usage: dict) -> dict | None:
+        """从 usage 对象提取 token 数，兼容两种字段名"""
+        total = usage.get("total_tokens", 0)
+        prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+        completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+        if total == 0 and (prompt > 0 or completion > 0):
+            total = prompt + completion
+        if total > 0:
+            return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
         return None
 
     # 1. 尝试直接解析为 JSON
     try:
         data = json.loads(response_body)
         usage = data.get("usage", {})
-        total = usage.get("total_tokens", 0)
-        prompt = usage.get("prompt_tokens", 0)
-        completion = usage.get("completion_tokens", 0)
-        if total == 0 and (prompt > 0 or completion > 0):
-            total = prompt + completion
-        if total > 0:
-            return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+        result = _parse_usage(usage)
+        if result:
+            return result
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -274,19 +281,16 @@ def _extract_tokens(response_body: str) -> dict | None:
         line = line.strip()
         if line.startswith("data: ") and not line.startswith("data: [DONE]"):
             try:
-                chunk = json.loads(line[6:])  # 去掉 "data: " 前缀
+                chunk = json.loads(line[6:])
                 if "usage" in chunk:
                     usage = chunk["usage"]
+                # responses SSE 格式: response.completed 事件中包含 usage
+                if chunk.get("type") == "response.completed" and chunk.get("response", {}).get("usage"):
+                    usage = chunk["response"]["usage"]
             except (json.JSONDecodeError, TypeError):
                 pass
     if usage:
-        total = usage.get("total_tokens", 0)
-        prompt = usage.get("prompt_tokens", 0)
-        completion = usage.get("completion_tokens", 0)
-        if total == 0 and (prompt > 0 or completion > 0):
-            total = prompt + completion
-        if total > 0:
-            return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+        return _parse_usage(usage)
 
     return None
 
@@ -379,10 +383,12 @@ async def api_logs(
     provider: str = Query(default=None),
     order: str = Query(default="DESC"),
     hide_empty: bool = Query(default=False),
+    status: str = Query(default="all"),
+    key_alias: str = Query(default=""),
 ):
-    """查询审计日志 API，支持分页、排序、过滤空记录，返回 JSON"""
-    logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty)
-    total = count_logs(provider=provider, hide_empty=hide_empty)
+    """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选和 Key 筛选，返回 JSON"""
+    logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias)
+    total = count_logs(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias)
     return {"data": logs, "total": total}
 
 
@@ -472,6 +478,18 @@ async def list_models():
 @app.post("/chat/completions")
 async def chat_completions(request: Request):
     """OpenAI 兼容的 chat completions 端点"""
+    return await _handle_ai_request(request, "chat/completions")
+
+
+@app.post("/v1/responses")
+@app.post("/responses")
+async def responses(request: Request):
+    """OpenAI Responses API 端点"""
+    return await _handle_ai_request(request, "responses")
+
+
+async def _handle_ai_request(request: Request, api_path: str):
+    """通用 AI API 请求处理：chat/completions 和 responses 复用"""
     content_type = request.headers.get("Content-Type", "")
     if "application/json" not in content_type:
         return JSONResponse(
@@ -480,7 +498,7 @@ async def chat_completions(request: Request):
         )
 
     body = await request.json()
-    result = await forward_request(body, request.app.state.http_client)
+    result = await forward_request(body, request.app.state.http_client, api_path=api_path)
 
     # ── 流式响应：逐块转发，边收边发 ──
     if result.get("stream"):
@@ -500,7 +518,6 @@ async def chat_completions(request: Request):
                 await resp.aclose()
                 latency = int((__import__("time").time() - t0) * 1000)
                 body_str = b"".join(chunks).decode("utf-8", errors="replace")
-                # 异步写入审计日志
                 asyncio.create_task(write_log_async({
                     "provider": provider, "key_alias": key_alias, "model": model,
                     "request_body": json.dumps(body, ensure_ascii=False),
@@ -522,18 +539,19 @@ async def chat_completions(request: Request):
             },
         )
 
-    # ── 非流式响应：原有逻辑 ──
-    # 异步写入审计日志（fire-and-forget，不阻塞响应）
-    asyncio.create_task(write_log_async({
-        "provider": result["provider"],
-        "key_alias": result["key_alias"],
-        "model": result["model"],
-        "request_body": json.dumps(body, ensure_ascii=False),
-        "response_body": result["body"],
-        "status_code": result["status_code"],
-        "latency_ms": result["latency_ms"],
-        "error": result["error"],
-    }))
+    # ── 非流式响应 ──
+    # 只有真正转发了的请求才写审计日志（没有可用 key 的 503 不记录）
+    if result["status_code"] != 503:
+        asyncio.create_task(write_log_async({
+            "provider": result["provider"],
+            "key_alias": result["key_alias"],
+            "model": result["model"],
+            "request_body": json.dumps(body, ensure_ascii=False),
+            "response_body": result["body"],
+            "status_code": result["status_code"],
+            "latency_ms": result["latency_ms"],
+            "error": result["error"],
+        }))
 
     if result["key_alias"]:
         status = result["status_code"]
@@ -544,7 +562,9 @@ async def chat_completions(request: Request):
             f"model={result['model']} → {status} {elapsed}{err}"
         )
     else:
-        logger.warning(f"请求失败 model={result['model']} → {result['error']}")
+        logger.warning(
+            f"[{api_path}] model={result['model']} → {result['error']}"
+        )
 
     if result["status_code"] == 503:
         return JSONResponse(status_code=503, content={"detail": result["error"]})
