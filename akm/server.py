@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
@@ -33,6 +34,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Key Manager", version="0.1.0", lifespan=lifespan)
 logger = logging.getLogger("akm")
+
+# 静态文件
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 # 简易模板引擎 — 读取模板文件并做变量替换
 import re as _re

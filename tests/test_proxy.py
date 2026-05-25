@@ -1,29 +1,36 @@
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import httpx
 from akm.proxy import forward_request, _build_upstream_url
 
 
-class FakeResponse:
-    """模拟 httpx.Response"""
-    def __init__(self, status_code, json_data=None, text=""):
+class FakeStreamResponse:
+    """模拟 httpx 流式响应，兼容 client.send(req, stream=True)"""
+
+    def __init__(self, status_code, body_text=""):
         self.status_code = status_code
-        self._json = json_data or {}
-        self.text = text
+        self._body = body_text.encode("utf-8") if body_text else b""
 
-    def json(self):
-        return self._json
+    async def aiter_bytes(self):
+        """模拟流式读取，为简单起见整块返回"""
+        if self._body:
+            yield self._body
 
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise httpx.HTTPStatusError("error", request=MagicMock(), response=self)
+    async def aclose(self):
+        pass
+
+    async def aread(self):
+        return self._body
 
 
-def _make_pick_mock(key_dict):
-    """创建一个返回指定 key 的 AsyncMock"""
-    mock = AsyncMock()
-    mock.return_value = key_dict
-    return mock
+def _make_send_mock(client_mock, responses):
+    """让 client.send 按顺序返回 FakeStreamResponse"""
+    async def send_side_effect(req, stream=False):
+        if not responses:
+            raise StopIteration("no more mock responses")
+        return responses.pop(0)
+
+    client_mock.send = AsyncMock(side_effect=send_side_effect)
 
 
 def test_build_upstream_url():
@@ -36,18 +43,16 @@ def test_build_upstream_url():
 @pytest.mark.asyncio
 async def test_forward_success(monkeypatch):
     """正常转发成功返回"""
-    mock_pick = AsyncMock(return_value={
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
         "alias": "ok", "provider": "openai", "api_key": "sk-xxx",
         "base_url": "https://api.openai.com",
-    })
-    monkeypatch.setattr("akm.proxy.pick_key_async", mock_pick)
+    }))
     mock_client = AsyncMock()
-    mock_client.post.return_value = FakeResponse(200, {"choices": [{"message": {"content": "hi"}}]})
+    _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"hi"}}]}')])
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
         client=mock_client,
-        log_callback=None,
     )
     assert result["status_code"] == 200
     assert result["key_alias"] == "ok"
@@ -71,15 +76,14 @@ async def test_forward_429_switches_key(monkeypatch):
     monkeypatch.setattr("akm.proxy.mark_rate_limited", lambda alias: None)
 
     mock_client = AsyncMock()
-    mock_client.post.side_effect = [
-        FakeResponse(429),
-        FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
-    ]
+    _make_send_mock(mock_client, [
+        FakeStreamResponse(429),
+        FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}'),
+    ])
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
         client=mock_client,
-        log_callback=None,
     )
     assert result["status_code"] == 200
     assert result["key_alias"] == "k2"
@@ -104,15 +108,14 @@ async def test_forward_402_disables_key(monkeypatch):
     monkeypatch.setattr("akm.proxy.set_status", lambda alias, status: None)
 
     mock_client = AsyncMock()
-    mock_client.post.side_effect = [
-        FakeResponse(402),
-        FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
-    ]
+    _make_send_mock(mock_client, [
+        FakeStreamResponse(402),
+        FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}'),
+    ])
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
         client=mock_client,
-        log_callback=None,
     )
     assert result["status_code"] == 200
     assert result["key_alias"] == "k2"
@@ -136,15 +139,14 @@ async def test_forward_401_disables_key(monkeypatch):
     monkeypatch.setattr("akm.proxy.set_status", lambda alias, status: None)
 
     mock_client = AsyncMock()
-    mock_client.post.side_effect = [
-        FakeResponse(401),
-        FakeResponse(200, {"choices": [{"message": {"content": "ok"}}]}),
-    ]
+    _make_send_mock(mock_client, [
+        FakeStreamResponse(401),
+        FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}'),
+    ])
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
         client=mock_client,
-        log_callback=None,
     )
     assert result["status_code"] == 200
     assert result["key_alias"] == "k2"
@@ -153,13 +155,11 @@ async def test_forward_401_disables_key(monkeypatch):
 @pytest.mark.asyncio
 async def test_forward_all_keys_exhausted(monkeypatch):
     """所有 key 都不可用时返回 503"""
-    mock_pick = AsyncMock(return_value=None)
-    monkeypatch.setattr("akm.proxy.pick_key_async", mock_pick)
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value=None))
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
         client=AsyncMock(),
-        log_callback=None,
     )
     assert result["status_code"] == 503
     assert "没有可用" in result["error"]

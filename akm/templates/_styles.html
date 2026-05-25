@@ -20,4 +20,18 @@
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   .token-number { font-variant-numeric: tabular-nums; }
+  /* 聊天 Markdown 渲染 */
+  .chat-md p { margin: 0.25em 0; }
+  .chat-md p:first-child { margin-top: 0; }
+  .chat-md p:last-child { margin-bottom: 0; }
+  .chat-md code { background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; font-size: 0.85em; }
+  .chat-md pre { background: #0d0d1a; border: 1px solid #333; border-radius: 6px; padding: 10px 14px; overflow-x: auto; margin: 0.5em 0; font-size: 0.82em; line-height: 1.5; }
+  .chat-md pre code { background: none; padding: 0; border-radius: 0; font-size: inherit; }
+  .chat-md ul, .chat-md ol { padding-left: 1.5em; margin: 0.25em 0; }
+  .chat-md blockquote { border-left: 3px solid #555; padding-left: 12px; color: #999; margin: 0.5em 0; }
+  .chat-md table { border-collapse: collapse; margin: 0.5em 0; font-size: 0.85em; }
+  .chat-md th, .chat-md td { border: 1px solid #444; padding: 4px 10px; text-align: left; }
+  .chat-md th { background: rgba(255,255,255,0.06); }
+  .chat-md a { color: #818cf8; text-decoration: underline; }
+  .chat-md hr { border-color: #333; margin: 0.75em 0; }
 </style>

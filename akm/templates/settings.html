@@ -1,48 +1,55 @@
 {% extends "_layout.html" %}
 {% block content %}
-<div class="max-w-xl space-y-6">
-  <div class="bg-surface-light border border-border rounded-lg p-5">
-    <div class="flex items-center justify-between">
-      <div>
-        <h3 class="text-sm font-semibold text-white">启动时打开管理台</h3>
-        <p class="text-xs text-gray-500 mt-1">菜单栏应用启动后自动在浏览器打开管理页面</p>
+<div class="space-y-4">
+  <!-- 第一行：启动开关 + 服务端口 -->
+  <div class="grid grid-cols-2 gap-4">
+    <div class="bg-surface-light border border-border rounded-lg p-5">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-sm font-semibold text-white">启动时打开管理台</h3>
+          <p class="text-xs text-gray-500 mt-1">菜单栏应用启动后自动在浏览器打开管理页面</p>
+        </div>
+        <label id="cfg-auto-open" class="flex items-center cursor-pointer select-none switch-off">
+          <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+        </label>
       </div>
-      <label id="cfg-auto-open" class="flex items-center cursor-pointer select-none switch-off">
-        <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
-      </label>
+    </div>
+
+    <div class="bg-surface-light border border-border rounded-lg p-5">
+      <h3 class="text-sm font-semibold text-white mb-2">服务端口</h3>
+      <p class="text-xs text-gray-500 mb-3">修改后需在菜单栏「重启服务」生效</p>
+      <div class="flex items-center gap-3">
+        <input id="server-port" type="number" value="8800" min="1024" max="65535"
+               class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+        <button onclick="savePort()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+      </div>
+      <p id="port-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
     </div>
   </div>
 
-  <div class="bg-surface-light border border-border rounded-lg p-5">
-    <h3 class="text-sm font-semibold text-white mb-1">服务端口</h3>
-    <p class="text-xs text-gray-500 mb-3">修改后需在菜单栏「重启服务」生效</p>
-    <div class="flex items-center gap-3">
-      <input id="server-port" type="number" value="8800" min="1024" max="65535"
-             class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-      <button onclick="savePort()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+  <!-- 第二行：日志保留 + 清空日志 -->
+  <div class="grid grid-cols-2 gap-4">
+    <div class="bg-surface-light border border-border rounded-lg p-5">
+      <h3 class="text-sm font-semibold text-white mb-2">日志保留天数</h3>
+      <p class="text-xs text-gray-500 mb-3">超过天数的审计日志将被自动清理</p>
+      <div class="flex items-center gap-3">
+        <input id="retention-days" type="number" value="30" min="1" max="365"
+               class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+        <span class="text-xs text-gray-400">天</span>
+        <button onclick="saveRetention()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+      </div>
+      <p id="retention-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
     </div>
-    <p id="port-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
-  </div>
 
-  <div class="bg-surface-light border border-border rounded-lg p-5">
-    <h3 class="text-sm font-semibold text-white mb-1">日志保留天数</h3>
-    <p class="text-xs text-gray-500 mb-3">超过天数的审计日志将被自动清理</p>
-    <div class="flex items-center gap-3">
-      <input id="retention-days" type="number" value="30" min="1" max="365"
-             class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-      <span class="text-xs text-gray-400">天</span>
-      <button onclick="saveRetention()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+    <div class="bg-surface-light border border-border rounded-lg p-5">
+      <h3 class="text-sm font-semibold text-white mb-2">清空日志</h3>
+      <p class="text-xs text-gray-500 mb-3">删除所有审计日志，此操作不可撤销</p>
+      <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">清空全部日志</button>
+      <p id="clean-msg" class="text-xs mt-2 hidden"></p>
     </div>
-    <p id="retention-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
   </div>
 
-  <div class="bg-surface-light border border-border rounded-lg p-5">
-    <h3 class="text-sm font-semibold text-white mb-1">清空日志</h3>
-    <p class="text-xs text-gray-500 mb-3">删除所有审计日志，此操作不可撤销</p>
-    <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">清空全部日志</button>
-    <p id="clean-msg" class="text-xs mt-2 hidden"></p>
-  </div>
-
+  <!-- 日志统计 -->
   <div class="bg-surface-light border border-border rounded-lg p-5">
     <h3 class="text-sm font-semibold text-white mb-1">日志统计</h3>
     <div id="log-stats" class="text-xs text-gray-400 mt-2">加载中...</div>

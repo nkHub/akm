@@ -43,27 +43,33 @@
 {% block extra_js %}
 <script>
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtNum(n) {
+  if (n == null) return '-';
+  if (n < 1000) return n.toString();
+  if (n < 1000000) return (n / 1000).toFixed(2) + 'K';
+  return (n / 1000000).toFixed(2) + 'M';
+}
 
 async function loadDashboard() {
   try {
     var res = await fetch('/api/stats');
     var s = await res.json();
     document.getElementById('stat-requests').textContent = s.total_requests.toLocaleString();
-    document.getElementById('stat-total').textContent = s.total_tokens.toLocaleString();
-    document.getElementById('stat-prompt').textContent = s.total_prompt_tokens.toLocaleString();
-    document.getElementById('stat-completion').textContent = s.total_completion_tokens.toLocaleString();
+    document.getElementById('stat-total').textContent = fmtNum(s.total_tokens);
+    document.getElementById('stat-prompt').textContent = fmtNum(s.total_prompt_tokens);
+    document.getElementById('stat-completion').textContent = fmtNum(s.total_completion_tokens);
 
     var html = '';
     Object.entries(s.by_provider||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.prompt.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.completion.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+v.total.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
     });
     document.getElementById('tbl-provider').innerHTML = html || '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
 
     html = '';
     Object.entries(s.by_model||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.prompt.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.completion.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+v.total.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
     });
     document.getElementById('tbl-model').innerHTML = html || '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
 
@@ -72,7 +78,7 @@ async function loadDashboard() {
     html = '';
     dailyEntries.forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.prompt.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+v.completion.toLocaleString()+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+v.total.toLocaleString()+'</td></tr>';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td></tr>';
     });
     document.getElementById('tbl-daily').innerHTML = html;
   } catch(e) { console.error('Dashboard:', e); }

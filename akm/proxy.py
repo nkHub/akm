@@ -15,6 +15,55 @@ MAX_RETRIES_PER_KEY = 2
 RETRY_BACKOFF_BASE = 0.5
 
 
+def _sse_to_json(sse_text: str) -> str:
+    """将 SSE 流式响应文本转换为标准 JSON 响应格式"""
+    content = ""
+    reasoning = ""
+    model = ""
+    msg_id = ""
+    usage = None
+    finish_reason = "stop"
+
+    for line in sse_text.split("\n"):
+        line = line.strip()
+        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            continue
+        try:
+            chunk = json.loads(line[6:])
+        except json.JSONDecodeError:
+            continue
+        if not model:
+            model = chunk.get("model", "")
+        if not msg_id:
+            msg_id = chunk.get("id", "")
+        if "usage" in chunk and chunk["usage"]:
+            usage = chunk["usage"]
+        if chunk.get("choices"):
+            delta = chunk["choices"][0].get("delta", {})
+            if delta.get("content"):
+                content += delta["content"]
+            if delta.get("reasoning_content"):
+                reasoning += delta["reasoning_content"]
+            if chunk["choices"][0].get("finish_reason"):
+                finish_reason = chunk["choices"][0]["finish_reason"]
+
+    result = {
+        "id": msg_id,
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": finish_reason,
+        }],
+    }
+    if reasoning:
+        result["choices"][0]["message"]["reasoning_content"] = reasoning
+    if usage:
+        result["usage"] = usage
+    return json.dumps(result, ensure_ascii=False)
+
+
 def _build_upstream_url(base_url: str | None) -> str:
     """从供应商 base_url 拼接 chat/completions 路径"""
     if not base_url:
@@ -33,13 +82,11 @@ async def forward_request(
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
-    非流式返回: {"status_code": int, "body": str, "key_alias": str,
-                 "provider": str, "model": str, "error": str, "latency_ms": int}
-    流式返回:   {"stream": True, "status_code": 200, "response": httpx.Response,
-                 "key_alias": str, "provider": str, "model": str}
+    客户端 stream=true 时流式返回，否则非流式返回。
+    内部统一向上游发 stream=true，边收边拼，减少首 token 延迟。
     """
     model = body.get("model", "")
-    is_stream = body.get("stream", False)
+    client_wants_stream = body.get("stream", False)
     tries = 0
     tried_aliases: set[str] = set()
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
@@ -82,29 +129,55 @@ async def forward_request(
             "Content-Type": "application/json",
         }
 
-        if is_stream:
-            # ── 流式请求：不重试，直接逐块转发 ──
-            req = client.build_request("POST", url, json=body, headers=headers, timeout=120)
+        # ── 内部统一向上游发 stream=true，边收边拼，减少首 token 延迟 ──
+        upstream_body = dict(body)
+        upstream_body["stream"] = True
+
+        last_error = ""
+        for attempt in range(1 + MAX_RETRIES_PER_KEY):
+            t0 = time.time()
             try:
+                req = client.build_request("POST", url, json=upstream_body, headers=headers, timeout=120)
                 resp = await client.send(req, stream=True)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
-                if log_callback:
-                    log_callback({
-                        "provider": key["provider"], "key_alias": key["alias"],
-                        "model": model, "request_body": json.dumps(body, ensure_ascii=False),
-                        "response_body": "", "status_code": 0, "latency_ms": 0, "error": str(e),
-                    })
-                continue  # 换 key
+                last_error = str(e)
+                if attempt < MAX_RETRIES_PER_KEY:
+                    await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                    continue
+                break
             except Exception as e:
-                if log_callback:
-                    log_callback({
-                        "provider": key["provider"], "key_alias": key["alias"],
-                        "model": model, "request_body": json.dumps(body, ensure_ascii=False),
-                        "response_body": "", "status_code": 0, "latency_ms": 0, "error": str(e),
-                    })
-                continue
+                last_error = str(e)
+                break
 
-            if resp.status_code == 200:
+            # ── 错误状态码处理 ──
+            if resp.status_code == 429:
+                mark_rate_limited(key["alias"])
+                last_error = f"429 Too Many Requests (key: {key['alias']})"
+                await resp.aclose()
+                break
+
+            if resp.status_code == 402:
+                set_status(key["alias"], "disabled")
+                last_error = f"402 Payment Required (key: {key['alias']} 已禁用)"
+                await resp.aclose()
+                break
+
+            if resp.status_code in (401, 403):
+                set_status(key["alias"], "disabled")
+                last_error = f"{resp.status_code} 认证失败 (key: {key['alias']} 已禁用)"
+                await resp.aclose()
+                break
+
+            if 500 <= resp.status_code < 600:
+                last_error = f"{resp.status_code} Server Error"
+                await resp.aclose()
+                if attempt < MAX_RETRIES_PER_KEY:
+                    await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                    continue
+                break
+
+            # ── 成功：客户端流式 → 透传 resp；非流式 → 读完拼接返回 ──
+            if client_wants_stream:
                 return {
                     "stream": True,
                     "status_code": 200,
@@ -114,88 +187,35 @@ async def forward_request(
                     "model": model,
                 }
 
-            # 流式请求出错，读取错误体后关闭
+            # 非流式客户端：读完所有 chunk，拼接后返回
+            chunks = []
             try:
-                err_body = await resp.aread()
-                err_text = err_body.decode("utf-8", errors="replace")[:500]
-            except Exception:
-                err_text = ""
-            await resp.aclose()
-
-            if resp.status_code == 429:
-                mark_rate_limited(key["alias"])
-            elif resp.status_code in (401, 403, 402):
-                set_status(key["alias"], "disabled")
-
-            if log_callback:
-                log_callback({
-                    "provider": key["provider"], "key_alias": key["alias"],
-                    "model": model, "request_body": json.dumps(body, ensure_ascii=False),
-                    "response_body": err_text, "status_code": resp.status_code,
-                    "latency_ms": 0, "error": f"{resp.status_code} {err_text}",
-                })
-            continue  # 换 key
-
-        # ── 非流式请求：原有逻辑 ──
-        last_error = ""
-        for attempt in range(1 + MAX_RETRIES_PER_KEY):
-            t0 = time.time()
-            try:
-                resp = await client.post(
-                    url,
-                    json=body,
-                    headers=headers,
-                    timeout=120,
-                )
-                latency = int((time.time() - t0) * 1000)
-                resp_body = resp.text
-
-                if resp.status_code == 429:
-                    mark_rate_limited(key["alias"])
-                    last_error = f"429 Too Many Requests (key: {key['alias']})"
-                    break  # 跳出重试循环，换 key
-
-                if resp.status_code == 402:
-                    set_status(key["alias"], "disabled")
-                    last_error = f"402 Payment Required (key: {key['alias']} 已禁用)"
-                    break
-
-                if resp.status_code in (401, 403):
-                    set_status(key["alias"], "disabled")
-                    last_error = f"{resp.status_code} 认证失败 (key: {key['alias']} 已禁用)"
-                    break
-
-                if 500 <= resp.status_code < 600:
-                    last_error = f"{resp.status_code} Server Error"
-                    if attempt < MAX_RETRIES_PER_KEY:
-                        # 退避延迟，避免连接池复用同一个坏连接
-                        await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
-                        continue
-                    else:
-                        break
-
-                # 成功
-                return {
-                    "status_code": resp.status_code,
-                    "body": resp_body,
-                    "key_alias": key["alias"],
-                    "provider": key["provider"],
-                    "model": model,
-                    "error": "",
-                    "latency_ms": latency,
-                }
-
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
-                last_error = str(e)
+                async for chunk in resp.aiter_bytes():
+                    chunks.append(chunk)
+            except Exception as e:
+                last_error = f"读取流式响应失败: {e}"
+                await resp.aclose()
                 if attempt < MAX_RETRIES_PER_KEY:
-                    # 连接/超时错误，退避后重试同一 key
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
                 break
+            await resp.aclose()
 
-            except Exception as e:
-                last_error = str(e)
-                break
+            latency = int((time.time() - t0) * 1000)
+            resp_body = b"".join(chunks).decode("utf-8", errors="replace")
+            # 将 SSE 流转为 JSON 格式返回给非流式客户端
+            json_body = _sse_to_json(resp_body)
+            return {
+                "status_code": resp.status_code,
+                "body": json_body,
+                "key_alias": key["alias"],
+                "provider": key["provider"],
+                "model": model,
+                "error": "",
+                "latency_ms": latency,
+            }
+
+        # 当前 key 彻底失败，日志回调记录失败尝试
 
         # 当前 key 彻底失败，日志回调记录失败尝试
         if log_callback:
