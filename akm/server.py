@@ -268,14 +268,15 @@ def _extract_tokens(response_body: str) -> dict | None:
         return None
 
     def _parse_usage(usage: dict) -> dict | None:
-        """从 usage 对象提取 token 数，兼容两种字段名"""
+        """从 usage 对象提取 token 数，兼容两种字段名和缓存 token"""
         total = usage.get("total_tokens", 0)
         prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
         completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+        cached = (usage.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
         if total == 0 and (prompt > 0 or completion > 0):
             total = prompt + completion
         if total > 0:
-            return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+            return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total, "cached_tokens": cached}
         return None
 
     # 1. 尝试直接解析为 JSON
@@ -325,6 +326,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
     total_prompt = 0
     total_completion = 0
     total_tokens = 0
+    total_cached = 0
     by_provider = {}
     by_model = {}
     by_key = {}
@@ -334,50 +336,55 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         r = dict(row)
         tokens = _extract_tokens(r.get("response_body", ""))
 
-        # 只统计成功的请求
         provider = r.get("provider", "unknown")
         model = r.get("model", "unknown")
         key_alias = r.get("key_alias", "unknown")
-        ts = str(r.get("timestamp", ""))[:10]  # YYYY-MM-DD
+        ts = str(r.get("timestamp", ""))[:10]
 
         p = tokens.get("prompt_tokens", 0) if tokens else 0
         c = tokens.get("completion_tokens", 0) if tokens else 0
         t = tokens.get("total_tokens", 0) if tokens else 0
+        cached = tokens.get("cached_tokens", 0) if tokens else 0
 
         total_prompt += p
         total_completion += c
         total_tokens += t
+        total_cached += cached
 
         # 按供应商
         if provider not in by_provider:
-            by_provider[provider] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+            by_provider[provider] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
         by_provider[provider]["prompt"] += p
         by_provider[provider]["completion"] += c
         by_provider[provider]["total"] += t
+        by_provider[provider]["cached"] += cached
         by_provider[provider]["requests"] += 1
 
         # 按模型
         if model not in by_model:
-            by_model[model] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+            by_model[model] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
         by_model[model]["prompt"] += p
         by_model[model]["completion"] += c
         by_model[model]["total"] += t
+        by_model[model]["cached"] += cached
         by_model[model]["requests"] += 1
 
         # 按 key
         if key_alias not in by_key:
-            by_key[key_alias] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+            by_key[key_alias] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
         by_key[key_alias]["prompt"] += p
         by_key[key_alias]["completion"] += c
         by_key[key_alias]["total"] += t
+        by_key[key_alias]["cached"] += cached
         by_key[key_alias]["requests"] += 1
 
         # 按天
         if ts not in daily:
-            daily[ts] = {"prompt": 0, "completion": 0, "total": 0, "requests": 0}
+            daily[ts] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
         daily[ts]["prompt"] += p
         daily[ts]["completion"] += c
         daily[ts]["total"] += t
+        daily[ts]["cached"] += cached
         daily[ts]["requests"] += 1
 
     return {
@@ -385,6 +392,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         "total_prompt_tokens": total_prompt,
         "total_completion_tokens": total_completion,
         "total_tokens": total_tokens,
+        "total_cached_tokens": total_cached,
         "by_provider": by_provider,
         "by_model": by_model,
         "by_key": by_key,
