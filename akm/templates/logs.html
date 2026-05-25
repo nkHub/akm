@@ -376,6 +376,18 @@ function selectAlias(alias) {
   label.textContent = alias || '全部 Key';
 
   var menu = document.getElementById('provider-menu');
+  // 更新"全部 Key"按钮样式
+  var allBtn = menu.querySelector('button[data-alias=""]');
+  if (allBtn) {
+    if (!alias) {
+      allBtn.className = 'w-full text-left px-3 py-1.5 text-sm text-indigo-400 bg-indigo-400/10 hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between';
+      allBtn.innerHTML = '<span>全部 Key</span><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+    } else {
+      allBtn.className = 'w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer';
+      allBtn.innerHTML = '<span>全部 Key</span>';
+    }
+  }
+  // 更新具体 key 按钮
   var buttons = menu.querySelectorAll('button[data-alias]:not([data-alias=""])');
   buttons.forEach(function(btn){
     if (btn.getAttribute('data-alias') === alias) {

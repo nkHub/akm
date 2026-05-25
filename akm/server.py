@@ -247,6 +247,19 @@ async def api_test_key(alias: str):
     return result
 
 
+@app.get("/api/keys/export")
+async def api_export_keys():
+    """导出所有 Key 配置（含完整 api_key），用于备份迁移"""
+    keys = list_keys()
+    # list_keys 返回的是脱敏后的 api_key，需要重新获取完整值
+    full_keys = []
+    for k in keys:
+        full = get_key(k["alias"])
+        if full:
+            full_keys.append(full)
+    return {"data": full_keys}
+
+
 # ── 统计 API ───────────────────────────────────────────────
 
 def _extract_tokens(response_body: str) -> dict | None:
@@ -296,12 +309,15 @@ def _extract_tokens(response_body: str) -> dict | None:
 
 
 @app.get("/api/stats")
-async def api_stats():
-    """Token 统计概览"""
+async def api_stats(days: int = Query(default=1, ge=1, le=365)):
+    """Token 统计概览，可按天数筛选"""
     from akm.db import get_connection
     conn = get_connection()
     rows = conn.execute(
-        "SELECT * FROM audit_logs ORDER BY id DESC LIMIT 2000"
+        """SELECT * FROM audit_logs
+           WHERE timestamp >= datetime('now', 'localtime', ? || ' days')
+           ORDER BY id DESC""",
+        (f"-{days}",),
     ).fetchall()
     conn.close()
 

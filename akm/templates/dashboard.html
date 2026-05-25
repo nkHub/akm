@@ -1,5 +1,12 @@
 {% extends "_layout.html" %}
 {% block content %}
+<!-- 时间范围切换 -->
+<div class="flex items-center gap-2 mb-4">
+  <span class="text-xs text-gray-500 mr-1">时间范围</span>
+  <button onclick="switchDays(1)" id="btn-1d" class="bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer">1天</button>
+  <button onclick="switchDays(7)" id="btn-7d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">7天</button>
+  <button onclick="switchDays(30)" id="btn-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">30天</button>
+</div>
 <!-- 统计概览 -->
 <div id="stats-cards" class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
   <div class="bg-surface-light border border-border rounded-lg p-4">
@@ -50,9 +57,24 @@ function fmtNum(n) {
   return (n / 1000000).toFixed(2) + 'M';
 }
 
+var _currentDays = 1;
+
+function switchDays(d) {
+  _currentDays = d;
+  ['1d','7d','30d'].forEach(function(k){
+    var btn = document.getElementById('btn-'+k);
+    if (parseInt(k) === d) {
+      btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer';
+    } else {
+      btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer';
+    }
+  });
+  loadDashboard();
+}
+
 async function loadDashboard() {
   try {
-    var res = await fetch('/api/stats');
+    var res = await fetch('/api/stats?days=' + _currentDays);
     var s = await res.json();
     document.getElementById('stat-requests').textContent = s.total_requests.toLocaleString();
     document.getElementById('stat-total').textContent = fmtNum(s.total_tokens);

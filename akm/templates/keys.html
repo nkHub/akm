@@ -1,6 +1,7 @@
 {% extends "_layout.html" %}
 {% block content %}
-<div class="flex justify-end mb-4">
+<div class="flex justify-end mb-4 gap-2">
+  <button onclick="exportKeys()" class="bg-surface border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">导出</button>
   <button onclick="openAddModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">添加 Key</button>
 </div>
 <div id="key-list-container"></div>
@@ -156,6 +157,18 @@ function testConnect(alias) {
       msg += d.ok ? '成功 ('+(d.latency_ms||0)+'ms)' : '失败\\n状态码: '+(d.status_code||'-')+'\\n错误: '+(d.error||'-');
       alert(msg);
     }).catch(function(e){ alert('请求失败: '+e.message); });
+}
+
+function exportKeys() {
+  fetch('/api/keys/export').then(function(r){return r.json()}).then(function(json){
+    var blob = new Blob([JSON.stringify(json.data, null, 2)], {type: 'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'akm-keys-' + new Date().toISOString().slice(0,10) + '.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  }).catch(function(e){ alert('导出失败: '+e.message); });
 }
 
 document.addEventListener('DOMContentLoaded', function() {
