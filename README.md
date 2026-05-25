@@ -93,9 +93,9 @@ akm-menubar
 
 | 页面 | 功能 |
 |------|------|
-| 统计 | Token 用量仪表盘（按供应商/模型/日期，K/M 格式） |
-| 审计 | 请求日志（分页、正序/倒序切换、仅对话过滤、Markdown 聊天气泡抽屉、自动刷新） |
-| Key管理 | 增删改查、启用/禁用、连通性测试 |
+| 统计 | Token 用量仪表盘（按 Key/模型/日期，K/M 格式，1天/7天/30天切换） |
+| 审计 | 请求日志（时间筛选、Key/状态过滤、正倒序、页码下拉、Markdown 对话视图） |
+| Key管理 | 增删改查、启用/禁用、连通性测试、一键导出备份 |
 | 设置 | 服务端口、日志保留天数、清空日志、自动打开管理台 |
 | 关于 | 版本与功能简介 |
 
@@ -117,18 +117,20 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/v1/chat/completions` | OpenAI 兼容接口 |
+| POST | `/v1/chat/completions` | OpenAI Chat Completions 接口 |
+| POST | `/v1/responses` | OpenAI Responses API 接口（Codex 兼容） |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/api/keys` | Key 列表（脱敏） |
 | POST | `/api/keys` | 添加 Key |
-| PUT | `/api/keys/{alias}` | 编辑 Key（支持 provider/models/base_url/auth_header/priority） |
+| PUT | `/api/keys/{alias}` | 编辑 Key |
 | PATCH | `/api/keys/{alias}/status` | 启用/禁用 Key |
 | DELETE | `/api/keys/{alias}` | 删除 Key |
 | POST | `/api/keys/{alias}/test` | 测试连通性 |
-| GET | `/api/logs` | 审计日志（分页，支持 provider/order/hide_empty 筛选） |
+| GET | `/api/keys/export` | 导出 Key 配置（含完整密钥） |
+| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选） |
 | POST | `/api/logs/clean` | 清空日志 |
-| GET | `/api/stats` | Token 统计 |
+| GET | `/api/stats` | Token 统计（支持 days 时间范围） |
 | GET/POST | `/api/config` | 配置读写 |
 
 ## 故障切换策略
