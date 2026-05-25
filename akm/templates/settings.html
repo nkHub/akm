@@ -14,6 +14,17 @@
   </div>
 
   <div class="bg-surface-light border border-border rounded-lg p-5">
+    <h3 class="text-sm font-semibold text-white mb-1">服务端口</h3>
+    <p class="text-xs text-gray-500 mb-3">修改后需在菜单栏「重启服务」生效</p>
+    <div class="flex items-center gap-3">
+      <input id="server-port" type="number" value="8800" min="1024" max="65535"
+             class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+      <button onclick="savePort()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+    </div>
+    <p id="port-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
+  </div>
+
+  <div class="bg-surface-light border border-border rounded-lg p-5">
     <h3 class="text-sm font-semibold text-white mb-1">日志保留天数</h3>
     <p class="text-xs text-gray-500 mb-3">超过天数的审计日志将被自动清理</p>
     <div class="flex items-center gap-3">
@@ -48,6 +59,7 @@ function loadConfig() {
     _autoOpen = cfg.auto_open_admin !== false;
     updateAutoOpenToggle();
     document.getElementById('retention-days').value = cfg.log_retention_days || 30;
+    document.getElementById('server-port').value = cfg.server_port || 8800;
     loadLogStats();
   }).catch(function(){
     loadLogStats();
@@ -93,6 +105,20 @@ function saveRetention() {
     msg.textContent = '已保存：日志保留 ' + days + ' 天';
     msg.classList.remove('hidden');
     setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  });
+}
+
+function savePort() {
+  var port = parseInt(document.getElementById('server-port').value) || 8800;
+  var msg = document.getElementById('port-msg');
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({server_port: port})
+  }).then(function(){
+    msg.textContent = '已保存，请在菜单栏「重启服务」使端口生效';
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 5000);
   });
 }
 

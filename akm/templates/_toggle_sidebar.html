@@ -2,18 +2,15 @@
 function toggleSidebar() {
   var sidebar = document.getElementById('sidebar');
   var labels = document.querySelectorAll('.sidebar-label');
-  var full = document.querySelector('.sidebar-brand');
-  var short = document.querySelector('.sidebar-brand-short');
+  var brand = document.querySelector('.sidebar-brand');
   if (sidebar.style.width === '60px') {
     sidebar.style.width = '220px';
     labels.forEach(function(l) { l.style.display = ''; });
-    full.classList.remove('hidden');
-    short.classList.add('hidden');
+    brand.style.display = '';
   } else {
     sidebar.style.width = '60px';
     labels.forEach(function(l) { l.style.display = 'none'; });
-    full.classList.add('hidden');
-    short.classList.remove('hidden');
+    brand.style.display = 'none';
   }
 }
 </script>
