@@ -28,6 +28,9 @@
     </label>
     <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↓ 倒序</button>
     <button onclick="toggleStatusFilter()" id="btn-status" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">全部</button>
+    <button onclick="switchLogDays(1)" id="btn-log-1d" class="bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">1天</button>
+    <button onclick="switchLogDays(7)" id="btn-log-7d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">7天</button>
+    <button onclick="switchLogDays(30)" id="btn-log-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">30天</button>
     <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off">
       <span class="text-xs text-gray-400">自动刷新</span>
       <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
@@ -43,7 +46,7 @@
 
 {% block extra_html %}
 <div id="log-drawer-overlay" class="hidden fixed inset-0 z-40 bg-black/50" onclick="closeDrawer()"></div>
-<div id="log-drawer" class="hidden fixed top-0 right-0 z-50 h-full w-full max-w-2xl bg-surface-light border-l border-border shadow-2xl flex flex-col" style="transform:translateX(100%); transition: transform 0.25s ease" style="transform:translateX(100%)">
+<div id="log-drawer" class="hidden fixed top-0 right-0 z-50 h-full w-full max-w-3xl bg-surface-light border-l border-border shadow-2xl flex flex-col" style="transform:translateX(100%); transition: transform 0.25s ease" style="transform:translateX(100%)">
   <div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
     <h3 id="drawer-title" class="text-sm font-semibold text-white"></h3>
     <button onclick="closeDrawer()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
@@ -55,7 +58,7 @@
     <button onclick="switchDrawerTab('request')" id="dtab-request" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">请求体</button>
     <button onclick="switchDrawerTab('response')" id="dtab-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">响应体</button>
   </div>
-  <div class="flex-1 overflow-y-auto p-4" id="drawer-content">
+  <div class="flex-1 overflow-y-auto overflow-x-hidden p-4" id="drawer-content">
     <div id="drawer-chat" class="space-y-3"></div>
     <pre id="drawer-request" class="hidden text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
     <pre id="drawer-response" class="hidden text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
@@ -76,6 +79,7 @@ var _providerDropdownOpen = false;
 var _orderAsc = false;
 var _hideEmpty = true;
 var _statusFilter = 'all';  // all | success | failed
+var _currentDays = 1;  // 0=全部, 默认1天
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
@@ -96,6 +100,7 @@ async function refreshLogs(page) {
   url += '&order=' + (_orderAsc ? 'ASC' : 'DESC');
   if (_hideEmpty) url += '&hide_empty=true';
   if (_statusFilter !== 'all') url += '&status=' + _statusFilter;
+  if (_currentDays > 0) url += '&days=' + _currentDays;
 
   try {
     var res = await fetch(url);
@@ -142,11 +147,12 @@ function renderPagination() {
   html += '<button onclick="refreshLogs(1)" class="px-2 py-1 text-xs rounded ' + (_currentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===1?'disabled':'') + '>首页</button>';
   html += '<button onclick="refreshLogs(' + (_currentPage-1) + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===1?'disabled':'') + '>上一页</button>';
 
-  var start = Math.max(1, _currentPage - 2);
-  var end = Math.min(totalPages, _currentPage + 2);
-  for (var p = start; p <= end; p++) {
-    html += '<button onclick="refreshLogs(' + p + ')" class="px-3 py-1 text-xs rounded ' + (p===_currentPage?'bg-indigo-600 text-white':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '">' + p + '</button>';
+  // 页码下拉
+  html += '<select onchange="refreshLogs(parseInt(this.value))" class="bg-surface-light border border-border rounded px-2 py-1 text-xs text-gray-300 cursor-pointer focus:outline-none focus:border-indigo-500">';
+  for (var p = 1; p <= totalPages; p++) {
+    html += '<option value="' + p + '"' + (p === _currentPage ? ' selected' : '') + '>第 ' + p + ' 页</option>';
   }
+  html += '</select>';
 
   html += '<button onclick="refreshLogs(' + (_currentPage+1) + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===totalPages?'disabled':'') + '>下一页</button>';
   html += '<button onclick="refreshLogs(' + totalPages + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===totalPages?'disabled':'') + '>末页</button>';
@@ -459,6 +465,19 @@ function toggleHideEmpty() {
     t.classList.remove('switch-on'); t.classList.add('switch-off');
     t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
   }
+  refreshLogs(1);
+}
+
+function switchLogDays(d) {
+  _currentDays = _currentDays === d ? 0 : d;
+  [1,7,30].forEach(function(k){
+    var btn = document.getElementById('btn-log-'+k+'d');
+    if (k === _currentDays) {
+      btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
+    } else {
+      btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
+    }
+  });
   refreshLogs(1);
 }
 
