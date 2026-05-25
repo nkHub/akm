@@ -156,6 +156,7 @@ async def test_forward_401_disables_key(monkeypatch):
 async def test_forward_all_keys_exhausted(monkeypatch):
     """所有 key 都不可用时返回 503"""
     monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value=None))
+    monkeypatch.setattr("akm.proxy.pick_wildcard_key_async", AsyncMock(return_value=None))
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
