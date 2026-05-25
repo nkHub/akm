@@ -2,6 +2,18 @@
 {% block content %}
 <div class="max-w-xl space-y-6">
   <div class="bg-surface-light border border-border rounded-lg p-5">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-semibold text-white">启动时打开管理台</h3>
+        <p class="text-xs text-gray-500 mt-1">菜单栏应用启动后自动在浏览器打开管理页面</p>
+      </div>
+      <label id="cfg-auto-open" class="flex items-center cursor-pointer select-none switch-off">
+        <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+      </label>
+    </div>
+  </div>
+
+  <div class="bg-surface-light border border-border rounded-lg p-5">
     <h3 class="text-sm font-semibold text-white mb-1">日志保留天数</h3>
     <p class="text-xs text-gray-500 mb-3">超过天数的审计日志将被自动清理</p>
     <div class="flex items-center gap-3">
@@ -29,7 +41,40 @@
 
 {% block extra_js %}
 <script>
-function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+var _autoOpen = true;
+
+function loadConfig() {
+  fetch('/api/config').then(function(r){return r.json()}).then(function(cfg){
+    _autoOpen = cfg.auto_open_admin !== false;
+    updateAutoOpenToggle();
+    document.getElementById('retention-days').value = cfg.log_retention_days || 30;
+    loadLogStats();
+  }).catch(function(){
+    loadLogStats();
+  });
+}
+
+function updateAutoOpenToggle() {
+  var toggle = document.getElementById('cfg-auto-open');
+  var track = toggle.querySelector('.switch-track');
+  if (_autoOpen) {
+    toggle.classList.add('switch-on'); toggle.classList.remove('switch-off');
+    track.classList.remove('bg-gray-600'); track.classList.add('bg-indigo-600');
+  } else {
+    toggle.classList.remove('switch-on'); toggle.classList.add('switch-off');
+    track.classList.add('bg-gray-600'); track.classList.remove('bg-indigo-600');
+  }
+}
+
+function toggleAutoOpen() {
+  _autoOpen = !_autoOpen;
+  updateAutoOpenToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({auto_open_admin: _autoOpen})
+  });
+}
 
 function loadLogStats() {
   fetch('/api/logs?limit=1&offset=0').then(function(r){return r.json()}).then(function(json){
@@ -40,11 +85,15 @@ function loadLogStats() {
 function saveRetention() {
   var days = document.getElementById('retention-days').value;
   var msg = document.getElementById('retention-msg');
-  // 留空：保留天数设置存储在 localStorage 中
-  try { localStorage.setItem('akm_log_retention_days', days); } catch(e) {}
-  msg.textContent = '已保存：日志保留 ' + days + ' 天';
-  msg.classList.remove('hidden');
-  setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({log_retention_days: parseInt(days) || 30})
+  }).then(function(){
+    msg.textContent = '已保存：日志保留 ' + days + ' 天';
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  });
 }
 
 function cleanLogs() {
@@ -69,11 +118,8 @@ function cleanLogs() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
-  try {
-    var saved = localStorage.getItem('akm_log_retention_days');
-    if (saved) document.getElementById('retention-days').value = saved;
-  } catch(e) {}
-  loadLogStats();
+  document.getElementById('cfg-auto-open').addEventListener('click', toggleAutoOpen);
+  loadConfig();
 });
 </script>
 {% endblock %}
