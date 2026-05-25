@@ -13,6 +13,8 @@ def setup(monkeypatch):
     conn = get_connection()
     init_db(conn)
     conn.close()
+    # 为 lifespan 未生效的测试环境提供模拟 http_client
+    app.state.http_client = AsyncMock()
     yield
 
 
