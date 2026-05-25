@@ -169,8 +169,14 @@ def mark_rate_limited(alias: str) -> None:
 
 
 def clear_expired_rate_limits() -> None:
-    """恢复冷却到期的 key 为 active 状态"""
+    """恢复冷却到期的 key 为 active 状态
+
+    同时检查内存计时器和数据库中 rate_limited 的 key，
+    防止应用重启后内存计时器丢失导致 key 永久卡在 rate_limited。
+    """
     now = time.time()
+
+    # 1. 检查内存中的计时器
     expired = [
         alias for alias, deadline in _rate_limit_timers.items()
         if now >= deadline
@@ -178,6 +184,18 @@ def clear_expired_rate_limits() -> None:
     for alias in expired:
         set_status(alias, "active")
         del _rate_limit_timers[alias]
+
+    # 2. 检查数据库中 rate_limited 但内存无记录的 key（重启后场景）
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT alias FROM keys WHERE status = 'rate_limited'"
+    ).fetchall()
+    conn.close()
+    for row in rows:
+        alias = row["alias"]
+        if alias not in _rate_limit_timers:
+            # 内存中无记录，说明是旧数据或重启后残留，安全恢复为 active
+            set_status(alias, "active")
 
 
 def pick_key(model: str) -> dict | None:
