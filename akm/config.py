@@ -9,6 +9,7 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULTS = {
     "auto_open_admin": True,  # 启动时自动打开管理台
     "log_retention_days": 30,  # 日志保留天数
+    "server_port": 8800,       # 默认服务端口
 }
 
 

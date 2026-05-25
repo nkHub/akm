@@ -5,7 +5,7 @@ from setuptools import setup
 
 APP = ["akm/menubar.py"]
 DATA_FILES = [
-    ("", ["logo.jpg"]),
+    ("", ["logo.png"]),
     ("templates", [
         "akm/templates/_layout.html",
         "akm/templates/_sidebar.html",

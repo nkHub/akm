@@ -6,7 +6,7 @@ import asyncio
 import os
 import httpx
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import JSONResponse, Response, HTMLResponse
+from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
@@ -99,6 +99,16 @@ def _render_template(name: str, **kwargs) -> str:
 async def health():
     """健康检查"""
     return {"status": "ok"}
+
+
+@app.get("/favicon.ico")
+@app.get("/logo.png")
+async def favicon():
+    """提供 logo 作为网页图标"""
+    logo_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logo.png")
+    if os.path.exists(logo_path):
+        return FileResponse(logo_path, media_type="image/png")
+    return Response(status_code=404)
 
 
 # ── Key 管理 API ───────────────────────────────────────────
