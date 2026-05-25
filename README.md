@@ -8,6 +8,25 @@
 pip install -e .
 ```
 
+## 打包为 macOS 应用
+
+```bash
+# 开发模式运行（无需打包，直接测试）
+python -m akm.menubar
+
+# 安装打包工具
+pip install py2app pillow
+
+# 打包（生成 dist/AI Key Manager.app）
+python setup.py py2app
+
+# 可选：清理构建缓存后重新打包
+rm -rf build dist
+python setup.py py2app
+```
+
+打包后的 `.app` 位于 `dist/` 目录，双击即可运行。打包配置见 `setup.py`。
+
 ## 快速开始
 
 ```bash
