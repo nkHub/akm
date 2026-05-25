@@ -1,0 +1,31 @@
+{% extends "_layout.html" %}
+{% block content %}
+<div class="max-w-xl space-y-6">
+  <div class="bg-surface-light border border-border rounded-lg p-6">
+    <h3 class="text-lg font-semibold text-white mb-3">AI Key Manager</h3>
+    <p class="text-sm text-gray-400 leading-relaxed mb-4">
+      本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，
+      自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
+    </p>
+    <div class="space-y-2 text-xs text-gray-500">
+      <div class="flex gap-2"><span class="text-gray-600 w-20 shrink-0">版本</span><span>0.1.0</span></div>
+      <div class="flex gap-2"><span class="text-gray-600 w-20 shrink-0">技术栈</span><span>Python / FastAPI / SQLite / Click</span></div>
+      <div class="flex gap-2"><span class="text-gray-600 w-20 shrink-0">代理端口</span><span>8800（默认）</span></div>
+      <div class="flex gap-2"><span class="text-gray-600 w-20 shrink-0">数据目录</span><span>~/.akm/</span></div>
+      <div class="flex gap-2"><span class="text-gray-600 w-20 shrink-0">仓库</span><a href="https://github.com/nkHub/akm" target="_blank" class="text-indigo-400 hover:text-indigo-300">github.com/nkHub/akm</a></div>
+    </div>
+  </div>
+
+  <div class="bg-surface-light border border-border rounded-lg p-6">
+    <h3 class="text-sm font-semibold text-white mb-3">功能特性</h3>
+    <ul class="space-y-2 text-xs text-gray-400">
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 多供应商 Key 管理（OpenAI / DeepSeek 等）</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 优先级调度与自动故障切换</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> OpenAI 兼容 API 代理（/v1/chat/completions）</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Fernet 加密存储 Key</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 完整审计日志与 Token 用量统计</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Web 后台管理界面</li>
+    </ul>
+  </div>
+</div>
+{% endblock %}

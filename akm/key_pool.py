@@ -2,6 +2,7 @@
 
 import os
 import time
+import asyncio
 from cryptography.fernet import Fernet
 from akm.db import get_connection
 from akm.models import DEFAULT_BASE_URLS
@@ -203,3 +204,8 @@ def pick_key(model: str) -> dict | None:
     d = dict(rows[0])
     d["api_key"] = _decrypt(d["api_key"])
     return d
+
+
+async def pick_key_async(model: str) -> dict | None:
+    """异步版本的 pick_key，在线程池中执行数据库查询"""
+    return await asyncio.to_thread(pick_key, model)

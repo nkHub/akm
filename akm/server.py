@@ -13,7 +13,7 @@ from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
 )
-from akm.audit import write_log, list_logs, count_logs
+from akm.audit import write_log_async, list_logs, count_logs
 
 app = FastAPI(title="AI Key Manager", version="0.1.0")
 logger = logging.getLogger("akm")
@@ -346,21 +346,47 @@ async def api_logs(
     return {"data": logs, "total": total}
 
 
+@app.post("/api/logs/clean")
+async def api_clean_logs(request: Request):
+    """清空审计日志 API"""
+    from datetime import datetime as _dt
+    from akm.audit import clean_logs as _clean_logs
+    body = await request.json()
+    before = body.get("before", _dt.now().strftime("%Y-%m-%d"))
+    try:
+        count = _clean_logs(before)
+        return {"ok": True, "deleted": count}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
 @app.get("/logs")
 async def log_viewer(request: Request):
     """审计日志查看页面"""
-    return HTMLResponse(_render_template("logs.html", title="审计日志", active="logs"))
+    return HTMLResponse(_render_template("logs.html", title="审计", active="logs"))
+
+
+@app.get("/keys")
+async def keys_page(request: Request):
+    """Key 管理页面"""
+    return HTMLResponse(_render_template("keys.html", title="Key管理", active="keys"))
 
 
 @app.get("/settings")
 async def settings_page(request: Request):
-    """Key 管理页面"""
+    """设置页面"""
     return HTMLResponse(_render_template("settings.html", title="设置", active="settings"))
+
+
+@app.get("/about")
+async def about_page(request: Request):
+    """关于页面"""
+    return HTMLResponse(_render_template("about.html", title="关于", active="about"))
 
 
 @app.get("/admin")
 async def admin_page(request: Request):
-    """后台管理 Dashboard 页面"""
+    """统计页面"""
     return HTMLResponse(_render_template("dashboard.html", title="统计", active="admin"))
 
 
@@ -405,8 +431,8 @@ async def chat_completions(request: Request):
     async with httpx.AsyncClient() as client:
         result = await forward_request(body, client)
 
-    # 写入审计日志
-    write_log({
+    # 异步写入审计日志（fire-and-forget，不阻塞响应）
+    asyncio.create_task(write_log_async({
         "provider": result["provider"],
         "key_alias": result["key_alias"],
         "model": result["model"],
@@ -415,7 +441,7 @@ async def chat_completions(request: Request):
         "status_code": result["status_code"],
         "latency_ms": result["latency_ms"],
         "error": result["error"],
-    })
+    }))
 
     # 控制台打印请求日志，包含 key alias 信息
     if result["key_alias"]:

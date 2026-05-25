@@ -1,15 +1,17 @@
 """审计日志：写入、查询、清理"""
 
+import asyncio
 from datetime import datetime
 from akm.db import get_connection
 
 
 def write_log(data: dict) -> None:
-    """写入一条审计日志
+    """写入一条审计日志（同步版本）"""
+    _do_write(data)
 
-    data 应包含: provider, key_alias, model, request_body,
-                response_body, status_code, latency_ms, error
-    """
+
+def _do_write(data: dict) -> None:
+    """执行实际写入操作"""
     conn = get_connection()
     conn.execute(
         """INSERT INTO audit_logs
@@ -29,6 +31,11 @@ def write_log(data: dict) -> None:
     )
     conn.commit()
     conn.close()
+
+
+async def write_log_async(data: dict) -> None:
+    """异步写入审计日志（在线程池中执行，避免阻塞事件循环）"""
+    await asyncio.to_thread(_do_write, data)
 
 
 def list_logs(
