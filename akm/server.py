@@ -405,7 +405,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
 
 @app.get("/api/logs")
 async def api_logs(
-    limit: int = Query(default=20, ge=1, le=200),
+    limit: int = Query(default=12, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     provider: str = Query(default=None),
     order: str = Query(default="DESC"),
