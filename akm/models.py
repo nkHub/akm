@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class KeyConfig(BaseModel):
     """Key 配置数据模型"""
     alias: str
-    provider: str               # openai / deepseek / codex
+    provider: str               # openai / deepseek
     api_key: str
     base_url: str | None = None
     models: str = "*"           # 支持的模型，逗号分隔，* 表示全部
@@ -32,5 +32,4 @@ class AuditRecord(BaseModel):
 DEFAULT_BASE_URLS = {
     "openai": "https://api.openai.com",
     "deepseek": "https://api.deepseek.com",
-    "codex": "https://api.openai.com",
 }
