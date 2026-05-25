@@ -207,13 +207,14 @@ function renderChatView(log) {
 
   msgs.forEach(function(m){
     var role = m.role || 'user';
-    var content = esc(m.content||'') || '(空)';
+    var content = m.content || '';
+    var mdHtml = content ? marked.parse(content) : '<span class="text-gray-500">(空)</span>';
     if (role === 'system') {
-      html += '<div class="flex justify-center"><div class="bg-amber-950/30 border border-amber-800/50 rounded-lg px-3 py-2 text-xs text-amber-300/80 max-w-lg text-center italic">'+content+'</div></div>';
+      html += '<div class="flex justify-center"><div class="bg-amber-950/30 border border-amber-800/50 rounded-lg px-3 py-2 text-xs text-amber-300/80 max-w-lg text-center italic chat-md">'+mdHtml+'</div></div>';
     } else if (role === 'user' || role === 'human') {
-      html += '<div class="flex justify-end"><div class="bg-indigo-600/30 border border-indigo-500/40 rounded-2xl rounded-br-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%]">'+content+'</div></div>';
+      html += '<div class="flex justify-end"><div class="bg-indigo-600/30 border border-indigo-500/40 rounded-2xl rounded-br-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+mdHtml+'</div></div>';
     } else {
-      html += '<div class="flex justify-start"><div class="bg-surface border border-border rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-300 max-w-[80%]">'+content+'</div></div>';
+      html += '<div class="flex justify-start"><div class="bg-surface border border-border rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-300 max-w-[80%] chat-md">'+mdHtml+'</div></div>';
     }
   });
 
@@ -258,7 +259,7 @@ function renderChatView(log) {
 
   // 渲染回复
   if (reply) {
-    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%]">'+esc(reply)+'</div></div>';
+    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+marked.parse(reply)+'</div></div>';
   } else if (!reasoning && respBody) {
     var errCode = log.status_code || 0;
     var errMsg = esc(log.error||'');

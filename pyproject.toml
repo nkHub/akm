@@ -25,4 +25,4 @@ akm-menubar = "akm.menubar:main"
 where = ["."]
 
 [tool.setuptools.package-data]
-akm = ["templates/*.html"]
+akm = ["templates/*.html", "static/*.js"]
