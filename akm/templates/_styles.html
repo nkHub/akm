@@ -34,4 +34,14 @@
   .chat-md th { background: rgba(255,255,255,0.06); }
   .chat-md a { color: #818cf8; text-decoration: underline; }
   .chat-md hr { border-color: #333; margin: 0.75em 0; }
+  /* 骨架屏动画 */
+  @keyframes skeleton-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .skeleton {
+    animation: skeleton-pulse 1.5s ease-in-out infinite;
+    background: #2a2a3a;
+    border-radius: 4px;
+  }
 </style>

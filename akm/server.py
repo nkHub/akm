@@ -200,7 +200,9 @@ async def api_update_key(alias: str, request: Request):
     if "models" in body:
         from akm.db import get_connection
         conn = get_connection()
-        conn.execute("UPDATE keys SET models = ? WHERE alias = ?", (body["models"], alias))
+        # 规范 models 字段：去除每个模型名前后空格
+        models = ",".join(m.strip() for m in body["models"].split(",") if m.strip()) if body["models"] != "*" else body["models"]
+        conn.execute("UPDATE keys SET models = ? WHERE alias = ?", (models, alias))
         conn.commit()
         conn.close()
     if "auth_header" in body:
@@ -417,6 +419,19 @@ async def api_logs(
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
     logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
     total = count_logs(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
+    # 为每条日志附加 token 用量信息
+    for log in logs:
+        tokens = _extract_tokens(log.get("response_body", ""))
+        if tokens:
+            log["prompt_tokens"] = tokens["prompt_tokens"]
+            log["completion_tokens"] = tokens["completion_tokens"]
+            log["total_tokens"] = tokens["total_tokens"]
+            log["cached_tokens"] = tokens["cached_tokens"]
+        else:
+            log["prompt_tokens"] = 0
+            log["completion_tokens"] = 0
+            log["total_tokens"] = 0
+            log["cached_tokens"] = 0
     return {"data": logs, "total": total}
 
 
