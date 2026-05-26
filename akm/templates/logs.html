@@ -399,6 +399,22 @@ function loadProviders() {
       html += '<button onclick="selectAlias(\'' + esc(a) + '\')" data-alias="' + esc(a) + '" class="w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer">' + esc(a) + '</button>';
     });
     container.innerHTML = html || '<div class="px-3 py-1.5 text-xs text-gray-500">暂无 Key</div>';
+
+    // 恢复已保存的 Key 选中样式
+    if (_currentAlias) {
+      var allBtn = document.getElementById('provider-menu').querySelector('button[data-alias=""]');
+      if (allBtn) {
+        allBtn.className = 'w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:bg-surface-hover hover:text-white transition-colors cursor-pointer';
+        allBtn.innerHTML = '<span>全部 Key</span>';
+      }
+      var btns = container.querySelectorAll('button[data-alias]');
+      btns.forEach(function(b){
+        if (b.getAttribute('data-alias') === _currentAlias) {
+          b.className = 'w-full text-left px-3 py-1.5 text-sm text-indigo-400 bg-indigo-400/10 hover:bg-surface-hover transition-colors cursor-pointer flex items-center justify-between';
+          b.innerHTML = '<span>' + esc(_currentAlias) + '</span><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+        }
+      });
+    }
   }).catch(function(e){ console.error(e); });
 }
 
