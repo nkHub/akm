@@ -349,7 +349,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         t = tokens.get("total_tokens", 0) if tokens else 0
         cached = tokens.get("cached_tokens", 0) if tokens else 0
 
-        total_prompt += p
+        total_prompt += p - cached
         total_completion += c
         total_tokens += t
         total_cached += cached
@@ -357,7 +357,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         # 按供应商
         if provider not in by_provider:
             by_provider[provider] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_provider[provider]["prompt"] += p
+        by_provider[provider]["prompt"] += p - cached
         by_provider[provider]["completion"] += c
         by_provider[provider]["total"] += t
         by_provider[provider]["cached"] += cached
@@ -366,7 +366,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         # 按模型
         if model not in by_model:
             by_model[model] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_model[model]["prompt"] += p
+        by_model[model]["prompt"] += p - cached
         by_model[model]["completion"] += c
         by_model[model]["total"] += t
         by_model[model]["cached"] += cached
@@ -375,7 +375,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         # 按 key
         if key_alias not in by_key:
             by_key[key_alias] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_key[key_alias]["prompt"] += p
+        by_key[key_alias]["prompt"] += p - cached
         by_key[key_alias]["completion"] += c
         by_key[key_alias]["total"] += t
         by_key[key_alias]["cached"] += cached
@@ -384,7 +384,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         # 按天
         if ts not in daily:
             daily[ts] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        daily[ts]["prompt"] += p
+        daily[ts]["prompt"] += p - cached
         daily[ts]["completion"] += c
         daily[ts]["total"] += t
         daily[ts]["cached"] += cached
@@ -538,22 +538,29 @@ async def _handle_ai_request(request: Request, api_path: str):
         async def stream_generator():
             chunks = []
             t0 = __import__("time").time()
+            stream_error = ""
             try:
                 async for chunk in resp.aiter_bytes():
                     chunks.append(chunk)
                     yield chunk
+            except Exception as e:
+                stream_error = f"上游连接中断: {e}"
+                logger.warning(
+                    f"[{key_alias}] {provider} model={model} → {stream_error}"
+                )
             finally:
                 await resp.aclose()
                 latency = int((__import__("time").time() - t0) * 1000)
                 body_str = b"".join(chunks).decode("utf-8", errors="replace")
+                status = 200 if not stream_error else 502
                 asyncio.create_task(write_log_async({
                     "provider": provider, "key_alias": key_alias, "model": model,
                     "request_body": json.dumps(body, ensure_ascii=False),
-                    "response_body": body_str, "status_code": 200,
-                    "latency_ms": latency, "error": "",
+                    "response_body": body_str, "status_code": status,
+                    "latency_ms": latency, "error": stream_error,
                 }))
                 logger.info(
-                    f"[{key_alias}] {provider} model={model} → 200 {latency}ms (stream)"
+                    f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)"
                 )
 
         return StreamingResponse(

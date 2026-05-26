@@ -44,7 +44,7 @@
   <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">每日用量</div>
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
-      <thead><tr class="text-gray-500 text-xs"><th class="text-left px-4 py-2 font-medium">日期</th><th class="text-right px-4 py-2 font-medium">请求</th><th class="text-right px-4 py-2 font-medium">输入</th><th class="text-right px-4 py-2 font-medium">输出</th><th class="text-right px-4 py-2 font-medium">缓存</th><th class="text-right px-4 py-2 font-medium">总计</th></tr></thead>
+      <thead><tr class="text-gray-500 text-xs"><th class="text-left px-4 py-2 font-medium">日期</th><th class="text-right px-4 py-2 font-medium">请求</th><th class="text-right px-4 py-2 font-medium">总计</th><th class="text-right px-4 py-2 font-medium">输入</th><th class="text-right px-4 py-2 font-medium">输出</th><th class="text-right px-4 py-2 font-medium">缓存</th></tr></thead>
       <tbody id="tbl-daily"></tbody>
     </table>
   </div>
@@ -89,14 +89,14 @@ async function loadDashboard() {
     var html = '';
     Object.entries(s.by_key||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
     document.getElementById('tbl-provider').innerHTML = html || '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
 
     html = '';
     Object.entries(s.by_model||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td></tr>';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
     document.getElementById('tbl-model').innerHTML = html || '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
 
@@ -105,7 +105,7 @@ async function loadDashboard() {
     html = '';
     dailyEntries.forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td></tr>';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
     document.getElementById('tbl-daily').innerHTML = html;
   } catch(e) { console.error('Dashboard:', e); }
