@@ -134,7 +134,7 @@ async def forward_request(
         if use_fallback:
             key = await pick_wildcard_key_async()
         else:
-            key = await pick_key_async(model)
+            key = await pick_key_async(model, list(tried_aliases))
 
         if key is None:
             if not use_fallback:
@@ -153,9 +153,8 @@ async def forward_request(
             }
 
         # 避免重复尝试同一个 key（5xx 不会禁用 key，可能被反复选中）
+        # 继续循环让 pick_key 返回下一个匹配的 key，而非直接跳通配符兜底
         if key["alias"] in tried_aliases:
-            if not use_fallback:
-                use_fallback = True
             continue
         tried_aliases.add(key["alias"])
 

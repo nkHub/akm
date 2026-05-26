@@ -57,6 +57,8 @@ def add_key(
 
     auth_header: 认证头模板，{api_key} 会被替换为实际 key
     """
+    # 规范 models 字段：去除每个模型名前后空格，移除多余逗号
+    models = ",".join(m.strip() for m in models.split(",") if m.strip()) if models and models != "*" else models
     if base_url is None:
         base_url = DEFAULT_BASE_URLS.get(provider, "")
     enc_key = _encrypt(api_key)
@@ -198,24 +200,37 @@ def clear_expired_rate_limits() -> None:
             set_status(alias, "active")
 
 
-def pick_key(model: str) -> dict | None:
+def pick_key(model: str, exclude_aliases: list[str] | None = None) -> dict | None:
     """根据 model 名选择优先级最高的可用 key
 
     匹配规则：
     1. key 的 models 字段包含该 model（精确匹配），或 models 为 '*'
     2. status 为 'active'
     3. 按 priority ASC 排序，取第一个
+    4. exclude_aliases 中的 alias 将被排除
     """
     clear_expired_rate_limits()
+    model = model.strip()
     conn = get_connection()
     # 先选 models='*' 通配的 + models 包含指定 model 的 active key
-    rows = conn.execute(
-        """SELECT * FROM keys
-           WHERE status = 'active'
-             AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')
-           ORDER BY priority ASC""",
-        (model,),
-    ).fetchall()
+    if exclude_aliases:
+        placeholders = ",".join("?" * len(exclude_aliases))
+        rows = conn.execute(
+            f"""SELECT * FROM keys
+               WHERE status = 'active'
+                 AND alias NOT IN ({placeholders})
+                 AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')
+               ORDER BY priority ASC""",
+            (*exclude_aliases, model),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM keys
+               WHERE status = 'active'
+                 AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')
+               ORDER BY priority ASC""",
+            (model,),
+        ).fetchall()
     conn.close()
     if not rows:
         return None
@@ -224,9 +239,9 @@ def pick_key(model: str) -> dict | None:
     return d
 
 
-async def pick_key_async(model: str) -> dict | None:
+async def pick_key_async(model: str, exclude_aliases: list[str] | None = None) -> dict | None:
     """异步版本的 pick_key，在线程池中执行数据库查询"""
-    return await asyncio.to_thread(pick_key, model)
+    return await asyncio.to_thread(pick_key, model, exclude_aliases)
 
 
 def pick_wildcard_key() -> dict | None:

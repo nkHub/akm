@@ -8,6 +8,33 @@
   <button onclick="switchDays(30)" id="btn-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">30天</button>
 </div>
 <!-- 统计概览 -->
+<!-- 骨架屏 -->
+<div id="dashboard-skeleton">
+  <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-12 mb-3"></div><div class="skeleton h-7 w-20"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-20 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
+  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
+      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
+      <div class="p-4 space-y-3">
+        <div class="skeleton h-4 w-full"></div><div class="skeleton h-4 w-3/4"></div><div class="skeleton h-4 w-5/6"></div><div class="skeleton h-4 w-2/3"></div>
+      </div>
+    </div>
+    <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
+      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
+      <div class="p-4 space-y-3">
+        <div class="skeleton h-4 w-full"></div><div class="skeleton h-4 w-3/4"></div><div class="skeleton h-4 w-5/6"></div><div class="skeleton h-4 w-2/3"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 真实内容（初始隐藏） -->
+<div id="dashboard-content" class="hidden">
 <div id="stats-cards" class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
   <div class="bg-surface-light border border-border rounded-lg p-4">
     <div class="text-xs text-gray-500 mb-1">总请求</div>
@@ -49,6 +76,7 @@
     </table>
   </div>
 </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -77,6 +105,9 @@ function switchDays(d) {
 }
 
 async function loadDashboard() {
+  // 显示骨架屏，隐藏真实内容
+  document.getElementById('dashboard-skeleton').classList.remove('hidden');
+  document.getElementById('dashboard-content').classList.add('hidden');
   try {
     var res = await fetch('/api/stats?days=' + _currentDays);
     var s = await res.json();
@@ -108,6 +139,9 @@ async function loadDashboard() {
       html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
     document.getElementById('tbl-daily').innerHTML = html;
+    // 数据加载完成，隐藏骨架屏
+    document.getElementById('dashboard-skeleton').classList.add('hidden');
+    document.getElementById('dashboard-content').classList.remove('hidden');
   } catch(e) { console.error('Dashboard:', e); }
 }
 
