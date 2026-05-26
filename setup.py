@@ -26,6 +26,7 @@ OPTIONS = {
     "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "PIL"],
     "includes": ["akm.server", "akm.db", "akm.key_pool", "akm.proxy", "akm.audit", "akm.models"],
     "excludes": ["tkinter", "PyQt5", "PySide2", "wx"],
+    "iconfile": "logo.icns",
     "plist": {
         "CFBundleName": "AI Key Manager",
         "CFBundleDisplayName": "AI Key Manager",
