@@ -6,6 +6,7 @@ import asyncio
 import httpx
 from akm.key_pool import pick_key_async, pick_wildcard_key_async, mark_rate_limited, set_status
 from akm.db import get_connection
+from akm.agent import get_agent
 
 
 # 最大尝试 key 数量，防止无限循环
@@ -102,16 +103,6 @@ def _sse_to_json(sse_text: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def _build_upstream_url(base_url: str | None, api_path: str = "chat/completions") -> str:
-    """从供应商 base_url 拼接 API 路径"""
-    if not base_url:
-        base_url = "https://api.openai.com"  # 兜底默认值
-    base = base_url.rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/{api_path}"
-    return f"{base}/v1/{api_path}"
-
-
 async def forward_request(
     body: dict,
     client: httpx.AsyncClient,
@@ -159,15 +150,26 @@ async def forward_request(
         tried_aliases.add(key["alias"])
 
         tries += 1
-        url = _build_upstream_url(key.get("base_url") or "https://api.openai.com", api_path)
-        auth_template = key.get("auth_header", "Bearer {api_key}")
-        headers = {
-            "Authorization": auth_template.format(api_key=key["api_key"]),
-            "Content-Type": "application/json",
-        }
+        agent = get_agent(key.get("provider", "openai"))
+
+        # ── 协议转换检测 ──
+        target_api_path = agent.needs_conversion(api_path)
+        adapter = None
+        if target_api_path:
+            if api_path == "responses":
+                adapter = agent.chat_to_responses
+            elif api_path == "messages":
+                adapter = agent.messages_to_chat
+            elif api_path == "chat/completions":
+                adapter = agent.messages_to_chat  # 反向用同一个适配器
+
+        # 构建上游 URL：转换后走目标路径
+        upstream_api_path = target_api_path or api_path
+        url = agent.resolve_url(key, upstream_api_path)
+        headers = agent.build_headers(key)
 
         # ── 内部统一向上游发 stream=true，边收边拼，减少首 token 延迟 ──
-        upstream_body = dict(body)
+        upstream_body = adapter.convert_request(body) if adapter else dict(body)
         upstream_body["stream"] = True
 
         last_error = ""
@@ -213,12 +215,13 @@ async def forward_request(
                     continue
                 break
 
-            # ── 成功：客户端流式 → 透传 resp；非流式 → 读完拼接返回 ──
+            # ── 成功：客户端流式 → 透传或标记转换 ──
             if client_wants_stream:
                 return {
                     "stream": True,
                     "status_code": 200,
                     "response": resp,
+                    "adapter": adapter,  # 非 None 时 server.py 会用转换器包装
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
@@ -241,10 +244,13 @@ async def forward_request(
             latency = int((time.time() - t0) * 1000)
             resp_body = b"".join(chunks).decode("utf-8", errors="replace")
             # chat/completions 将 SSE 流转为 JSON，其他路径透传原始响应
-            if api_path == "chat/completions":
+            if upstream_api_path == "chat/completions":
                 json_body = _sse_to_json(resp_body)
             else:
                 json_body = resp_body
+            # 协议转换：响应体格式转回客户端期望的格式
+            if adapter:
+                json_body = adapter.convert_response(json_body)
             return {
                 "status_code": resp.status_code,
                 "body": json_body,
@@ -287,13 +293,10 @@ async def test_key_connectivity(key: dict) -> dict:
     返回: {"ok": bool, "url": str, "model": str, "status_code": int,
            "latency_ms": int, "error": str, "response_body": str}
     """
-    url = _build_upstream_url(key["base_url"])
+    agent = get_agent(key.get("provider", "openai"))
+    url = agent.resolve_url(key, "chat/completions")
     model = key.get("models", "*").split(",")[0].strip() or "gpt-3.5-turbo"
-    auth_template = key.get("auth_header", "Bearer {api_key}")
-    headers = {
-        "Authorization": auth_template.format(api_key=key["api_key"]),
-        "Content-Type": "application/json",
-    }
+    headers = agent.build_headers(key)
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "hi"}],

@@ -16,11 +16,13 @@ from akm.key_pool import (
 )
 from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
+from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：维护共享 HTTP 连接池，避免每次请求重新建立 TCP 连接"""
+    load_custom_agents()  # 启动时加载自定义 Agent
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
     app.state.http_client = httpx.AsyncClient(
         limits=limits,
@@ -463,6 +465,43 @@ async def api_save_config(request: Request):
     return {"ok": True}
 
 
+@app.get("/api/agents")
+async def api_list_agents():
+    """列出所有 Agent（内置 + 自定义）"""
+    return {"data": list_agents()}
+
+
+@app.post("/api/agents")
+async def api_add_agent(request: Request):
+    """添加自定义 Agent"""
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"detail": "供应商名称不能为空"})
+    try:
+        register_agent(
+            name=name,
+            default_base_url=body.get("default_base_url", ""),
+            default_auth_header=body.get("default_auth_header", "Bearer {api_key}"),
+            supports_responses=body.get("supports_responses", False),
+            supports_chat=body.get("supports_chat", True),
+            supports_messages=body.get("supports_messages", False),
+        )
+        return {"ok": True, "name": name}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
+@app.delete("/api/agents/{name}")
+async def api_delete_agent(name: str):
+    """删除自定义 Agent"""
+    try:
+        unregister_agent(name)
+        return {"ok": True}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
 @app.get("/logs")
 async def log_viewer(request: Request):
     """审计日志查看页面"""
@@ -546,6 +585,7 @@ async def _handle_ai_request(request: Request, api_path: str):
     # ── 流式响应：逐块转发，边收边发 ──
     if result.get("stream"):
         resp = result["response"]
+        adapter = result.get("adapter")  # 协议转换适配器（非 None 时需转换）
         key_alias = result["key_alias"]
         provider = result["provider"]
         model = result["model"]
@@ -555,9 +595,16 @@ async def _handle_ai_request(request: Request, api_path: str):
             t0 = __import__("time").time()
             stream_error = ""
             try:
-                async for chunk in resp.aiter_bytes():
-                    chunks.append(chunk)
-                    yield chunk
+                if adapter:
+                    # 协议转换：边收 Chat SSE 边转 Responses SSE
+                    async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                        chunk = line.encode("utf-8") if isinstance(line, str) else line
+                        chunks.append(chunk)
+                        yield chunk
+                else:
+                    async for chunk in resp.aiter_bytes():
+                        chunks.append(chunk)
+                        yield chunk
             except Exception as e:
                 stream_error = f"上游连接中断: {e}"
                 logger.warning(
