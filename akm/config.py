@@ -10,6 +10,8 @@ DEFAULTS = {
     "auto_open_admin": True,  # 启动时自动打开管理台
     "log_retention_days": 30,  # 日志保留天数
     "server_port": 8800,       # 默认服务端口
+    "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）
+    "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
 }
 
 

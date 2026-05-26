@@ -332,7 +332,7 @@ def _get_stats(days: int) -> dict:
     now = time.time()
     if cache_key in _stats_cache:
         ts, data = _stats_cache[cache_key]
-        if now - ts < 30:
+        if now - ts < 60:
             return data
 
     from akm.db import get_connection
@@ -465,6 +465,17 @@ async def api_logs(
         log["total_tokens"] = t
         log["cached_tokens"] = cached
     return {"data": logs, "total": total}
+
+
+@app.get("/api/logs/size")
+async def api_logs_size():
+    """返回数据库文件大小（字节）"""
+    from akm.db import get_db_path
+    try:
+        size = os.path.getsize(get_db_path())
+        return {"size": size}
+    except OSError:
+        return {"size": 0}
 
 
 @app.post("/api/logs/clean")
@@ -610,6 +621,10 @@ async def _handle_ai_request(request: Request, api_path: str):
         )
 
     body = await request.json()
+    # 读取日志存储配置
+    cfg = load_config()
+    save_request_body = cfg.get("log_request_body", False)
+    save_response_body = cfg.get("log_response_body", False)
     result = await forward_request(body, request.app.state.http_client, api_path=api_path)
 
     # ── 流式响应：逐块转发，边收边发 ──
@@ -648,8 +663,8 @@ async def _handle_ai_request(request: Request, api_path: str):
                 tokens = _extract_tokens(body_str) or {}
                 asyncio.create_task(write_log_async({
                     "provider": provider, "key_alias": key_alias, "model": model,
-                    "request_body": json.dumps(body, ensure_ascii=False),
-                    "response_body": body_str, "status_code": status,
+                    "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+                    "response_body": body_str if save_response_body else "", "status_code": status,
                     "latency_ms": latency, "error": stream_error,
                     "prompt_tokens": tokens.get("prompt_tokens", 0),
                     "completion_tokens": tokens.get("completion_tokens", 0),
@@ -679,8 +694,8 @@ async def _handle_ai_request(request: Request, api_path: str):
             "provider": result["provider"],
             "key_alias": result["key_alias"],
             "model": result["model"],
-            "request_body": json.dumps(body, ensure_ascii=False),
-            "response_body": result["body"],
+            "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+            "response_body": result["body"] if save_response_body else "",
             "status_code": result["status_code"],
             "latency_ms": result["latency_ms"],
             "error": result["error"],
