@@ -22,9 +22,9 @@
     <span id="log-count" class="text-xs text-gray-500"></span>
   </div>
   <div class="flex items-center gap-3">
-    <label id="hide-empty-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-on" onclick="toggleHideEmpty()">
+    <label id="hide-empty-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off" onclick="toggleHideEmpty()">
       <span class="text-xs text-gray-400">仅对话</span>
-      <div class="switch-track bg-indigo-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+      <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
     </label>
     <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↓ 倒序</button>
     <button onclick="toggleStatusFilter()" id="btn-status" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">成功</button>
@@ -77,7 +77,7 @@ var _currentProvider = '';
 var _currentAlias = '';
 var _providerDropdownOpen = false;
 var _orderAsc = false;
-var _hideEmpty = true;
+var _hideEmpty = false;
 var _statusFilter = 'success';  // success | failed
 var _currentDays = 1;  // 0=全部, 默认1天
 
