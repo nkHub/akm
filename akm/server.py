@@ -3,6 +3,7 @@
 import json
 import logging
 import asyncio
+import time
 import os
 from contextlib import asynccontextmanager
 import httpx
@@ -316,13 +317,30 @@ def _extract_tokens(response_body: str) -> dict | None:
     return None
 
 
+# ── 统计内存缓存（30 秒过期，减少重复解析）──
+_stats_cache: dict[str, tuple[float, dict]] = {}
+
 @app.get("/api/stats")
 async def api_stats(days: int = Query(default=1, ge=1, le=365)):
-    """Token 统计概览，可按天数筛选"""
+    """Token 统计概览，可按天数筛选（30 秒内存缓存）"""
+    return _get_stats(days)
+
+
+def _get_stats(days: int) -> dict:
+    """带缓存的统计查询"""
+    cache_key = f"days={days}"
+    now = time.time()
+    if cache_key in _stats_cache:
+        ts, data = _stats_cache[cache_key]
+        if now - ts < 30:
+            return data
+
     from akm.db import get_connection
     conn = get_connection()
     rows = conn.execute(
-        """SELECT * FROM audit_logs
+        """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                  provider, model, key_alias, timestamp, response_body
+           FROM audit_logs
            WHERE timestamp >= datetime('now', 'localtime', ? || ' days')
            ORDER BY id DESC""",
         (f"-{days}",),
@@ -341,17 +359,23 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
 
     for row in rows:
         r = dict(row)
-        tokens = _extract_tokens(r.get("response_body", ""))
+        p = r.get("prompt_tokens", 0) or 0
+        c = r.get("completion_tokens", 0) or 0
+        t = r.get("total_tokens", 0) or 0
+        cached = r.get("cached_tokens", 0) or 0
+        # 兼容旧数据：列值为 0 但有 response_body 时，仍从 body 提取
+        if not t and r.get("response_body"):
+            tokens = _extract_tokens(r["response_body"])
+            if tokens:
+                p = tokens.get("prompt_tokens", 0) or p
+                c = tokens.get("completion_tokens", 0) or c
+                t = tokens.get("total_tokens", 0) or t
+                cached = tokens.get("cached_tokens", 0) or cached
 
         provider = r.get("provider", "unknown")
         model = r.get("model", "unknown")
         key_alias = r.get("key_alias", "unknown")
         ts = str(r.get("timestamp", ""))[:10]
-
-        p = tokens.get("prompt_tokens", 0) if tokens else 0
-        c = tokens.get("completion_tokens", 0) if tokens else 0
-        t = tokens.get("total_tokens", 0) if tokens else 0
-        cached = tokens.get("cached_tokens", 0) if tokens else 0
 
         total_prompt += p - cached
         total_completion += c
@@ -394,7 +418,7 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         daily[ts]["cached"] += cached
         daily[ts]["requests"] += 1
 
-    return {
+    result = {
         "total_requests": total_requests,
         "total_prompt_tokens": total_prompt,
         "total_completion_tokens": total_completion,
@@ -405,6 +429,8 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
         "by_key": by_key,
         "daily": dict(sorted(daily.items())),
     }
+    _stats_cache[cache_key] = (time.time(), result)
+    return result
 
 
 @app.get("/api/logs")
@@ -421,19 +447,23 @@ async def api_logs(
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
     logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
     total = count_logs(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
-    # 为每条日志附加 token 用量信息
+    # 为每条日志附加 token 用量信息（优先读列，兼容旧数据才解析 body）
     for log in logs:
-        tokens = _extract_tokens(log.get("response_body", ""))
-        if tokens:
-            log["prompt_tokens"] = tokens["prompt_tokens"]
-            log["completion_tokens"] = tokens["completion_tokens"]
-            log["total_tokens"] = tokens["total_tokens"]
-            log["cached_tokens"] = tokens["cached_tokens"]
-        else:
-            log["prompt_tokens"] = 0
-            log["completion_tokens"] = 0
-            log["total_tokens"] = 0
-            log["cached_tokens"] = 0
+        p = log.get("prompt_tokens", 0) or 0
+        c = log.get("completion_tokens", 0) or 0
+        t = log.get("total_tokens", 0) or 0
+        cached = log.get("cached_tokens", 0) or 0
+        if not t and log.get("response_body"):
+            tokens = _extract_tokens(log["response_body"])
+            if tokens:
+                p = tokens.get("prompt_tokens", 0) or p
+                c = tokens.get("completion_tokens", 0) or c
+                t = tokens.get("total_tokens", 0) or t
+                cached = tokens.get("cached_tokens", 0) or cached
+        log["prompt_tokens"] = p
+        log["completion_tokens"] = c
+        log["total_tokens"] = t
+        log["cached_tokens"] = cached
     return {"data": logs, "total": total}
 
 
@@ -615,11 +645,16 @@ async def _handle_ai_request(request: Request, api_path: str):
                 latency = int((__import__("time").time() - t0) * 1000)
                 body_str = b"".join(chunks).decode("utf-8", errors="replace")
                 status = 200 if not stream_error else 502
+                tokens = _extract_tokens(body_str) or {}
                 asyncio.create_task(write_log_async({
                     "provider": provider, "key_alias": key_alias, "model": model,
                     "request_body": json.dumps(body, ensure_ascii=False),
                     "response_body": body_str, "status_code": status,
                     "latency_ms": latency, "error": stream_error,
+                    "prompt_tokens": tokens.get("prompt_tokens", 0),
+                    "completion_tokens": tokens.get("completion_tokens", 0),
+                    "total_tokens": tokens.get("total_tokens", 0),
+                    "cached_tokens": tokens.get("cached_tokens", 0),
                 }))
                 logger.info(
                     f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)"
@@ -639,6 +674,7 @@ async def _handle_ai_request(request: Request, api_path: str):
     # ── 非流式响应 ──
     # 只有真正转发了的请求才写审计日志（没有可用 key 的 503 不记录）
     if result["status_code"] != 503:
+        tokens = _extract_tokens(result.get("body", "")) or {}
         asyncio.create_task(write_log_async({
             "provider": result["provider"],
             "key_alias": result["key_alias"],
@@ -648,6 +684,10 @@ async def _handle_ai_request(request: Request, api_path: str):
             "status_code": result["status_code"],
             "latency_ms": result["latency_ms"],
             "error": result["error"],
+            "prompt_tokens": tokens.get("prompt_tokens", 0),
+            "completion_tokens": tokens.get("completion_tokens", 0),
+            "total_tokens": tokens.get("total_tokens", 0),
+            "cached_tokens": tokens.get("cached_tokens", 0),
         }))
 
     if result["key_alias"]:

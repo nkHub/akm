@@ -16,8 +16,9 @@ def _do_write(data: dict) -> None:
     conn.execute(
         """INSERT INTO audit_logs
            (timestamp, provider, key_alias, model, request_body,
-            response_body, status_code, latency_ms, error)
-            VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?)""",
+            response_body, status_code, latency_ms, error,
+            prompt_tokens, completion_tokens, total_tokens, cached_tokens)
+            VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data.get("provider", ""),
             data.get("key_alias", ""),
@@ -27,6 +28,10 @@ def _do_write(data: dict) -> None:
             data.get("status_code", 0),
             data.get("latency_ms", 0),
             data.get("error", ""),
+            data.get("prompt_tokens", 0),
+            data.get("completion_tokens", 0),
+            data.get("total_tokens", 0),
+            data.get("cached_tokens", 0),
         ),
     )
     conn.commit()
