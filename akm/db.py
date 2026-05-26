@@ -48,15 +48,36 @@ def init_db(conn: sqlite3.Connection) -> None:
             response_body TEXT DEFAULT '',
             status_code  INTEGER DEFAULT 0,
             latency_ms   INTEGER DEFAULT 0,
-            error        TEXT DEFAULT ''
+            error        TEXT DEFAULT '',
+            prompt_tokens     INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            total_tokens      INTEGER DEFAULT 0,
+            cached_tokens     INTEGER DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp
             ON audit_logs(timestamp);
     """)
-    # 迁移：旧表可能没有 auth_header 列，忽略已存在的错误
+    # 迁移旧表，添加新列（忽略已存在的错误）
+    _migrate_audit_columns(conn)
+    conn.commit()
+
+
+def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
+    """增量迁移：为旧数据库添加新列"""
+    # keys 表 — auth_header
     try:
         conn.execute("ALTER TABLE keys ADD COLUMN auth_header TEXT DEFAULT 'Bearer {api_key}'")
     except sqlite3.OperationalError:
         pass
-    conn.commit()
+    # audit_logs 表 — token 列
+    for col, default in [
+        ("prompt_tokens", "0"),
+        ("completion_tokens", "0"),
+        ("total_tokens", "0"),
+        ("cached_tokens", "0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE audit_logs ADD COLUMN {col} INTEGER DEFAULT {default}")
+        except sqlite3.OperationalError:
+            pass
