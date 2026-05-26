@@ -5,7 +5,7 @@ import time
 import asyncio
 from cryptography.fernet import Fernet
 from akm.db import get_connection
-from akm.models import DEFAULT_BASE_URLS
+from akm.agent import AGENT_REGISTRY
 
 SECRET_DIR = os.path.expanduser("~/.akm")
 RATE_LIMIT_COOLDOWN = 60  # 限流冷却秒数
@@ -60,7 +60,9 @@ def add_key(
     # 规范 models 字段：去除每个模型名前后空格，移除多余逗号
     models = ",".join(m.strip() for m in models.split(",") if m.strip()) if models and models != "*" else models
     if base_url is None:
-        base_url = DEFAULT_BASE_URLS.get(provider, "")
+        # 只查已知 provider 的默认地址，未知 provider 保留空字符串
+        agent = AGENT_REGISTRY.get(provider)
+        base_url = agent.default_base_url if agent else ""
     enc_key = _encrypt(api_key)
     conn = get_connection()
     try:

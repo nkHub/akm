@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 import httpx
-from akm.proxy import forward_request, _build_upstream_url
+from akm.proxy import forward_request
 
 
 class FakeStreamResponse:
@@ -33,13 +33,6 @@ def _make_send_mock(client_mock, responses):
     client_mock.send = AsyncMock(side_effect=send_side_effect)
 
 
-def test_build_upstream_url():
-    assert _build_upstream_url("https://api.openai.com") == \
-        "https://api.openai.com/v1/chat/completions"
-    assert _build_upstream_url("https://api.deepseek.com/v1") == \
-        "https://api.deepseek.com/v1/chat/completions"
-
-
 @pytest.mark.asyncio
 async def test_forward_success(monkeypatch):
     """正常转发成功返回"""
@@ -63,7 +56,7 @@ async def test_forward_429_switches_key(monkeypatch):
     """429 限流后切换下一个 key"""
     keys_called = []
 
-    async def pick_key_mock(model):
+    async def pick_key_mock(model, exclude_aliases=None):
         keys_called.append(model)
         if len(keys_called) == 1:
             return {"alias": "k1", "provider": "openai", "api_key": "sk-a",
@@ -95,7 +88,7 @@ async def test_forward_402_disables_key(monkeypatch):
     """402 余额不足后禁用 key 并切换"""
     keys_called = []
 
-    async def pick_key_mock(model):
+    async def pick_key_mock(model, exclude_aliases=None):
         keys_called.append(model)
         if len(keys_called) == 1:
             return {"alias": "k1", "provider": "openai", "api_key": "sk-a",
@@ -126,7 +119,7 @@ async def test_forward_401_disables_key(monkeypatch):
     """401 认证失败后禁用 key 并切换"""
     keys_called = []
 
-    async def pick_key_mock(model):
+    async def pick_key_mock(model, exclude_aliases=None):
         keys_called.append(model)
         if len(keys_called) == 1:
             return {"alias": "k1", "provider": "openai", "api_key": "sk-a",

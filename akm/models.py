@@ -9,6 +9,7 @@ class KeyConfig(BaseModel):
     provider: str               # openai / deepseek
     api_key: str
     base_url: str | None = None
+    auth_header: str = "Bearer {api_key}"  # 认证头模板，{api_key} 会被替换
     models: str = "*"           # 支持的模型，逗号分隔，* 表示全部
     priority: int = 0
     status: str = "active"      # active / disabled / rate_limited
@@ -26,10 +27,3 @@ class AuditRecord(BaseModel):
     status_code: int = 0
     latency_ms: int = 0
     error: str = ""
-
-
-# 供应商默认 base_url
-DEFAULT_BASE_URLS = {
-    "openai": "https://api.openai.com",
-    "deepseek": "https://api.deepseek.com",
-}

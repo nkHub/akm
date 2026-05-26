@@ -49,6 +49,46 @@
     </div>
   </div>
 
+  <!-- Agent 管理 -->
+  <div class="bg-surface-light border border-border rounded-lg p-5">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm font-semibold text-white">供应商代理管理</h3>
+      <button onclick="toggleAgentForm()" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加</button>
+    </div>
+    <!-- 添加表单 -->
+    <div id="agent-form" class="hidden bg-surface border border-border rounded-lg p-4 mb-3">
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="text-xs text-gray-400">名称</label>
+          <input id="agent-name" class="w-full bg-surface-light border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 mt-1" placeholder="dmxapi">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">Base URL</label>
+          <input id="agent-url" class="w-full bg-surface-light border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 mt-1" placeholder="https://www.dmxapi.cn/v1">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">认证头模板</label>
+          <input id="agent-auth" value="Bearer {api_key}" class="w-full bg-surface-light border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 mt-1">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">协议能力</label>
+          <div class="flex gap-3 mt-1.5">
+            <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-chat" checked> Chat</label>
+            <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-responses"> Responses</label>
+            <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-messages"> Messages</label>
+          </div>
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="addAgent()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded cursor-pointer">保存</button>
+        <button onclick="toggleAgentForm()" class="text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 cursor-pointer">取消</button>
+      </div>
+      <p id="agent-msg" class="text-xs mt-2 hidden"></p>
+    </div>
+    <!-- Agent 列表 -->
+    <div id="agent-list" class="text-xs text-gray-400">加载中...</div>
+  </div>
+
   <!-- 日志统计 -->
   <div class="bg-surface-light border border-border rounded-lg p-5">
     <h3 class="text-sm font-semibold text-white mb-1">日志统计</h3>
@@ -153,9 +193,99 @@ function cleanLogs() {
   });
 }
 
+// ── Agent 管理 ──
+function toggleAgentForm() {
+  var form = document.getElementById('agent-form');
+  form.classList.toggle('hidden');
+  if (!form.classList.contains('hidden')) {
+    document.getElementById('agent-name').value = '';
+    document.getElementById('agent-url').value = '';
+    document.getElementById('agent-auth').value = 'Bearer {api_key}';
+    document.getElementById('agent-chat').checked = true;
+    document.getElementById('agent-responses').checked = false;
+    document.getElementById('agent-messages').checked = false;
+    var msg = document.getElementById('agent-msg');
+    msg.classList.add('hidden');
+  }
+}
+
+function addAgent() {
+  var name = document.getElementById('agent-name').value.trim();
+  var url = document.getElementById('agent-url').value.trim();
+  var auth = document.getElementById('agent-auth').value.trim() || 'Bearer {api_key}';
+  var msg = document.getElementById('agent-msg');
+  if (!name) { msg.textContent = '名称不能为空'; msg.className = 'text-xs text-red-400 mt-2'; msg.classList.remove('hidden'); return; }
+  if (!url) { msg.textContent = 'Base URL 不能为空'; msg.className = 'text-xs text-red-400 mt-2'; msg.classList.remove('hidden'); return; }
+
+  fetch('/api/agents', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      name: name,
+      default_base_url: url,
+      default_auth_header: auth,
+      supports_responses: document.getElementById('agent-responses').checked,
+      supports_chat: document.getElementById('agent-chat').checked,
+      supports_messages: document.getElementById('agent-messages').checked
+    })
+  }).then(function(r){ return r.json().then(function(d){ return {status: r.status, body: d}; }); })
+  .then(function(r){
+    if (r.status === 200) {
+      msg.textContent = '已添加 ' + name;
+      msg.className = 'text-xs text-emerald-400 mt-2';
+      msg.classList.remove('hidden');
+      toggleAgentForm();
+      loadAgents();
+    } else {
+      msg.textContent = '错误: ' + (r.body.detail || r.status);
+      msg.className = 'text-xs text-red-400 mt-2';
+      msg.classList.remove('hidden');
+    }
+  }).catch(function(e){
+    msg.textContent = '网络错误'; msg.className = 'text-xs text-red-400 mt-2'; msg.classList.remove('hidden');
+  });
+}
+
+function deleteAgent(name) {
+  if (!confirm('确认删除自定义供应商 "' + name + '"？已有 Key 不受影响。')) return;
+  fetch('/api/agents/' + encodeURIComponent(name), {method: 'DELETE'})
+    .then(function(r){ return r.json(); })
+    .then(function(){
+      loadAgents();
+    });
+}
+
+function loadAgents() {
+  fetch('/api/agents').then(function(r){return r.json()}).then(function(json){
+    var agents = json.data || [];
+    var html = '';
+    if (agents.length === 0) {
+      html = '<div class="text-gray-600">暂无可用的供应商代理</div>';
+    } else {
+      html = '<table class="w-full text-xs"><thead><tr class="text-gray-500"><th class="text-left py-1.5 font-medium">名称</th><th class="text-left py-1.5 font-medium">Base URL</th><th class="text-left py-1.5 font-medium">认证头</th><th class="text-center py-1.5 font-medium w-20">Chat</th><th class="text-center py-1.5 font-medium w-20">Responses</th><th class="text-center py-1.5 font-medium w-20">Messages</th><th class="text-center py-1.5 font-medium w-12"></th></tr></thead><tbody>';
+      agents.forEach(function(a){
+        html += '<tr class="border-t border-border">';
+        html += '<td class="py-1.5 text-gray-300">' + esc(a.name) + (a.is_custom ? '' : ' <span class="text-gray-600">(内置)</span>') + '</td>';
+        html += '<td class="py-1.5 text-gray-500">' + esc(a.default_base_url) + '</td>';
+        html += '<td class="py-1.5 text-gray-500">' + esc(a.default_auth_header) + '</td>';
+        html += '<td class="py-1.5 text-center">' + (a.supports_chat ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
+        html += '<td class="py-1.5 text-center">' + (a.supports_responses ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
+        html += '<td class="py-1.5 text-center">' + (a.supports_messages ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
+        html += '<td class="py-1.5 text-center">' + (a.is_custom ? '<button onclick="deleteAgent(\'' + esc(a.name) + '\')" class="text-red-400 hover:text-red-300 cursor-pointer text-xs">删除</button>' : '') + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    document.getElementById('agent-list').innerHTML = html;
+  }).catch(function(){ document.getElementById('agent-list').textContent = '加载失败'; });
+}
+
+function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('cfg-auto-open').addEventListener('click', toggleAutoOpen);
   loadConfig();
+  loadAgents();
 });
 </script>
 {% endblock %}
