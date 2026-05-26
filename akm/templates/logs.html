@@ -84,6 +84,30 @@ var _currentDays = 1;  // 0=全部, 默认1天
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
 
+// 筛选状态持久化
+var FILTER_KEY = 'akm_log_filters';
+function saveFilters() {
+  try {
+    localStorage.setItem(FILTER_KEY, JSON.stringify({
+      status: _statusFilter,
+      alias: _currentAlias,
+      days: _currentDays,
+      hideEmpty: _hideEmpty,
+      orderAsc: _orderAsc
+    }));
+  } catch(e) {}
+}
+function loadFilters() {
+  try {
+    var saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}');
+    if (saved.status) _statusFilter = saved.status;
+    if (saved.days !== undefined) _currentDays = saved.days;
+    if (saved.hideEmpty !== undefined) _hideEmpty = saved.hideEmpty;
+    if (saved.orderAsc !== undefined) _orderAsc = saved.orderAsc;
+    if (saved.alias !== undefined) _currentAlias = saved.alias;
+  } catch(e) {}
+}
+
 function toggleAutoRefresh() {
   autoRefresh = !autoRefresh;
   var t = document.getElementById('auto-refresh-toggle');
@@ -425,6 +449,7 @@ function selectAlias(alias) {
   arrow.style.transform = 'rotate(0deg)';
   _providerDropdownOpen = false;
 
+  saveFilters();
   refreshLogs(1);
 }
 
@@ -467,6 +492,7 @@ function toggleOrder() {
   _orderAsc = !_orderAsc;
   var btn = document.getElementById('btn-order');
   btn.textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
+  saveFilters();
   refreshLogs(1);
 }
 
@@ -480,6 +506,7 @@ function toggleHideEmpty() {
     t.classList.remove('switch-on'); t.classList.add('switch-off');
     t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
   }
+  saveFilters();
   refreshLogs(1);
 }
 
@@ -493,6 +520,7 @@ function switchLogDays(d) {
       btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
     }
   });
+  saveFilters();
   refreshLogs(1);
 }
 
@@ -501,10 +529,41 @@ function toggleStatusFilter() {
   var next = {success: 'failed', failed: 'success'};
   _statusFilter = next[_statusFilter];
   document.getElementById('btn-status').textContent = labels[_statusFilter];
+  saveFilters();
   refreshLogs(1);
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+  loadFilters();
+
+  // 同步状态筛选按钮
+  document.getElementById('btn-status').textContent = _statusFilter === 'success' ? '成功' : '失败';
+
+  // 同步排序按钮
+  document.getElementById('btn-order').textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
+
+  // 同步仅对话开关
+  if (!_hideEmpty) {
+    var t = document.getElementById('hide-empty-toggle');
+    t.classList.remove('switch-on'); t.classList.add('switch-off');
+    t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
+  }
+
+  // 同步时间范围按钮
+  [1,7,30].forEach(function(k){
+    var btn = document.getElementById('btn-log-'+k+'d');
+    if (k === _currentDays) {
+      btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
+    } else {
+      btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
+    }
+  });
+
+  // 恢复 Key 筛选标签
+  if (_currentAlias) {
+    document.getElementById('provider-label').textContent = _currentAlias;
+  }
+
   document.getElementById('auto-refresh-toggle').addEventListener('click', toggleAutoRefresh);
   document.addEventListener('keydown', function(e) { if (e.key==='Escape') closeDrawer(); });
   // 调试：确认 JS 加载
