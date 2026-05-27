@@ -1,5 +1,7 @@
 {% extends "_layout.html" %}
 {% block content %}
+<script src="/static/json-viewer.js"></script>
+<script src="/static/chat-viewer.js"></script>
 <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
   <div class="flex items-center gap-3">
     <!-- 自定义供应商下拉 -->
@@ -59,9 +61,9 @@
     <button onclick="switchDrawerTab('response')" id="dtab-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">响应体</button>
   </div>
   <div class="flex-1 overflow-y-auto overflow-x-hidden p-4" id="drawer-content">
-    <div id="drawer-chat" class="space-y-3"></div>
-    <pre id="drawer-request" class="hidden text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
-    <pre id="drawer-response" class="hidden text-xs text-gray-300 leading-relaxed whitespace-pre-wrap break-all"></pre>
+    <akm-chat-viewer id="drawer-chat" class="block"></akm-chat-viewer>
+    <akm-json-viewer id="drawer-request" class="hidden block"></akm-json-viewer>
+    <akm-json-viewer id="drawer-response" class="hidden block"></akm-json-viewer>
   </div>
 </div>
 {% endblock %}
@@ -80,9 +82,153 @@ var _orderAsc = false;
 var _hideEmpty = false;
 var _statusFilter = 'success';  // success | failed
 var _currentDays = 1;  // 0=全部, 默认1天
-
+var _jsonViewerMaxTextLength = 600000;
+var _chatLazyThreshold = 600000;
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
+
+function renderJsonAsync(targetId, raw, logRef) {
+  var el = document.getElementById(targetId);
+  if (!el) return;
+  if (_drawerLog !== logRef) return;
+  // 超大内容直接短路：避免任何额外解析/组件内部状态开销，先保证可见反馈。
+  var rawStr = raw === null || raw === undefined ? '' : String(raw);
+  if (rawStr.length > _jsonViewerMaxTextLength) {
+    if (typeof el.setRaw === 'function') {
+      try {
+        if (typeof el.setMaxTextLength === 'function') {
+          el.setMaxTextLength(_jsonViewerMaxTextLength);
+        }
+        el.setRaw(rawStr);
+        return;
+      } catch (e) {
+        // 组件异常时降级到纯文本提示，保证用户至少看到原因。
+      }
+    }
+    el.innerHTML = '<div class="text-red-300 text-xs py-3">文本过长（' + rawStr.length.toLocaleString() + '），已停止渲染。</div>';
+    return;
+  }
+  if (typeof el.setRaw === 'function') {
+    if (typeof el.setMaxTextLength === 'function') {
+      el.setMaxTextLength(_jsonViewerMaxTextLength);
+    }
+    el.setRaw(rawStr);
+    return;
+  }
+  var fallbackRaw = rawStr;
+  el.textContent = fallbackRaw.trim() === '' ? 'null' : fallbackRaw;
+}
+
+function renderChatAsync(logRef, force) {
+  if (!logRef) return;
+  var chatEl = document.getElementById('drawer-chat');
+  if (!chatEl) return;
+  if (_drawerLog !== logRef) return;
+  if (logRef.__chatRendered) return;
+  var reqLen = (logRef.request_body || '').length;
+  // 超大请求体默认不自动渲染对话视图，避免主线程长时间阻塞，导致 tab 切换状态无法及时刷新。
+  if (!force && reqLen > _chatLazyThreshold) {
+    if (typeof chatEl.setLoading === 'function') {
+      chatEl.setLoading('对话视图内容较大（' + reqLen.toLocaleString() + ' 字符），切换到请求/响应查看更稳定');
+    }
+    return;
+  }
+  logRef.__chatRendered = true;
+  if (typeof chatEl.setLoading === 'function') chatEl.setLoading('加载中...');
+  setTimeout(function() {
+    if (_drawerLog !== logRef) return;
+    try {
+      if (typeof chatEl.setItems === 'function') {
+        chatEl.setItems(buildChatItems(logRef));
+      } else {
+        chatEl.innerHTML = renderChatView(logRef);
+      }
+    } catch (e) {
+      if (typeof chatEl.setLoading === 'function') chatEl.setLoading('渲染失败: ' + String(e));
+      else chatEl.innerHTML = '<div class="text-red-400 text-xs">渲染失败: ' + esc(String(e)) + '</div>';
+    }
+  }, 0);
+}
+
+function buildChatItems(log) {
+  var items = [];
+  var reqBody = null;
+  try { reqBody = JSON.parse(log.request_body || '{}'); } catch(e) {}
+  var msgs = [];
+  if (reqBody) {
+    if (reqBody.messages && reqBody.messages.length) {
+      msgs = reqBody.messages;
+    } else if (reqBody.input !== undefined || reqBody.instructions) {
+      if (reqBody.instructions) msgs.push({role:'system', content:reqBody.instructions});
+      var input = reqBody.input;
+      if (typeof input === 'string') msgs.push({role:'user', content:input});
+      else if (Array.isArray(input)) {
+        input.forEach(function(it){
+          if (it.role) msgs.push({role:it.role, content:it.content || ''});
+          else if (it.type === 'input_text') msgs.push({role:'user', content:it.text || ''});
+        });
+      }
+    }
+  }
+  msgs.forEach(function(m){
+    var content = m.content || '';
+    if (Array.isArray(content)) content = content.map(function(c){ return c.text || c.content || ''; }).join('');
+    items.push({ role: (m.role === 'system' || m.role === 'developer') ? 'system' : (m.role === 'user' || m.role === 'human' ? 'user' : 'assistant'), html: content ? marked.parse(String(content)) : '<span class="text-gray-500">(空)</span>' });
+  });
+
+  var respBody = null;
+  try { respBody = JSON.parse(log.response_body || '{}'); } catch(e) {}
+  var reasoning = '';
+  var reply = '';
+  if (respBody) {
+    if (respBody.choices && respBody.choices.length) {
+      var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
+      reasoning = msg.reasoning_content || '';
+      reply = msg.content || '';
+    } else if (respBody.output && respBody.output.length) {
+      var out = [];
+      respBody.output.forEach(function(it){
+        if (it.type === 'reasoning' && it.summary && it.summary.length) {
+          it.summary.forEach(function(s){ if (s.type === 'summary_text') reasoning += (reasoning ? '\n' : '') + s.text; });
+        }
+        if (it.type === 'message' && it.role === 'assistant' && it.content) {
+          var arr = Array.isArray(it.content) ? it.content : [it.content];
+          arr.forEach(function(c){ if (c.type === 'output_text') out.push(c.text); else if (typeof c === 'string') out.push(c); });
+        }
+      });
+      reply = out.join('\n');
+    }
+  }
+  if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
+    var sseContent = '';
+    var sseReason = '';
+    (log.response_body.split('\n') || []).forEach(function(line){
+      line = line.trim();
+      if (!line.startsWith('data: ') || line.startsWith('data: [DONE]')) return;
+      try {
+        var ch = JSON.parse(line.substring(6));
+        if (ch.choices && ch.choices[0]) {
+          var d = ch.choices[0].delta || {};
+          if (d.content) sseContent += d.content;
+          if (d.reasoning_content) sseReason += d.reasoning_content;
+        } else if (ch.type === 'response.output_text.delta') sseContent += (ch.delta || '');
+        else if (ch.type === 'response.reasoning_summary_text.delta') sseReason += (ch.delta || '');
+      } catch(e) {}
+    });
+    reply = sseContent;
+    reasoning = sseReason;
+  }
+  if (reasoning) items.push({ role:'system', html: '<span class="text-amber-300">思考过程</span><br>' + esc(reasoning) });
+  if (reply) items.push({ role:'assistant', html: marked.parse(String(reply)) });
+
+  var pt = log.prompt_tokens || 0;
+  var ct = log.completion_tokens || 0;
+  var cached = log.cached_tokens || 0;
+  var tokenInfo = '';
+  if (pt > 0 || ct > 0) tokenInfo = ' · 输入: ' + pt + (cached > 0 ? ' Token (缓存命中: ' + cached + ')' : ' Token') + ' · 输出: ' + ct + ' Token';
+  items.push({ role:'meta', html: esc(log.model || '-') + ' · ' + (log.latency_ms || 0) + 'ms · HTTP ' + (log.status_code || '-') + tokenInfo });
+  return items;
+}
 
 // 筛选状态持久化
 var FILTER_KEY = 'akm_log_filters';
@@ -198,16 +344,26 @@ function openDrawer(idx) {
   if (_drawerOpening) return;
   _drawerLog = _logsData[idx];
   if (!_drawerLog) return;
+  var currentLog = _drawerLog;
+  var chatEl = document.getElementById('drawer-chat');
+  var reqEl = document.getElementById('drawer-request');
+  var respEl = document.getElementById('drawer-response');
   document.getElementById('drawer-title').textContent = '['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-');
-  // 预渲染（防崩）
-  try {
-    document.getElementById('drawer-chat').innerHTML = renderChatView(_drawerLog);
-  } catch(e) {
-    document.getElementById('drawer-chat').innerHTML = '<div class="text-red-400 text-xs">渲染失败: '+esc(String(e))+'</div>';
+  // 聊天视图改为延迟渲染：避免大请求体时阻塞主线程，导致 tab 切换看起来失效。
+  currentLog.__chatRendered = false;
+  currentLog.__reqRendered = false;
+  currentLog.__respRendered = false;
+  var reqLen = (currentLog.request_body || '').length;
+  if (reqLen > _chatLazyThreshold) {
+    chatEl.innerHTML = '<div class="text-gray-500 text-xs py-4 text-center">数据较大，切换到“对话视图”时再渲染</div>';
+  } else {
+    chatEl.innerHTML = '<div class="text-gray-500 text-xs py-4 text-center">加载中...</div>';
   }
-  document.getElementById('drawer-request').textContent = formatJson(_drawerLog.request_body)||'(空)';
-  document.getElementById('drawer-response').textContent = formatJson(_drawerLog.response_body)||'(空)';
+  // 抽屉打开时先清空滚动与内容，避免看到上一次日志残留。
+  if (typeof reqEl.setLoading === 'function') reqEl.setLoading(); else reqEl.textContent = '加载中...';
+  if (typeof respEl.setLoading === 'function') respEl.setLoading(); else respEl.textContent = '加载中...';
   switchDrawerTab('chat');
+  document.getElementById('drawer-content').scrollTop = 0;
   document.getElementById('log-drawer-overlay').classList.remove('hidden');
   var drawer = document.getElementById('log-drawer');
   drawer.classList.remove('hidden');
@@ -219,26 +375,66 @@ function openDrawer(idx) {
       _drawerOpening = false;
     });
   });
+
+  // 异步渲染请求/响应 JSON（失败时回退原始文本，空值显示 null）。
 }
 function closeDrawer() {
   _drawerOpening = false;
   var drawer = document.getElementById('log-drawer');
   drawer.style.transform = 'translateX(100%)';
-  setTimeout(function(){ drawer.classList.add('hidden'); document.getElementById('log-drawer-overlay').classList.add('hidden'); }, 250);
+  setTimeout(function(){
+    drawer.classList.add('hidden');
+    document.getElementById('log-drawer-overlay').classList.add('hidden');
+    var chatEl = document.getElementById('drawer-chat');
+    if (chatEl && typeof chatEl.clear === 'function') chatEl.clear(); else if (chatEl) chatEl.innerHTML = '';
+    var reqEl = document.getElementById('drawer-request');
+    var respEl = document.getElementById('drawer-response');
+    if (reqEl && typeof reqEl.clear === 'function') reqEl.clear(); else if (reqEl) reqEl.textContent = '';
+    if (respEl && typeof respEl.clear === 'function') respEl.clear(); else if (respEl) respEl.textContent = '';
+    document.getElementById('drawer-content').scrollTop = 0;
+    document.getElementById('drawer-request').scrollTop = 0;
+    document.getElementById('drawer-response').scrollTop = 0;
+    _drawerLog = null;
+  }, 250);
 }
 function switchDrawerTab(tab) {
-  if (!_drawerLog) return;
+  // 不依赖 _drawerLog 状态，确保抽屉切换始终可执行。
   var tabs = {chat:'dtab-chat', request:'dtab-request', response:'dtab-response'};
   var views = {chat:'drawer-chat', request:'drawer-request', response:'drawer-response'};
+  var active = views[tab] || views.chat;
   for (var k in tabs) {
     var tb = document.getElementById(tabs[k]);
-    var vw = document.getElementById(views[k]);
-    if (k === tab) {
-      tb.className = 'flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50';
-      vw.classList.remove('hidden');
-    } else {
-      tb.className = 'flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
-      vw.classList.add('hidden');
+    if (!tb) continue;
+    tb.className = (k === tab)
+      ? 'flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50'
+      : 'flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
+  }
+  for (var v in views) {
+    var el = document.getElementById(views[v]);
+    if (!el) continue;
+    var show = views[v] === active;
+    if (show) el.classList.remove('hidden'); else el.classList.add('hidden');
+  }
+  if (tab === 'chat') {
+    renderChatAsync(_drawerLog, false);
+  } else if (tab === 'request') {
+    if (_drawerLog && !_drawerLog.__reqRendered) {
+      // 先完成 tab 显隐，再异步触发 JSON 赋值，避免大文本处理阻塞导致 hidden 状态看起来未切换。
+      var logRefReq = _drawerLog;
+      _drawerLog.__reqRendered = true;
+      setTimeout(function() {
+        if (_drawerLog !== logRefReq) return;
+        renderJsonAsync('drawer-request', logRefReq.request_body, logRefReq);
+      }, 0);
+    }
+  } else if (tab === 'response') {
+    if (_drawerLog && !_drawerLog.__respRendered) {
+      var logRefResp = _drawerLog;
+      _drawerLog.__respRendered = true;
+      setTimeout(function() {
+        if (_drawerLog !== logRefResp) return;
+        renderJsonAsync('drawer-response', logRefResp.response_body, logRefResp);
+      }, 0);
     }
   }
 }
@@ -550,6 +746,11 @@ function toggleStatusFilter() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+  fetch('/api/config').then(function(r){ return r.json(); }).then(function(cfg){
+    _jsonViewerMaxTextLength = parseInt(cfg.json_viewer_max_text_length || 600000, 10) || 600000;
+    // 对话视图与 JSON 查看共用同一阈值，避免两个入口行为不一致。
+    _chatLazyThreshold = _jsonViewerMaxTextLength;
+  }).catch(function(){});
   loadFilters();
 
   // 同步状态筛选按钮
@@ -558,9 +759,12 @@ document.addEventListener('DOMContentLoaded', function() {
   // 同步排序按钮
   document.getElementById('btn-order').textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
 
-  // 同步仅对话开关
-  if (!_hideEmpty) {
-    var t = document.getElementById('hide-empty-toggle');
+  // 同步仅对话开关（无论 true/false 都显式同步，避免刷新后样式与状态不一致）
+  var t = document.getElementById('hide-empty-toggle');
+  if (_hideEmpty) {
+    t.classList.add('switch-on'); t.classList.remove('switch-off');
+    t.querySelector('.switch-track').classList.replace('bg-gray-600','bg-indigo-600');
+  } else {
     t.classList.remove('switch-on'); t.classList.add('switch-off');
     t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
   }

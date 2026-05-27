@@ -12,6 +12,7 @@ DEFAULTS = {
     "server_port": 8800,       # 默认服务端口
     "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）
     "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
+    "json_viewer_max_text_length": 600000,  # JSON 查看器超长文本阈值（超过后仅允许下载原文）
 }
 
 
