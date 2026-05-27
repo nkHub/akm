@@ -98,9 +98,9 @@ akm-menubar
 | 页面 | 功能 |
 |------|------|
 | 统计 | Token 用量仪表盘（骨架屏加载、缓存命中独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1天/7天/30天切换） |
-| 审计 | 请求日志（输入/缓存/输出 Token 列、Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、loading 动画、Markdown 对话回放） |
+| 审计 | 请求日志（输入/缓存/输出 Token 列、Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制） |
 | 管理 | Key 增删改查、启用/禁用、优先级排序、连通性测试、一键导出备份 |
-| 设置 | 分区布局（服务/日志/供应商代理）、端口配置、日志保留天数、日志体积控制（请求/响应体开关）、清空日志（显示数据库大小）、供应商代理管理 |
+| 设置 | 分区布局（服务/日志/供应商代理）、端口配置、日志保留天数、日志体积控制（请求/响应体开关）、清空日志、清空请求/响应体、JSON 渲染阈值（显示数据库大小）、供应商代理管理 |
 | 关于 | 版本与功能简介 |
 
 ## 配置
@@ -113,7 +113,8 @@ akm-menubar
   "log_retention_days": 30,
   "server_port": 8800,
   "log_request_body": false,
-  "log_response_body": false
+  "log_response_body": false,
+  "json_viewer_max_text_length": 600000
 }
 ```
 
@@ -137,6 +138,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
 | GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选） |
 | GET | `/api/logs/size` | 数据库文件大小 |
 | POST | `/api/logs/clean` | 清空日志 |
+| POST | `/api/logs/clean-bodies` | 清空请求体/响应体（保留元数据与统计列） |
 | GET | `/api/stats` | Token 统计（支持 days 时间范围） |
 | GET/POST | `/api/config` | 配置读写 |
 | GET | `/api/agents` | 供应商代理列表（内置 + 自定义） |

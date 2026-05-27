@@ -524,6 +524,14 @@ async def api_clean_logs(request: Request):
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
 
+@app.post("/api/logs/clean-bodies")
+async def api_clean_log_bodies():
+    """清空审计日志请求体/响应体内容，保留统计字段与元数据"""
+    from akm.audit import clean_log_bodies as _clean_log_bodies
+    count = _clean_log_bodies()
+    return {"ok": True, "updated": count}
+
+
 @app.get("/api/config")
 async def api_get_config():
     """获取配置"""
@@ -760,4 +768,3 @@ async def _handle_ai_request(request: Request, api_path: str):
         status_code=result["status_code"],
         media_type="application/json",
     )
-

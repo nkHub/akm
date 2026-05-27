@@ -151,3 +151,19 @@ def clean_logs(before: str) -> int:
     conn.execute("VACUUM")
     conn.close()
     return count
+
+
+def clean_log_bodies() -> int:
+    """清空所有审计日志的请求体/响应体内容，返回影响条数"""
+    conn = get_connection()
+    cursor = conn.execute(
+        """UPDATE audit_logs
+           SET request_body = '', response_body = ''
+           WHERE request_body != '' OR response_body != ''"""
+    )
+    conn.commit()
+    count = cursor.rowcount
+    # 释放清空文本后仍占用的磁盘空间
+    conn.execute("VACUUM")
+    conn.close()
+    return count
