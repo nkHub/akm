@@ -56,21 +56,33 @@ function renderKeys() {
   _keysData.forEach(function(k){
     var sc = 'status-'+k.status;
     var sl = { active:'启用', disabled:'禁用', rate_limited:'限流' }[k.status]||k.status;
+
+    // 模型 tag 标签
+    var modelTags = '';
+    if (k.models === '*') {
+      modelTags = '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>';
+    } else {
+      (k.models||'').split(',').filter(Boolean).forEach(function(m){
+        modelTags += '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-400">'+esc(m.trim())+'</span>';
+      });
+    }
+
     html += '<div class="border border-border rounded-lg mb-3 bg-surface-light/50 overflow-hidden">'+
       '<div class="flex items-center justify-between px-4 py-3 flex-wrap gap-2">'+
       '<div class="flex items-center gap-3 min-w-0">'+
       '<span class="text-indigo-300 font-medium text-sm truncate">'+esc(k.alias)+'</span>'+
       '<span class="text-gray-500 text-xs">'+esc(k.provider)+'</span>'+
-      '<span class="text-gray-600 text-xs truncate" style="max-width:150px">'+esc(k.models)+'</span>'+
       '<span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+sl+'</span>'+
       '<span class="text-gray-500 text-xs">优先级 '+k.priority+'</span></div>'+
       '<div class="flex items-center gap-1.5 shrink-0">'+
-      '<span class="text-gray-600 text-xs font-mono">'+esc(k.api_key||'')+'</span>'+
       '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" class="px-2 py-1 text-xs rounded cursor-pointer transition-colors '+(k.status==='active'?'bg-red-950/30 hover:bg-red-950/50 text-red-400':'bg-green-950/30 hover:bg-green-950/50 text-green-400')+'">'+(k.status==='active'?'禁用':'启用')+'</button>'+
       '<button onclick="editKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-gray-200 cursor-pointer transition-colors">编辑</button>'+
       '<button onclick="testConnect(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-indigo-400 cursor-pointer transition-colors">测试</button>'+
       '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">删除</button></div></div>'+
-      (k.base_url?'<div class="px-4 pb-2 text-xs text-gray-600">URL: '+esc(k.base_url)+'</div>':'')+'</div>';
+      '<div class="px-4 pb-2 flex items-center gap-2 flex-wrap text-xs">'+
+      modelTags+
+      (k.base_url?'<span class="text-gray-600">URL: '+esc(k.base_url)+'</span>':'')+
+      '</div></div>';
   });
   container.innerHTML = html;
 }
