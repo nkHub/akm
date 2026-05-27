@@ -3,9 +3,9 @@
 <!-- 时间范围切换 -->
 <div class="flex items-center gap-2 mb-4">
   <span class="text-xs text-gray-500 mr-1">时间范围</span>
-  <button onclick="switchDays(1)" id="btn-1d" class="bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer">1天</button>
-  <button onclick="switchDays(7)" id="btn-7d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">7天</button>
-  <button onclick="switchDays(30)" id="btn-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">30天</button>
+  <button onclick="switchDays(1)" id="btn-1d" class="bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer">1d</button>
+  <button onclick="switchDays(7)" id="btn-7d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">7d</button>
+  <button onclick="switchDays(30)" id="btn-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">30d</button>
   <span id="stat-cached-at" class="text-xs text-gray-600 ml-auto">—</span>
 </div>
 <!-- 统计概览 -->
@@ -91,9 +91,26 @@ function fmtNum(n) {
 }
 
 var _currentDays = 1;
+var DASHBOARD_DAYS_KEY = 'akm_dashboard_days';
+
+function loadDaysFilter() {
+  try {
+    var saved = parseInt(localStorage.getItem(DASHBOARD_DAYS_KEY) || '1', 10);
+    if (saved === 1 || saved === 7 || saved === 30) {
+      _currentDays = saved;
+    }
+  } catch (e) {}
+}
+
+function saveDaysFilter() {
+  try {
+    localStorage.setItem(DASHBOARD_DAYS_KEY, String(_currentDays));
+  } catch (e) {}
+}
 
 function switchDays(d) {
   _currentDays = d;
+  saveDaysFilter();
   ['1d','7d','30d'].forEach(function(k){
     var btn = document.getElementById('btn-'+k);
     if (parseInt(k) === d) {
@@ -147,6 +164,9 @@ async function loadDashboard() {
   } catch(e) { console.error('Dashboard:', e); }
 }
 
-document.addEventListener('DOMContentLoaded', loadDashboard);
+document.addEventListener('DOMContentLoaded', function() {
+  loadDaysFilter();
+  switchDays(_currentDays);
+});
 </script>
 {% endblock %}
