@@ -74,8 +74,10 @@
           <p class="text-xs text-gray-400 mt-1"><span id="log-stats">加载中...</span> <span id="log-size" class="text-gray-500"></span></p>
         </div>
         <div class="flex flex-col items-end shrink-0">
-          <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空全部日志</button>
-          <button onclick="cleanLogBodies()" class="mt-2 bg-amber-600 hover:bg-amber-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空请求/响应体</button>
+          <div class="flex items-center gap-2">
+            <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空全部日志</button>
+            <button onclick="cleanLogBodies()" class="bg-amber-600 hover:bg-amber-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空请求/响应体</button>
+          </div>
           <p id="clean-msg" class="text-xs mt-1 hidden"></p>
         </div>
       </div>
