@@ -6,6 +6,7 @@ import asyncio
 import time
 import os
 import sys
+import traceback
 from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query
@@ -25,6 +26,11 @@ from akm.agent import register_agent, unregister_agent, list_agents, load_custom
 async def lifespan(app: FastAPI):
     """应用生命周期：维护共享 HTTP 连接池，避免每次请求重新建立 TCP 连接"""
     load_custom_agents()  # 启动时加载自定义 Agent
+    # 确保数据库及表存在（打包环境不经过 CLI，需要在此初始化）
+    from akm.db import get_connection, init_db
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
     app.state.http_client = httpx.AsyncClient(
         limits=limits,
@@ -37,6 +43,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Key Manager", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """全局异常处理：500 时返回详细报错信息，方便本地排查"""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "traceback": traceback.format_exc()},
+    )
 logger = logging.getLogger("akm")
 
 # 静态文件
@@ -284,10 +299,14 @@ def _extract_tokens(response_body: str) -> dict | None:
         total = usage.get("total_tokens", 0)
         prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
         completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-        cached = (
-            (usage.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
-            or (usage.get("input_tokens_details", {}) or {}).get("cached_tokens", 0)
-        )
+        # 安全提取缓存 token：上游可能返回非字典类型（字符串、null 等）
+        cached = 0
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(key)
+            if isinstance(details, dict):
+                cached = details.get("cached_tokens", 0)
+                if cached:
+                    break
         if total == 0 and (prompt > 0 or completion > 0):
             total = prompt + completion
         if total > 0:
