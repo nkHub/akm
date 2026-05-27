@@ -65,8 +65,11 @@ def list_logs(
     filters = ""
     params = []
     if days > 0:
-        filters += " AND timestamp >= datetime('now', 'localtime', ? || ' days')"
-        params.append(f"-{days}")
+        # 自然日范围：1=今天，7=最近7个自然日（含今天），30 同理。
+        # days=1 -> offset=0；days=7 -> offset=-6。
+        day_offset = 1 - days
+        filters += " AND timestamp >= datetime(date('now', 'localtime', ? || ' days'))"
+        params.append(str(day_offset))
     if hide_empty:
         filters += " AND request_body != ''"
     if status == "success":
@@ -106,8 +109,10 @@ def count_logs(
     filters = ""
     params = []
     if days > 0:
-        filters += " AND timestamp >= datetime('now', 'localtime', ? || ' days')"
-        params.append(f"-{days}")
+        # 自然日范围：1=今天，7=最近7个自然日（含今天），30 同理。
+        day_offset = 1 - days
+        filters += " AND timestamp >= datetime(date('now', 'localtime', ? || ' days'))"
+        params.append(str(day_offset))
     if hide_empty:
         filters += " AND request_body != ''"
     if status == "success":

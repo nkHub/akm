@@ -367,13 +367,15 @@ def _get_stats(days: int) -> dict:
 
     from akm.db import get_connection
     conn = get_connection()
+    # 自然日范围：1=今天，7=最近7个自然日（含今天），30 同理。
+    day_offset = 1 - days
     rows = conn.execute(
         """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                   provider, model, key_alias, timestamp, response_body
            FROM audit_logs
-           WHERE timestamp >= datetime('now', 'localtime', ? || ' days')
+           WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
            ORDER BY id DESC""",
-        (f"-{days}",),
+        (str(day_offset),),
     ).fetchall()
     conn.close()
 
