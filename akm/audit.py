@@ -147,5 +147,7 @@ def clean_logs(before: str) -> int:
     )
     conn.commit()
     count = cursor.rowcount
+    # 回收被删除数据占用的磁盘空间
+    conn.execute("VACUUM")
     conn.close()
     return count

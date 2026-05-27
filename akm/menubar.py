@@ -77,6 +77,7 @@ class AKMApp(rumps.App):
     def _get_icon(self) -> str | None:
         """获取菜单栏图标，支持圆角处理"""
         candidates = [
+            os.path.join(self._resources_dir(), "logo.png"),
             os.path.join(os.path.dirname(os.path.dirname(__file__)), "logo.png"),
             os.path.expanduser("~/.akm/logo.png"),
         ]
@@ -85,6 +86,13 @@ class AKMApp(rumps.App):
                 rounded = _round_corners(path)
                 return rounded
         return None
+
+    @staticmethod
+    def _resources_dir() -> str:
+        """py2app 打包后的 Resources 目录，开发环境返回当前目录"""
+        if hasattr(sys, "frozen") or "Python" not in sys.executable:
+            return os.path.join(os.path.dirname(sys.executable), "..", "Resources")
+        return os.path.dirname(os.path.dirname(__file__))
 
     def _check_port(self) -> bool:
         """检查目标端口是否可达（服务已启动）"""
@@ -102,6 +110,9 @@ class AKMApp(rumps.App):
 
         import uvicorn.server
         import uvicorn.config
+
+        # 打包环境下确保模块已加载，uvicorn 才能通过字符串 "akm.server:app" 找到
+        import akm.server  # noqa: F401
 
         config = uvicorn.config.Config(
             "akm.server:app",
