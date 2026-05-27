@@ -5,6 +5,7 @@ import logging
 import asyncio
 import time
 import os
+import sys
 from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query
@@ -129,9 +130,15 @@ async def health():
 @app.get("/logo.png")
 async def favicon():
     """提供 logo 作为网页图标"""
-    logo_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logo.png")
-    if os.path.exists(logo_path):
-        return FileResponse(logo_path, media_type="image/png")
+    # 开发环境：项目根目录；打包环境：Resources 目录
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "logo.png"),
+    ]
+    if hasattr(sys, "frozen") or "Python" not in sys.executable:
+        candidates.insert(0, os.path.join(os.path.dirname(sys.executable), "..", "Resources", "logo.png"))
+    for path in candidates:
+        if os.path.exists(path):
+            return FileResponse(path, media_type="image/png")
     return Response(status_code=404)
 
 
