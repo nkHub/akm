@@ -6,26 +6,28 @@
   <section>
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">服务</h3>
     <div class="grid grid-cols-2 gap-4">
-      <div class="bg-surface-light border border-border rounded-lg p-4">
-        <div class="flex items-center justify-between">
-          <div>
-            <h4 class="text-sm font-semibold text-white">启动时打开管理台</h4>
-            <p class="text-xs text-gray-500 mt-0.5">菜单栏应用启动后自动在浏览器打开管理页面</p>
-          </div>
-          <label id="cfg-auto-open" class="flex items-center cursor-pointer select-none switch-off">
-            <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
-          </label>
+      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">
+        <div>
+          <h4 class="text-sm font-semibold text-white">启动时打开管理台</h4>
+          <p class="text-xs text-gray-500 mt-0.5">菜单栏应用启动后自动在浏览器打开管理页面</p>
         </div>
+        <label id="cfg-auto-open" class="flex items-center cursor-pointer select-none switch-off">
+          <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+        </label>
       </div>
-      <div class="bg-surface-light border border-border rounded-lg p-4">
-        <h4 class="text-sm font-semibold text-white mb-2">服务端口</h4>
-        <p class="text-xs text-gray-500 mb-3">修改后需在菜单栏「重启服务」生效</p>
-        <div class="flex items-center gap-3">
-          <input id="server-port" type="number" value="8800" min="1024" max="65535"
-                 class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-          <button onclick="savePort()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+        <div>
+          <h4 class="text-sm font-semibold text-white">服务端口</h4>
+          <p class="text-xs text-gray-500 mt-0.5">修改后需在菜单栏「重启服务」生效</p>
         </div>
-        <p id="port-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
+        <div class="flex flex-col items-end shrink-0">
+          <div class="flex items-center gap-3">
+            <input id="server-port" type="number" value="8800" min="1024" max="65535"
+                   class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+            <button onclick="savePort()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+          </div>
+          <p id="port-msg" class="text-xs text-emerald-400 mt-1 hidden"></p>
+        </div>
       </div>
     </div>
   </section>
@@ -34,40 +36,48 @@
   <section>
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">日志</h3>
     <div class="grid grid-cols-2 gap-4">
-      <div class="bg-surface-light border border-border rounded-lg p-4">
-        <h4 class="text-sm font-semibold text-white mb-2">日志保留天数</h4>
-        <p class="text-xs text-gray-500 mb-3">超过天数的审计日志将被自动清理</p>
-        <div class="flex items-center gap-3">
-          <input id="retention-days" type="number" value="30" min="1" max="365"
-                 class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-          <span class="text-xs text-gray-400">天</span>
-          <button onclick="saveRetention()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+        <div>
+          <h4 class="text-sm font-semibold text-white">日志保留天数</h4>
+          <p class="text-xs text-gray-500 mt-0.5">超过天数的审计日志将被自动清理</p>
         </div>
-        <p id="retention-msg" class="text-xs text-emerald-400 mt-2 hidden"></p>
+        <div class="flex flex-col items-end shrink-0">
+          <div class="flex items-center gap-3">
+            <input id="retention-days" type="number" value="30" min="1" max="365"
+                   class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+            <span class="text-xs text-gray-400">天</span>
+            <button onclick="saveRetention()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+          </div>
+          <p id="retention-msg" class="text-xs text-emerald-400 mt-1 hidden"></p>
+        </div>
       </div>
-      <div class="bg-surface-light border border-border rounded-lg p-4">
-        <h4 class="text-sm font-semibold text-white mb-2">日志体积控制</h4>
-        <p class="text-xs text-gray-500 mb-3">关闭后不存储请求/响应原文，token 统计不受影响</p>
-        <div class="flex flex-col gap-2">
-          <label id="cfg-log-req" class="flex items-center gap-3 cursor-pointer select-none switch-off">
+      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">
+        <div>
+          <h4 class="text-sm font-semibold text-white">日志体积控制</h4>
+          <p class="text-xs text-gray-500 mt-0.5">关闭后不存储请求/响应原文，token 统计不受影响</p>
+        </div>
+        <div class="flex items-center gap-4 shrink-0">
+          <label id="cfg-log-req" class="flex items-center gap-2 cursor-pointer select-none switch-off">
             <span class="text-xs text-gray-400">记录请求体</span>
             <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
           </label>
-          <label id="cfg-log-resp" class="flex items-center gap-3 cursor-pointer select-none switch-off">
+          <label id="cfg-log-resp" class="flex items-center gap-2 cursor-pointer select-none switch-off">
             <span class="text-xs text-gray-400">记录响应体</span>
             <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
           </label>
         </div>
       </div>
-    </div>
-    <div class="mt-4 bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">
-      <div>
-        <h4 class="text-sm font-semibold text-white">清空日志</h4>
-        <p class="text-xs text-gray-500 mt-0.5">删除所有审计日志，此操作不可撤销</p>
-        <p class="text-xs text-gray-400 mt-1"><span id="log-stats">加载中...</span> <span id="log-size" class="text-gray-500"></span></p>
+      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+        <div>
+          <h4 class="text-sm font-semibold text-white">清空日志</h4>
+          <p class="text-xs text-gray-500 mt-0.5">删除所有审计日志，此操作不可撤销</p>
+          <p class="text-xs text-gray-400 mt-1"><span id="log-stats">加载中...</span> <span id="log-size" class="text-gray-500"></span></p>
+        </div>
+        <div class="flex flex-col items-end shrink-0">
+          <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空全部日志</button>
+          <p id="clean-msg" class="text-xs mt-1 hidden"></p>
+        </div>
       </div>
-      <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空全部日志</button>
-      <p id="clean-msg" class="text-xs mt-2 hidden"></p>
     </div>
   </section>
 
