@@ -18,7 +18,7 @@ DATA_FILES = [
         "akm/templates/settings.html",
         "akm/templates/about.html",
     ]),
-    ("static", ["akm/static/marked.min.js"]),
+    ("static", ["akm/static/marked.min.js", "akm/static/tailwindcss.js"]),
 ]
 
 OPTIONS = {

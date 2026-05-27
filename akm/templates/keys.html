@@ -81,7 +81,6 @@ function renderKeys() {
       '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">删除</button></div></div>'+
       '<div class="px-4 pb-2 flex items-center gap-2 flex-wrap text-xs">'+
       modelTags+
-      (k.base_url?'<span class="text-gray-600">URL: '+esc(k.base_url)+'</span>':'')+
       '</div></div>';
   });
   container.innerHTML = html;
@@ -92,6 +91,7 @@ function openAddModal() {
   document.getElementById('edit-alias').value = '';
   document.getElementById('key-alias').value = '';
   document.getElementById('key-alias').disabled = false;
+  document.getElementById('key-alias').classList.remove('opacity-50', 'cursor-not-allowed');
   document.getElementById('key-provider').value = '';
   document.getElementById('key-apikey').value = '';
   document.getElementById('key-apikey').type = 'password';
@@ -113,6 +113,7 @@ function editKey(alias) {
     document.getElementById('edit-alias').value = alias;
     document.getElementById('key-alias').value = alias;
     document.getElementById('key-alias').disabled = true;
+    document.getElementById('key-alias').classList.add('opacity-50', 'cursor-not-allowed');
     document.getElementById('key-provider').value = key.provider||'';
     document.getElementById('key-apikey').value = '';
     document.getElementById('key-apikey').placeholder = '(不修改则留空)';
