@@ -57,6 +57,7 @@
     <div id="stat-cached" class="text-2xl font-semibold text-teal-400 token-number">-</div>
   </div>
 </div>
+<div id="stat-cached-at" class="text-xs text-gray-600 mb-4">—</div>
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
   <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
     <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按 Key</div>
@@ -116,6 +117,7 @@ async function loadDashboard() {
     document.getElementById('stat-prompt').textContent = fmtNum(s.total_prompt_tokens);
     document.getElementById('stat-completion').textContent = fmtNum(s.total_completion_tokens);
     document.getElementById('stat-cached').textContent = fmtNum(s.total_cached_tokens || 0);
+    document.getElementById('stat-cached-at').textContent = s.cached_at ? '缓存更新于 ' + s.cached_at : '';
 
     var html = '';
     Object.entries(s.by_key||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){

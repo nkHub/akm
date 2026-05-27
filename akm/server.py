@@ -328,12 +328,16 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
 
 def _get_stats(days: int) -> dict:
     """带缓存的统计查询"""
+    from datetime import datetime, timezone, timedelta
+    tz = timezone(timedelta(hours=8))
     cache_key = f"days={days}"
     now = time.time()
     if cache_key in _stats_cache:
         ts, data = _stats_cache[cache_key]
         if now - ts < 60:
-            return data
+            result = dict(data)
+            result["cached_at"] = datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S")
+            return result
 
     from akm.db import get_connection
     conn = get_connection()
@@ -429,7 +433,9 @@ def _get_stats(days: int) -> dict:
         "by_key": by_key,
         "daily": dict(sorted(daily.items())),
     }
-    _stats_cache[cache_key] = (time.time(), result)
+    now_ts = time.time()
+    result["cached_at"] = datetime.fromtimestamp(now_ts, tz).strftime("%Y-%m-%d %H:%M:%S")
+    _stats_cache[cache_key] = (now_ts, result)
     return result
 
 
