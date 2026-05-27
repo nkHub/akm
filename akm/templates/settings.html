@@ -75,6 +75,7 @@
         </div>
         <div class="flex flex-col items-end shrink-0">
           <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空全部日志</button>
+          <button onclick="cleanLogBodies()" class="mt-2 bg-amber-600 hover:bg-amber-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空请求/响应体</button>
           <p id="clean-msg" class="text-xs mt-1 hidden"></p>
         </div>
       </div>
@@ -308,6 +309,24 @@ function cleanLogs() {
   }).catch(function(e){
     var msg = document.getElementById('clean-msg');
     msg.textContent = '清空失败: ' + e.message;
+    msg.className = 'text-xs text-red-400 mt-2';
+    msg.classList.remove('hidden');
+  });
+}
+
+function cleanLogBodies() {
+  if (!confirm('确认清空所有日志的请求体和响应体？\n\n将保留时间、状态码、token 统计等元数据。')) return;
+  fetch('/api/logs/clean-bodies', {
+    method: 'POST'
+  }).then(function(r){ return r.json(); }).then(function(data){
+    var msg = document.getElementById('clean-msg');
+    msg.textContent = '已清空 ' + (data.updated || 0) + ' 条日志的请求/响应体';
+    msg.className = 'text-xs text-emerald-400 mt-2';
+    msg.classList.remove('hidden');
+    loadLogStats();
+  }).catch(function(e){
+    var msg = document.getElementById('clean-msg');
+    msg.textContent = '操作失败: ' + e.message;
     msg.className = 'text-xs text-red-400 mt-2';
     msg.classList.remove('hidden');
   });
