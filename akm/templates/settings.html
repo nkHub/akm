@@ -78,6 +78,20 @@
           <p id="clean-msg" class="text-xs mt-1 hidden"></p>
         </div>
       </div>
+      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+        <div>
+          <h4 class="text-sm font-semibold text-white">JSON 渲染阈值</h4>
+          <p class="text-xs text-gray-500 mt-0.5">超过阈值时停止渲染并提示下载原始数据（单位：字符）</p>
+        </div>
+        <div class="flex flex-col items-end shrink-0">
+          <div class="flex items-center gap-3">
+            <input id="json-max-len" type="number" value="600000" min="10000" step="10000"
+                   class="w-32 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+            <button onclick="saveJsonMaxLen()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">保存</button>
+          </div>
+          <p id="json-max-len-msg" class="text-xs mt-1 hidden"></p>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -135,6 +149,7 @@
 var _autoOpen = true;
 var _logReqBody = false;
 var _logRespBody = false;
+var _jsonViewerMaxTextLength = 600000;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -144,8 +159,10 @@ function loadConfig() {
     updateAutoOpenToggle();
     _logReqBody = cfg.log_request_body === true;
     _logRespBody = cfg.log_response_body === true;
+    _jsonViewerMaxTextLength = parseInt(cfg.json_viewer_max_text_length || 600000) || 600000;
     updateLogReqToggle();
     updateLogRespToggle();
+    document.getElementById('json-max-len').value = _jsonViewerMaxTextLength;
     document.getElementById('retention-days').value = cfg.log_retention_days || 30;
     document.getElementById('server-port').value = cfg.server_port || 8800;
     loadLogStats();
@@ -229,6 +246,33 @@ function saveRetention() {
     msg.textContent = '已保存：日志保留 ' + days + ' 天';
     msg.classList.remove('hidden');
     setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  });
+}
+
+function saveJsonMaxLen() {
+  var input = document.getElementById('json-max-len');
+  var msg = document.getElementById('json-max-len-msg');
+  var val = parseInt(input.value, 10);
+  if (!Number.isFinite(val) || val < 10000) {
+    msg.textContent = '请输入不小于 10000 的整数';
+    msg.className = 'text-xs text-red-400 mt-1';
+    msg.classList.remove('hidden');
+    return;
+  }
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({json_viewer_max_text_length: val})
+  }).then(function(){
+    _jsonViewerMaxTextLength = val;
+    msg.textContent = '已保存：JSON 超长阈值 ' + val.toLocaleString();
+    msg.className = 'text-xs text-emerald-400 mt-1';
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  }).catch(function(){
+    msg.textContent = '保存失败，请稍后重试';
+    msg.className = 'text-xs text-red-400 mt-1';
+    msg.classList.remove('hidden');
   });
 }
 
