@@ -9,7 +9,7 @@ import sys
 import traceback
 from contextlib import asynccontextmanager
 import httpx
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from akm.proxy import forward_request, test_key_connectivity
@@ -20,6 +20,7 @@ from akm.key_pool import (
 from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents
+from akm.plugins.plugin_manager import PluginManager
 
 
 @asynccontextmanager
@@ -31,6 +32,10 @@ async def lifespan(app: FastAPI):
     conn = get_connection()
     init_db(conn)
     conn.close()
+    # 初始化插件管理器
+    plugin_manager = PluginManager()
+    await plugin_manager.load_all(app, conn)
+    app.state.plugin_manager = plugin_manager
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
     app.state.http_client = httpx.AsyncClient(
         limits=limits,
@@ -585,6 +590,79 @@ async def api_delete_agent(name: str):
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
 
+# ── 插件管理 API ─────────────────────────────────────────────
+
+@app.get("/api/plugins")
+async def list_plugins(request: Request):
+    """返回插件列表（含启用/禁用状态）"""
+    pm = request.app.state.plugin_manager
+    return pm.get_plugin_list()
+
+
+@app.post("/api/plugins/upload")
+async def upload_plugin(file: UploadFile, request: Request):
+    """上传 .zip 插件包，解压到 ~/.akm/plugins/"""
+    pm = request.app.state.plugin_manager
+    result = await pm.install_plugin(file)
+    if result.get("ok"):
+        return result
+    return JSONResponse(result, status_code=400)
+
+
+@app.post("/api/plugins/{name}/enable")
+async def enable_plugin(name: str, request: Request):
+    """启用插件"""
+    pm = request.app.state.plugin_manager
+    result = pm.toggle_plugin(name, True)
+    if result.get("ok"):
+        return result
+    return JSONResponse(result, status_code=400)
+
+
+@app.post("/api/plugins/{name}/disable")
+async def disable_plugin(name: str, request: Request):
+    """禁用插件"""
+    pm = request.app.state.plugin_manager
+    result = pm.toggle_plugin(name, False)
+    if result.get("ok"):
+        return result
+    return JSONResponse(result, status_code=400)
+
+
+@app.delete("/api/plugins/{name}")
+async def delete_plugin(name: str, request: Request):
+    """删除第三方插件"""
+    pm = request.app.state.plugin_manager
+    result = pm.delete_plugin(name)
+    if result.get("ok"):
+        return result
+    return JSONResponse(result, status_code=400)
+
+
+@app.get("/api/plugin-menu")
+async def plugin_menu(request: Request):
+    """插件菜单（供侧边栏动态注入）"""
+    return request.app.state.plugin_manager.get_menu()
+
+
+@app.get("/api/plugin-config/{name}")
+async def plugin_get_config(name: str, request: Request):
+    """读取插件配置"""
+    pm = request.app.state.plugin_manager
+    cfg = pm.get_config(name)
+    if cfg is None:
+        return JSONResponse({"error": "插件不存在"}, status_code=404)
+    return cfg
+
+
+@app.post("/api/plugin-config/{name}")
+async def plugin_save_config(name: str, request: Request):
+    """保存插件配置"""
+    pm = request.app.state.plugin_manager
+    body = await request.json()
+    return pm.set_config(name, body)
+
+
 @app.get("/logs")
 async def log_viewer(request: Request):
     """审计日志查看页面"""
@@ -613,6 +691,25 @@ async def about_page(request: Request):
 async def admin_page(request: Request):
     """统计页面"""
     return HTMLResponse(_render_template("dashboard.html", title="统计", active="admin"))
+
+
+@app.get("/plugins")
+async def plugins_page(request: Request):
+    """插件管理页面"""
+    return HTMLResponse(_render_template("plugins.html", title="插件管理", active="plugins"))
+
+
+@app.get("/plugins/{name}")
+async def plugin_view(name: str, request: Request):
+    """插件前端页面 — 返回插件的 views/index.html"""
+    pm = request.app.state.plugin_manager
+    plugin = pm.plugins.get(name)
+    if not plugin or not plugin.enabled:
+        return JSONResponse({"error": "插件不存在或未启用"}, status_code=404)
+    index_path = plugin._static_dir / "index.html"
+    if not index_path.exists():
+        return JSONResponse({"error": "该插件无前端界面"}, status_code=404)
+    return FileResponse(str(index_path))
 
 
 @app.get("/v1/models")

@@ -1,0 +1,457 @@
+"""插件管理器 — 扫描、加载、生命周期管理、配置读写、Hook 管道执行"""
+import json
+import logging
+import zipfile
+import shutil
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, UploadFile
+from fastapi.staticfiles import StaticFiles
+
+from .models import PluginMeta
+from .base import PluginBase
+
+logger = logging.getLogger("akm.plugin_manager")
+
+
+class PluginManager:
+    """插件管理器
+
+    职责：
+    1. 启动时扫描 akm/plugins/（内置）和 ~/.akm/plugins/（第三方）
+    2. 动态导入 index.py、注入上下文、注册路由和静态文件
+    3. 按 priority 管道执行 hook，崩溃隔离
+    4. 插件配置读写、启用/禁用、zip 安装、删除
+    """
+
+    def __init__(self):
+        self.plugins: dict[str, PluginBase] = {}           # name → PluginBase 实例
+        self._plugin_metas: dict[str, PluginMeta] = {}     # name → PluginMeta
+        self._plugin_sources: dict[str, str] = {}          # name → "builtin" / "third_party"
+        self._builtin_dir = Path(__file__).resolve().parent
+        self._third_party_dir = Path.home() / ".akm" / "plugins"
+        self._config_path = Path.home() / ".akm" / "config.json"
+        self.app: Optional[FastAPI] = None
+        self.db = None
+
+    # ── 配置读写（内部） ──
+
+    def _load_config_json(self) -> dict:
+        """读取 ~/.akm/config.json"""
+        if not self._config_path.exists():
+            return {}
+        try:
+            return json.loads(self._config_path.read_text("utf-8"))
+        except Exception:
+            return {}
+
+    def _save_config_json(self, data: dict):
+        """写入 ~/.akm/config.json"""
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), "utf-8"
+        )
+
+    # ── 插件加载 ──
+
+    def _load_plugin(self, plugin_dir: Path, source: str) -> Optional[PluginBase]:
+        """从目录加载单个插件
+
+        Args:
+            plugin_dir: 插件目录（如 akm/plugins/responses_converter/）
+            source: "builtin" 或 "third_party"
+
+        Returns:
+            加载成功返回 PluginBase 实例，失败返回 None
+        """
+        json_path = plugin_dir / "plugin.json"
+        py_path = plugin_dir / "index.py"
+
+        if not json_path.exists() or not py_path.exists():
+            return None
+
+        # ── 解析 plugin.json ──
+        try:
+            meta = PluginMeta.model_validate_json(json_path.read_text("utf-8"))
+        except Exception as e:
+            logger.warning(f"[PluginManager] 解析 plugin.json 失败: {plugin_dir} — {e}")
+            return None
+
+        name = meta.name
+
+        # ── 重名检测：全局唯一 ──
+        if name in self.plugins:
+            logger.info(
+                f"[PluginManager] 插件名冲突，跳过第三方: {name} (已有同名插件)"
+            )
+            return None
+
+        # ── 动态导入 index.py ──
+        import importlib.util
+        import sys
+
+        spec = importlib.util.spec_from_file_location(
+            f"plugin_{name}", str(py_path)
+        )
+        if spec is None or spec.loader is None:
+            logger.warning(f"[PluginManager] 无法加载模块: {name}")
+            return None
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[f"akm_plugin_{name}"] = module
+        spec.loader.exec_module(module)
+
+        PluginClass = getattr(module, "Plugin", None)
+        if PluginClass is None or not issubclass(PluginClass, PluginBase):
+            logger.warning(
+                f"[PluginManager] {name}: 未找到继承 PluginBase 的 Plugin 类"
+            )
+            return None
+
+        # ── 实例化并注入上下文 ──
+        plugin: PluginBase = PluginClass()
+        plugin.name = name
+        plugin.builtin = meta.builtin
+        plugin.meta = meta
+        plugin.logger = logging.getLogger(f"akm.plugins.{name}")
+        plugin._static_dir = plugin_dir / "views"
+
+        if self.app is not None:
+            plugin.app = self.app
+        if self.db is not None:
+            plugin.db = self.db
+
+        # ── 注册路由 ──
+        if plugin.router is not None:
+            routes_prefix = meta.routes_prefix or f"/{name}"
+            self.app.include_router(plugin.router, prefix=routes_prefix)
+            logger.info(f"[PluginManager] 注册路由: {routes_prefix}")
+
+        # ── 注册静态文件 + 前端路由（has_menu） ──
+        if meta.has_menu and plugin._static_dir.exists():
+            static_path = f"/plugins/{name}/static"
+            self.app.mount(
+                static_path,
+                StaticFiles(directory=str(plugin._static_dir)),
+                name=f"plugin_static_{name}",
+            )
+            logger.info(f"[PluginManager] 挂载静态文件: {static_path}")
+
+        # ── 读取启停状态 ──
+        cfg = self._load_config_json()
+        plugin_states = cfg.get("plugin_states", {})
+        if name in plugin_states:
+            plugin.enabled = plugin_states[name]
+
+        self.plugins[name] = plugin
+        self._plugin_metas[name] = meta
+        self._plugin_sources[name] = source
+
+        logger.info(
+            f"[PluginManager] 加载插件: {name} v{meta.version} "
+            f"(来源: {source}, 分类: {meta.category}, "
+            f"{'启用' if plugin.enabled else '已禁用'})"
+        )
+        return plugin
+
+    async def load_all(self, app: FastAPI, db=None):
+        """启动时扫描并加载所有插件
+
+        加载顺序：内置先加载，第三方后加载（重名跳过第三方）
+        """
+        self.app = app
+        self.db = db
+
+        # ── 1. 加载内置插件 (akm/plugins/ 子目录) ──
+        for entry in sorted(self._builtin_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith("__"):
+                continue
+            # 跳过非插件目录（base.py, models.py 等文件所在目录就是 akm/plugins/ 本身）
+            if entry.name in ("base.py", "models.py", "plugin_manager.py", "__pycache__"):
+                continue
+            self._load_plugin(entry, "builtin")
+
+        # ── 2. 加载第三方插件 (~/.akm/plugins/ 子目录) ──
+        self._third_party_dir.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(self._third_party_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            self._load_plugin(entry, "third_party")
+
+        # ── 3. 首次加载时自动启用所有内置插件 ──
+        cfg = self._load_config_json()
+        plugin_states = cfg.get("plugin_states", {})
+        changed = False
+        for name, plugin in self.plugins.items():
+            if name not in plugin_states and plugin.builtin:
+                plugin.enabled = True
+                plugin_states[name] = True
+                changed = True
+                logger.info(
+                    f"[PluginManager] 首次加载，自动启用内置插件: {name}"
+                )
+
+        if changed:
+            cfg["plugin_states"] = plugin_states
+            self._save_config_json(cfg)
+
+        # ── 4. 调用 on_load 生命周期 ──
+        for plugin in self.plugins.values():
+            if plugin.enabled:
+                try:
+                    await plugin.on_load()
+                except Exception as e:
+                    logger.error(
+                        f"[PluginManager] {plugin.name} on_load 异常: {e}"
+                    )
+
+        logger.info(f"[PluginManager] 共加载 {len(self.plugins)} 个插件")
+
+    # ── Hook 管道执行 ──
+
+    async def run_hook(self, hook: str, **kwargs):
+        """管道执行 hook：按 priority 从小到大，前一个返回值传给下一个
+
+        Args:
+            hook: hook 名称（on_request / on_key_selected / on_upstream_error / on_response）
+            **kwargs: 传递给 hook 的关键字参数
+
+        Returns:
+            管道末端的状态（对 on_upstream_error 返回第一个非 None 的 action）
+        """
+        # 筛选注册了该 hook 的已启用插件
+        candidates = [
+            p for p in self.plugins.values()
+            if p.enabled and p.meta.hooks.get(hook)
+        ]
+        # 按 priority 升序
+        candidates.sort(key=lambda p: p.meta.priority)
+
+        current = kwargs
+        action = None  # 仅 on_upstream_error 使用
+
+        for plugin in candidates:
+            try:
+                ret = await getattr(plugin, hook)(**current)
+
+                if hook == "on_upstream_error":
+                    # on_upstream_error: 第一个非 None 即为最终决策
+                    if ret is not None and action is None:
+                        action = ret
+                elif hook == "on_key_selected" and ret is not None:
+                    # on_key_selected: 返回的 key 替换当前 key
+                    current["key"] = ret
+                elif hook == "on_request" and ret is not None:
+                    # on_request: 返回的 request 替换当前 request
+                    current["request"] = ret
+                # on_response: 无返回值，纯观察
+
+            except Exception as e:
+                logger.error(
+                    f"[PluginManager] {plugin.name}.{hook} 异常: {e}"
+                )
+                continue
+
+        if hook == "on_upstream_error":
+            return action
+        return current
+
+    # ── 转换器查询 ──
+
+    def get_converter(self, from_format: str, to_format: str) -> Optional[PluginBase]:
+        """根据转换声明查找启用的转换插件"""
+        for plugin in self.plugins.values():
+            if not plugin.enabled:
+                continue
+            c = plugin.meta.converts
+            if c and c.get("from") == from_format and c.get("to") == to_format:
+                return plugin
+        return None
+
+    # ── 插件安装 ──
+
+    async def install_plugin(self, file: UploadFile) -> dict:
+        """上传 .zip 插件包，解压到 ~/.akm/plugins/"""
+        if not file.filename or not file.filename.endswith(".zip"):
+            return {"ok": False, "error": "仅支持 .zip 格式"}
+
+        # 解压到临时目录，读取 plugin.json 获取 name
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            content = await file.read()
+            zippath = tmp / "plugin.zip"
+            zippath.write_bytes(content)
+
+            with zipfile.ZipFile(zippath, "r") as zf:
+                zf.extractall(tmp)
+
+            # 查找 plugin.json
+            json_candidates = list(tmp.rglob("plugin.json"))
+            if not json_candidates:
+                return {"ok": False, "error": "zip 包中未找到 plugin.json"}
+
+            meta_path = json_candidates[0]
+            plugin_root = meta_path.parent
+
+            try:
+                meta = PluginMeta.model_validate_json(
+                    meta_path.read_text("utf-8")
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"plugin.json 格式错误: {e}"}
+
+            name = meta.name
+
+            # ── 重名检测 ──
+            dest = self._third_party_dir / name
+            if dest.exists():
+                return {"ok": False, "error": f"插件 '{name}' 已存在"}
+
+            # 检查是否与内置插件重名
+            for entry in self._builtin_dir.iterdir():
+                if entry.is_dir() and entry.name == name:
+                    return {
+                        "ok": False,
+                        "error": f"插件 '{name}' 与内置插件重名，无法安装",
+                    }
+
+            # ── 验证 index.py 存在 ──
+            if not (plugin_root / "index.py").exists():
+                return {"ok": False, "error": "zip 包中未找到 index.py"}
+
+            # ── 复制到 ~/.akm/plugins/{name}/ ──
+            shutil.copytree(plugin_root, dest)
+
+        return {
+            "ok": True,
+            "name": name,
+            "message": f"已安装到 ~/.akm/plugins/{name}/，重启 akm 后生效",
+        }
+
+    # ── 插件删除 ──
+
+    def delete_plugin(self, name: str) -> dict:
+        """删除 ~/.akm/plugins/{name}/ 目录（仅第三方）"""
+        if name not in self._plugin_sources:
+            return {"ok": False, "error": "插件不存在"}
+
+        source = self._plugin_sources[name]
+        if source == "builtin":
+            return {"ok": False, "error": "内置插件不可删除"}
+
+        dest = self._third_party_dir / name
+        if dest.exists():
+            shutil.rmtree(dest)
+
+        # 清除插件状态
+        self.plugins.pop(name, None)
+        self._plugin_metas.pop(name, None)
+        self._plugin_sources.pop(name, None)
+
+        cfg = self._load_config_json()
+        plugin_states = cfg.get("plugin_states", {})
+        plugin_states.pop(name, None)
+        cfg["plugin_states"] = plugin_states
+        self._save_config_json(cfg)
+
+        return {"ok": True, "message": f"已删除 {name}"}
+
+    # ── 启停管理 ──
+
+    def toggle_plugin(self, name: str, enable: bool) -> dict:
+        """切换插件启用/禁用状态，写入 config.json"""
+        if name not in self.plugins:
+            return {"ok": False, "error": "插件不存在"}
+
+        plugin = self.plugins[name]
+        if not enable and plugin.meta.required:
+            return {
+                "ok": False,
+                "error": f"插件 '{name}' 是必需的，不可禁用",
+            }
+
+        plugin.enabled = enable
+        cfg = self._load_config_json()
+        plugin_states = cfg.get("plugin_states", {})
+        plugin_states[name] = enable
+        cfg["plugin_states"] = plugin_states
+        self._save_config_json(cfg)
+
+        return {
+            "ok": True,
+            "name": name,
+            "enabled": enable,
+            "message": "状态已保存，重启 akm 后生效",
+        }
+
+    # ── 配置读写 ──
+
+    def get_config(self, name: str) -> dict | None:
+        """读取插件配置（合并默认值）"""
+        if name not in self._plugin_metas:
+            return None
+        meta = self._plugin_metas[name]
+        defaults = {}
+        for s in meta.settings:
+            defaults[s.key] = s.default
+        cfg = self._load_config_json()
+        plugin_configs = cfg.get("plugin_configs", {})
+        return {**defaults, **plugin_configs.get(name, {})}
+
+    def set_config(self, name: str, data: dict) -> dict:
+        """保存插件配置"""
+        if name not in self._plugin_metas:
+            return {"ok": False, "error": "插件不存在"}
+        cfg = self._load_config_json()
+        plugin_configs = cfg.get("plugin_configs", {})
+        plugin_configs[name] = data
+        cfg["plugin_configs"] = plugin_configs
+        self._save_config_json(cfg)
+        return {"ok": True}
+
+    # ── 查询 ──
+
+    def get_plugin_list(self) -> list:
+        """返回全部插件信息（供管理界面）"""
+        result = []
+        for name, plugin in self.plugins.items():
+            meta = plugin.meta
+            result.append({
+                "name": name,
+                "version": meta.version,
+                "category": meta.category,
+                "description": meta.description,
+                "has_menu": meta.has_menu,
+                "builtin": plugin.builtin,
+                "required": meta.required,
+                "priority": meta.priority,
+                "enabled": plugin.enabled,
+                "source": self._plugin_sources.get(name, "unknown"),
+                "hooks": meta.hooks,
+                "settings": [s.model_dump() for s in meta.settings],
+                "converts": meta.converts,
+            })
+        return result
+
+    def get_menu(self) -> list:
+        """返回已启用的有菜单插件信息（供侧边栏）"""
+        items = []
+        for plugin in self.plugins.values():
+            if plugin.enabled and plugin.meta.has_menu:
+                items.append({
+                    "name": plugin.meta.name,
+                    "title": plugin.meta.menu.get("title", plugin.meta.name),
+                    "icon": plugin.meta.menu.get("icon", "plugin"),
+                    "order": plugin.meta.menu.get("order", 100),
+                    "route": f"/plugins/{plugin.meta.name}",
+                })
+        items.sort(key=lambda x: x["order"])
+        return items
+
+    def get_plugin_metas(self) -> list:
+        """返回所有插件元数据（含 settings schema，供设置页表单渲染）"""
+        return [self._plugin_metas[name].model_dump() for name in self.plugins]
