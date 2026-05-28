@@ -29,17 +29,26 @@ akm/
 │   ├── __init__.py
 │   ├── base.py                   # PluginBase 基类（提供上下文方法）
 │   ├── plugin_manager.py         # 插件管理器
+│   ├── builtin/                  # 内置插件（随项目分发，可禁用）
+│   │   ├── responses_converter/  # Responses → Chat 协议转换
+│   │   │   ├── plugin.json
+│   │   │   └── index.py
+│   │   ├── messages_converter/   # Messages → Chat 协议转换
+│   │   │   ├── plugin.json
+│   │   │   └── index.py
+│   │   └── chat_converter/       # Chat → Messages 协议转换
+│   │       ├── plugin.json
+│   │       └── index.py
 │   └── model_mapper/             # 示例插件（有菜单）
-│       ├── plugin.json           # 元数据 + 菜单配置
+│       ├── plugin.json
 │       ├── index.py              # 插件入口（导出 Plugin 类，继承 PluginBase）
-│       └── views/                # 前端页面（仅 has_menu: true 时需要）
-│           ├── index.html        # 最少 index.html
+│       └── views/
+│           ├── index.html
 │           ├── style.css
 │           └── app.js
-│   └── request_logger/           # 示例插件（无菜单）
-│       ├── plugin.json
-│       └── index.py
 ```
+
+所有插件在同一层级，`builtin/` 只是组织方式，加载时同等待遇。通过 `plugin.json` 中的 `has_menu` 和 `builtin` 字段区分行为和来源。
 
 ## 三、plugin.json 定义
 

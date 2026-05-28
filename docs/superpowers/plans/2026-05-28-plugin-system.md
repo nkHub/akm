@@ -32,9 +32,8 @@
 
 | 维度 | 评估 |
 |------|------|
-| 系统耦合 | 适配器零耦合 — 不依赖 app、db、config、key_pool、FastAPI Request/Response，仅做纯数据转换 |
-| 构造参数 | 全部无参构造，可直接作为插件实例化 |
-| 职责边界 | 每个适配器职责单一，天然对应"协议转换"插件 |
+| 系统耦合 | 转换逻辑仅做纯数据转换，不依赖 app/db/config/FastAPI Request/Response |
+| 迁移方案 | 将 `akm/adapters/*.py` 的逻辑直接内联到对应插件 `index.py`，删除空壳 adapter 类 |
 | 核心独立 | proxy 不硬编码适配器引用，找不到转换插件时返回明确错误而非崩溃 |
 
 **需重构的关键点**：`agent.py` 中硬编码的 `responses_adapter`/`messages_adapter` 属性 → 删除，`proxy.py` 改为通过 `PluginManager.get_converter()` 查询。
@@ -52,18 +51,13 @@ akm/
 │   └── builtin/                   # 内置插件（随项目分发，可禁用）
 │       ├── responses_converter/
 │       │   ├── plugin.json
-│       │   └── index.py
+│       │   └── index.py           # 内联原 ResponsesAdapter 全部转换逻辑
 │       ├── messages_converter/
 │       │   ├── plugin.json
-│       │   └── index.py
+│       │   └── index.py           # 内联原 MessagesAdapter 全部转换逻辑
 │       └── chat_converter/
 │           ├── plugin.json
-│           └── index.py
-├── adapters/                      # 底层转换逻辑（被插件内部引用）
-│   ├── __init__.py
-│   ├── responses_adapter.py
-│   ├── messages_adapter.py
-│   └── chat_adapter.py
+│           └── index.py           # 内联原 ChatAdapter 透传逻辑
 ├── server.py                      # 集成 PluginManager
 └── agent.py                       # 移除硬编码适配器属性
 ```
@@ -103,16 +97,12 @@ akm/
 
 ## Task 2: 三个协议转换内置插件
 
-- [ ] **Step 2.1: responses_converter**
-  - `plugin.json`：`converts: { "from": "responses", "to": "chat" }`，`builtin: true`
-  - `index.py`：包装 `ResponsesAdapter`，暴露 `convert_request()` 和 `convert_sse_stream()`
+**目标**：将现有适配器的转换逻辑直接内联到插件 `index.py` 中，删除 `akm/adapters/` 目录。每个插件暴露 `convert_request()` 和 `convert_sse_stream()` 方法，PluginManager 通过 `get_converter()` 查找。
 
-- [ ] **Step 2.2: messages_converter**
-  - `converts: { "from": "messages", "to": "chat" }`，`builtin: true`
-
-- [ ] **Step 2.3: chat_converter**
-  - `converts: { "from": "chat", "to": "messages" }`，`builtin: true`
-  - 当前 ChatAdapter 为透传空壳，后续可扩展
+- [ ] **Step 2.1: responses_converter** — `converts: { "from": "responses", "to": "chat" }`
+- [ ] **Step 2.2: messages_converter** — `converts: { "from": "messages", "to": "chat" }`
+- [ ] **Step 2.3: chat_converter** — `converts: { "from": "chat", "to": "messages" }`
+- [ ] **Step 2.4: 删除 `akm/adapters/` 目录**，迁移现有 31 个测试到插件目录下的 `tests/`
 
 ---
 
