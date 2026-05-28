@@ -1,0 +1,33 @@
+{
+  "name": "prompt_booster",
+  "version": "0.1.0",
+  "has_menu": true,
+  "category": "filter",
+  "description": "附加提示词注入：在请求发送到 AI 供应商之前注入自定义 system prompt 或指令",
+  "builtin": true,
+  "hooks": {
+    "on_request": true
+  },
+  "settings": [
+    {
+      "key": "prompt_text",
+      "label": "附加提示词",
+      "type": "text",
+      "default": "",
+      "description": "注入到请求中的附加 system prompt / instructions 文本"
+    },
+    {
+      "key": "position",
+      "label": "注入位置",
+      "type": "select",
+      "default": "before",
+      "options": ["before", "after"],
+      "description": "before=加在原有内容前面，after=追加到末尾"
+    }
+  ],
+  "menu": {
+    "title": "提示词增强",
+    "icon": "prompt",
+    "order": 50
+  }
+}
