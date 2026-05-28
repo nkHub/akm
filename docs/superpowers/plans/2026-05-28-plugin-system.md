@@ -57,6 +57,12 @@ akm/
 │   └── chat_converter/
 │       ├── plugin.json
 │       └── index.py              # 内联原 ChatAdapter 透传逻辑
+│   ├── model_matcher/            # 默认模型匹配（required: true，不可禁用）
+│   │   ├── plugin.json
+│   │   └── index.py
+│   └── error_handler/            # 错误处理 + 故障切换
+│       ├── plugin.json
+│       └── index.py
 
 ~/.akm/
 ├── config.json
@@ -79,7 +85,7 @@ akm/
 - [ ] **Step 1.1: 创建 `akm/plugins/base.py`**
   - 属性注入：`name`、`app`、`router`、`meta`、`logger`、`_static_dir`
   - 生命周期：`on_load()`、`on_unload()`（默认空实现）
-  - hook：`on_request(request)`、`on_response(request, response)`
+  - hook：`on_request(request)`、`on_key_selected(model, key, request)`、`on_upstream_error(request, response, key)`、`on_response(request, response)`
   - 辅助：`self.config`（自动读 config.json）、`self.db`（共享连接）、`self.enabled`
 
 - [ ] **Step 1.2: 创建 `akm/plugins/plugin_manager.py`**
@@ -87,7 +93,7 @@ akm/
   - `get_menu()`：仅返回已加载且 enabled 的有菜单插件
   - `get_plugin_list()`：返回全部插件（含加载失败的），供管理界面使用
   - `get_converter(from_format, to_format) -> Plugin | None`：查询启用的转换插件
-  - `enable_plugin(name)` / `disable_plugin(name)`：状态写入 config.json
+  - `enable_plugin(name)` / `disable_plugin(name)`：required 插件不可禁用，状态写入 config.json
   - `delete_plugin(name)`：仅第三方插件可删，物理删除 `~/.akm/plugins/{name}/`
   - `run_hook(hook, request, response)`：仅对 enabled 的插件执行
 
@@ -99,48 +105,123 @@ akm/
       builtin: bool = False       # 内置插件标记
       menu: dict = {}
       routes_prefix: str = ""
-      hooks: dict = {"on_request": False, "on_response": False}
+      required: bool = False      # 不可禁用
+      hooks: dict = {"on_request": False, "on_key_selected": False, "on_upstream_error": False, "on_response": False}
       settings: list[SettingDef] = []
       converts: dict = None       # { "from": "responses", "to": "chat" }
   ```
 
 ---
 
-## Task 2: 三个协议转换内置插件
+## Task 2: 内置插件实现
 
-**目标**：将现有适配器的转换逻辑直接内联到插件 `index.py` 中，删除 `akm/adapters/` 目录。每个插件暴露 `convert_request()` 和 `convert_sse_stream()` 方法，PluginManager 通过 `get_converter()` 查找。
+**目标**：将现有核心逻辑从 proxy.py / key_pool.py 抽离为内置插件，删除 `akm/adapters/` 目录。
 
-- [ ] **Step 2.1: responses_converter** — `converts: { "from": "responses", "to": "chat" }`
-- [ ] **Step 2.2: messages_converter** — `converts: { "from": "messages", "to": "chat" }`
-- [ ] **Step 2.3: chat_converter** — `converts: { "from": "chat", "to": "messages" }`
-- [ ] **Step 2.4: 删除 `akm/adapters/` 目录**，迁移现有 31 个测试到对应插件目录
+### 2.1 协议转换插件
+
+- [ ] **responses_converter** — `converts: { "from": "responses", "to": "chat" }`
+- [ ] **messages_converter** — `converts: { "from": "messages", "to": "chat" }`
+- [ ] **chat_converter** — `converts: { "from": "chat", "to": "messages" }`
+- [ ] 删除 `akm/adapters/` 目录，迁移现有测试到对应插件
+
+### 2.2 模型匹配插件（model_matcher）
+
+**来源**：原 `key_pool.py` 的 `pick_key(model)` 逻辑
+
+**职责**：
+- `on_key_selected(model, key, request)` → 根据 models 字段匹配（`*` 通配 / 逗号分隔精确匹配），返回
+- 可在 `on_request` 中改写 model 名（别名映射）
+
+**plugin.json**：
+```json
+{
+    "name": "model_matcher",
+    "has_menu": false,
+    "builtin": true,
+    "required": true,
+    "version": "1.0.0",
+    "description": "默认模型匹配规则：根据 key 的 models 字段选择匹配的 API key",
+    "hooks": { "on_key_selected": true },
+    "settings": [
+        {
+            "key": "aliases",
+            "label": "模型别名映射",
+            "type": "text",
+            "default": "",
+            "description": "一行一个，格式：原名→别名（如 gpt-5→gpt-4o）"
+        }
+    ]
+}
+```
+
+> `required: true` 保证至少一个模型匹配插件生效。用户可安装第三方模型匹配插件替换默认行为，但新插件必须也声明 `required: true` 才会替代默认的（即最多一个 required 模型匹配插件生效）。
+
+### 2.3 错误处理插件（error_handler）
+
+**来源**：原 `proxy.py` 的两层重试循环
+
+**职责**：
+- `on_upstream_error(request, response, key)` → 根据状态码决定：`"retry"` / `"switch"` / `None`（默认处理）
+
+**plugin.json**：
+```json
+{
+    "name": "error_handler",
+    "has_menu": false,
+    "builtin": true,
+    "version": "1.0.0",
+    "description": "默认错误处理：429/402/401/403 切换 key，5xx 指数退避重试",
+    "hooks": { "on_upstream_error": true },
+    "settings": [
+        {
+            "key": "max_retries_per_key",
+            "label": "单 key 最大重试",
+            "type": "number",
+            "default": 2,
+            "min": 0,
+            "max": 10
+        },
+        {
+            "key": "max_key_tries",
+            "label": "最大尝试 key 数",
+            "type": "number",
+            "default": 20,
+            "min": 1,
+            "max": 50
+        }
+    ]
+}
+```
 
 ---
 
-## Task 3: 核心去适配器化（agent.py / proxy.py）
+## Task 3: 核心重构（agent.py / proxy.py / key_pool.py）
 
-- [ ] **Step 3.1: agent.py — 删除硬编码适配器**
-  - 删除 `responses_adapter`、`messages_adapter`、`chat_adapter` 三个懒加载属性
-  - 保留 `supports_*` 能力标记和 `needs_conversion()`
+**目标**：核心只做纯粹的转发 + 日志，协议转换/模型匹配/错误处理均委托给插件。
 
-- [ ] **Step 3.2: proxy.py — 通过 PluginManager 获取转换器**
+- [ ] **Step 3.1: agent.py** — 删除 `responses_adapter`、`messages_adapter`、`chat_adapter` 三个懒加载属性，保留 `supports_*` 能力标记
+
+- [ ] **Step 3.2: proxy.py** — 重构转发流程，新增插件 hook 调用点
   ```python
-  # 改造后
+  # 转换插件查询
   target_format = agent.needs_conversion(api_path)
   if target_format:
       converter = plugin_manager.get_converter(api_path, target_format)
       if converter is None:
-          raise UnsupportedConversion(
-              f"供应商 {agent.name} 不支持 {api_path} 格式，"
-              f"且未找到可用的 {api_path}→{target_format} 转换插件。"
-              f"请在插件管理中启用对应的转换插件。"
-          )
-      body = converter.convert_request(body)
+          return error("转换插件未启用", 400)
+
+  # key 选择后触发 hook
+  key = await pick_key_async(model)
+  await plugin_manager.run_hook("on_key_selected", model, key, request)
+
+  # 上游错误时触发 hook
+  action = await plugin_manager.run_hook("on_upstream_error", request, response, key)
+  # action: "retry" → 重试 / "switch" → 切换下一 key / None → 默认降级
   ```
 
-- [ ] **Step 3.3: server.py 传递 PluginManager**
-  - `forward_request()` 新增 `plugin_manager` 参数
-  - lifespan 中将 `app.state.plugin_manager` 传给 proxy 调用点
+- [ ] **Step 3.3: key_pool.py** — 删减为基础 CRUD（add/list/disable/delete），模型匹配逻辑移至 model_matcher 插件
+
+- [ ] **Step 3.4: server.py** — `forward_request()` 新增 `plugin_manager` 参数
 
 ---
 
@@ -156,9 +237,10 @@ akm/
 ## Task 5: 集成与测试
 
 - [ ] server.py lifespan 集成 PluginManager
-- [ ] 适配现有 31 个适配器测试
-- [ ] 新增：插件加载、协议转换查询、启用/禁用端到端测试
-- [ ] 端到端：禁用 responses_converter → DeepSeek `/v1/responses` 返回明确错误提示
+- [ ] 适配现有 31 个适配器测试（迁移到对应插件目录）
+- [ ] 新增：插件加载、协议转换查询、模型匹配、错误处理端到端测试
+- [ ] 端到端：禁用 error_handler → 上游 5xx 不再重试，直接返回错误
+- [ ] 端到端：model_matcher (required) 不可被 disable 接口禁用
 
 ---
 
@@ -166,6 +248,7 @@ akm/
 
 | 风险 | 缓解 |
 |------|------|
-| 内置插件默认启用才能保证向后兼容 | 首次加载时自动启用所有内置转换插件 |
+| 内置插件默认启用才能保证向后兼容 | 首次加载时自动启用所有内置插件 |
 | 用户误关转换插件导致 DeepSeek 不可用 | proxy 返回的报错信息指明缺少哪个插件 |
+| model_matcher 被禁用导致无匹配规则 | `required: true` 标记禁止禁用，且同名 required 插件后注册的覆盖前一个 |
 | 插件启用/禁用状态丢失 | 状态写入 `~/.akm/config.json` 的 `plugin_states` 字段 |

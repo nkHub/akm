@@ -17,9 +17,9 @@
 | `has_menu` | 描述 | 必需文件 |
 |----------|------|----------|
 | `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由 | `plugin.json` + `index.py` + `views/index.html` |
-| `false` | 不显示菜单，可注册 API 路由和请求/响应 hook | `plugin.json` + `index.py` |
+| `false` | 不显示菜单，可注册 API 路由、请求/响应 hook | `plugin.json` + `index.py` |
 
-> `has_menu` 默认为 `false`，不填即视为无需菜单入口。
+> `has_menu` 默认为 `false`，不填即视为无需菜单入口。部分关键内置插件（如 model_matcher）标记为 `required: true`，不可禁用，保证核心链路至少有一个生效。
 
 ## 二、目录结构
 
@@ -35,7 +35,13 @@ akm/
 │   ├── messages_converter/       # Messages → Chat 协议转换
 │   │   ├── plugin.json
 │   │   └── index.py
-│   └── chat_converter/           # Chat → Messages 协议转换
+│   ├── chat_converter/           # Chat → Messages 协议转换
+│   │   ├── plugin.json
+│   │   └── index.py
+│   ├── model_matcher/            # 默认模型匹配（不可禁用）
+│   │   ├── plugin.json
+│   │   └── index.py
+│   └── error_handler/            # 错误处理 + 故障切换
 │       ├── plugin.json
 │       └── index.py
 
@@ -115,8 +121,12 @@ akm/
 | `menu.icon` | string | | 菜单图标，默认 `"plugin"` |
 | `menu.order` | int | | 菜单位置排序，默认 `100` |
 | `routes_prefix` | string | | API 路由前缀，默认 `/{name}` |
-| `hooks.on_request` | bool | | 是否接收原始请求对象 |
-| `hooks.on_response` | bool | | 是否接收原始响应对象 |
+| `hooks.on_request` | bool | | 是否接收请求对象（可改写请求体） |
+| `hooks.on_key_selected` | bool | | 是否接收 key 选择事件 |
+| `hooks.on_upstream_error` | bool | | 是否接收上游错误事件 |
+| `hooks.on_response` | bool | | 是否接收响应对象 |
+| `builtin` | bool | | 是否为内置插件，默认 `false` |
+| `required` | bool | | 是否不可禁用，默认 `false` |
 | `settings` | object[] | | 配置项定义，见 3.4 节 |
 
 ### 3.4 插件配置
@@ -227,8 +237,21 @@ class PluginBase:
         pass
 
     # ——— 可重写的 hook 方法 ———
-    async def on_request(self, request) -> None:
-        """请求到达时调用（需在 plugin.json 中声明 hooks.on_request: true）"""
+    async def on_request(self, request) -> dict | None:
+        """请求到达时调用（需在 plugin.json 中声明 hooks.on_request: true）
+        
+        返回 dict 则替换请求体（如模型名映射）
+        """
+        pass
+
+    async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
+        """Key 被匹配后调用，可修改 key 或用另一个 key 替换
+        返回 None 表示不修改，返回 dict 替换当前 key
+        """
+        pass
+
+    async def on_upstream_error(self, request, response, key) -> str | None:
+        """上游返回错误时调用，返回 "retry" 重试 / "switch" 切换 key / None 继续默认处理"""
         pass
 
     async def on_response(self, request, response) -> None:
@@ -337,7 +360,9 @@ PluginManager.load_all(app, db)
 
 | Hook | 触发点 | 参数 | 用途 |
 |------|--------|------|------|
-| `on_request` | proxy 转发请求之前 | `request: Request` | 请求日志、参数校验、请求改写 |
+| `on_request` | proxy 转发请求之前 | `request: Request` | 请求日志、参数校验、请求改写（含模型名映射） |
+| `on_key_selected` | 根据 model 匹配到 key 之后 | `model, key, request` | 模型匹配插件修改 key 选择结果 |
+| `on_upstream_error` | 上游返回错误（非 2xx） | `request, response, key` | 错误处理插件决定是否重试、切换模型 |
 | `on_response` | proxy 转发响应之后 | `request: Request, response: Response` | 响应日志、结果缓存、告警通知 |
 
 ### 6.2 约定
