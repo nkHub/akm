@@ -266,9 +266,9 @@ class PluginManager:
         for plugin in self.plugins.values():
             if not plugin.enabled:
                 continue
-            c = plugin.meta.converts
-            if c and c.get("from") == from_format and c.get("to") == to_format:
-                return plugin
+            for c in plugin.meta.converts:
+                if c.get("from") == from_format and c.get("to") == to_format:
+                    return plugin
         return None
 
     # ── 插件安装 ──

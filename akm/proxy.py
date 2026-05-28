@@ -108,6 +108,7 @@ async def forward_request(
     client: httpx.AsyncClient,
     log_callback=None,
     api_path: str = "chat/completions",
+    plugin_manager=None,
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
@@ -155,13 +156,24 @@ async def forward_request(
         # ── 协议转换检测 ──
         target_api_path = agent.needs_conversion(api_path)
         adapter = None
-        if target_api_path:
-            if api_path == "responses":
-                adapter = agent.responses_adapter
-            elif api_path == "messages":
-                adapter = agent.messages_adapter
-            elif api_path == "chat/completions":
-                adapter = agent.messages_adapter  # 反向用同一个适配器
+        if target_api_path and plugin_manager:
+            # 从插件系统查找转换器：api_path 格式 → target_api_path 格式
+            from_fmt = api_path.replace("/completions", "")
+            to_fmt = target_api_path.replace("/completions", "")
+            adapter = plugin_manager.get_converter(from_fmt, to_fmt)
+            if adapter is None:
+                # 找不到转换器则返回明确报错
+                return {
+                    "status_code": 400,
+                    "body": json.dumps({
+                        "error": f"缺少协议转换插件：需要将 {from_fmt} 请求转为 {to_fmt} 格式，但未找到启用的转换器。请前往插件管理页面开启 protocol_converter 插件。"
+                    }),
+                    "key_alias": key.get("alias", ""),
+                    "provider": key.get("provider", ""),
+                    "model": model,
+                    "error": f"缺少 {from_fmt}→{to_fmt} 转换器",
+                    "latency_ms": 0,
+                }
 
         # 构建上游 URL：转换后走目标路径
         upstream_api_path = target_api_path or api_path

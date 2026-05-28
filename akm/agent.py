@@ -67,34 +67,7 @@ class Agent:
                 return "messages"
         return None
 
-    # ── 适配器（懒加载，按源格式命名）──
-
-    @property
-    def responses_adapter(self):
-        """Responses 格式适配器（用于将 Responses 请求转为 Chat 格式，DeepSeek 等不原生支持 Responses 的供应商）"""
-        if not hasattr(self, "_responses_adapter"):
-            from akm.adapters.responses_adapter import ResponsesAdapter
-            self._responses_adapter = ResponsesAdapter()
-        return self._responses_adapter
-
-    @property
-    def messages_adapter(self):
-        """Messages 格式适配器（用于将 Messages 请求转为 Chat 格式，Anthropic → Chat 兼容供应商）"""
-        if not hasattr(self, "_messages_adapter"):
-            from akm.adapters.messages_adapter import MessagesAdapter
-            self._messages_adapter = MessagesAdapter()
-        return self._messages_adapter
-
-    @property
-    def chat_adapter(self):
-        """Chat 格式适配器（预留，当前无使用场景）"""
-        if not hasattr(self, "_chat_adapter"):
-            from akm.adapters.chat_adapter import ChatAdapter
-            self._chat_adapter = ChatAdapter()
-        return self._chat_adapter
-
-
-# ── 内置供应商（不可删除）──
+    # ── 内置供应商（不可删除）──
 BUILTIN_AGENTS: dict[str, Agent] = {
     "openai": Agent(
         name="openai",
