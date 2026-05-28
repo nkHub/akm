@@ -383,7 +383,12 @@ class ResponsesAdapter(BaseAdapter):
     async def convert_sse_stream(
         self, upstream_stream: AsyncIterator[bytes]
     ) -> AsyncIterator[str]:
-        """Chat Completions SSE 字节流 → Responses API SSE 文本流"""
+        """Chat Completions SSE 字节流 → Responses API SSE 文本流
+
+        将 DeepSeek Chat SSE 的 reasoning_content 映射为 Responses SSE 的独立推理项
+        （type=reasoning），通过 response.reasoning_summary_text.delta 事件流式推送，
+        使 Codex 能在「思考」面板中折叠展示推理过程，与正文输出分离。
+        """
         resp_id = f"resp_{uuid4().hex[:24]}"
         created = int(time.time())
         model = ""
@@ -396,6 +401,9 @@ class ResponsesAdapter(BaseAdapter):
         seen_tool_indices: set[int] = set()
 
         state = "init"
+        in_reasoning = False
+        reasoning_item_id = ""
+        reasoning_seq = 0
         buffer = ""
         done = False
         seq = 0
@@ -433,13 +441,81 @@ class ResponsesAdapter(BaseAdapter):
                 delta = choice.get("delta", {})
                 usage = chunk.get("usage", {})
 
+                # ── 流开始时创建顶层响应和推理输出项 ──
                 if state == "init" and (delta.get("role") or delta.get("reasoning_content") or delta.get("tool_calls")):
                     state = "started"
-                    msg_id = f"msg_{uuid4().hex[:12]}"
                     yield _sse_event("response.created", _make_response_created(resp_id, model, created))
                     yield _sse_event("response.in_progress", _make_response_in_progress(resp_id, model, created))
-                    yield _sse_event("response.output_item.added", _make_output_item_added(resp_id, 0, msg_id, "in_progress"))
-                    yield _sse_event("response.content_part.added", _make_content_part_added(resp_id, 0, 0, ""))
+
+                    if delta.get("reasoning_content"):
+                        in_reasoning = True
+                        reasoning_item_id = f"rsn_{uuid4().hex[:12]}"
+                        reasoning_seq = 0
+                        yield _sse_event("response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "id": reasoning_item_id,
+                                "type": "reasoning",
+                                "status": "in_progress",
+                            },
+                        })
+
+                # ── 推理内容：映射为 reasoning_summary_text.delta ──
+                if delta.get("reasoning_content"):
+                    if not in_reasoning:
+                        in_reasoning = True
+                        reasoning_item_id = f"rsn_{uuid4().hex[:12]}"
+                        reasoning_seq = 0
+                        yield _sse_event("response.output_item.added", {
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {
+                                "id": reasoning_item_id,
+                                "type": "reasoning",
+                                "status": "in_progress",
+                            },
+                        })
+                    text = delta["reasoning_content"]
+                    reasoning += text
+                    reasoning_seq += 1
+                    yield _sse_event("response.reasoning_summary_text.delta", {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": reasoning_item_id,
+                        "output_index": 0,
+                        "summary_index": 0,
+                        "delta": text,
+                        "sequence_number": reasoning_seq,
+                    })
+
+                # ── 正文或工具调用开始前，先关闭推理输出项 ──
+                _has_non_reasoning = delta.get("content") is not None or delta.get("tool_calls")
+                if _has_non_reasoning and in_reasoning:
+                    yield _sse_event("response.reasoning_summary_text.done", {
+                        "type": "response.reasoning_summary_text.done",
+                        "item_id": reasoning_item_id,
+                        "output_index": 0,
+                        "summary_index": 0,
+                        "text": reasoning,
+                    })
+                    yield _sse_event("response.output_item.done", {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "id": reasoning_item_id,
+                            "type": "reasoning",
+                            "status": "completed",
+                        },
+                    })
+                    in_reasoning = False
+
+                # ── 正文输出：先创建 message 输出项 ──
+                if (delta.get("content") or delta.get("tool_calls")) and not msg_id:
+                    # 推理项的 output_index 已占用 0，message 从 1 开始
+                    text_output_index = 1 if reasoning else 0
+                    msg_id = f"msg_{uuid4().hex[:12]}"
+                    yield _sse_event("response.output_item.added", _make_output_item_added(resp_id, text_output_index, msg_id, "in_progress"))
+                    yield _sse_event("response.content_part.added", _make_content_part_added(resp_id, text_output_index, 0, ""))
 
                 if delta.get("content"):
                     text = delta["content"]
@@ -448,20 +524,7 @@ class ResponsesAdapter(BaseAdapter):
                     yield _sse_event("response.output_text.delta", {
                         "type": "response.output_text.delta",
                         "item_id": msg_id,
-                        "output_index": 0,
-                        "content_index": 0,
-                        "delta": text,
-                        "sequence_number": seq,
-                    })
-
-                if delta.get("reasoning_content"):
-                    text = delta["reasoning_content"]
-                    reasoning += text
-                    seq += 1
-                    yield _sse_event("response.output_text.delta", {
-                        "type": "response.output_text.delta",
-                        "item_id": msg_id,
-                        "output_index": 0,
+                        "output_index": 1 if reasoning else 0,
                         "content_index": 0,
                         "delta": text,
                         "sequence_number": seq,
@@ -480,7 +543,7 @@ class ResponsesAdapter(BaseAdapter):
                             tool_calls_state[idx] = {"id": tc_id, "name": tc_name, "arguments": tc_args}
                             yield _sse_event("response.output_item.added", {
                                 "type": "response.output_item.added",
-                                "output_index": idx + 1,
+                                "output_index": idx + (2 if reasoning else 1),
                                 "item": {
                                     "id": tc_id,
                                     "type": "function_call",
@@ -496,7 +559,7 @@ class ResponsesAdapter(BaseAdapter):
                                 tool_calls_state[idx]["arguments"] += arg_delta
                                 yield _sse_event("response.function_call_arguments.delta", {
                                     "type": "response.function_call_arguments.delta",
-                                    "output_index": idx + 1,
+                                    "output_index": idx + (2 if reasoning else 1),
                                     "delta": arg_delta,
                                 })
 
@@ -519,27 +582,67 @@ class ResponsesAdapter(BaseAdapter):
             yield "data: [DONE]\n\n"
             return
 
+        # ── 纯推理（无正文/工具调用）：关闭推理项，创建 message 展示推理内容 ──
+        if in_reasoning:
+            yield _sse_event("response.reasoning_summary_text.done", {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": reasoning_item_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "text": reasoning,
+            })
+            yield _sse_event("response.output_item.done", {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": reasoning_item_id,
+                    "type": "reasoning",
+                    "status": "completed",
+                },
+            })
+            in_reasoning = False
+
+        text_output_index = 1 if reasoning else 0
+
+        # ── 无正文输出项时创建一个（纯 reasoning 或有 tool_calls）──
+        if not msg_id:
+            msg_id = f"msg_{uuid4().hex[:12]}"
+            yield _sse_event("response.output_item.added", _make_output_item_added(resp_id, text_output_index, msg_id, "in_progress"))
+            yield _sse_event("response.content_part.added", _make_content_part_added(resp_id, text_output_index, 0, ""))
+            # 纯 reasoning 场景需要发送 text delta
+            if reasoning and not content and not tool_calls_state:
+                yield _sse_event("response.output_text.delta", {
+                    "type": "response.output_text.delta",
+                    "item_id": msg_id,
+                    "output_index": text_output_index,
+                    "content_index": 0,
+                    "delta": reasoning,
+                    "sequence_number": 1,
+                })
+
         output_content = []
-        if reasoning:
-            output_content.append({"type": "output_text", "text": reasoning})
         if content:
             output_content.append({"type": "output_text", "text": content})
+        elif reasoning and not tool_calls_state:
+            output_content.append({"type": "output_text", "text": reasoning})
+        elif tool_calls_state:
+            output_content = [{"type": "output_text", "text": ""}]
         if not output_content:
             output_content = [{"type": "output_text", "text": ""}]
-        final_text = reasoning + content
+        final_text = content or (reasoning if not tool_calls_state else "")
 
         yield _sse_event("response.output_text.done", {
             "type": "response.output_text.done",
             "text": final_text,
             "item_id": msg_id,
-            "output_index": 0,
+            "output_index": text_output_index,
             "content_index": 0,
         })
 
         yield _sse_event("response.content_part.done", {
             "type": "response.content_part.done",
             "item_id": msg_id,
-            "output_index": 0,
+            "output_index": text_output_index,
             "content_index": 0,
             "part": {"type": "output_text", "text": final_text},
         })
@@ -554,21 +657,22 @@ class ResponsesAdapter(BaseAdapter):
             text_output_item["reasoning_content"] = reasoning
         yield _sse_event("response.output_item.done", {
             "type": "response.output_item.done",
-            "output_index": 0,
+            "output_index": text_output_index,
             "item": text_output_item,
         })
 
         for idx in sorted(tool_calls_state.keys()):
             tc = tool_calls_state[idx]
+            tc_output_index = idx + (2 if reasoning else 1)
             yield _sse_event("response.function_call_arguments.done", {
                 "type": "response.function_call_arguments.done",
-                "output_index": idx + 1,
+                "output_index": tc_output_index,
                 "name": tc["name"],
                 "arguments": tc["arguments"],
             })
             yield _sse_event("response.output_item.done", {
                 "type": "response.output_item.done",
-                "output_index": idx + 1,
+                "output_index": tc_output_index,
                 "item": {
                     "type": "function_call",
                     "status": "completed",
@@ -579,11 +683,22 @@ class ResponsesAdapter(BaseAdapter):
             })
 
         total = prompt_tokens + completion_tokens
-        resp_output = [{
+        resp_output = []
+        if reasoning:
+            resp_output.append({
+                "type": "reasoning",
+                "id": reasoning_item_id,
+                "status": "completed",
+                "content": [{
+                    "type": "reasoning_summary_text",
+                    "text": reasoning,
+                }],
+            })
+        resp_output.append({
             "type": "message",
             "role": "assistant",
             "content": output_content,
-        }]
+        })
         for idx in sorted(tool_calls_state.keys()):
             tc = tool_calls_state[idx]
             resp_output.append({
@@ -598,8 +713,8 @@ class ResponsesAdapter(BaseAdapter):
             "response": {
                 "id": resp_id,
                 "object": "response",
-                "model": model,
                 "status": "completed",
+                "model": model,
                 "output": resp_output,
                 "usage": {
                     "input_tokens": prompt_tokens,
