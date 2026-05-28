@@ -201,6 +201,8 @@ class PluginManager:
         # ── 4. 调用 on_load 生命周期 ──
         for plugin in self.plugins.values():
             if plugin.enabled:
+                # 注入插件配置（从 config.json 读取，合并默认值）
+                plugin.config = self.get_config(plugin.name) or {}
                 try:
                     await plugin.on_load()
                 except Exception as e:
@@ -411,6 +413,12 @@ class PluginManager:
         plugin_configs[name] = data
         cfg["plugin_configs"] = plugin_configs
         self._save_config_json(cfg)
+        # 同步更新内存中的 plugin.config（避免重启后才能读取）
+        if name in self.plugins:
+            defaults = {}
+            for s in self._plugin_metas[name].settings:
+                defaults[s.key] = s.default
+            self.plugins[name].config = {**defaults, **data}
         return {"ok": True}
 
     # ── 查询 ──
