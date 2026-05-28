@@ -1,8 +1,12 @@
 """
-Anthropic Messages API ↔ OpenAI Chat Completions 双向转换器
+Messages 格式适配器
 
-支持将 Anthropic Messages API 请求转为 Chat Completions 格式（用于 OpenAI 兼容供应商），
-并将 Chat Completions SSE 流转为 Messages SSE 流。
+源格式为 Anthropic Messages API，提供到 Chat Completions 的双向转换。
+- Messages → Chat（请求转换）
+- Chat SSE → Messages SSE（响应逆转换）
+- Chat JSON → Messages JSON（非流式响应转换）
+
+未实现：Messages → Responses（暂无需求，留空）
 """
 
 import json
@@ -12,13 +16,18 @@ from typing import AsyncIterator
 from akm.adapter import BaseAdapter
 
 
-class MessagesToChatAdapter(BaseAdapter):
-    """Anthropic Messages ↔ OpenAI Chat Completions 双向转换"""
+class MessagesAdapter(BaseAdapter):
+    """Messages 格式适配器：源格式为 Anthropic Messages API
 
-    # ── 请求转换：Anthropic Messages → Chat Completions ──
+    发送方向：convert_request()     — Messages → Chat（请求转换）
+    接收方向：convert_sse_stream()  — Chat SSE → Messages SSE（响应逆转换）
+    非流式：  convert_response()   — Chat JSON → Messages JSON
+    """
+
+    # ── 请求转换：Messages → Chat Completions ──
 
     def convert_request(self, body: dict) -> dict:
-        """Anthropic Messages 请求 → Chat Completions 请求"""
+        """Messages API 请求 → Chat Completions 请求"""
         chat_body = {
             "model": body.get("model", ""),
             "messages": self._messages_to_openai(body),
@@ -40,14 +49,12 @@ class MessagesToChatAdapter(BaseAdapter):
         """构造 OpenAI messages 数组"""
         messages = []
 
-        # system prompt 插入到 messages 最前面
         system = body.get("system")
         if system:
             content = self._flatten_content(system)
             if content:
                 messages.append({"role": "system", "content": content})
 
-        # Anthropic messages → OpenAI messages
         for m in body.get("messages", []):
             role = m.get("role", "user")
             content = m.get("content", "")
@@ -58,7 +65,7 @@ class MessagesToChatAdapter(BaseAdapter):
         return messages
 
     def _flatten_content(self, value) -> str:
-        """展开 system 字段（string 或 content block 数组）"""
+        """展开系统提示（string 或 content block 数组）"""
         if isinstance(value, str):
             return value
         if isinstance(value, list):
@@ -95,7 +102,6 @@ class MessagesToChatAdapter(BaseAdapter):
         usage = chat.get("usage", {})
         content = message.get("content", "")
 
-        # Chat stop_reason → Anthropic stop_reason
         finish = choice.get("finish_reason", "stop")
         stop_map = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
         stop_reason = stop_map.get(finish, "end_turn")
@@ -115,12 +121,12 @@ class MessagesToChatAdapter(BaseAdapter):
         }
         return json.dumps(resp, ensure_ascii=False)
 
-    # ── 流式 SSE 转换：Chat Completions SSE → Anthropic Messages SSE ──
+    # ── 流式 SSE 转换：Chat SSE → Messages SSE ──
 
     async def convert_sse_stream(
         self, upstream_stream: AsyncIterator[bytes]
     ) -> AsyncIterator[str]:
-        """Chat Completions SSE 字节流 → Anthropic Messages SSE 文本流"""
+        """Chat Completions SSE 字节流 → Messages SSE 文本流"""
         msg_id = f"msg_{uuid4().hex[:12]}"
         model = ""
         content = ""
@@ -153,10 +159,9 @@ class MessagesToChatAdapter(BaseAdapter):
             delta = choice.get("delta", {})
             usage = chunk.get("usage", {})
 
-            # 首次 role delta → message_start
             if delta.get("role") and not role_sent:
                 role_sent = True
-                yield _anthropic_event("message_start", {
+                yield _messages_sse_event("message_start", {
                     "type": "message_start",
                     "message": {
                         "id": msg_id,
@@ -167,20 +172,19 @@ class MessagesToChatAdapter(BaseAdapter):
                     },
                 })
 
-            # content delta → content_block_start + content_block_delta
             if delta.get("content"):
                 text = delta["content"]
                 content += text
 
                 if not block_sent:
                     block_sent = True
-                    yield _anthropic_event("content_block_start", {
+                    yield _messages_sse_event("content_block_start", {
                         "type": "content_block_start",
                         "index": 0,
                         "content_block": {"type": "text", "text": ""},
                     })
 
-                yield _anthropic_event("content_block_delta", {
+                yield _messages_sse_event("content_block_delta", {
                     "type": "content_block_delta",
                     "index": 0,
                     "delta": {"type": "text_delta", "text": text},
@@ -195,25 +199,24 @@ class MessagesToChatAdapter(BaseAdapter):
                 input_tokens = usage.get("prompt_tokens", 0)
                 output_tokens = usage.get("completion_tokens", 0)
 
-        # 流结束 → content_block_stop + message_delta + message_stop
         if block_sent:
-            yield _anthropic_event("content_block_stop", {
+            yield _messages_sse_event("content_block_stop", {
                 "type": "content_block_stop",
                 "index": 0,
             })
 
-        yield _anthropic_event("message_delta", {
+        yield _messages_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": finish_reason, "stop_sequence": None},
             "usage": {"output_tokens": output_tokens},
         })
 
-        yield _anthropic_event("message_stop", {
+        yield _messages_sse_event("message_stop", {
             "type": "message_stop",
         })
         yield "data: [DONE]\n\n"
 
 
-def _anthropic_event(event_name: str, data: dict) -> str:
-    """构建一条 Anthropic SSE 事件"""
+def _messages_sse_event(event_name: str, data: dict) -> str:
+    """构建一条 Messages SSE 事件"""
     return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

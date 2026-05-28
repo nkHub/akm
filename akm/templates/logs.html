@@ -152,6 +152,14 @@ function renderChatAsync(logRef, force) {
 
 function buildChatItems(log) {
   var items = [];
+  var headerLines = [];
+  try {
+    var reqHeaders = JSON.parse(log.request_headers || '{}');
+    for (var hk in reqHeaders) headerLines.push(hk + ': ' + reqHeaders[hk]);
+  } catch (e) {}
+  if (headerLines.length) {
+    items.push({ role:'meta', html: '<span class="text-gray-500">' + esc(headerLines.join(' | ')) + '</span>' });
+  }
   var reqBody = null;
   try { reqBody = JSON.parse(log.request_body || '{}'); } catch(e) {}
   var msgs = [];
@@ -221,12 +229,6 @@ function buildChatItems(log) {
   if (reasoning) items.push({ role:'system', html: '<span class="text-amber-300">思考过程</span><br>' + esc(reasoning) });
   if (reply) items.push({ role:'assistant', html: marked.parse(String(reply)) });
 
-  var pt = log.prompt_tokens || 0;
-  var ct = log.completion_tokens || 0;
-  var cached = log.cached_tokens || 0;
-  var tokenInfo = '';
-  if (pt > 0 || ct > 0) tokenInfo = ' · 输入: ' + pt + (cached > 0 ? ' Token (缓存命中: ' + cached + ')' : ' Token') + ' · 输出: ' + ct + ' Token';
-  items.push({ role:'meta', html: esc(log.model || '-') + ' · ' + (log.latency_ms || 0) + 'ms · HTTP ' + (log.status_code || '-') + tokenInfo });
   return items;
 }
 
@@ -291,9 +293,22 @@ function renderLogTable() {
   if (!_logsData.length) { container.innerHTML=''; empty.classList.remove('hidden'); document.getElementById('log-pagination').classList.add('hidden'); return; }
   empty.classList.add('hidden');
 
-  var html = '<table class="w-full text-sm"><thead><tr class="bg-surface-light text-gray-400 text-xs"><th class="text-left px-4 py-2.5 font-medium w-40">时间</th><th class="text-left px-4 py-2.5 font-medium">Alias</th><th class="text-left px-4 py-2.5 font-medium">供应商</th><th class="text-left px-4 py-2.5 font-medium">模型</th><th class="text-center px-4 py-2.5 font-medium w-28">输入(缓存)</th><th class="text-center px-4 py-2.5 font-medium w-20">输出</th><th class="text-center px-4 py-2.5 font-medium w-20">状态</th><th class="text-right px-4 py-2.5 font-medium w-24">延迟</th><th class="text-center px-4 py-2.5 font-medium w-16">详情</th></tr></thead><tbody>';
+  var html = '<table class="w-full text-sm"><thead><tr class="bg-surface-light text-gray-400 text-xs"><th class="text-left px-4 py-2.5 font-medium w-40">时间</th><th class="text-left px-4 py-2.5 font-medium">Alias</th><th class="text-left px-4 py-2.5 font-medium">供应商</th><th class="text-left px-4 py-2.5 font-medium">模型</th><th class="text-left px-4 py-2.5 font-medium w-24">来源</th><th class="text-center px-4 py-2.5 font-medium w-28">输入(缓存)</th><th class="text-center px-4 py-2.5 font-medium w-20">输出</th><th class="text-center px-4 py-2.5 font-medium w-20">状态</th><th class="text-right px-4 py-2.5 font-medium w-24">延迟</th><th class="text-center px-4 py-2.5 font-medium w-16">详情</th></tr></thead><tbody>';
 
   _logsData.forEach(function(log, i){
+    // ── 从请求头中提取来源标签 ──
+    var headers = {};
+    try { headers = JSON.parse(log.request_headers || '{}'); } catch(e) {}
+    var ua = (headers['user-agent'] || '').toLowerCase();
+    var sourceLabel = '-';
+    var sourceClass = 'text-gray-600';
+    if (ua.includes('opencode')) { sourceLabel = 'OpenCode'; sourceClass = 'text-teal-400'; }
+    else if (ua.includes('codex')) { sourceLabel = 'Codex'; sourceClass = 'text-amber-400'; }
+    else if (ua.includes('cursor')) { sourceLabel = 'Cursor'; sourceClass = 'text-purple-400'; }
+    else if (ua.includes('curl')) { sourceLabel = 'curl'; sourceClass = 'text-gray-400'; }
+    else if (ua.includes('python')) { sourceLabel = 'Python'; sourceClass = 'text-blue-400'; }
+    else if (ua) { sourceLabel = ua.split('/')[0].substring(0, 12); sourceClass = 'text-gray-400'; }
+
     var code = log.status_code;
     var sc = 'status-err';
     if (code>=200&&code<300) sc='status-2xx'; else if(code>=400&&code<500) sc='status-4xx'; else if(code>=500) sc='status-5xx';
@@ -308,7 +323,7 @@ function renderLogTable() {
     var promptHtml = pt > 0 ? '<span class="text-gray-300">'+effectivePrompt.toLocaleString()+'</span>' + (cached > 0 ? ' <span class="text-teal-400">(R'+cached.toLocaleString()+')</span>' : '') : '<span class="text-gray-600">-</span>';
     var completionHtml = ct > 0 ? '<span class="text-gray-300">'+ct.toLocaleString()+'</span>' : '<span class="text-gray-600">-</span>';
 
-    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 whitespace-nowrap text-xs">'+esc(log.timestamp||'-')+'</td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs">'+esc(log.key_alias||'-')+'</td><td class="px-4 py-2.5 text-gray-300 text-xs">'+esc(log.provider||'-')+'</td><td class="px-4 py-2.5 text-gray-400 text-xs">'+esc(log.model||'-')+'</td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td><td class="px-4 py-2.5 text-center"><span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-4 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-4 py-2.5 text-center">'+(hasBody?'<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>':'<span class="text-gray-600">-</span>')+'</td></tr>';
+    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 whitespace-nowrap text-xs">'+esc(log.timestamp||'-')+'</td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs">'+esc(log.key_alias||'-')+'</td><td class="px-4 py-2.5 text-gray-300 text-xs">'+esc(log.provider||'-')+'</td><td class="px-4 py-2.5 text-gray-400 text-xs">'+esc(log.model||'-')+'</td><td class="px-4 py-2.5 text-xs '+sourceClass+'">'+esc(sourceLabel)+'</td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td><td class="px-4 py-2.5 text-center"><span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-4 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-4 py-2.5 text-center">'+(hasBody?'<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>':'<span class="text-gray-600">-</span>')+'</td></tr>';
     if (log.error) html += '<tr class="border-t border-border bg-red-950/20"><td colspan="9" class="px-4 py-1.5 text-xs text-red-400">'+esc(log.error)+'</td></tr>';
   });
   html += '</tbody></table>';
@@ -442,6 +457,14 @@ function switchDrawerTab(tab) {
 function renderChatView(log) {
   /* 将请求/响应解析为聊天气泡 HTML，兼容 chat/completions 和 responses 格式 */
   var html = '';
+  var headerLines = [];
+  try {
+    var reqHeaders = JSON.parse(log.request_headers || '{}');
+    for (var hk in reqHeaders) headerLines.push(hk + ': ' + reqHeaders[hk]);
+  } catch (e) {}
+  if (headerLines.length) {
+    html += '<div class="text-xs text-gray-500 mb-3 break-all">' + esc(headerLines.join(' | ')) + '</div>';
+  }
   var reqBody = null;
 
   // 1. 解析请求体
@@ -568,16 +591,6 @@ function renderChatView(log) {
     var errMsg = esc(log.error||'');
     html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';
   }
-
-  // 3. 底部显示元信息（含 token 用量）
-  var pt = log.prompt_tokens || 0;
-  var ct = log.completion_tokens || 0;
-  var cached = log.cached_tokens || 0;
-  var tokenInfo = '';
-  if (pt > 0 || ct > 0) {
-    tokenInfo = ' &middot; 输入: ' + pt + (cached > 0 ? ' Token (缓存命中: ' + cached + ')' : ' Token') + ' &middot; 输出: ' + ct + ' Token';
-  }
-  html += '<div class="text-center pt-3"><span class="text-xs text-gray-600">'+esc(log.model||'-')+' &middot; '+(log.latency_ms||0)+'ms &middot; HTTP '+(log.status_code||'-')+ tokenInfo +'</span></div>';
 
   return html || '<div class="text-center text-gray-500 text-xs py-8">无对话数据</div>';
 }
