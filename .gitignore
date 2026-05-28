@@ -167,4 +167,5 @@ Thumbs.db
 # Project specific
 *.db
 ~/.akm/
+.opencode/
 tempCodeRunnerFile.py
