@@ -28,21 +28,10 @@ class ResponsesAdapter(BaseAdapter):
     非流式：  convert_response()   — Chat JSON → Responses JSON
     """
 
-    def __init__(self):
-        self._namespace_map: dict[str, str] = {}  # full_name → namespace_prefix（用于 SSE 反向映射）
-        self._id_counter: int = 0  # 每个适配器实例独立计数，避免 request 间碰撞
-
-    def _reset_state(self):
-        """每次请求前重置状态（namespace_map 和 id_counter）"""
-        self._namespace_map = {}
-        self._id_counter = 0
-
     # ── 请求转换：Responses → Chat Completions ──
 
     def convert_request(self, body: dict) -> dict:
         """Responses API 请求 → Chat Completions 请求"""
-        self._reset_state()  # 每次新请求重置 namespace_map 等状态
-
         chat_body = {}
 
         if "model" in body:
@@ -343,8 +332,6 @@ class ResponsesAdapter(BaseAdapter):
                     if not sub_name:
                         continue
                     full_name = ns_prefix + sub_name  # "mcp__translate__" + "translate" = "mcp__translate__translate"
-                    # 存储反向映射，用于 SSE 转换时还原短名 + namespace
-                    self._namespace_map[full_name] = ns_prefix
                     if sub_tool.get("function"):
                         # 子工具已是 function 格式，仅替换 name
                         expanded = dict(sub_tool)
@@ -597,54 +584,27 @@ class ResponsesAdapter(BaseAdapter):
                             tc_id = tc.get("id", f"call_{uuid4().hex[:12]}")
                             tc_name = fn.get("name", "")
                             tc_args = fn.get("arguments", "")
-
-                            # 根据 namespace_map 提取 namespace（MCP 工具还原短名）
-                            ns_prefix = self._namespace_map.get(tc_name, "")
-                            display_name = tc_name[len(ns_prefix):] if ns_prefix else tc_name
-
-                            self._id_counter += 1
-                            fc_item_id = f"fc_{uuid4().hex[:12]}"
-                            tc_output_index = idx + (2 if reasoning else 1)
-
-                            tool_calls_state[idx] = {
-                                "id": tc_id,
-                                "name": tc_name,
-                                "display_name": display_name,
-                                "namespace": ns_prefix,
-                                "item_id": fc_item_id,
-                                "arguments": tc_args,
-                                "output_index": tc_output_index,
-                                "start_seq": seq,  # 记录本 tool_call 出现时的 seq
-                            }
-
-                            item_data = {
-                                "id": fc_item_id,
-                                "type": "function_call",
-                                "status": "in_progress",
-                                "call_id": tc_id,
-                                "name": display_name,
-                                "arguments": tc_args,
-                            }
-                            if ns_prefix:
-                                item_data["namespace"] = ns_prefix
-
+                            tool_calls_state[idx] = {"id": tc_id, "name": tc_name, "arguments": tc_args}
                             yield _sse_event("response.output_item.added", {
                                 "type": "response.output_item.added",
-                                "output_index": tc_output_index,
-                                "sequence_number": seq + 1,
-                                "item": item_data,
+                                "output_index": idx + (2 if reasoning else 1),
+                                "item": {
+                                    "id": tc_id,
+                                    "type": "function_call",
+                                    "status": "in_progress",
+                                    "call_id": tc_id,
+                                    "name": tc_name,
+                                    "arguments": tc_args,
+                                },
                             })
                         else:
                             arg_delta = fn.get("arguments", "")
                             if arg_delta:
                                 tool_calls_state[idx]["arguments"] += arg_delta
-                                tc_info = tool_calls_state[idx]
                                 yield _sse_event("response.function_call_arguments.delta", {
                                     "type": "response.function_call_arguments.delta",
-                                    "item_id": tc_info["item_id"],
-                                    "output_index": tc_info["output_index"],
+                                    "output_index": idx + (2 if reasoning else 1),
                                     "delta": arg_delta,
-                                    "sequence_number": seq + 2,
                                 })
 
                 if usage:
@@ -747,33 +707,23 @@ class ResponsesAdapter(BaseAdapter):
 
         for idx in sorted(tool_calls_state.keys()):
             tc = tool_calls_state[idx]
-            tc_output_index = tc.get("output_index", idx + (2 if reasoning else 1))
-            tc_display_name = tc.get("display_name", tc["name"])
-            tc_namespace = tc.get("namespace", "")
-
+            tc_output_index = idx + (2 if reasoning else 1)
             yield _sse_event("response.function_call_arguments.done", {
                 "type": "response.function_call_arguments.done",
-                "item_id": tc["item_id"],
                 "output_index": tc_output_index,
-                "name": tc_display_name,
+                "name": tc["name"],
                 "arguments": tc["arguments"],
             })
-
-            done_item = {
-                "id": tc["item_id"],
-                "type": "function_call",
-                "status": "completed",
-                "call_id": tc["id"],
-                "name": tc_display_name,
-                "arguments": tc["arguments"],
-            }
-            if tc_namespace:
-                done_item["namespace"] = tc_namespace
-
             yield _sse_event("response.output_item.done", {
                 "type": "response.output_item.done",
                 "output_index": tc_output_index,
-                "item": done_item,
+                "item": {
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": tc["id"],
+                    "name": tc["name"],
+                    "arguments": tc["arguments"],
+                },
             })
 
         total = prompt_tokens + completion_tokens
@@ -795,19 +745,13 @@ class ResponsesAdapter(BaseAdapter):
         })
         for idx in sorted(tool_calls_state.keys()):
             tc = tool_calls_state[idx]
-            tc_display_name = tc.get("display_name", tc["name"])
-            tc_namespace = tc.get("namespace", "")
-            fc_entry = {
+            resp_output.append({
                 "type": "function_call",
-                "id": tc["item_id"],
                 "status": "completed",
                 "call_id": tc["id"],
-                "name": tc_display_name,
+                "name": tc["name"],
                 "arguments": tc["arguments"],
-            }
-            if tc_namespace:
-                fc_entry["namespace"] = tc_namespace
-            resp_output.append(fc_entry)
+            })
         yield _sse_event("response.completed", {
             "type": "response.completed",
             "response": {
