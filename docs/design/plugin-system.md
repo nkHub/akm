@@ -10,9 +10,39 @@
 - 拦截请求/响应做自定义处理（日志、审计、过滤等）
 - 访问项目数据库、配置、日志等上下文
 
-## 一、插件类型
+## 一、插件分类
 
-所有插件结构统一，通过 `plugin.json` 中的 `has_menu` 字段区分：
+根据在代理转发链路中的职责不同，插件分为以下类别：
+
+```
+请求到达 → [请求处理] → [Key匹配] → [格式转换] → 上游转发 → [错误处理] → [响应处理] → 返回
+             category=      category=   category=                category=    category=
+             filter         matcher     converter               handler      post
+```
+
+| `category` | 名称 | 职责 | 核心 Hook | 示例 |
+|------------|------|------|-----------|------|
+| `filter` | 请求处理 | 请求到达时对数据做预处理（加密、参数注入、内容屏蔽） | `on_request` | 请求体加密、敏感词过滤 |
+| `matcher` | 模型匹配 | 根据请求模型名选择/映射到实际的 key 或模型 | `on_key_selected` | 模型别名映射、权重路由 |
+| `converter` | 格式转换 | 请求/响应在不同协议格式间转换 | `convert_request` / `convert_sse_stream` | Responses→Chat、JSON→YAML |
+| `handler` | 错误处理 | 上游返回错误时的重试、切换、降级策略 | `on_upstream_error` | 5xx 重试、429 切换 key |
+| `post` | 响应处理 | 响应返回后的日志、统计、缓存 | `on_response` | 审计增强、耗时统计 |
+| `app` | 应用插件 | 有独立前端界面，注册 API 路由 | `self.router` + `views/` | 管理台、数据面板 |
+
+一个插件可以注册多个 hook，跨多个 category。`category` 字段仅用于管理界面分类展示。
+
+## 二、来源与优先级
+
+| 来源 | 路径 | 优先级 | 说明 |
+|------|------|:---:|------|
+| 内置 | `akm/plugins/` | 🥇 最高 | 随项目分发，内部插件优先于同名第三方 |
+| 第三方 | `~/.akm/plugins/` | 🥈 | 用户自行安装，可安装/启用/禁用/删除 |
+
+同名插件：内置优先。用户关闭内置插件后，同名的第三方插件才会生效。这确保内置的关键插件（如协议转换）不被第三方覆盖。
+
+## 三、插件结构
+
+所有插件结构统一。`has_menu: true` 表示在管理台显示菜单入口：
 
 | `has_menu` | 描述 | 必需文件 |
 |----------|------|----------|
@@ -21,7 +51,7 @@
 
 > `has_menu` 默认为 `false`，不填即视为无需菜单入口。部分关键内置插件（如 model_matcher）标记为 `required: true`，不可禁用，保证核心链路至少有一个生效。
 
-## 二、目录结构
+## 四、目录结构
 
 ```
 akm/
@@ -65,9 +95,9 @@ akm/
 | 内置 | `akm/plugins/` | 随项目分发，`plugin.json` 中 `builtin: true`，可禁用但建议保留 |
 | 第三方 | `~/.akm/plugins/` | 用户自行安装，可安装/启用/禁用/删除 |
 
-## 三、plugin.json 定义
+## 五、plugin.json 定义
 
-### 3.1 有菜单插件（`has_menu: true`）
+### 5.1 有菜单插件（`has_menu: true`）
 
 ```json
 {
@@ -84,7 +114,7 @@ akm/
 }
 ```
 
-### 3.2 无菜单插件（`has_menu: false`）
+### 5.2 无菜单插件（`has_menu: false`）
 
 ```json
 {
@@ -108,11 +138,12 @@ akm/
 }
 ```
 
-### 3.3 字段说明
+### 5.3 字段说明
 
 | 字段 | 类型 | 必需 | 说明 |
 |------|------|------|------|
 | `name` | string | ✓ | 插件唯一标识，作为目录名 |
+| `category` | string | | 插件分类：`filter`/`matcher`/`converter`/`handler`/`post`/`app` |
 | `has_menu` | bool | | 是否在管理台显示菜单入口，默认 `false` |
 | `version` | string | ✓ | 语义化版本号 |
 | `description` | string | | 功能描述 |
@@ -129,7 +160,7 @@ akm/
 | `required` | bool | | 是否不可禁用，默认 `false` |
 | `settings` | object[] | | 配置项定义，见 3.4 节 |
 
-### 3.4 插件配置
+### 5.4 插件配置
 
 插件可声明 `settings` 字段，定义自己的配置项。配置统一存储在 `~/.akm/config.json` 的 `plugin_configs` 字段中，格式为 `{ "插件名": { "key": "value" } }`。
 
@@ -205,9 +236,9 @@ async def on_request(self, request):
 }
 ```
 
-## 四、PluginBase 基类
+## 六、PluginBase 基类
 
-### 4.1 设计
+### 6.1 设计
 
 每个插件的 `index.py` 导出名为 `Plugin` 的类，继承自 `plugins.base.PluginBase`。PluginBase 封装了插件可访问的全部上下文和方法：
 
@@ -287,7 +318,7 @@ class PluginBase:
     def _get_db(self): ...
 ```
 
-### 4.2 上下文能力一览
+### 6.2 上下文能力一览
 
 | 属性/方法 | 类型 | 说明 |
 |-----------|------|------|
@@ -300,7 +331,7 @@ class PluginBase:
 | `self.meta` | `dict` | plugin.json 原始数据（含 settings schema 等） |
 | `self.static_dir` | `Path` | views/ 目录路径，用于读取静态资源 |
 
-### 4.3 生命周期
+### 6.3 生命周期
 
 ```
 PluginManager.load_all()
@@ -318,9 +349,9 @@ PluginManager.load_all()
        └── 调用 plugin.on_unload()                     # ← 清理钩子
 ```
 
-## 五、PluginManager 设计
+## 七、PluginManager 设计
 
-### 5.1 核心类
+### 7.1 核心类
 
 ```python
 class PluginManager:
@@ -336,7 +367,7 @@ class PluginManager:
     set_config(name: str, data: dict)       # 保存插件配置到 config.json
 ```
 
-### 5.2 加载流程
+### 7.2 加载流程
 
 ```
 PluginManager.load_all(app, db)
@@ -348,15 +379,15 @@ PluginManager.load_all(app, db)
       └── 存入 self.plugins[name]（同名插件第三方优先覆盖内置，以 * 标记）
 ```
 
-### 5.3 路由注册规则
+### 7.3 路由注册规则
 
 - **API 路由**：插件的 `self.router`（在 `__init__` 中定义的 APIRouter）挂载到 `{routes_prefix}` 下
 - **前端路由**（仅 has_menu 插件）：`/plugins/{name}` 和 `/plugins/{name}/{rest:path}` → `views/index.html`（SPA 支持）
 - **静态文件**（仅 has_menu 插件）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）
 
-## 六、Hook 机制
+## 八、Hook 机制
 
-### 6.1 触发时机
+### 8.1 触发时机
 
 | Hook | 触发点 | 参数 | 用途 |
 |------|--------|------|------|
@@ -365,7 +396,7 @@ PluginManager.load_all(app, db)
 | `on_upstream_error` | 上游返回错误（非 2xx） | `request, response, key` | 错误处理插件决定是否重试、切换模型 |
 | `on_response` | proxy 转发响应之后 | `request: Request, response: Response` | 响应日志、结果缓存、告警通知 |
 
-### 6.2 约定
+### 8.2 约定
 
 插件在 `Plugin` 类中重写 `on_request` / `on_response` 方法，同时在 `plugin.json` 的 `hooks` 中声明为 `true`。PluginManager 在对应时机自动调用：
 
@@ -389,13 +420,13 @@ class Plugin(PluginBase):
         self.logger.info(f"[#{self._total}] done")
 ```
 
-### 6.3 执行顺序
+### 8.3 执行顺序
 
 Hook 按插件加载顺序依次执行，单个 hook 异常不会中断后续 hook 的执行。
 
-## 七、与 server.py 集成
+## 九、与 server.py 集成
 
-### 7.1 改动点
+### 9.1 改动点
 
 ```python
 # server.py
@@ -446,7 +477,7 @@ async def responses(request: Request):
     return result
 ```
 
-### 7.2 前端集成
+### 9.2 前端集成
 
 **菜单**：sidebar 调用 `/api/plugin-menu`，动态插入插件入口：
 
@@ -470,9 +501,9 @@ fetch('/api/plugin-metas')
     });
 ```
 
-## 八、插件开发示例
+## 十、插件开发示例
 
-### 8.1 有菜单插件：模型映射（操作数据库）
+### 10.1 有菜单插件：模型映射（操作数据库）
 
 **plugins/model_mapper/plugin.json**
 ```json
@@ -541,7 +572,7 @@ class Plugin(PluginBase):
 </html>
 ```
 
-### 8.2 无菜单插件：请求日志（hook + 配置）
+### 10.2 无菜单插件：请求日志（hook + 配置）
 
 **plugins/request_logger/plugin.json**
 ```json
@@ -598,7 +629,7 @@ class Plugin(PluginBase):
                 self.logger.info(f"← {request.url.path} ({elapsed:.2f}s)")
 ```
 
-## 九、安全考虑
+## 十一、安全考虑
 
 - 插件代码在 akm 进程中运行，拥有完整权限（包括数据库），仅应由信任的开发者编写
 - `plugin.json` 中不包含可执行代码

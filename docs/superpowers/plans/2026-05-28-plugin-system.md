@@ -28,7 +28,24 @@
 - **插件**：协议格式转换（Responses/Chat/Messages 互转）作为可选功能，用户通过插件管理界面开启/关闭
 - **加载**：所有插件（内置 + 第三方）统一从 `plugins/` 目录加载，内置插件默认随项目分发但可禁用
 
-## 可行性评估
+## 可行性与评估
+
+### 分类覆盖
+
+现有插件系统通过 `category` 字段 + hook 组合覆盖所有代理链路环节：
+
+| `category` | 名称 | Hook | 已有内置插件 | 可扩展场景 |
+|------------|------|------|-------------|-----------|
+| `filter` | 请求处理 | `on_request` | — | 请求加密、敏感词过滤、参数注入 |
+| `matcher` | 模型匹配 | `on_key_selected` | model_matcher | 权重路由、A/B 测试分流、自定义别名 |
+| `converter` | 格式转换 | `convert_*` | 3 个转换器 | JSON→YAML、自定义协议 |
+| `handler` | 错误处理 | `on_upstream_error` | error_handler | 自定义降级、通知告警 |
+| `post` | 响应处理 | `on_response` | — | 审计增强、Token 统计、缓存 |
+| `app` | 应用插件 | router + views | — | 管理面板、数据仪表盘 |
+
+**结论：完全适配。** 所有代理链路的扩展点都已预留 hook，只需在 plugin.json 中声明对应 `category` 和 `hooks`。
+
+### 适配器迁移评估
 
 | 维度 | 评估 |
 |------|------|
@@ -101,6 +118,7 @@ akm/
   ```python
   class PluginMeta(BaseModel):
       name: str; version: str; has_menu: bool = False
+      category: str = ""           # filter/matcher/converter/handler/post/app
       description: str = ""
       builtin: bool = False       # 内置插件标记
       menu: dict = {}
@@ -136,6 +154,7 @@ akm/
 ```json
 {
     "name": "model_matcher",
+    "category": "matcher",
     "has_menu": false,
     "builtin": true,
     "required": true,
@@ -167,6 +186,7 @@ akm/
 ```json
 {
     "name": "error_handler",
+    "category": "handler",
     "has_menu": false,
     "builtin": true,
     "version": "1.0.0",
