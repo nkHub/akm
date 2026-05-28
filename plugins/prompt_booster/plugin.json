@@ -4,7 +4,7 @@
   "has_menu": true,
   "category": "filter",
   "description": "附加提示词注入：在请求发送到 AI 供应商之前注入自定义 system prompt 或指令",
-  "builtin": true,
+  "builtin": false,
   "hooks": {
     "on_request": true
   },

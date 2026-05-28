@@ -28,8 +28,9 @@ class PluginManager:
     def __init__(self):
         self.plugins: dict[str, PluginBase] = {}           # name → PluginBase 实例
         self._plugin_metas: dict[str, PluginMeta] = {}     # name → PluginMeta
-        self._plugin_sources: dict[str, str] = {}          # name → "builtin" / "third_party"
+        self._plugin_sources: dict[str, str] = {}          # name → "builtin" / "project" / "third_party"
         self._builtin_dir = Path(__file__).resolve().parent
+        self._project_dir = Path(__file__).resolve().parent.parent.parent / "plugins"
         self._third_party_dir = Path.home() / ".akm" / "plugins"
         self._config_path = Path.home() / ".akm" / "config.json"
         self.app: Optional[FastAPI] = None
@@ -158,7 +159,7 @@ class PluginManager:
     async def load_all(self, app: FastAPI, db=None):
         """启动时扫描并加载所有插件
 
-        加载顺序：内置先加载，第三方后加载（重名跳过第三方）
+        加载顺序：内置 → 项目本地 → 第三方（重名跳过）
         """
         self.app = app
         self.db = db
@@ -174,7 +175,14 @@ class PluginManager:
                 continue
             self._load_plugin(entry, "builtin")
 
-        # ── 2. 加载第三方插件 (~/.akm/plugins/ 子目录) ──
+        # ── 2. 加载项目本地插件 (项目根目录 plugins/ 子目录) ──
+        if self._project_dir.exists():
+            for entry in sorted(self._project_dir.iterdir()):
+                if not entry.is_dir():
+                    continue
+                self._load_plugin(entry, "project")
+
+        # ── 3. 加载第三方插件 (~/.akm/plugins/ 子目录) ──
         self._third_party_dir.mkdir(parents=True, exist_ok=True)
         for entry in sorted(self._third_party_dir.iterdir()):
             if not entry.is_dir():
@@ -337,7 +345,7 @@ class PluginManager:
     # ── 插件删除 ──
 
     def delete_plugin(self, name: str) -> dict:
-        """删除 ~/.akm/plugins/{name}/ 目录（仅第三方）"""
+        """删除本地/第三方插件目录（内置插件不可删除）"""
         if name not in self._plugin_sources:
             return {"ok": False, "error": "插件不存在"}
 
@@ -345,7 +353,11 @@ class PluginManager:
         if source == "builtin":
             return {"ok": False, "error": "内置插件不可删除"}
 
-        dest = self._third_party_dir / name
+        if source == "project":
+            dest = self._project_dir / name
+        else:
+            dest = self._third_party_dir / name
+
         if dest.exists():
             shutil.rmtree(dest)
 

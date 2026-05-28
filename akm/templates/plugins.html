@@ -61,9 +61,14 @@ function renderPluginList(plugins) {
   } else {
     plugins.forEach(function(p) {
       var cat = CATEGORY_LABELS[p.category] || p.category || '未分类';
-      var sourceBadge = p.builtin
-        ? '<span class="text-xs px-1.5 py-0.5 rounded bg-indigo-400/10 text-indigo-300">内置</span>'
-        : '<span class="text-xs px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300">第三方</span>';
+      var sourceBadge;
+      if (p.builtin) {
+        sourceBadge = '<span class="text-xs px-1.5 py-0.5 rounded bg-indigo-400/10 text-indigo-300">内置</span>';
+      } else if (p.source === 'project') {
+        sourceBadge = '<span class="text-xs px-1.5 py-0.5 rounded bg-cyan-400/10 text-cyan-300">本地</span>';
+      } else {
+        sourceBadge = '<span class="text-xs px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300">第三方</span>';
+      }
       var requiredBadge = p.required
         ? '<span class="text-xs px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300">必需</span>'
         : '';
