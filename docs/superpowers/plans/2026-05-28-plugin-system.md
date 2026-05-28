@@ -110,10 +110,12 @@ akm/
   - `get_menu()`：仅返回已加载且 enabled 的有菜单插件
   - `get_plugin_list()`：返回全部插件（含加载失败的），供管理界面使用
   - `get_converter(from_format, to_format) -> Plugin | None`：查询启用的转换插件
-  - `install_plugin(file: UploadFile)`：解压 .zip 到 `~/.akm/plugins/`
+  - `install_plugin(file: UploadFile)`：解压 .zip 到 `~/.akm/plugins/`；重名时拒绝并提示冲突
   - `enable_plugin(name)` / `disable_plugin(name)`：required 插件不可禁用，状态写入 config.json
   - `delete_plugin(name)`：仅第三方插件可删，物理删除 `~/.akm/plugins/{name}/`
   - `run_hook(hook, **kwargs)`：按 priority 从小到大管道执行，前一个返回值传给下一个，崩溃隔离
+
+> 插件名全局唯一。加载时内置 + 第三方目录扫描，重名跳过第三方；上传安装时检查重名。
 
 - [ ] **Step 1.3: PluginMeta 模型**
   ```python
@@ -279,5 +281,5 @@ akm/
 |------|------|
 | 内置插件默认启用才能保证向后兼容 | 首次加载时自动启用所有内置插件 |
 | 用户误关转换插件导致 DeepSeek 不可用 | proxy 返回的报错信息指明缺少哪个插件 |
-| model_matcher 被禁用导致无匹配规则 | `required: true` 标记禁止禁用，且同名 required 插件后注册的覆盖前一个 |
+| model_matcher 被禁用导致无匹配规则 | `required: true` 标记禁止禁用，插件名全局唯一 |
 | 插件启用/禁用状态丢失 | 状态写入 `~/.akm/config.json` 的 `plugin_states` 字段 |
