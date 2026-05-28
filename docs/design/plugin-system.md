@@ -174,6 +174,7 @@ akm/
 | `hooks.on_response` | bool | | 是否接收响应对象 |
 | `builtin` | bool | | 是否为内置插件，默认 `false` |
 | `required` | bool | | 是否不可禁用，默认 `false` |
+| `priority` | int | | 同 hook 插件的执行优先级，0-999，越小越先，默认 `100` |
 | `converts` | object | converter 时必需 | `{ "from": "responses", "to": "chat" }` |
 | `settings` | object[] | | 配置项定义，见 5.4 节 |
 
@@ -379,7 +380,7 @@ class PluginManager:
     get_menu() -> list                      # 生成前端菜单结构（仅 has_menu 的插件）
     get_plugin_metas() -> list              # 获取所有插件元数据（含 settings schema）
     get_hook_plugins(hook: str)             # 获取注册了指定 hook 的插件实例列表
-    run_hook(hook, request, response)       # 执行 hook（带崩溃隔离）
+    run_hook(hook, **kwargs) -> Any          # 管道执行：按 priority 从小到大，前一个返回值传给下一个（带崩溃隔离）
     get_config(name: str) -> dict           # 读取插件配置（合并默认值）
     set_config(name: str, data: dict)       # 保存插件配置到 config.json
     install_plugin(file: UploadFile)        # 解压 .zip 到 ~/.akm/plugins/
@@ -443,9 +444,27 @@ class Plugin(PluginBase):
         self.logger.info(f"[#{self._total}] done")
 ```
 
-### 8.3 执行顺序与隔离
+### 8.3 执行顺序与状态传递
 
-Hook 按插件加载顺序依次执行。**崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件 hook 抛异常不会中断后续插件的 hook 执行，也不会影响代理转发主链路。异常会记录到日志。
+同一 hook 的多个插件按 `priority` 从小到大依次执行（越小越优先），形成**管道链**：
+
+```
+request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (priority=100)] → 下一环节
+              ↓ 可改写 request              ↓ 基于 A 的输出继续处理       ↓ 最终处理
+```
+
+每个 hook 的返回值作为下一个同类型 hook 的输入：
+
+| Hook | 输入 | 返回值 | 管道传递 |
+|------|------|--------|---------|
+| `on_request` | `request` | `request`（可修改后返回） | 前一个返回的 request → 下一个的输入 |
+| `on_key_selected` | `(model, key, request)` | `key`（可替换后返回） | 前一个返回的 key → 下一个的输入 |
+| `on_upstream_error` | `(request, response, key)` | `"retry"` / `"switch"` / `None` | 第一个非 None 返回值即为最终决策 |
+| `on_response` | `(request, response)` | `None`（无状态传递） | 纯粹观察，按优先级依次执行 |
+
+> 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。
+
+**崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留其输入原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
 
 ## 九、与 server.py 集成
 
@@ -499,21 +518,39 @@ async def plugin_save_config(name: str, request: Request):
 async def plugin_metas(request: Request):
     return request.app.state.plugin_manager.get_plugin_metas()
 
-# AI 请求端点注入 hook
+# AI 请求端点注入 hook（管道模式：状态逐插件传递）
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     pm = request.app.state.plugin_manager
-    await pm.run_hook("on_request", request)          # ← 请求前 hook
+    request = await pm.run_hook("on_request", request=request)  # ← 前一个改写后的 request 传给下一个
     result = await _handle_ai_request(request, "chat/completions")
-    await pm.run_hook("on_response", request, result) # ← 响应后 hook
+    await pm.run_hook("on_response", request=request, response=result)
     return result
 
 @app.post("/v1/responses")
 async def responses(request: Request):
     pm = request.app.state.plugin_manager
-    await pm.run_hook("on_request", request)
+    request = await pm.run_hook("on_request", request=request)
     result = await _handle_ai_request(request, "responses")
-    await pm.run_hook("on_response", request, result)
+    await pm.run_hook("on_response", request=request, response=result)
+    return result
+
+# run_hook 内部实现（管道）
+async def run_hook(self, hook: str, **kwargs):
+    """按 priority 从小到大依次执行，前一个返回值传给下一个"""
+    plugins = sorted(
+        [p for p in self.plugins.values() if p.enabled and p.meta.hooks.get(hook)],
+        key=lambda p: p.meta.priority
+    )
+    result = kwargs
+    for plugin in plugins:
+        try:
+            ret = await getattr(plugin, hook)(**result)
+            if ret is not None:
+                # 将返回值合并到 kwargs，传给下一个插件
+                result = {**result, **self._unwrap_hook_result(hook, ret)}
+        except Exception as e:
+            self.logger.error(f"[{plugin.meta.name}] hook {hook} 异常: {e}")
     return result
 ```
 

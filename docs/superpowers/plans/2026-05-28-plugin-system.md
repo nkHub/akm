@@ -113,7 +113,7 @@ akm/
   - `install_plugin(file: UploadFile)`：解压 .zip 到 `~/.akm/plugins/`
   - `enable_plugin(name)` / `disable_plugin(name)`：required 插件不可禁用，状态写入 config.json
   - `delete_plugin(name)`：仅第三方插件可删，物理删除 `~/.akm/plugins/{name}/`
-  - `run_hook(hook, ...)`：try/except 包裹，单个插件异常不中断后续 hook 和主链路
+  - `run_hook(hook, **kwargs)`：按 priority 从小到大管道执行，前一个返回值传给下一个，崩溃隔离
 
 - [ ] **Step 1.3: PluginMeta 模型**
   ```python
@@ -125,6 +125,7 @@ akm/
       menu: dict = {}
       routes_prefix: str = ""
       required: bool = False      # 不可禁用
+      priority: int = 100         # 同 hook 的执行优先级，0-999，越小越先
       hooks: dict = {"on_request": False, "on_key_selected": False, "on_upstream_error": False, "on_response": False}
       settings: list[SettingDef] = []
       converts: dict = None       # { "from": "responses", "to": "chat" }
