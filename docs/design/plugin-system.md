@@ -8,6 +8,7 @@
 - 注册自定义 API 路由
 - 提供独立的前端界面（集成到管理台菜单）
 - 拦截请求/响应做自定义处理（日志、审计、过滤等）
+- 访问项目数据库、配置、日志等上下文
 
 ## 一、插件类型
 
@@ -15,8 +16,8 @@
 
 | `has_menu` | 描述 | 必需文件 |
 |----------|------|----------|
-| `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由 | `plugin.json` + `router.py` + `views/index.html` |
-| `false` | 不显示菜单，可注册 API 路由和请求/响应 hook | `plugin.json` + `router.py` |
+| `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由 | `plugin.json` + `index.py` + `views/index.html` |
+| `false` | 不显示菜单，可注册 API 路由和请求/响应 hook | `plugin.json` + `index.py` |
 
 > `has_menu` 默认为 `false`，不填即视为无需菜单入口。
 
@@ -26,20 +27,19 @@
 akm/
 ├── plugins/                      # 插件根目录
 │   ├── __init__.py
+│   ├── base.py                   # PluginBase 基类（提供上下文方法）
 │   ├── plugin_manager.py         # 插件管理器
-│   └── model_mapper/             # 示例插件（有界面）
+│   └── model_mapper/             # 示例插件（有菜单）
 │       ├── plugin.json           # 元数据 + 菜单配置
-│       ├── router.py             # API 路由（约定导出 `router` 对象）
+│       ├── index.py              # 插件入口（导出 Plugin 类，继承 PluginBase）
 │       └── views/                # 前端页面（仅 has_menu: true 时需要）
 │           ├── index.html        # 最少 index.html
 │           ├── style.css
 │           └── app.js
-│   └── request_logger/           # 示例插件（无界面）
+│   └── request_logger/           # 示例插件（无菜单）
 │       ├── plugin.json
-│       └── router.py
+│       └── index.py
 ```
-
-所有插件在同一层级，通过 `plugin.json` 中的 `has_menu` 字段区分是否有前端界面。`has_menu: true` 时需提供 `views/` 目录（至少 `index.html`），同时 `menu` 字段为必需。
 
 ## 三、plugin.json 定义
 
@@ -67,7 +67,7 @@ akm/
     "name": "request_logger",
     "has_menu": false,
     "version": "1.0.0",
-    "description": "增强请求日志，记录完整请求/响应内容到独立存储",
+    "description": "增强请求日志",
     "routes_prefix": "/api/logger",
     "hooks": {
         "on_request": true,
@@ -153,11 +153,13 @@ akm/
 
 #### 配置的读写
 
-插件管理器自动注册 `/api/plugin-config/{name}` 端点：
+插件通过 `self.config` 直接读取当前插件配置，无需手动查找：
 
-```
-GET  /api/plugin-config/{name}      # 读取插件配置（含默认值）
-POST /api/plugin-config/{name}      # 保存插件配置
+```python
+# index.py — Plugin 类中
+async def on_request(self, request):
+    if self.config.get("enable_cache"):
+        ...
 ```
 
 设置页通过 `settings` schema 自动渲染表单，保存后写入 `~/.akm/config.json`：
@@ -175,91 +177,186 @@ POST /api/plugin-config/{name}      # 保存插件配置
 }
 ```
 
-插件在 `router.py` 中通过 `request.app.state.plugin_manager.get_config(name)` 读取：
+## 四、PluginBase 基类
+
+### 4.1 设计
+
+每个插件的 `index.py` 导出名为 `Plugin` 的类，继承自 `plugins.base.PluginBase`。PluginBase 封装了插件可访问的全部上下文和方法：
 
 ```python
-from fastapi import Request
+# akm/plugins/base.py
+import logging
+from pathlib import Path
+from fastapi import FastAPI, APIRouter
 
-@router.get("/stats")
-async def get_stats(request: Request):
-    cfg = request.app.state.plugin_manager.get_config("request_logger")
-    if cfg.get("enable_cache"):
-        ...
+class PluginBase:
+    """插件基类，由 PluginManager 在加载时注入上下文"""
+
+    # ——— 由 PluginManager 注入的属性 ———
+    name: str              # 插件名称（来自 plugin.json）
+    app: FastAPI           # FastAPI 应用实例
+    router: APIRouter      # 本插件的 APIRouter（可在 __init__ 中自定义）
+    meta: dict             # plugin.json 的原始数据
+    logger: logging.Logger # 本插件专属 logger
+
+    # ——— 可重写的生命周期方法 ———
+    async def on_load(self):
+        """插件加载完成时调用（路由已注册），可做初始化操作"""
+        pass
+
+    async def on_unload(self):
+        """插件卸载时调用，可做清理操作"""
+        pass
+
+    # ——— 可重写的 hook 方法 ———
+    async def on_request(self, request) -> None:
+        """请求到达时调用（需在 plugin.json 中声明 hooks.on_request: true）"""
+        pass
+
+    async def on_response(self, request, response) -> None:
+        """响应返回后调用（需在 plugin.json 中声明 hooks.on_response: true）"""
+        pass
+
+    # ——— 辅助属性 ———
+    @property
+    def config(self) -> dict:
+        """当前插件的配置（已合并 settings 默认值）"""
+        return self._get_config()
+
+    @property
+    def db(self):
+        """数据库连接（SQLite，与项目共享同一实例）"""
+        return self._get_db()
+
+    @property
+    def static_dir(self) -> Path:
+        """本插件 views/ 目录的绝对路径"""
+        return self._static_dir
+
+    # ——— 内部方法（由 PluginManager 设置） ———
+    def _set_context(self, name: str, app: FastAPI, meta: dict, static_dir: Path):
+        self.name = name
+        self.app = app
+        self.meta = meta
+        self._static_dir = static_dir
+        self.router = APIRouter()
+        self.logger = logging.getLogger(f"plugin.{name}")
+
+    def _get_config(self) -> dict: ...
+    def _get_db(self): ...
 ```
 
-## 四、PluginManager 设计
+### 4.2 上下文能力一览
 
-### 4.1 核心类
+| 属性/方法 | 类型 | 说明 |
+|-----------|------|------|
+| `self.name` | `str` | 插件名称 |
+| `self.app` | `FastAPI` | 应用实例，可注册中间件、事件处理器等 |
+| `self.router` | `APIRouter` | 本插件路由，在 `__init__` 中定义端点并自动挂载 |
+| `self.config` | `dict` | 本插件配置（含默认值），运行时自动从 config.json 加载 |
+| `self.db` | `sqlite3.Connection` | 项目共享数据库连接，可直接执行 SQL |
+| `self.logger` | `Logger` | 插件专用 logger，输出格式 `[plugin.xxx]` |
+| `self.meta` | `dict` | plugin.json 原始数据（含 settings schema 等） |
+| `self.static_dir` | `Path` | views/ 目录路径，用于读取静态资源 |
+
+### 4.3 生命周期
+
+```
+PluginManager.load_all()
+  └── 对每个插件目录：
+       ├── 1. 读取 plugin.json
+       ├── 2. 动态导入 index.py，获取 Plugin 类
+       ├── 3. 实例化 plugin = Plugin()
+       ├── 4. 调用 plugin._set_context(name, app, meta, static_dir)
+       ├── 5. 调用 plugin.on_load()                    # ← 初始化钩子
+       ├── 6. app.include_router(plugin.router)        # ← 注册路由
+       └── 7. 存入 self.plugins
+
+应用关闭时 lifecycle shutdown：
+  └── 对每个已加载插件：
+       └── 调用 plugin.on_unload()                     # ← 清理钩子
+```
+
+## 五、PluginManager 设计
+
+### 5.1 核心类
 
 ```python
 class PluginManager:
     root: Path                              # 插件根目录
-    plugins: Dict[str, PluginInfo]           # 已加载的全部插件
+    plugins: Dict[str, PluginBase]           # 已加载的插件实例（name → PluginBase）
 
-    load_all(app: FastAPI)                  # 扫描并加载全部插件
+    load_all(app: FastAPI, db)              # 扫描并加载全部插件
     get_menu() -> list                      # 生成前端菜单结构（仅 has_menu 的插件）
     get_plugin_metas() -> list              # 获取所有插件元数据（含 settings schema）
-    get_hook_plugins(hook: str)             # 获取注册了指定 hook 的插件列表
+    get_hook_plugins(hook: str)             # 获取注册了指定 hook 的插件实例列表
     run_hook(hook, request, response)       # 执行 hook
     get_config(name: str) -> dict           # 读取插件配置（合并默认值）
     set_config(name: str, data: dict)       # 保存插件配置到 config.json
 ```
 
-### 4.2 加载流程
+### 5.2 加载流程
 
 ```
-PluginManager.load_all(app)
+PluginManager.load_all(app, db)
   ├── 扫描 plugins/ 目录下所有子目录
   │   ├── 读取 plugin.json → 解析 PluginMeta
-  │   ├── 动态导入 router.py → app.include_router(router, prefix=routes_prefix)
+  │   ├── 动态导入 index.py → 获取 Plugin 类
+  │   ├── 实例化 plugin 并注入上下文（app, db, config, logger）
+  │   ├── 调用 plugin.on_load()
+  │   ├── app.include_router(plugin.router, prefix=routes_prefix)
   │   ├── 如果 has_menu: true 且 views/ 存在
   │   │   ├── StaticFiles 挂载 views/ → /plugins/{name}/static
   │   │   └── 注册前端页面路由 /plugins/{name} → views/index.html
-  │   └── 存入 self.plugins
+  │   └── 存入 self.plugins[name] = plugin
 ```
 
-### 4.3 路由注册规则
+### 5.3 路由注册规则
 
-- **API 路由**：`router.py` 中导出的 `router`（FastAPI `APIRouter` 实例）挂载到 `{routes_prefix}` 下
+- **API 路由**：插件的 `self.router`（在 `__init__` 中定义的 APIRouter）挂载到 `{routes_prefix}` 下
 - **前端路由**（仅 has_menu 插件）：`/plugins/{name}` 和 `/plugins/{name}/{rest:path}` → `views/index.html`（SPA 支持）
 - **静态文件**（仅 has_menu 插件）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）
 
-## 五、Hook 机制
+## 六、Hook 机制
 
-### 5.1 触发时机
+### 6.1 触发时机
 
 | Hook | 触发点 | 参数 | 用途 |
 |------|--------|------|------|
 | `on_request` | proxy 转发请求之前 | `request: Request` | 请求日志、参数校验、请求改写 |
 | `on_response` | proxy 转发响应之后 | `request: Request, response: Response` | 响应日志、结果缓存、告警通知 |
 
-### 5.2 约定
+### 6.2 约定
 
-插件在 `router.py` 中声明与 hook 同名的异步函数，PluginManager 在对应时机自动调用：
+插件在 `Plugin` 类中重写 `on_request` / `on_response` 方法，同时在 `plugin.json` 的 `hooks` 中声明为 `true`。PluginManager 在对应时机自动调用：
 
 ```python
-# router.py
-from fastapi import APIRouter, Request
-from fastapi.responses import Response
+# index.py
+from plugins.base import PluginBase
+from fastapi import Request
 
-router = APIRouter()
+class Plugin(PluginBase):
+    """请求日志插件"""
 
-async def on_request(request: Request, response=None):
-    """请求到达时记录"""
-    print(f"[{request.method}] {request.url.path}")
+    def __init__(self):
+        super().__init__()
+        self._total = 0
 
-async def on_response(request: Request, response=None):
-    """响应返回时处理"""
-    pass
+    async def on_request(self, request):
+        self._total += 1
+        self.logger.info(f"[#{self._total}] {request.method} {request.url.path}")
+
+    async def on_response(self, request, response):
+        self.logger.info(f"[#{self._total}] done")
 ```
 
-### 5.3 执行顺序
+### 6.3 执行顺序
 
 Hook 按插件加载顺序依次执行，单个 hook 异常不会中断后续 hook 的执行。
 
-## 六、与 server.py 集成
+## 七、与 server.py 集成
 
-### 6.1 改动点
+### 7.1 改动点
 
 ```python
 # server.py
@@ -268,7 +365,7 @@ from .plugins.plugin_manager import PluginManager
 
 # lifespan 中：
 plugin_manager = PluginManager()
-plugin_manager.load_all(app)
+plugin_manager.load_all(app, db)  # db 传入共享数据库连接
 app.state.plugin_manager = plugin_manager
 
 # 新增菜单 API
@@ -310,7 +407,7 @@ async def responses(request: Request):
     return result
 ```
 
-### 6.2 前端集成
+### 7.2 前端集成
 
 **菜单**：sidebar 调用 `/api/plugin-menu`，动态插入插件入口：
 
@@ -323,7 +420,6 @@ fetch('/api/plugin-menu')
 **设置页**：全局设置页调用 `/api/plugin-metas`，遍历每个插件的 `settings` 数组，按 schema 自动渲染表单（number→数字输入、boolean→开关、select→下拉、text→多行文本）。修改后 POST 到 `/api/plugin-config/{name}` 保存。
 
 ```javascript
-// settings.html 中
 fetch('/api/plugin-metas')
     .then(res => res.json())
     .then(metas => {
@@ -333,24 +429,11 @@ fetch('/api/plugin-metas')
             }
         });
     });
-
-function renderPluginSettings(name, settings) {
-    const section = createSection(`${name} 设置`);
-    settings.forEach(s => {
-        let el;
-        if (s.type === 'boolean') el = createToggle(s.label, s.default);
-        else if (s.type === 'select') el = createSelect(s.label, s.options);
-        else if (s.type === 'text') el = createTextarea(s.label, s.default);
-        else el = createInput(s.label, s.type, s.default, s.min, s.max);
-        section.append(el);
-    });
-    section.onSave(() => fetch(`/api/plugin-config/${name}`, { method: 'POST', body: collect(section) }));
-}
 ```
 
-## 七、插件开发示例
+## 八、插件开发示例
 
-### 7.1 有菜单插件：模型映射
+### 8.1 有菜单插件：模型映射（操作数据库）
 
 **plugins/model_mapper/plugin.json**
 ```json
@@ -364,20 +447,43 @@ function renderPluginSettings(name, settings) {
 }
 ```
 
-**plugins/model_mapper/router.py**
+**plugins/model_mapper/index.py**
 ```python
-from fastapi import APIRouter
+from plugins.base import PluginBase
 
-router = APIRouter()
+class Plugin(PluginBase):
+    """模型映射插件"""
 
-@router.get("/list")
-async def list_mappings():
-    return {"mappings": {"gpt-4": "gpt-oss:20b", "claude": "claude-opus"}}
+    def __init__(self):
+        super().__init__()
+        # 定义路由
+        self.router.add_api_route("/list", self.list_mappings)
+        self.router.add_api_route("/add", self.add_mapping, methods=["POST"])
 
-@router.post("/add")
-async def add_mapping(original: str, mapped: str):
-    # 写入数据库
-    return {"status": "ok", "original": original, "mapped": mapped}
+    async def on_load(self):
+        """插件加载时初始化数据库表"""
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS model_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original TEXT NOT NULL,
+                mapped TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self.db.commit()
+        self.logger.info("映射表初始化完成")
+
+    async def list_mappings(self):
+        rows = self.db.execute("SELECT original, mapped FROM model_mappings").fetchall()
+        return {"mappings": [{"original": r[0], "mapped": r[1]} for r in rows]}
+
+    async def add_mapping(self, original: str, mapped: str):
+        self.db.execute(
+            "INSERT INTO model_mappings (original, mapped) VALUES (?, ?)",
+            (original, mapped)
+        )
+        self.db.commit()
+        return {"status": "ok", "original": original, "mapped": mapped}
 ```
 
 **plugins/model_mapper/views/index.html**
@@ -396,7 +502,7 @@ async def add_mapping(original: str, mapped: str):
 </html>
 ```
 
-### 7.2 无菜单插件：请求日志（带配置）
+### 8.2 无菜单插件：请求日志（hook + 配置）
 
 **plugins/request_logger/plugin.json**
 ```json
@@ -426,33 +532,37 @@ async def add_mapping(original: str, mapped: str):
 }
 ```
 
-**plugins/request_logger/router.py**
+**plugins/request_logger/index.py**
 ```python
-from fastapi import APIRouter, Request
 from datetime import datetime
+from plugins.base import PluginBase
 
-router = APIRouter()
+class Plugin(PluginBase):
+    """请求日志插件 — 通过 hook 拦截请求/响应"""
 
-async def on_request(request: Request, response=None):
-    cfg = request.app.state.plugin_manager.get_config("request_logger")
-    if cfg.get("enable_stats"):
-        request.state._logger_start = datetime.now()
+    def __init__(self):
+        super().__init__()
+        self._start_times = {}  # request_id → 开始时间
 
-async def on_response(request: Request, response=None):
-    cfg = request.app.state.plugin_manager.get_config("request_logger")
-    if cfg.get("enable_stats"):
-        elapsed = (datetime.now() - request.state._logger_start).total_seconds()
-        print(f"[logger] {request.url.path} in {elapsed:.2f}s")
+    async def on_request(self, request):
+        if self.config.get("enable_stats"):
+            rid = id(request)
+            self._start_times[rid] = datetime.now()
+            self.logger.info(f"→ {request.method} {request.url.path}")
 
-@router.get("/stats")
-async def get_stats(request: Request):
-    cfg = request.app.state.plugin_manager.get_config("request_logger")
-    return {"enabled": cfg.get("enable_stats"), "retries": cfg.get("max_retries")}
+    async def on_response(self, request, response):
+        if self.config.get("enable_stats"):
+            rid = id(request)
+            start = self._start_times.pop(rid, None)
+            if start:
+                elapsed = (datetime.now() - start).total_seconds()
+                self.logger.info(f"← {request.url.path} ({elapsed:.2f}s)")
 ```
 
-## 八、安全考虑
+## 九、安全考虑
 
-- 插件代码在 akm 进程中运行，拥有完整权限，仅应由信任的开发者编写
+- 插件代码在 akm 进程中运行，拥有完整权限（包括数据库），仅应由信任的开发者编写
 - `plugin.json` 中不包含可执行代码
+- `PluginBase` 中的数据库访问为共享连接，插件需自行管理事务和锁
 - 插件加载失败时打印警告但不阻止 akm 启动
 - hook 执行异常被捕获，不影响请求正常流程
