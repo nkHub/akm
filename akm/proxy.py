@@ -103,6 +103,44 @@ def _sse_to_json(sse_text: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+async def _handle_upstream_error(
+    plugin_manager,
+    body: dict,
+    status_code: int,
+    error_type: str,
+    attempt: int,
+    key: dict,
+) -> str | None:
+    """调用 on_upstream_error hook，无插件可用时返回内置兜底策略
+
+    返回值: "retry" / "switch" / "block" / None
+    """
+    if plugin_manager:
+        hook_result = await plugin_manager.run_hook(
+            "on_upstream_error",
+            request=body,
+            status_code=status_code,
+            error_type=error_type,
+            attempt=attempt,
+            key=key,
+        )
+        action = hook_result.get("action")
+        if action is not None:
+            return action
+
+    # ── 内置兜底策略（无 error_handler 插件或插件返回 None 时生效）──
+    max_retries = MAX_RETRIES_PER_KEY
+    if status_code == 429:
+        return "block"
+    if status_code in (402, 401, 403):
+        return "block"
+    if 500 <= status_code < 600:
+        return "retry" if attempt < max_retries else "switch"
+    if error_type in ("connect", "timeout", "chunk") and status_code == 0:
+        return "retry" if attempt < max_retries else "switch"
+    return "switch"
+
+
 async def forward_request(
     body: dict,
     client: httpx.AsyncClient,
@@ -207,38 +245,34 @@ async def forward_request(
                 req = client.build_request("POST", url, json=upstream_body, headers=headers, timeout=120)
                 resp = await client.send(req, stream=True)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
-                last_error = str(e)
-                if attempt < MAX_RETRIES_PER_KEY:
+                error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
+                action = await _handle_upstream_error(
+                    plugin_manager, body, 0, error_type, attempt, key
+                )
+                if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
+                last_error = str(e)
                 break
             except Exception as e:
                 last_error = str(e)
                 break
 
-            # ── 错误状态码处理 ──
-            if resp.status_code == 429:
-                mark_rate_limited(key["alias"])
-                last_error = f"429 Too Many Requests (key: {key['alias']})"
-                await resp.aclose()
-                break
+            # ── 错误状态码处理（通过 on_upstream_error hook 决定策略）──
+            is_error = resp.status_code != 200
 
-            if resp.status_code == 402:
-                set_status(key["alias"], "disabled")
-                last_error = f"402 Payment Required (key: {key['alias']} 已禁用)"
+            if is_error:
+                action = await _handle_upstream_error(
+                    plugin_manager, body, resp.status_code, "http", attempt, key
+                )
+                last_error = f"{resp.status_code} (key: {key['alias']})"
+                if action == "block":
+                    if resp.status_code == 429:
+                        mark_rate_limited(key["alias"])
+                    else:
+                        set_status(key["alias"], "disabled")
                 await resp.aclose()
-                break
-
-            if resp.status_code in (401, 403):
-                set_status(key["alias"], "disabled")
-                last_error = f"{resp.status_code} 认证失败 (key: {key['alias']} 已禁用)"
-                await resp.aclose()
-                break
-
-            if 500 <= resp.status_code < 600:
-                last_error = f"{resp.status_code} Server Error"
-                await resp.aclose()
-                if attempt < MAX_RETRIES_PER_KEY:
+                if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
                 break
@@ -261,9 +295,12 @@ async def forward_request(
                 async for chunk in resp.aiter_bytes():
                     chunks.append(chunk)
             except Exception as e:
+                action = await _handle_upstream_error(
+                    plugin_manager, body, 0, "chunk", attempt, key
+                )
                 last_error = f"读取流式响应失败: {e}"
                 await resp.aclose()
-                if attempt < MAX_RETRIES_PER_KEY:
+                if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
                 break
