@@ -44,22 +44,32 @@
 
 ```
 akm/
-├── plugins/
+├── plugins/                      # 内置插件（随项目分发）
 │   ├── __init__.py
-│   ├── base.py                    # PluginBase 基类
-│   ├── plugin_manager.py          # PluginManager
-│   └── builtin/                   # 内置插件（随项目分发，可禁用）
-│       ├── responses_converter/
-│       │   ├── plugin.json
-│       │   └── index.py           # 内联原 ResponsesAdapter 全部转换逻辑
-│       ├── messages_converter/
-│       │   ├── plugin.json
-│       │   └── index.py           # 内联原 MessagesAdapter 全部转换逻辑
-│       └── chat_converter/
-│           ├── plugin.json
-│           └── index.py           # 内联原 ChatAdapter 透传逻辑
-├── server.py                      # 集成 PluginManager
-└── agent.py                       # 移除硬编码适配器属性
+│   ├── base.py                   # PluginBase 基类
+│   ├── plugin_manager.py         # PluginManager
+│   ├── responses_converter/      # 协议转换插件
+│   │   ├── plugin.json
+│   │   └── index.py              # 内联原 ResponsesAdapter 全部转换逻辑
+│   ├── messages_converter/
+│   │   ├── plugin.json
+│   │   └── index.py              # 内联原 MessagesAdapter 全部转换逻辑
+│   └── chat_converter/
+│       ├── plugin.json
+│       └── index.py              # 内联原 ChatAdapter 透传逻辑
+
+~/.akm/
+├── config.json
+├── akm.db
+└── plugins/                      # 第三方插件（用户自行安装）
+    └── model_mapper/
+        ├── plugin.json
+        ├── index.py
+        └── views/
+            └── index.html
+
+├── server.py                     # 集成 PluginManager
+└── agent.py                      # 移除硬编码适配器属性
 ```
 
 ---
@@ -73,11 +83,12 @@ akm/
   - 辅助：`self.config`（自动读 config.json）、`self.db`（共享连接）、`self.enabled`
 
 - [ ] **Step 1.2: 创建 `akm/plugins/plugin_manager.py`**
-  - `load_all(app, db)`：扫描 `plugins/builtin/` + `plugins/` 下所有子目录
+  - `load_all(app, db)`：扫描 `akm/plugins/`（内置）+ `~/.akm/plugins/`（第三方）
   - `get_menu()`：仅返回已加载且 enabled 的有菜单插件
   - `get_plugin_list()`：返回全部插件（含加载失败的），供管理界面使用
   - `get_converter(from_format, to_format) -> Plugin | None`：查询启用的转换插件
   - `enable_plugin(name)` / `disable_plugin(name)`：状态写入 config.json
+  - `delete_plugin(name)`：仅第三方插件可删，物理删除 `~/.akm/plugins/{name}/`
   - `run_hook(hook, request, response)`：仅对 enabled 的插件执行
 
 - [ ] **Step 1.3: PluginMeta 模型**
@@ -102,7 +113,7 @@ akm/
 - [ ] **Step 2.1: responses_converter** — `converts: { "from": "responses", "to": "chat" }`
 - [ ] **Step 2.2: messages_converter** — `converts: { "from": "messages", "to": "chat" }`
 - [ ] **Step 2.3: chat_converter** — `converts: { "from": "chat", "to": "messages" }`
-- [ ] **Step 2.4: 删除 `akm/adapters/` 目录**，迁移现有 31 个测试到插件目录下的 `tests/`
+- [ ] **Step 2.4: 删除 `akm/adapters/` 目录**，迁移现有 31 个测试到对应插件目录
 
 ---
 
