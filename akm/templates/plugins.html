@@ -1,0 +1,171 @@
+{% extends "_layout.html" %}
+{% block content %}
+<div class="space-y-6">
+
+  <!-- 提示 -->
+  <div class="bg-amber-400/10 border border-amber-400/30 rounded-lg p-3 flex items-center gap-2">
+    <svg class="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+    <p class="text-xs text-amber-300">插件启用/禁用/安装后，需<b>手动重启 akm 服务</b>才能生效。</p>
+  </div>
+
+  <!-- 上传区域 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">安装插件</h3>
+    <div class="bg-surface-light border border-border rounded-lg p-4">
+      <div class="flex items-center gap-4">
+        <label class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded cursor-pointer transition-colors">
+          选择 .zip 文件
+          <input type="file" id="plugin-file" accept=".zip" class="hidden" onchange="uploadPlugin()">
+        </label>
+        <span id="upload-status" class="text-xs text-gray-400">支持 .zip 格式，自动解压到 ~/.akm/plugins/</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 插件列表 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">已加载插件 (<span id="plugin-count">0</span>)</h3>
+    <div id="plugin-list" class="space-y-2">
+      <div class="text-xs text-gray-500">加载中...</div>
+    </div>
+  </section>
+
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+var _plugins = [];
+
+function loadPlugins() {
+  fetch('/api/plugins').then(function(r){return r.json()}).then(function(data){
+    _plugins = data;
+    document.getElementById('plugin-count').textContent = data.length;
+    renderPluginList(data);
+  }).catch(function(e){
+    document.getElementById('plugin-list').innerHTML = '<div class="text-xs text-red-400">加载失败: ' + esc(e.message) + '</div>';
+  });
+}
+
+var CATEGORY_LABELS = {
+  filter: '请求处理', matcher: '模型匹配', converter: '格式转换',
+  handler: '错误处理', post: '响应处理', app: '应用插件'
+};
+
+function renderPluginList(plugins) {
+  var html = '';
+  if (plugins.length === 0) {
+    html = '<div class="text-gray-600 text-sm">暂无插件</div>';
+  } else {
+    plugins.forEach(function(p) {
+      var cat = CATEGORY_LABELS[p.category] || p.category || '未分类';
+      var sourceBadge = p.builtin
+        ? '<span class="text-xs px-1.5 py-0.5 rounded bg-indigo-400/10 text-indigo-300">内置</span>'
+        : '<span class="text-xs px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300">第三方</span>';
+      var requiredBadge = p.required
+        ? '<span class="text-xs px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300">必需</span>'
+        : '';
+      var convertsInfo = p.converts
+        ? '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(p.converts.from) + ' → ' + esc(p.converts.to) + '</span>'
+        : '';
+
+      html += '<div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">';
+      html += '<div class="flex-1 min-w-0">';
+      html += '<div class="flex items-center gap-2 mb-1">';
+      html += '<h4 class="text-sm font-semibold text-white">' + esc(p.name) + '</h4>';
+      html += sourceBadge + requiredBadge;
+      html += '<span class="text-xs text-gray-500">v' + esc(p.version) + '</span>';
+      html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
+      html += convertsInfo;
+      html += '</div>';
+      if (p.description) {
+        html += '<p class="text-xs text-gray-500">' + esc(p.description) + '</p>';
+      }
+
+      var hooks = [];
+      if (p.hooks.on_request) hooks.push('on_request');
+      if (p.hooks.on_key_selected) hooks.push('on_key_selected');
+      if (p.hooks.on_upstream_error) hooks.push('on_upstream_error');
+      if (p.hooks.on_response) hooks.push('on_response');
+      if (hooks.length) {
+        html += '<p class="text-xs text-gray-600 mt-1">Hooks: ' + hooks.join(', ') + (p.priority !== 100 ? ' (优先级: ' + p.priority + ')' : '') + '</p>';
+      }
+      html += '</div>';
+
+      html += '<div class="flex items-center gap-3 shrink-0 ml-4">';
+      if (p.required) {
+        html += '<span class="text-xs text-gray-500">系统必需</span>';
+      } else {
+        html += '<label class="flex items-center cursor-pointer select-none switch-' + (p.enabled ? 'on' : 'off') + '" onclick="togglePlugin(\'' + esc(p.name) + '\', ' + p.enabled + ')">';
+        html += '<div class="switch-track ' + (p.enabled ? 'bg-indigo-600' : 'bg-gray-600') + ' flex items-center"><div class="switch-thumb bg-white"></div></div>';
+        html += '</label>';
+      }
+      if (!p.builtin) {
+        html += '<button onclick="deletePlugin(\'' + esc(p.name) + '\')" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>';
+      }
+      html += '</div>';
+
+      html += '</div>';
+    });
+  }
+  document.getElementById('plugin-list').innerHTML = html;
+}
+
+function togglePlugin(name, currentEnabled) {
+  var endpoint = currentEnabled ? '/api/plugins/' + name + '/disable' : '/api/plugins/' + name + '/enable';
+  fetch(endpoint, {method: 'POST'}).then(function(r){return r.json()}).then(function(data){
+    if (data.ok) {
+      loadPlugins();
+    } else {
+      alert(data.error || '操作失败');
+    }
+  }).catch(function(e){
+    alert('网络错误: ' + e.message);
+  });
+}
+
+function deletePlugin(name) {
+  if (!confirm('确认删除插件 "' + name + '"？此操作不可撤销。')) return;
+  fetch('/api/plugins/' + encodeURIComponent(name), {method: 'DELETE'}).then(function(r){return r.json()}).then(function(data){
+    if (data.ok) {
+      loadPlugins();
+    } else {
+      alert(data.error || '删除失败');
+    }
+  }).catch(function(e){
+    alert('网络错误: ' + e.message);
+  });
+}
+
+function uploadPlugin() {
+  var fileInput = document.getElementById('plugin-file');
+  var status = document.getElementById('upload-status');
+  var file = fileInput.files[0];
+  if (!file) return;
+
+  status.textContent = '上传中...';
+  status.className = 'text-xs text-gray-400';
+
+  var formData = new FormData();
+  formData.append('file', file);
+
+  fetch('/api/plugins/upload', {method: 'POST', body: formData}).then(function(r){return r.json()}).then(function(data){
+    if (data.ok) {
+      status.textContent = data.message;
+      status.className = 'text-xs text-emerald-400';
+      fileInput.value = '';
+    } else {
+      status.textContent = data.error || '上传失败';
+      status.className = 'text-xs text-red-400';
+    }
+  }).catch(function(e){
+    status.textContent = '上传失败: ' + e.message;
+    status.className = 'text-xs text-red-400';
+  });
+}
+
+document.addEventListener('DOMContentLoaded', loadPlugins);
+</script>
+{% endblock %}
