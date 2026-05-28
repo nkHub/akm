@@ -352,7 +352,7 @@ class TestResponsesAdapterSSE:
 
     @pytest.mark.asyncio
     async def test_convert_sse_with_reasoning(self):
-        """验证 DeepSeek thinking 返回的 reasoning_content 被透传到 Responses SSE"""
+        """验证 DeepSeek reasoning_content 映射为独立的 reasoning_summary_text.delta 事件"""
         adapter = ResponsesAdapter()
         chat_sse = [
             b'data: {"id":"chatcmpl-1","model":"deepseek-v4","choices":[{"delta":{"role":"assistant","reasoning_content":""},"index":0}]}\n\n',
@@ -367,31 +367,41 @@ class TestResponsesAdapterSSE:
             lines.append(line)
 
         events = _parse_sse_helper(lines)
-        deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
-        assert len(deltas) == 3
-        assert "Now" in deltas
-        assert " processing..." in deltas
-        assert "Hello world" in deltas
 
-        # 最终 content_part.done 应包含合并后的全文
+        # reasoning 内容走 reasoning_summary_text.delta，不走 output_text.delta
+        reasoning_deltas = [e[1]["delta"] for e in events if e[0] == "response.reasoning_summary_text.delta"]
+        assert len(reasoning_deltas) == 2
+        assert reasoning_deltas == ["Now", " processing..."]
+
+        # 正文走 output_text.delta
+        output_deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
+        assert len(output_deltas) == 1
+        assert output_deltas == ["Hello world"]
+
+        # content_part.done 只包含正文
         done_event = [e for e in events if e[0] == "response.content_part.done"][0]
-        assert done_event[1]["part"]["text"] == "Now processing...Hello world"
-        assert "item_id" in done_event[1]
+        assert done_event[1]["part"]["text"] == "Hello world"
 
-        # output_item.done 应包含 reasoning_content
-        item_done = [e for e in events if e[0] == "response.output_item.done"][0]
-        assert item_done[1]["item"]["reasoning_content"] == "Now processing..."
+        # output_item.done 仍包含 reasoning_content 元数据
+        item_done = [e for e in events if e[0] == "response.output_item.done"]
+        # 有两个 output_item.done：推理项 + message 项
+        assert len(item_done) == 2
+        message_done = [e for e in item_done if e[1]["item"]["type"] == "message"][0]
+        assert message_done[1]["item"]["reasoning_content"] == "Now processing..."
 
-        # response.completed 的 output 应包含 reasoning 和 content 两条
+        # response.completed 的 output：推理项 + message
         completed_event = [e for e in events if e[0] == "response.completed"][0]
-        output_content = completed_event[1]["response"]["output"][0]["content"]
-        assert len(output_content) == 2
-        assert output_content[0]["text"] == "Now processing..."
-        assert output_content[1]["text"] == "Hello world"
+        output = completed_event[1]["response"]["output"]
+        assert len(output) == 2
+        assert output[0]["type"] == "reasoning"
+        assert output[0]["content"][0]["text"] == "Now processing..."
+        assert output[0]["content"][0]["type"] == "reasoning_summary_text"
+        assert output[1]["type"] == "message"
+        assert output[1]["content"][0]["text"] == "Hello world"
 
     @pytest.mark.asyncio
     async def test_convert_sse_reasoning_only(self):
-        """验证纯 reasoning 无正文时，reasoning 仍被透传且不丢失"""
+        """验证纯 reasoning 无正文时，reasoning 作为独立推理项 + message 兜底输出"""
         adapter = ResponsesAdapter()
         chat_sse = [
             b'data: {"id":"chatcmpl-1","model":"deepseek-v4","choices":[{"delta":{"role":"assistant","reasoning_content":""},"index":0}]}\n\n',
@@ -404,13 +414,27 @@ class TestResponsesAdapterSSE:
             lines.append(line)
 
         events = _parse_sse_helper(lines)
-        deltas = [e[1]["delta"] for e in events if e[0] == "response.output_text.delta"]
-        assert len(deltas) == 1
-        assert "thinking..." in deltas
 
-        # 只有 reasoning 无 content 时，done 的 part 中应有 reasoning
+        # 流式推理走 reasoning_summary_text.delta
+        reasoning_deltas = [e[1]["delta"] for e in events if e[0] == "response.reasoning_summary_text.delta"]
+        assert len(reasoning_deltas) == 1
+        assert "thinking..." in reasoning_deltas
+
+        # 必须有 reasoning_summary_text.done 关闭推理
+        rsn_done = [e for e in events if e[0] == "response.reasoning_summary_text.done"]
+        assert len(rsn_done) == 1
+        assert rsn_done[0][1]["text"] == "thinking..."
+
+        # 纯推理场景仍将 reasoning 作为正文兜底输出到 message output_item
         done_event = [e for e in events if e[0] == "response.content_part.done"][0]
         assert done_event[1]["part"]["text"] == "thinking..."
+
+        # response.completed 应包含 reasoning 项 + message 项
+        completed = [e for e in events if e[0] == "response.completed"][0]
+        output = completed[1]["response"]["output"]
+        assert len(output) == 2
+        assert output[0]["type"] == "reasoning"
+        assert output[1]["type"] == "message"
 
     @pytest.mark.asyncio
     async def test_convert_sse_empty_stream(self):
