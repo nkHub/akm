@@ -121,6 +121,13 @@ async def forward_request(
     tried_aliases: set[str] = set()
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
 
+    # ── 插件 hook: on_request（模型名映射等预处理）──
+    if plugin_manager:
+        hook_result = await plugin_manager.run_hook("on_request", request=body)
+        if isinstance(hook_result, dict) and "request" in hook_result:
+            body = hook_result["request"]
+            model = body.get("model", model)
+
     while tries < MAX_KEY_TRIES:
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
         if use_fallback:
@@ -151,6 +158,15 @@ async def forward_request(
         tried_aliases.add(key["alias"])
 
         tries += 1
+
+        # ── 插件 hook: on_key_selected（模型匹配后二次调整）──
+        if plugin_manager:
+            result = await plugin_manager.run_hook(
+                "on_key_selected", model=model, key=key, request=body
+            )
+            if isinstance(result, dict) and "key" in result:
+                key = result["key"]
+
         agent = get_agent(key.get("provider", "openai"))
 
         # ── 协议转换检测 ──
