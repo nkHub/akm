@@ -223,6 +223,102 @@ class TestResponsesAdapterRequest:
         assert "additionalProperties" not in params
         assert "strict" not in func  # strict 在 function 层级也不应有
 
+    def test_convert_namespace_tools_expansion(self):
+        """验证 namespace 类型工具递归展开子工具，名称加命名空间前缀"""
+        adapter = ResponsesAdapter()
+        tools = [
+            {
+                "type": "function",
+                "name": "exec_command",
+                "description": "执行命令",
+                "parameters": {"type": "object", "properties": {}}
+            },
+            {
+                "type": "namespace",
+                "name": "mcp__translate__",
+                "description": "翻译 MCP 工具",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "translate",
+                        "description": "翻译文本",
+                        "strict": False,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string", "description": "需要翻译的文本"}
+                            },
+                            "required": ["text"]
+                        }
+                    },
+                    {
+                        "name": "detect_language",
+                        "description": "检测语言",
+                        "strict": False,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string", "description": "需要检测的文本"}
+                            },
+                            "required": ["text"]
+                        }
+                    }
+                ]
+            }
+        ]
+        result = adapter._convert_tools(tools)
+        # 应该有 3 个工具：1 个普通 + 2 个展开的 MCP 子工具
+        assert len(result) == 3
+
+        # 普通工具不变
+        assert result[0]["function"]["name"] == "exec_command"
+
+        # MCP 子工具 1（function 格式）：名称加前缀
+        assert result[1]["function"]["name"] == "mcp__translate__translate"
+        assert result[1]["function"]["description"] == "翻译文本"
+        params1 = result[1]["function"]["parameters"]
+        assert "text" in params1.get("properties", {})
+        assert "additionalProperties" not in params1
+
+        # MCP 子工具 2（简洁格式）：名称加前缀，包装为 function 格式
+        assert result[2]["function"]["name"] == "mcp__translate__detect_language"
+        assert result[2]["function"]["description"] == "检测语言"
+        params2 = result[2]["function"]["parameters"]
+        assert "text" in params2.get("properties", {})
+
+    def test_convert_empty_namespace_skipped(self):
+        """验证空的 namespace（无 tools）被跳过"""
+        adapter = ResponsesAdapter()
+        tools = [
+            {"type": "namespace", "name": "empty", "tools": []},
+            {"type": "function", "name": "real_tool", "parameters": {}}
+        ]
+        result = adapter._convert_tools(tools)
+        assert len(result) == 1
+        assert result[0]["function"]["name"] == "real_tool"
+
+    def test_convert_namespace_with_nested_function_cleaning(self):
+        """验证 namespace 子工具的 strict 和 additionalProperties 被清理"""
+        adapter = ResponsesAdapter()
+        tools = [{
+            "type": "namespace",
+            "name": "mcp__test__",
+            "tools": [{
+                "name": "foo",
+                "description": "test tool",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {"bar": {"type": "string"}}
+                }
+            }]
+        }]
+        result = adapter._convert_tools(tools)
+        assert len(result) == 1
+        params = result[0]["function"]["parameters"]
+        assert "additionalProperties" not in params
+
     def test_message_reordering_system_between_tool_calls(self):
         """验证 system 消息被移到 assistant(tool_calls) 之前，tool 结果紧跟 assistant"""
         adapter = ResponsesAdapter()
