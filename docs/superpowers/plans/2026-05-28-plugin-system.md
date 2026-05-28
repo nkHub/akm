@@ -110,9 +110,10 @@ akm/
   - `get_menu()`：仅返回已加载且 enabled 的有菜单插件
   - `get_plugin_list()`：返回全部插件（含加载失败的），供管理界面使用
   - `get_converter(from_format, to_format) -> Plugin | None`：查询启用的转换插件
+  - `install_plugin(file: UploadFile)`：解压 .zip 到 `~/.akm/plugins/`
   - `enable_plugin(name)` / `disable_plugin(name)`：required 插件不可禁用，状态写入 config.json
   - `delete_plugin(name)`：仅第三方插件可删，物理删除 `~/.akm/plugins/{name}/`
-  - `run_hook(hook, request, response)`：仅对 enabled 的插件执行
+  - `run_hook(hook, ...)`：try/except 包裹，单个插件异常不中断后续 hook 和主链路
 
 - [ ] **Step 1.3: PluginMeta 模型**
   ```python
@@ -247,10 +248,17 @@ akm/
 
 ## Task 4: 插件管理界面
 
-- [ ] **`GET /api/plugins`** — 插件列表（含加载状态、启用状态）
-- [ ] **`POST /api/plugins/{name}/enable`** — 启用
-- [ ] **`POST /api/plugins/{name}/disable`** — 禁用
-- [ ] **管理台新增「插件管理」页面** — 表格展示，状态开关，内置标记
+- [ ] **`GET /api/plugins`** — 插件列表（含加载状态、启用状态、内置/第三方标记）
+- [ ] **`POST /api/plugins/upload`** — 上传 `.zip` 包，服务端解压到 `~/.akm/plugins/`
+- [ ] **`POST /api/plugins/{name}/enable`** — 启用（需重启生效）
+- [ ] **`POST /api/plugins/{name}/disable`** — 禁用（required 插件拒绝，需重启生效）
+- [ ] **`DELETE /api/plugins/{name}`** — 删除（仅第三方，物理删除目录）
+- [ ] **管理台新增「插件管理」页面**：
+  - 表格展示所有插件（名称/版本/分类/来源/状态）
+  - 状态开关（required 插件灰化不可操作）
+  - 上传 .zip 按钮 → 调用 `/api/plugins/upload`
+  - 第三方插件删除按钮
+  - 顶部提示：「插件状态变更后需手动重启服务生效」（不支持热重载）
 
 ---
 

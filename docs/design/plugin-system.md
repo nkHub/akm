@@ -38,7 +38,7 @@
 | 内置 | `akm/plugins/` | 🥇 最高 | 随项目分发，内部插件优先于同名第三方 |
 | 第三方 | `~/.akm/plugins/` | 🥈 | 用户自行安装，可安装/启用/禁用/删除 |
 
-同名插件：内置优先。用户关闭内置插件后，同名的第三方插件才会生效。这确保内置的关键插件（如协议转换）不被第三方覆盖。
+同名插件：内置优先。**第三方插件生效流程**：关闭内置同名插件 → 在插件管理页上传第三方 `.zip` 包 → 服务端自动解压到 `~/.akm/plugins/{name}/` → 开启第三方插件 → 手动重启 akm 服务生效。
 
 ## 三、插件结构
 
@@ -116,6 +116,7 @@ akm/
 
 ### 5.2 无菜单插件（`has_menu: false`）
 
+**请求日志插件示例**：
 ```json
 {
     "name": "request_logger",
@@ -138,6 +139,21 @@ akm/
 }
 ```
 
+**协议转换插件示例**（`category: "converter"`）：
+```json
+{
+    "name": "responses_converter",
+    "category": "converter",
+    "has_menu": false,
+    "builtin": true,
+    "version": "1.0.0",
+    "description": "Responses → Chat 协议转换",
+    "converts": { "from": "responses", "to": "chat" }
+}
+```
+
+> `converts` 字段声明源格式和目标格式，PluginManager 通过 `get_converter(from, to)` 查找匹配的转换插件。
+
 ### 5.3 字段说明
 
 | 字段 | 类型 | 必需 | 说明 |
@@ -158,7 +174,8 @@ akm/
 | `hooks.on_response` | bool | | 是否接收响应对象 |
 | `builtin` | bool | | 是否为内置插件，默认 `false` |
 | `required` | bool | | 是否不可禁用，默认 `false` |
-| `settings` | object[] | | 配置项定义，见 3.4 节 |
+| `converts` | object | converter 时必需 | `{ "from": "responses", "to": "chat" }` |
+| `settings` | object[] | | 配置项定义，见 5.4 节 |
 
 ### 5.4 插件配置
 
@@ -362,12 +379,18 @@ class PluginManager:
     get_menu() -> list                      # 生成前端菜单结构（仅 has_menu 的插件）
     get_plugin_metas() -> list              # 获取所有插件元数据（含 settings schema）
     get_hook_plugins(hook: str)             # 获取注册了指定 hook 的插件实例列表
-    run_hook(hook, request, response)       # 执行 hook
+    run_hook(hook, request, response)       # 执行 hook（带崩溃隔离）
     get_config(name: str) -> dict           # 读取插件配置（合并默认值）
     set_config(name: str, data: dict)       # 保存插件配置到 config.json
+    install_plugin(file: UploadFile)        # 解压 .zip 到 ~/.akm/plugins/
+    delete_plugin(name: str)                # 删除 ~/.akm/plugins/{name}/
+    get_plugin_list() -> list               # 全部插件状态（含加载失败）
+    get_converter(from, to) -> Plugin|None  # 查找启用的转换插件
 ```
 
 ### 7.2 加载流程
+
+> **注意：插件启用/禁用/安装后需手动重启 akm 服务生效。** 不支持热重载。
 
 ```
 PluginManager.load_all(app, db)
@@ -376,7 +399,7 @@ PluginManager.load_all(app, db)
   │   └── 存入 self.plugins[name]
   └── 扫描 ~/.akm/plugins/ 下所有子目录（第三方插件）
       ├── 同上加载流程
-      └── 存入 self.plugins[name]（同名插件第三方优先覆盖内置，以 * 标记）
+      └── 存入 self.plugins[name]（同名插件内置优先，第三方需先关闭内置才能生效）
 ```
 
 ### 7.3 路由注册规则
@@ -420,9 +443,9 @@ class Plugin(PluginBase):
         self.logger.info(f"[#{self._total}] done")
 ```
 
-### 8.3 执行顺序
+### 8.3 执行顺序与隔离
 
-Hook 按插件加载顺序依次执行，单个 hook 异常不会中断后续 hook 的执行。
+Hook 按插件加载顺序依次执行。**崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件 hook 抛异常不会中断后续插件的 hook 执行，也不会影响代理转发主链路。异常会记录到日志。
 
 ## 九、与 server.py 集成
 
@@ -438,7 +461,24 @@ plugin_manager = PluginManager()
 plugin_manager.load_all(app, db)  # db 传入共享数据库连接
 app.state.plugin_manager = plugin_manager
 
-# 新增菜单 API
+# 新增插件管理 API
+@app.post("/api/plugins/upload")
+async def upload_plugin(file: UploadFile, request: Request):
+    """上传 .zip 插件包，服务端自动解压到 ~/.akm/plugins/"""
+    pm = request.app.state.plugin_manager
+    return await pm.install_plugin(file)
+
+@app.get("/api/plugins")
+async def list_plugins(request: Request):
+    """返回已加载插件列表（含启用/禁用状态）"""
+    return request.app.state.plugin_manager.get_plugin_list()
+
+@app.post("/api/plugins/{name}/enable")
+@app.post("/api/plugins/{name}/disable")
+async def toggle_plugin(name: str, request: Request):
+    """启用/禁用插件（required 插件不可禁用），需重启生效"""
+    return request.app.state.plugin_manager.toggle(name, enable=...)
+
 @app.get("/api/plugin-menu")
 async def plugin_menu(request: Request):
     return request.app.state.plugin_manager.get_menu()
