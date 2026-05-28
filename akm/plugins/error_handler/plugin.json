@@ -1,0 +1,28 @@
+{
+  "name": "error_handler",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "handler",
+  "description": "上游错误处理：429 切换 key、402/401/403 禁用 key、5xx 指数退避重试",
+  "builtin": true,
+  "required": false,
+  "hooks": {
+    "on_upstream_error": true
+  },
+  "settings": [
+    {
+      "key": "max_retries_per_key",
+      "label": "单 key 最大重试次数",
+      "type": "number",
+      "default": 3,
+      "description": "同个 key 遇到 5xx 或连接错误时的指数退避重试上限"
+    },
+    {
+      "key": "max_key_tries",
+      "label": "最大 key 切换次数",
+      "type": "number",
+      "default": 5,
+      "description": "所有 key 全部失败前最多尝试几个 key"
+    }
+  ]
+}
