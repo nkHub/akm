@@ -33,4 +33,4 @@ class PluginMeta(BaseModel):
         "on_response": False
     }
     settings: list[SettingDef] = []
-    converts: dict | None = None  # { "from": "responses", "to": "chat" }
+    converts: list[dict] = []    # [{ "from": "responses", "to": "chat" }, ...]

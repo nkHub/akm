@@ -1,9 +1,8 @@
 """ResponsesAdapter 和 MessagesAdapter 单元测试"""
-
 import json
 import pytest
-from akm.adapters.responses_adapter import ResponsesAdapter
-from akm.adapters.messages_adapter import MessagesAdapter
+from akm.plugins.protocol_converter._responses import ResponsesAdapter
+from akm.plugins.protocol_converter._messages import MessagesAdapter
 
 
 # ═══════════════════════════════════════

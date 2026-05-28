@@ -777,7 +777,7 @@ async def _handle_ai_request(request: Request, api_path: str):
     cfg = load_config()
     save_request_body = cfg.get("log_request_body", False)
     save_response_body = cfg.get("log_response_body", False)
-    result = await forward_request(body, request.app.state.http_client, api_path=api_path)
+    result = await forward_request(body, request.app.state.http_client, api_path=api_path, plugin_manager=request.app.state.plugin_manager)
 
     # ── 流式响应：逐块转发，边收边发 ──
     if result.get("stream"):
