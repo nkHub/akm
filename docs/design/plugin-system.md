@@ -25,30 +25,39 @@
 
 ```
 akm/
-├── plugins/                      # 插件根目录
+├── plugins/                      # 内置插件（随项目分发，可禁用）
 │   ├── __init__.py
 │   ├── base.py                   # PluginBase 基类（提供上下文方法）
 │   ├── plugin_manager.py         # 插件管理器
-│   ├── builtin/                  # 内置插件（随项目分发，可禁用）
-│   │   ├── responses_converter/  # Responses → Chat 协议转换
-│   │   │   ├── plugin.json
-│   │   │   └── index.py
-│   │   ├── messages_converter/   # Messages → Chat 协议转换
-│   │   │   ├── plugin.json
-│   │   │   └── index.py
-│   │   └── chat_converter/       # Chat → Messages 协议转换
-│   │       ├── plugin.json
-│   │       └── index.py
-│   └── model_mapper/             # 示例插件（有菜单）
+│   ├── responses_converter/      # Responses → Chat 协议转换
+│   │   ├── plugin.json
+│   │   └── index.py
+│   ├── messages_converter/       # Messages → Chat 协议转换
+│   │   ├── plugin.json
+│   │   └── index.py
+│   └── chat_converter/           # Chat → Messages 协议转换
 │       ├── plugin.json
-│       ├── index.py              # 插件入口（导出 Plugin 类，继承 PluginBase）
-│       └── views/
-│           ├── index.html
-│           ├── style.css
-│           └── app.js
+│       └── index.py
+
+~/.akm/
+├── config.json
+├── akm.db
+└── plugins/                      # 第三方插件（用户自行安装）
+    └── model_mapper/
+        ├── plugin.json
+        ├── index.py
+        └── views/
+            ├── index.html
+            ├── style.css
+            └── app.js
 ```
 
-所有插件在同一层级，`builtin/` 只是组织方式，加载时同等待遇。通过 `plugin.json` 中的 `has_menu` 和 `builtin` 字段区分行为和来源。
+**插件来源**：
+
+| 来源 | 路径 | 特点 |
+|------|------|------|
+| 内置 | `akm/plugins/` | 随项目分发，`plugin.json` 中 `builtin: true`，可禁用但建议保留 |
+| 第三方 | `~/.akm/plugins/` | 用户自行安装，可安装/启用/禁用/删除 |
 
 ## 三、plugin.json 定义
 
@@ -308,16 +317,12 @@ class PluginManager:
 
 ```
 PluginManager.load_all(app, db)
-  ├── 扫描 plugins/ 目录下所有子目录
-  │   ├── 读取 plugin.json → 解析 PluginMeta
-  │   ├── 动态导入 index.py → 获取 Plugin 类
-  │   ├── 实例化 plugin 并注入上下文（app, db, config, logger）
-  │   ├── 调用 plugin.on_load()
-  │   ├── app.include_router(plugin.router, prefix=routes_prefix)
-  │   ├── 如果 has_menu: true 且 views/ 存在
-  │   │   ├── StaticFiles 挂载 views/ → /plugins/{name}/static
-  │   │   └── 注册前端页面路由 /plugins/{name} → views/index.html
-  │   └── 存入 self.plugins[name] = plugin
+  ├── 扫描 akm/plugins/ 下所有子目录（内置插件）
+  │   ├── 同上：解析 meta、导入 index.py、注入上下文、on_load、注册路由
+  │   └── 存入 self.plugins[name]
+  └── 扫描 ~/.akm/plugins/ 下所有子目录（第三方插件）
+      ├── 同上加载流程
+      └── 存入 self.plugins[name]（同名插件第三方优先覆盖内置，以 * 标记）
 ```
 
 ### 5.3 路由注册规则
