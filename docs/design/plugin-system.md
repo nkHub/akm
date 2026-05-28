@@ -11,12 +11,14 @@
 
 ## 一、插件类型
 
-分两种，通过 `plugin.json` 中的 `type` 字段区分：
+所有插件结构统一，通过 `plugin.json` 中的 `has_menu` 字段区分：
 
-| 类型 | `type` 值 | 描述 | 必需 |
-|------|----------|------|------|
-| 应用插件 | `"app"` | 有自定义前端界面，注册 API 路由 + 提供 views/ 目录 | `plugin.json` + `router.py` + `views/index.html` |
-| 服务端插件 | `"server"` | 纯后端，无前端，可注册 API 路由和请求/响应 hook | `plugin.json` + `router.py` |
+| `has_menu` | 描述 | 必需文件 |
+|----------|------|----------|
+| `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由 | `plugin.json` + `router.py` + `views/index.html` |
+| `false` | 不显示菜单，可注册 API 路由和请求/响应 hook | `plugin.json` + `router.py` |
+
+> `has_menu` 默认为 `false`，不填即视为无需菜单入口。
 
 ## 二、目录结构
 
@@ -25,28 +27,28 @@ akm/
 ├── plugins/                      # 插件根目录
 │   ├── __init__.py
 │   ├── plugin_manager.py         # 插件管理器
-│   ├── app_plugins/              # 有界面插件
-│   │   └── model_mapper/
-│   │       ├── plugin.json       # 元数据 + 菜单配置
-│   │       ├── router.py         # API 路由（约定导出 `router` 对象）
-│   │       └── views/            # 前端页面（最少 index.html）
-│   │           ├── index.html
-│   │           ├── style.css
-│   │           └── app.js
-│   └── server_plugins/           # 无界面插件
-│       └── request_logger/
-│           ├── plugin.json
-│           └── router.py
+│   └── model_mapper/             # 示例插件（有界面）
+│       ├── plugin.json           # 元数据 + 菜单配置
+│       ├── router.py             # API 路由（约定导出 `router` 对象）
+│       └── views/                # 前端页面（仅 has_menu: true 时需要）
+│           ├── index.html        # 最少 index.html
+│           ├── style.css
+│           └── app.js
+│   └── request_logger/           # 示例插件（无界面）
+│       ├── plugin.json
+│       └── router.py
 ```
+
+所有插件在同一层级，通过 `plugin.json` 中的 `has_menu` 字段区分是否有前端界面。`has_menu: true` 时需提供 `views/` 目录（至少 `index.html`），同时 `menu` 字段为必需。
 
 ## 三、plugin.json 定义
 
-### 3.1 应用插件（`type: "app"`）
+### 3.1 有菜单插件（`has_menu: true`）
 
 ```json
 {
     "name": "model_mapper",
-    "type": "app",
+    "has_menu": true,
     "version": "1.0.0",
     "description": "模型名称映射配置插件，支持自定义模型别名",
     "menu": {
@@ -54,27 +56,31 @@ akm/
         "icon": "swap",
         "order": 10
     },
-    "routes_prefix": "/api/mapper",
-    "hooks": {
-        "on_request": false,
-        "on_response": false
-    }
+    "routes_prefix": "/api/mapper"
 }
 ```
 
-### 3.2 服务端插件（`type: "server"`）
+### 3.2 无菜单插件（`has_menu: false`）
 
 ```json
 {
     "name": "request_logger",
-    "type": "server",
+    "has_menu": false,
     "version": "1.0.0",
     "description": "增强请求日志，记录完整请求/响应内容到独立存储",
     "routes_prefix": "/api/logger",
     "hooks": {
         "on_request": true,
         "on_response": true
-    }
+    },
+    "settings": [
+        {
+            "key": "max_retries",
+            "label": "最大重试次数",
+            "type": "number",
+            "default": 3
+        }
+    ]
 }
 ```
 
@@ -83,17 +89,17 @@ akm/
 | 字段 | 类型 | 必需 | 说明 |
 |------|------|------|------|
 | `name` | string | ✓ | 插件唯一标识，作为目录名 |
-| `type` | string | ✓ | `"app"` 或 `"server"` |
+| `has_menu` | bool | | 是否在管理台显示菜单入口，默认 `false` |
 | `version` | string | ✓ | 语义化版本号 |
 | `description` | string | | 功能描述 |
-| `menu` | object | app 必需 | 菜单配置，仅 app 类型 |
+| `menu` | object | has_menu 时必需 | 菜单配置 |
 | `menu.title` | string | ✓ | 菜单显示名称 |
 | `menu.icon` | string | | 菜单图标，默认 `"plugin"` |
 | `menu.order` | int | | 菜单位置排序，默认 `100` |
 | `routes_prefix` | string | | API 路由前缀，默认 `/{name}` |
 | `hooks.on_request` | bool | | 是否接收原始请求对象 |
 | `hooks.on_response` | bool | | 是否接收原始响应对象 |
-| `settings` | object[] | | 配置项定义，见下方 3.4 节 |
+| `settings` | object[] | | 配置项定义，见 3.4 节 |
 
 ### 3.4 插件配置
 
@@ -188,11 +194,10 @@ async def get_stats(request: Request):
 ```python
 class PluginManager:
     root: Path                              # 插件根目录
-    app_plugins: Dict[str, PluginInfo]       # 已加载的应用插件
-    server_plugins: Dict[str, PluginInfo]    # 已加载的服务端插件
+    plugins: Dict[str, PluginInfo]           # 已加载的全部插件
 
     load_all(app: FastAPI)                  # 扫描并加载全部插件
-    get_menu() -> list                      # 生成前端菜单结构
+    get_menu() -> list                      # 生成前端菜单结构（仅 has_menu 的插件）
     get_plugin_metas() -> list              # 获取所有插件元数据（含 settings schema）
     get_hook_plugins(hook: str)             # 获取注册了指定 hook 的插件列表
     run_hook(hook, request, response)       # 执行 hook
@@ -204,24 +209,20 @@ class PluginManager:
 
 ```
 PluginManager.load_all(app)
-  ├── 扫描 app_plugins/ 目录
+  ├── 扫描 plugins/ 目录下所有子目录
   │   ├── 读取 plugin.json → 解析 PluginMeta
-  │   ├── 动态导入 router.py → 获取 APIRouter 实例
-  │   │   └── app.include_router(router, prefix=routes_prefix)
-  │   ├── StaticFiles 挂载 views/ → /plugins/{name}/static
-  │   ├── 注册前端页面路由 /plugins/{name} → views/index.html
-  │   └── 存入 self.app_plugins
-  └── 扫描 server_plugins/ 目录
-      ├── 读取 plugin.json
-      ├── 动态导入 router.py → include_router
-      └── 存入 self.server_plugins
+  │   ├── 动态导入 router.py → app.include_router(router, prefix=routes_prefix)
+  │   ├── 如果 has_menu: true 且 views/ 存在
+  │   │   ├── StaticFiles 挂载 views/ → /plugins/{name}/static
+  │   │   └── 注册前端页面路由 /plugins/{name} → views/index.html
+  │   └── 存入 self.plugins
 ```
 
 ### 4.3 路由注册规则
 
 - **API 路由**：`router.py` 中导出的 `router`（FastAPI `APIRouter` 实例）挂载到 `{routes_prefix}` 下
-- **前端路由**（仅 app 类型）：`/plugins/{name}` 和 `/plugins/{name}/{rest:path}` → `views/index.html`（SPA 支持）
-- **静态文件**（仅 app 类型）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）
+- **前端路由**（仅 has_menu 插件）：`/plugins/{name}` 和 `/plugins/{name}/{rest:path}` → `views/index.html`（SPA 支持）
+- **静态文件**（仅 has_menu 插件）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）
 
 ## 五、Hook 机制
 
@@ -349,13 +350,13 @@ function renderPluginSettings(name, settings) {
 
 ## 七、插件开发示例
 
-### 7.1 应用插件：模型映射
+### 7.1 有菜单插件：模型映射
 
-**plugins/app_plugins/model_mapper/plugin.json**
+**plugins/model_mapper/plugin.json**
 ```json
 {
     "name": "model_mapper",
-    "type": "app",
+    "has_menu": true,
     "version": "1.0.0",
     "description": "模型名称映射",
     "menu": { "title": "模型映射", "icon": "swap", "order": 10 },
@@ -363,7 +364,7 @@ function renderPluginSettings(name, settings) {
 }
 ```
 
-**plugins/app_plugins/model_mapper/router.py**
+**plugins/model_mapper/router.py**
 ```python
 from fastapi import APIRouter
 
@@ -379,7 +380,7 @@ async def add_mapping(original: str, mapped: str):
     return {"status": "ok", "original": original, "mapped": mapped}
 ```
 
-**plugins/app_plugins/model_mapper/views/index.html**
+**plugins/model_mapper/views/index.html**
 ```html
 <!DOCTYPE html>
 <html>
@@ -395,13 +396,13 @@ async def add_mapping(original: str, mapped: str):
 </html>
 ```
 
-### 7.2 服务端插件：请求日志（带配置）
+### 7.2 无菜单插件：请求日志（带配置）
 
-**plugins/server_plugins/request_logger/plugin.json**
+**plugins/request_logger/plugin.json**
 ```json
 {
     "name": "request_logger",
-    "type": "server",
+    "has_menu": false,
     "version": "1.0.0",
     "description": "增强请求日志",
     "routes_prefix": "/api/logger",
@@ -425,7 +426,7 @@ async def add_mapping(original: str, mapped: str):
 }
 ```
 
-**plugins/server_plugins/request_logger/router.py**
+**plugins/request_logger/router.py**
 ```python
 from fastapi import APIRouter, Request
 from datetime import datetime
