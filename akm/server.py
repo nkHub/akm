@@ -663,6 +663,19 @@ async def _handle_ai_request(request: Request, api_path: str):
         )
 
     body = await request.json()
+    # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
+    # starlette 的 headers 是大小写不敏感的 MutableHeaders
+    _trace_headers = {k.lower(): v for k, v in request.headers.items()}
+    # 只保留有溯源价值的头，去除 Authorization（太长且敏感）
+    _trace_keys = [
+        "user-agent", "x-request-id", "x-stainless-os", "x-stainless-lang",
+        "x-stainless-package-version", "x-stainless-runtime", "x-stainless-runtime-version",
+        "x-forwarded-for", "x-real-ip", "origin", "referer", "host",
+    ]
+    request_headers_json = json.dumps(
+        {k: _trace_headers[k] for k in _trace_keys if k in _trace_headers},
+        ensure_ascii=False,
+    )
     # 读取日志存储配置
     cfg = load_config()
     save_request_body = cfg.get("log_request_body", False)
@@ -708,6 +721,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
                     "response_body": body_str if save_response_body else "", "status_code": status,
                     "latency_ms": latency, "error": stream_error,
+                    "request_headers": request_headers_json,
                     "prompt_tokens": tokens.get("prompt_tokens", 0),
                     "completion_tokens": tokens.get("completion_tokens", 0),
                     "total_tokens": tokens.get("total_tokens", 0),
@@ -741,6 +755,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             "status_code": result["status_code"],
             "latency_ms": result["latency_ms"],
             "error": result["error"],
+            "request_headers": request_headers_json,
             "prompt_tokens": tokens.get("prompt_tokens", 0),
             "completion_tokens": tokens.get("completion_tokens", 0),
             "total_tokens": tokens.get("total_tokens", 0),

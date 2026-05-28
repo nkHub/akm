@@ -39,16 +39,17 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS audit_logs (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp    TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            provider     TEXT DEFAULT '',
-            key_alias    TEXT DEFAULT '',
-            model        TEXT DEFAULT '',
-            request_body TEXT DEFAULT '',
-            response_body TEXT DEFAULT '',
-            status_code  INTEGER DEFAULT 0,
-            latency_ms   INTEGER DEFAULT 0,
-            error        TEXT DEFAULT '',
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            provider        TEXT DEFAULT '',
+            key_alias       TEXT DEFAULT '',
+            model           TEXT DEFAULT '',
+            request_body    TEXT DEFAULT '',
+            response_body   TEXT DEFAULT '',
+            status_code     INTEGER DEFAULT 0,
+            latency_ms      INTEGER DEFAULT 0,
+            error           TEXT DEFAULT '',
+            request_headers TEXT DEFAULT '',
             prompt_tokens     INTEGER DEFAULT 0,
             completion_tokens INTEGER DEFAULT 0,
             total_tokens      INTEGER DEFAULT 0,
@@ -68,6 +69,11 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
     # keys 表 — auth_header
     try:
         conn.execute("ALTER TABLE keys ADD COLUMN auth_header TEXT DEFAULT 'Bearer {api_key}'")
+    except sqlite3.OperationalError:
+        pass
+    # audit_logs 表 — request_headers 列
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN request_headers TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
     # audit_logs 表 — token 列

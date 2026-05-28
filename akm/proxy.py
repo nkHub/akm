@@ -157,11 +157,11 @@ async def forward_request(
         adapter = None
         if target_api_path:
             if api_path == "responses":
-                adapter = agent.chat_to_responses
+                adapter = agent.responses_adapter
             elif api_path == "messages":
-                adapter = agent.messages_to_chat
+                adapter = agent.messages_adapter
             elif api_path == "chat/completions":
-                adapter = agent.messages_to_chat  # 反向用同一个适配器
+                adapter = agent.messages_adapter  # 反向用同一个适配器
 
         # 构建上游 URL：转换后走目标路径
         upstream_api_path = target_api_path or api_path
