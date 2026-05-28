@@ -310,9 +310,53 @@ class ResponsesAdapter(BaseAdapter):
         return cleaned
 
     def _convert_tools(self, tools: list) -> list:
-        """Responses API tools → Chat Completions tools（自动清理不兼容字段）"""
+        """Responses API tools → Chat Completions tools（自动清理不兼容字段）
+
+        支持三种工具格式：
+        1. {"type": "function", "function": {...}}  → 直接透传
+        2. {"type": "namespace", "name": "...", "tools": [...]}  → 递归展开子工具，
+           子工具名加命名空间前缀（如 mcp__translate__ + translate → mcp__translate__translate）
+        3. {"name": "...", "parameters": {...}}  → 包装为 function 格式
+        """
         result = []
         for t in tools:
+            # ── 命名空间工具：递归展开子工具 ──
+            if t.get("type") == "namespace" and isinstance(t.get("tools"), list):
+                ns_prefix = t.get("name", "")
+                # 去掉末尾的 __（如 "mcp__translate__" → "mcp__translate"），后面再加回来
+                # 保留原始前缀确保子工具名与 Codex 内部注册名一致
+                for sub_tool in t["tools"]:
+                    sub_name = sub_tool.get("name", "")
+                    if not sub_name:
+                        sub_name = sub_tool.get("function", {}).get("name", "")
+                    if not sub_name:
+                        continue
+                    full_name = ns_prefix + sub_name  # "mcp__translate__" + "translate" = "mcp__translate__translate"
+                    if sub_tool.get("function"):
+                        # 子工具已是 function 格式，仅替换 name
+                        expanded = dict(sub_tool)
+                        expanded["function"] = dict(expanded["function"])
+                        expanded["function"]["name"] = full_name
+                        if "parameters" in expanded["function"]:
+                            expanded["function"]["parameters"] = self._clean_schema(
+                                expanded["function"]["parameters"]
+                            )
+                        result.append(expanded)
+                    else:
+                        # 子工具是简洁格式，包装为 function
+                        sub_params = sub_tool.get("parameters") or {}
+                        if not isinstance(sub_params, dict) or "type" not in sub_params:
+                            sub_params = {"type": "object", "properties": {}}
+                        result.append({
+                            "type": "function",
+                            "function": {
+                                "name": full_name,
+                                "description": sub_tool.get("description", ""),
+                                "parameters": self._clean_schema(sub_params),
+                            }
+                        })
+                continue
+
             name = t.get("name", "")
             if not name and t.get("function"):
                 name = t["function"].get("name", "")
