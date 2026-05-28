@@ -4,8 +4,8 @@
   <div class="bg-surface-light border border-border rounded-lg p-6">
     <h3 class="text-lg font-semibold text-white mb-3">AI Key Manager</h3>
     <p class="text-sm text-gray-400 leading-relaxed mb-4">
-      本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，
-      自动根据优先级选择可用 Key，支持故障切换、协议转换及完整审计日志。
+      本地 AI API Key 管理代理服务。核心仅提供纯粹的请求转发与审计日志，
+      协议转换、模型匹配、错误处理等全部由插件接管，可按需启用/禁用。
     </p>
     <div class="space-y-2 text-xs text-gray-500">
       <div class="flex gap-2"><span class="text-gray-600 w-20 shrink-0">版本</span><span>0.1.0</span></div>
@@ -17,15 +17,79 @@
   </div>
 
   <div class="bg-surface-light border border-border rounded-lg p-6">
-    <h3 class="text-sm font-semibold text-white mb-3">功能特性</h3>
+    <h3 class="text-sm font-semibold text-white mb-3">架构</h3>
+    <div class="space-y-3 text-xs">
+      <div class="flex gap-3 p-3 bg-surface rounded border border-border">
+        <div class="w-1 h-7 bg-indigo-500 rounded-full shrink-0 mt-0.5"></div>
+        <div>
+          <div class="text-white font-medium mb-1">核心层（akm/）</div>
+          <div class="text-gray-500">请求转发代理 + 审计日志持久化。不做任何格式转换或业务逻辑，所有扩展能力由插件提供。</div>
+        </div>
+      </div>
+      <div class="flex gap-3 p-3 bg-surface rounded border border-border">
+        <div class="w-1 h-7 bg-cyan-500 rounded-full shrink-0 mt-0.5"></div>
+        <div>
+          <div class="text-white font-medium mb-1">插件层（akm/plugins/ + plugins/ + ~/.akm/plugins/）</div>
+          <div class="text-gray-500">三大扫描来源：内置（akm/plugins/）、项目本地（plugins/）、第三方（~/.akm/plugins/）。通过 plugin.json 声明 hook + settings schema，按 priority 管道执行。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-surface-light border border-border rounded-lg p-6">
+    <h3 class="text-sm font-semibold text-white mb-3">内置插件</h3>
+    <div class="space-y-3 text-xs">
+      <div class="flex items-start gap-3 p-3 bg-surface rounded border border-border">
+        <div class="w-1 h-6 bg-indigo-500 rounded-full shrink-0 mt-0.5"></div>
+        <div class="flex-1">
+          <div class="text-white font-medium">protocol_converter</div>
+          <div class="text-gray-500">Responses / Messages / Chat 三格式双向转换，支持 reasoning 透传、tool_calls 增量拼接、MCP namespace 展开</div>
+        </div>
+        <span class="text-xs px-1.5 py-0.5 rounded bg-cyan-400/10 text-cyan-300 shrink-0">converter</span>
+      </div>
+      <div class="flex items-start gap-3 p-3 bg-surface rounded border border-border">
+        <div class="w-1 h-6 bg-amber-500 rounded-full shrink-0 mt-0.5"></div>
+        <div class="flex-1">
+          <div class="text-white font-medium">model_matcher</div>
+          <div class="text-gray-500">模型别名映射 + Key 模型匹配 + 通配符兜底，系统必需不可禁用</div>
+        </div>
+        <span class="text-xs px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300 shrink-0">必需</span>
+      </div>
+      <div class="flex items-start gap-3 p-3 bg-surface rounded border border-border">
+        <div class="w-1 h-6 bg-emerald-500 rounded-full shrink-0 mt-0.5"></div>
+        <div class="flex-1">
+          <div class="text-white font-medium">error_handler</div>
+          <div class="text-gray-500">429/401/402/403 换 Key + 5xx 指数退避重试，可配置最大重试次数</div>
+        </div>
+        <span class="text-xs px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300 shrink-0">handler</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-surface-light border border-border rounded-lg p-6">
+    <h3 class="text-sm font-semibold text-white mb-3">本地插件</h3>
+    <div class="space-y-3 text-xs">
+      <div class="flex items-start gap-3 p-3 bg-surface rounded border border-border">
+        <div class="w-1 h-6 bg-purple-500 rounded-full shrink-0 mt-0.5"></div>
+        <div class="flex-1">
+          <div class="text-white font-medium">prompt_booster</div>
+          <div class="text-gray-500">请求发送前自动注入自定义 system prompt / instructions，支持 before/after 位置，有独立配置界面</div>
+        </div>
+        <span class="text-xs px-1.5 py-0.5 rounded bg-purple-400/10 text-purple-300 shrink-0">filter</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-surface-light border border-border rounded-lg p-6">
+    <h3 class="text-sm font-semibold text-white mb-3">其他功能</h3>
     <ul class="space-y-2 text-xs text-gray-400">
       <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 多供应商 Key 管理 + 自定义供应商代理配置</li>
-      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 优先级调度与 429/401/402/5xx 自动故障切换</li>
-      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> OpenAI 兼容 API（/v1/chat/completions + /v1/responses）</li>
-      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 协议自动转换（Codex Responses ↔ Chat Completions）</li>
-      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Fernet 加密存储 Key + 多重认证头支持</li>
-      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Token 用量仪表盘（含缓存命中、K/M 格式、骨架屏加载）</li>
-      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 审计日志（输入/缓存/输出 Token、筛选持久化、对话回放）</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 429/401/402/5xx 自动故障切换（插件接管）</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> OpenAI 兼容 API 转发（/v1/chat/completions + /v1/responses + /v1/models）</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 插件系统：六大分类、priority 管道执行、zip 安装、配置读写</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Fernet 加密存储 Key + 多重认证头模板支持</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Token 用量仪表盘（缓存命中、K/M 格式、1d/7d/30d）</li>
+      <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 审计日志（筛选持久化、对话回放、流式收集）</li>
       <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> Web 后台管理 + macOS 菜单栏应用</li>
     </ul>
   </div>
