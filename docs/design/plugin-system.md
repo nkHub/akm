@@ -46,8 +46,8 @@
 
 | `has_menu` | 描述 | 必需文件 |
 |----------|------|----------|
-| `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由 | `plugin.json` + `index.py` + `views/index.html` |
-| `false` | 不显示菜单，可注册 API 路由、请求/响应 hook | `plugin.json` + `index.py` |
+| `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由。插件列表中的 `converts` 仅在「插件已启用」时可点击进入页面，未启用时仅灰显展示。 | `plugin.json` + `index.py` + `views/index.html` |
+| `false` | 不显示菜单，可注册 API 路由、请求/响应 hook。插件列表不展示 `converts` 节点。 | `plugin.json` + `index.py` |
 
 > `has_menu` 默认为 `false`，不填即视为无需菜单入口。部分关键内置插件（如 model_matcher）标记为 `required: true`，不可禁用，保证核心链路至少有一个生效。
 
