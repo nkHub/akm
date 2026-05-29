@@ -401,6 +401,24 @@ class TestResponsesAdapterResponse:
         assert result["usage"]["input_tokens"] == 10
         assert result["usage"]["output_tokens"] == 5
 
+    def test_convert_response_preserves_cached_tokens(self):
+        adapter = ResponsesAdapter()
+        chat_resp = json.dumps({
+            "id": "chatcmpl-cache1",
+            "model": "deepseek-v4",
+            "choices": [{"message": {"content": "Hello!"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "total_tokens": 128,
+                "prompt_tokens_details": {"cached_tokens": 96},
+            },
+        })
+        result = json.loads(adapter.convert_response(chat_resp))
+        assert result["usage"]["input_tokens"] == 120
+        assert result["usage"]["output_tokens"] == 8
+        assert result["usage"]["input_tokens_details"]["cached_tokens"] == 96
+
 
 # ═══════════════════════════════════════
 # ResponsesAdapter — SSE 流式转换
@@ -493,6 +511,26 @@ class TestResponsesAdapterSSE:
         assert output[0]["content"][0]["type"] == "reasoning_summary_text"
         assert output[1]["type"] == "message"
         assert output[1]["content"][0]["text"] == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_convert_sse_preserves_cached_tokens(self):
+        adapter = ResponsesAdapter()
+        chat_sse = [
+            b'data: {"id":"chatcmpl-1","model":"deepseek-v4","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","model":"deepseek-v4","choices":[{"delta":{"content":"ok"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":5,"total_tokens":205,"prompt_tokens_details":{"cached_tokens":150}}}\n\n',
+        ]
+
+        lines = []
+        async for line in adapter.convert_sse_stream(_async_bytes_iter(chat_sse)):
+            lines.append(line)
+
+        events = _parse_sse_helper(lines)
+        completed = [e for e in events if e[0] == "response.completed"][0]
+        usage = completed[1]["response"]["usage"]
+        assert usage["input_tokens"] == 200
+        assert usage["output_tokens"] == 5
+        assert usage["input_tokens_details"]["cached_tokens"] == 150
 
     @pytest.mark.asyncio
     async def test_convert_sse_reasoning_only(self):

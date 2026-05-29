@@ -399,6 +399,14 @@ class ResponsesAdapter(BaseAdapter):
         output_text = message.get("content", "")
 
         resp_id = chat.get("id", "").replace("chatcmpl-", "resp_")
+        cached_tokens = 0
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(key)
+            if isinstance(details, dict):
+                cached_tokens = details.get("cached_tokens", 0) or 0
+                if cached_tokens:
+                    break
+
         resp = {
             "id": resp_id or f"resp_{uuid4().hex[:24]}",
             "object": "response",
@@ -412,6 +420,8 @@ class ResponsesAdapter(BaseAdapter):
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
+        if cached_tokens:
+            resp["usage"]["input_tokens_details"] = {"cached_tokens": cached_tokens}
 
         if output_text:
             resp["output"].append({
@@ -440,6 +450,7 @@ class ResponsesAdapter(BaseAdapter):
         reasoning = ""
         prompt_tokens = 0
         completion_tokens = 0
+        cached_tokens = 0
 
         tool_calls_state: dict[int, dict] = {}
         seen_tool_indices: set[int] = set()
@@ -610,6 +621,12 @@ class ResponsesAdapter(BaseAdapter):
                 if usage:
                     prompt_tokens = usage.get("prompt_tokens", 0)
                     completion_tokens = usage.get("completion_tokens", 0)
+                    for key in ("prompt_tokens_details", "input_tokens_details"):
+                        details = usage.get(key)
+                        if isinstance(details, dict):
+                            cached_tokens = details.get("cached_tokens", 0) or 0
+                            if cached_tokens:
+                                break
 
         # ── 流结束 ──
 
@@ -752,6 +769,14 @@ class ResponsesAdapter(BaseAdapter):
                 "name": tc["name"],
                 "arguments": tc["arguments"],
             })
+        completed_usage = {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "total_tokens": total,
+        }
+        if cached_tokens:
+            completed_usage["input_tokens_details"] = {"cached_tokens": cached_tokens}
+
         yield _sse_event("response.completed", {
             "type": "response.completed",
             "response": {
@@ -760,11 +785,7 @@ class ResponsesAdapter(BaseAdapter):
                 "status": "completed",
                 "model": model,
                 "output": resp_output,
-                "usage": {
-                    "input_tokens": prompt_tokens,
-                    "output_tokens": completion_tokens,
-                    "total_tokens": total,
-                },
+                "usage": completed_usage,
             },
         })
         yield "data: [DONE]\n\n"
