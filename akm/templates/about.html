@@ -29,8 +29,8 @@
       <div class="flex gap-3 p-3 bg-surface rounded border border-border">
         <div class="w-1 h-7 bg-cyan-500 rounded-full shrink-0 mt-0.5"></div>
         <div>
-          <div class="text-white font-medium mb-1">插件层（akm/plugins/ + plugins/ + ~/.akm/plugins/）</div>
-          <div class="text-gray-500">三大扫描来源：内置（akm/plugins/）、项目本地（plugins/）、第三方（~/.akm/plugins/）。通过 plugin.json 声明 hook + settings schema，按 priority 管道执行。</div>
+          <div class="text-white font-medium mb-1">插件层（akm/plugins/ + ~/.akm/plugins/）</div>
+          <div class="text-gray-500">扫描来源：内置（akm/plugins/）与第三方（~/.akm/plugins/）。通过 plugin.json 声明 hook + settings schema，按 priority 管道执行。</div>
         </div>
       </div>
     </div>
@@ -62,20 +62,6 @@
           <div class="text-gray-500">429/401/402/403 换 Key + 5xx 指数退避重试，可配置最大重试次数</div>
         </div>
         <span class="text-xs px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300 shrink-0">handler</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="bg-surface-light border border-border rounded-lg p-6">
-    <h3 class="text-sm font-semibold text-white mb-3">本地插件</h3>
-    <div class="space-y-3 text-xs">
-      <div class="flex items-start gap-3 p-3 bg-surface rounded border border-border">
-        <div class="w-1 h-6 bg-purple-500 rounded-full shrink-0 mt-0.5"></div>
-        <div class="flex-1">
-          <div class="text-white font-medium">prompt_booster</div>
-          <div class="text-gray-500">请求发送前自动注入自定义 system prompt / instructions，支持 before/after 位置，有独立配置界面</div>
-        </div>
-        <span class="text-xs px-1.5 py-0.5 rounded bg-purple-400/10 text-purple-300 shrink-0">filter</span>
       </div>
     </div>
   </div>
