@@ -36,6 +36,7 @@
 {% block extra_js %}
 <script>
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function pluginRoute(name) { return '/plugins/' + encodeURIComponent(name || ''); }
 
 var _plugins = [];
 
@@ -72,9 +73,15 @@ function renderPluginList(plugins) {
       var requiredBadge = p.required
         ? '<span class="text-xs px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300">必需</span>'
         : '';
-      var convertsInfo = p.converts
-        ? '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(p.converts.from) + ' → ' + esc(p.converts.to) + '</span>'
-        : '';
+      var convertsInfo = '';
+      if (p.converts) {
+        var convertText = esc(p.converts.from) + ' → ' + esc(p.converts.to);
+        if (p.has_menu && p.enabled) {
+          convertsInfo = '<button type="button" class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer" onclick="window.location.href=\'' + pluginRoute(p.name) + '\'" title="进入插件页面">' + convertText + '</button>';
+        } else if (p.has_menu) {
+          convertsInfo = '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400" title="插件未启用，无法进入页面">' + convertText + '</span>';
+        }
+      }
 
       html += '<div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">';
       html += '<div class="flex-1 min-w-0">';
