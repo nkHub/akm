@@ -124,9 +124,10 @@ async def _handle_upstream_error(
             attempt=attempt,
             key=key,
         )
-        action = hook_result.get("action")
-        if action is not None:
-            return action
+        if isinstance(hook_result, dict):
+            action = hook_result.get("action")
+            if action is not None:
+                return action
 
     # ── 内置兜底策略（无 error_handler 插件或插件返回 None 时生效）──
     max_retries = MAX_RETRIES_PER_KEY
