@@ -21,6 +21,13 @@ from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.plugins.plugin_manager import PluginManager
+from akm.usage_flags import (
+    FLAG_COUNT_TOKENS_FALLBACK,
+    FLAG_USAGE_FALLBACK_ADAPTER,
+    FLAG_USAGE_ESTIMATED_LIGHT,
+    FLAG_MISSING_USAGE_UPSTREAM,
+    FLAG_LOOP_GUARD_TRIGGERED,
+)
 
 
 @asynccontextmanager
@@ -495,7 +502,7 @@ async def _build_usage_metrics(
         ct = await _try_count_tokens_fallback(request, request_body, api_path, key_alias, provider)
         if ct:
             tokens = ct
-            flags.append("count_tokens_fallback")
+            flags.append(FLAG_COUNT_TOKENS_FALLBACK)
             has_tokens = True
 
     if not has_tokens and adapter:
@@ -513,12 +520,12 @@ async def _build_usage_metrics(
                     "cached_tokens": cached,
                     "cache_creation_tokens": int(last_usage.get("cache_creation_tokens", 0) or 0),
                 }
-                flags.append("usage_fallback_adapter")
+                flags.append(FLAG_USAGE_FALLBACK_ADAPTER)
                 has_tokens = True
 
     if not has_tokens:
         tokens = _estimate_tokens_light(request_body, response_body)
-        flags.append("usage_estimated_light")
+        flags.append(FLAG_USAGE_ESTIMATED_LIGHT)
 
     return tokens, flags
 
@@ -1047,11 +1054,11 @@ async def _handle_ai_request(request: Request, api_path: str):
                         flags.append("fallback_thinking_to_text")
                     if status == 200 and not stream_error:
                         if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
-                            flags.append("missing_usage_upstream")
+                            flags.append(FLAG_MISSING_USAGE_UPSTREAM)
                     flags.extend(usage_flags)
                     if adapter and getattr(adapter, "_tool_trace_events", None):
                         if any("loop_guard_drop" in x for x in getattr(adapter, "_tool_trace_events", [])):
-                            flags.append("loop_guard_triggered")
+                            flags.append(FLAG_LOOP_GUARD_TRIGGERED)
                     tool_trace = ""
                     if adapter and getattr(adapter, "_tool_trace_events", None):
                         tool_trace = "; ".join(getattr(adapter, "_tool_trace_events", []))
