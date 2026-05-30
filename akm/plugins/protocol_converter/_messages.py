@@ -15,6 +15,29 @@ from uuid import uuid4
 from typing import AsyncIterator
 from akm.adapter import BaseAdapter
 from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_messages_content
+from akm.plugins.protocol_converter._messages_codec import (
+    sse_chat_to_json,
+    messages_sse_event as _messages_sse_event,
+)
+from akm.plugins.protocol_converter._messages_stream import (
+    build_rescue_messages_sse,
+    finalize_messages_sse,
+    update_loop_guard,
+    upsert_tool_call_state,
+    should_try_empty_args_tool_start,
+    build_tool_use_start_events,
+    handle_thinking_delta,
+    ensure_message_start,
+    handle_text_delta,
+    map_finish_reason_to_stop_reason,
+    append_tool_trace,
+    normalize_tool_input,
+    make_finalize_state,
+    append_tool_arguments_delta,
+    parse_tool_args_buffer,
+    start_tool_call_state,
+    mark_empty_args_tool_state,
+)
 
 
 class MessagesAdapter(BaseAdapter):
@@ -433,7 +456,7 @@ class MessagesAdapter(BaseAdapter):
         """
         # 若输入是 Chat SSE 原文，先在插件内完成 SSE->Chat 聚合（协议语义在插件内处理）
         if isinstance(body, str) and body.lstrip().startswith("data: "):
-            body = self._sse_chat_to_json(body)
+            body = sse_chat_to_json(body)
 
         try:
             chat = json.loads(body)
@@ -451,11 +474,10 @@ class MessagesAdapter(BaseAdapter):
         for tc in ir.get("tool_calls") or []:
             tool_name = tc.get("name", "")
             tool_input = tc.get("arguments", {}) if isinstance(tc.get("arguments"), dict) else {}
-            if not self._validate_tool_input(tool_name, tool_input):
-                tool_input = self._repair_tool_input(tool_name, tool_input)
-            if not self._validate_tool_input(tool_name, tool_input):
+            valid, tool_input = normalize_tool_input(self, tool_name, tool_input)
+            if not valid:
                 self._tool_trace_events = getattr(self, "_tool_trace_events", [])
-                self._tool_trace_events.append(f"drop_invalid_tool name={tool_name}")
+                append_tool_trace(self, f"drop_invalid_tool name={tool_name}")
                 continue
             fixed = dict(tc)
             fixed["arguments"] = tool_input
@@ -467,15 +489,7 @@ class MessagesAdapter(BaseAdapter):
 
         # finish_reason → stop_reason
         finish = choice.get("finish_reason", "stop")
-        stop_map = {
-            "stop": "end_turn",
-            "length": "max_tokens",
-            "max_tokens": "max_tokens",
-            "tool_calls": "tool_use",
-            "function_call": "tool_use",
-            "content_filter": "end_turn",
-        }
-        stop_reason = stop_map.get(finish, "end_turn")
+        stop_reason = map_finish_reason_to_stop_reason(finish)
 
         # finish=tool_calls 但无有效 tool_use 时，降级为 end_turn，避免客户端状态机异常
         if stop_reason == "tool_use":
@@ -511,103 +525,6 @@ class MessagesAdapter(BaseAdapter):
             },
         }
         return json.dumps(resp, ensure_ascii=False)
-
-    def _sse_chat_to_json(self, sse_text: str) -> str:
-        """将 Chat Completions SSE 聚合为 Chat JSON（插件内版本）
-
-        仅用于 messages 非流式路径，把协议语义（tool_calls 重组/finish 降级）下沉到插件。
-        """
-        content = ""
-        reasoning = ""
-        model = ""
-        msg_id = ""
-        usage = None
-        finish_reason = "stop"
-        tool_calls_map: dict[int, dict] = {}
-
-        for line in sse_text.split("\n"):
-            line = line.strip()
-            if not line.startswith("data: ") or line.startswith("data: [DONE]"):
-                continue
-            try:
-                chunk = json.loads(line[6:])
-            except json.JSONDecodeError:
-                continue
-
-            if not model:
-                model = chunk.get("model", "")
-            if not msg_id:
-                msg_id = chunk.get("id", "")
-            if "usage" in chunk and chunk["usage"]:
-                usage = chunk["usage"]
-
-            choices = chunk.get("choices", []) or []
-            if not choices:
-                continue
-            choice = choices[0]
-            delta = choice.get("delta", {}) or {}
-
-            # 文本与推理
-            if delta.get("content"):
-                content += delta["content"]
-            if delta.get("reasoning_content"):
-                reasoning += delta["reasoning_content"]
-
-            # tool_calls 增量重组
-            if delta.get("tool_calls"):
-                for tc in delta["tool_calls"]:
-                    idx = tc.get("index", 0)
-                    if idx not in tool_calls_map:
-                        tool_calls_map[idx] = {
-                            "id": tc.get("id", ""),
-                            "type": tc.get("type", "function") or "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    cur = tool_calls_map[idx]
-                    if tc.get("id"):
-                        cur["id"] = tc["id"]
-                    if tc.get("type"):
-                        cur["type"] = tc["type"]
-                    fn = tc.get("function", {}) or {}
-                    if fn.get("name"):
-                        cur["function"]["name"] = fn["name"]
-                    if "arguments" in fn and fn.get("arguments") is not None:
-                        cur["function"]["arguments"] += fn.get("arguments", "")
-
-            if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-
-        result = {
-            "id": msg_id,
-            "object": "chat.completion",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": finish_reason,
-            }],
-        }
-
-        if tool_calls_map:
-            tool_calls = []
-            for i in sorted(tool_calls_map.keys()):
-                tc = tool_calls_map[i]
-                if tc.get("function", {}).get("name"):
-                    tool_calls.append(tc)
-            if tool_calls:
-                result["choices"][0]["message"]["tool_calls"] = tool_calls
-
-        # finish=tool_calls 但无有效 tool_call 时降级为 stop
-        if result["choices"][0].get("finish_reason") == "tool_calls":
-            if not result["choices"][0]["message"].get("tool_calls"):
-                result["choices"][0]["finish_reason"] = "stop"
-
-        if reasoning:
-            result["choices"][0]["message"]["reasoning_content"] = reasoning
-        if usage:
-            result["usage"] = usage
-
-        return json.dumps(result, ensure_ascii=False)
 
     # ═══════════════════════════════════════════════════════════
     #  流式 SSE 转换：Chat SSE → Messages SSE
@@ -699,287 +616,161 @@ class MessagesAdapter(BaseAdapter):
             # ── 推理/思考内容 (reasoning_content) ──
             reasoning = delta.get("reasoning_content", "")
             if reasoning:
-                if first_thinking_at is None:
-                    first_thinking_at = time.monotonic()
-                thinking_text += reasoning
-                # 首次推理内容出现时初始化索引
-                if thinking_block_index is None:
-                    # 如果 text 块已在 role 中预发出（index=0），推理块用下一个索引
-                    if text_block_emitted:
-                        thinking_block_index = 1
-                    else:
-                        thinking_block_index = 0
-                        text_block_index = 1  # 文本块索引顺延
-                if not role_sent:
-                    role_sent = True
-                    yield _messages_sse_event("message_start", {
-                        "type": "message_start",
-                        "message": {
-                            "id": msg_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "model": model,
-                            "content": [],
-                            "usage": {"input_tokens": input_tokens},
-                        },
-                    })
-                if not thinking_block_sent:
-                    thinking_block_sent = True
-                    yield _messages_sse_event("content_block_start", {
-                        "type": "content_block_start",
-                        "index": thinking_block_index,
-                        "content_block": {"type": "thinking", "thinking": ""},
-                    })
-                yield _messages_sse_event("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": thinking_block_index,
-                    "delta": {"type": "thinking_delta", "thinking": reasoning},
-                })
-
-                # 可见性增强：当长时间只有 thinking 而无正文/工具时，提前镜像一份可见文本。
-                # 这样 Claude Code 不会一直显示 Razzmatazzing/Channeling 而无任何可见输出。
                 has_any_tool_started = any(tc.get("started") for tc in current_tool_calls.values())
-                if (
-                    (not thinking_mirrored_to_text)
-                    and (not text_block_sent)
-                    and (not has_any_tool_started)
-                    and len(thinking_text) >= 120
-                ):
+                thinking_lines, thinking_state = handle_thinking_delta(
+                    thinking_text=thinking_text,
+                    reasoning_delta=reasoning,
+                    role_sent=role_sent,
+                    text_block_sent=text_block_sent,
+                    text_block_emitted=text_block_emitted,
+                    text_block_index=text_block_index,
+                    thinking_block_index=thinking_block_index,
+                    thinking_block_sent=thinking_block_sent,
+                    has_any_tool_started=has_any_tool_started,
+                    msg_id=msg_id,
+                    model=model,
+                    input_tokens=input_tokens,
+                    first_thinking_at=first_thinking_at,
+                    stream_started_at=stream_started_at,
+                )
+                for ln in thinking_lines:
+                    yield ln
+
+                thinking_text = thinking_state["thinking_text"]
+                role_sent = thinking_state["role_sent"]
+                text_block_sent = thinking_state["text_block_sent"]
+                text_block_emitted = thinking_state["text_block_emitted"]
+                text_block_index = thinking_state["text_block_index"]
+                thinking_block_index = thinking_state["thinking_block_index"]
+                thinking_block_sent = thinking_state["thinking_block_sent"]
+                thinking_mirrored_to_text = thinking_state["thinking_mirrored_to_text"]
+                first_thinking_at = thinking_state["first_thinking_at"]
+                if thinking_mirrored_to_text:
                     self._fallback_thinking_to_text = True
-                    if not text_block_emitted:
-                        text_block_emitted = True
-                        yield _messages_sse_event("content_block_start", {
-                            "type": "content_block_start",
-                            "index": text_block_index,
-                            "content_block": {"type": "text", "text": ""},
-                        })
-                    preview = thinking_text[:200]
-                    yield _messages_sse_event("content_block_delta", {
-                        "type": "content_block_delta",
-                        "index": text_block_index,
-                        "delta": {"type": "text_delta", "text": preview},
-                    })
-                    text_block_sent = True
-                    thinking_mirrored_to_text = True
-
-                # 超时收敛：若持续仅有 thinking 且无正文/工具，主动结束本轮，避免客户端长时间“Flowing”。
-                has_any_tool_started = any(tc.get("started") for tc in current_tool_calls.values())
-                elapsed = time.monotonic() - (first_thinking_at or stream_started_at)
-                if (not text_block_sent) and (not has_any_tool_started) and elapsed >= 8.0:
+                if thinking_state["force_early_end_turn"]:
                     force_early_end_turn = True
-                    self._tool_trace_events.append("early_end_turn_only_thinking")
+                    append_tool_trace(self, "early_end_turn_only_thinking")
                     break
 
             # ── role delta（消息开始，去重）──
             if delta.get("role") and not role_sent:
-                role_sent = True
-                yield _messages_sse_event("message_start", {
-                    "type": "message_start",
-                    "message": {
-                        "id": msg_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "model": model,
-                        "content": [],
-                        "usage": {"input_tokens": input_tokens},
-                    },
-                })
+                role_lines, role_sent = ensure_message_start(
+                    role_sent=role_sent,
+                    msg_id=msg_id,
+                    model=model,
+                    input_tokens=input_tokens,
+                )
+                for ln in role_lines:
+                    yield ln
 
             # ── 文本 delta（字段存在即处理，避免空串被误吞）──
             if "content" in delta and delta.get("content") is not None:
                 text = delta["content"]
-                if not role_sent:
-                    role_sent = True
-                    yield _messages_sse_event("message_start", {
-                        "type": "message_start",
-                        "message": {
-                            "id": msg_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "model": model,
-                            "content": [],
-                            "usage": {"input_tokens": input_tokens},
-                        },
-                    })
-                if not text_block_emitted:
-                    text_block_emitted = True
-                    yield _messages_sse_event("content_block_start", {
-                        "type": "content_block_start",
-                        "index": text_block_index,
-                        "content_block": {"type": "text", "text": ""},
-                    })
-                # 仅当有可见文本时，才标记 text_block_sent
-                if text:
-                    text_block_sent = True
-                yield _messages_sse_event("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": text_block_index,
-                    "delta": {"type": "text_delta", "text": text},
-                })
+                text_lines, text_state = handle_text_delta(
+                    text=text,
+                    role_sent=role_sent,
+                    text_block_emitted=text_block_emitted,
+                    text_block_sent=text_block_sent,
+                    text_block_index=text_block_index,
+                    msg_id=msg_id,
+                    model=model,
+                    input_tokens=input_tokens,
+                )
+                for ln in text_lines:
+                    yield ln
+                role_sent = text_state["role_sent"]
+                text_block_emitted = text_state["text_block_emitted"]
+                text_block_sent = text_state["text_block_sent"]
 
             # ── tool_calls delta（增量 tool_use）──
             if "tool_calls" in delta and delta["tool_calls"]:
                 for tc_delta in delta["tool_calls"]:
                     tc_index = tc_delta.get("index", 0)
-
-                    # 初始化 tool call 跟踪
-                    if tc_index not in current_tool_calls:
-                        current_tool_calls[tc_index] = {
-                            "id": None,
-                            "name": None,
-                            "args_buffer": "",
-                            "started": False,
-                            "done": False,
-                            "args_flushed": False,
-                            "valid": False,
-                        }
-
-                    tc = current_tool_calls[tc_index]
-
-                    # 更新 id 和 name
-                    if tc_delta.get("id"):
-                        tc["id"] = tc_delta["id"]
-
-                    func_data = tc_delta.get("function", {})
-                    if func_data.get("name"):
-                        tc["name"] = func_data["name"]
+                    tc, func_data = upsert_tool_call_state(current_tool_calls, tc_index, tc_delta)
 
                     # 工具参数 delta（增量 JSON）
-                    if "arguments" in func_data:
-                        part = func_data.get("arguments") or ""
-                        # 无论是否 started，先缓冲，避免“参数先于 name/id 到达”时丢片段
-                        tc["args_buffer"] += part
+                    if append_tool_arguments_delta(tc, func_data):
 
                         # 尝试标记 JSON 是否完整，并在“完整+通过schema校验”后再发 tool_use
                         try:
-                            parsed = json.loads(tc["args_buffer"] or "{}")
+                            ok, parsed_dict = parse_tool_args_buffer(tc["args_buffer"])
+                            if not ok:
+                                raise json.JSONDecodeError("incomplete", tc["args_buffer"] or "", 0)
                             tc["done"] = True
                             tool_name = tc.get("name") or ""
-                            parsed_dict = parsed if isinstance(parsed, dict) else {}
-                            if not self._validate_tool_input(tool_name, parsed_dict):
-                                parsed_dict = self._repair_tool_input(tool_name, parsed_dict)
-                                # 把修复后的参数写回缓冲，确保下游拿到的是可用参数
-                                tc["args_buffer"] = json.dumps(parsed_dict, ensure_ascii=False)
-                            tc["valid"] = self._validate_tool_input(tool_name, parsed_dict)
+                            tc["valid"], parsed_dict = normalize_tool_input(self, tool_name, parsed_dict)
+                            # 把修复后的参数写回缓冲，确保下游拿到的是可用参数
+                            tc["args_buffer"] = json.dumps(parsed_dict, ensure_ascii=False)
 
                             if tc["id"] and tc["name"] and tc["valid"] and not tc["started"]:
                                 # 循环判定签名：name + args + tool_call_id。
                                 # 关键点：同一轮里不同 call_id 的多个 Read/Bash 属于合法并行工具调用，
                                 # 不应被误判为循环；仅当同一 call_id 反复下发相同参数才计数。
-                                sig = f"{tc['name']}|{tc['args_buffer'] or '{}'}|{tc.get('id') or tc_index}"
-                                tool_signature_counts[sig] = tool_signature_counts.get(sig, 0) + 1
-                                if tool_signature_counts[sig] > loop_guard_threshold:
+                                triggered, _sig, _count = update_loop_guard(
+                                    signature_counts=tool_signature_counts,
+                                    tool_name=tc["name"],
+                                    args_json=tc["args_buffer"] or "{}",
+                                    call_id=tc.get("id") or "",
+                                    tc_index=tc_index,
+                                    threshold=loop_guard_threshold,
+                                )
+                                if triggered:
                                     loop_guard_triggered = True
-                                    self._tool_trace_events.append(
-                                        f"loop_guard_drop sig={tc['name']} id={tc.get('id') or ''} cnt={tool_signature_counts[sig]}"
-                                    )
+                                    append_tool_trace(self, f"loop_guard_drop sig={tc['name']} id={tc.get('id') or ''} cnt={_count}")
                                     # 不再继续下发重复工具块，避免客户端陷入循环等待
                                     tc["started"] = False
                                     tc["valid"] = False
                                     continue
-                                if not role_sent:
-                                    role_sent = True
-                                    yield _messages_sse_event("message_start", {
-                                        "type": "message_start",
-                                        "message": {
-                                            "id": msg_id,
-                                            "type": "message",
-                                            "role": "assistant",
-                                            "model": model,
-                                            "content": [],
-                                            "usage": {"input_tokens": input_tokens},
-                                        },
-                                    })
-                                tool_block_counter += 1
-                                tc["started"] = True
-                                claude_index = text_block_index + tool_block_counter
-                                tc["claude_index"] = claude_index
-                                self._tool_trace_events.append(
-                                    f"tool_start tc={tc_index} cb={claude_index} name={tc['name']}"
+                                tool_block_counter, claude_index = start_tool_call_state(
+                                    tc=tc,
+                                    tool_block_counter=tool_block_counter,
+                                    text_block_index=text_block_index,
                                 )
-                                yield _messages_sse_event("content_block_start", {
-                                    "type": "content_block_start",
-                                    "index": claude_index,
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": tc["id"],
-                                        "name": tc["name"],
-                                        "input": {},
-                                    },
-                                })
-                                # 完整 JSON 一次性发出，避免碎片导致解析失败
-                                yield _messages_sse_event("content_block_delta", {
-                                    "type": "content_block_delta",
-                                    "index": tc["claude_index"],
-                                    "delta": {
-                                        "type": "input_json_delta",
-                                        "partial_json": tc["args_buffer"] or "{}",
-                                    },
-                                })
+                                append_tool_trace(self, f"tool_start tc={tc_index} cb={claude_index} name={tc['name']}")
+                                tool_lines, role_sent = build_tool_use_start_events(
+                                    role_sent=role_sent,
+                                    msg_id=msg_id,
+                                    model=model,
+                                    input_tokens=input_tokens,
+                                    claude_index=claude_index,
+                                    tool_id=tc["id"],
+                                    tool_name=tc["name"],
+                                    partial_json=tc["args_buffer"] or "{}",
+                                )
+                                for ln in tool_lines:
+                                    yield ln
                                 tc["args_flushed"] = True
-                                self._tool_trace_events.append(
-                                    f"tool_delta tc={tc_index} cb={tc['claude_index']} len={len(tc['args_buffer'] or '{}')} full"
-                                )
+                                append_tool_trace(self, f"tool_delta tc={tc_index} cb={tc['claude_index']} len={len(tc['args_buffer'] or '{}')} full")
                         except json.JSONDecodeError:
                             pass
 
                     # 参数为空对象场景：name/id 已到但 arguments 可能为空字符串，尝试兜底发 {}
-                    if tc["id"] and tc["name"] and not tc["started"] and tc["args_buffer"] in ("", None):
+                    if should_try_empty_args_tool_start(tc):
                         if self._validate_tool_input(tc["name"], {}):
-                            if not role_sent:
-                                role_sent = True
-                                yield _messages_sse_event("message_start", {
-                                    "type": "message_start",
-                                    "message": {
-                                        "id": msg_id,
-                                        "type": "message",
-                                        "role": "assistant",
-                                        "model": model,
-                                        "content": [],
-                                        "usage": {"input_tokens": input_tokens},
-                                    },
-                                })
-                            tool_block_counter += 1
-                            tc["started"] = True
-                            tc["done"] = True
-                            tc["valid"] = True
-                            claude_index = text_block_index + tool_block_counter
-                            tc["claude_index"] = claude_index
-                            self._tool_trace_events.append(
-                                f"tool_start tc={tc_index} cb={claude_index} name={tc['name']} empty_args"
+                            tool_block_counter, claude_index = start_tool_call_state(
+                                tc=tc,
+                                tool_block_counter=tool_block_counter,
+                                text_block_index=text_block_index,
                             )
-                            yield _messages_sse_event("content_block_start", {
-                                "type": "content_block_start",
-                                "index": claude_index,
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": tc["id"],
-                                    "name": tc["name"],
-                                    "input": {},
-                                },
-                            })
-                            yield _messages_sse_event("content_block_delta", {
-                                "type": "content_block_delta",
-                                "index": tc["claude_index"],
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": "{}",
-                                },
-                            })
+                            mark_empty_args_tool_state(tc)
+                            append_tool_trace(self, f"tool_start tc={tc_index} cb={claude_index} name={tc['name']} empty_args")
+                            tool_lines, role_sent = build_tool_use_start_events(
+                                role_sent=role_sent,
+                                msg_id=msg_id,
+                                model=model,
+                                input_tokens=input_tokens,
+                                claude_index=claude_index,
+                                tool_id=tc["id"],
+                                tool_name=tc["name"],
+                                partial_json="{}",
+                            )
+                            for ln in tool_lines:
+                                yield ln
                             tc["args_flushed"] = True
 
             # ── finish_reason ──
             if choice.get("finish_reason"):
-                finish = choice["finish_reason"]
-                stop_map = {
-                    "stop": "end_turn",
-                    "length": "max_tokens",
-                    "max_tokens": "max_tokens",
-                    "tool_calls": "tool_use",
-                    "function_call": "tool_use",
-                    "content_filter": "end_turn",
-                }
-                finish_reason = stop_map.get(finish, "end_turn")
+                finish_reason = map_finish_reason_to_stop_reason(choice["finish_reason"])
 
         # ═══════════════════════════════════════
         #  SSE 收尾：content_block_stop × N
@@ -988,228 +779,44 @@ class MessagesAdapter(BaseAdapter):
         # 兜底救援：若流式阶段完全未产出 role（常见于上游 SSE 被分片导致逐行解析失败），
         # 尝试基于完整原始 SSE 文本聚合为 Chat JSON，再一次性还原为 Messages 事件。
         if (not role_sent) and raw_stream_text and ("data:" in raw_stream_text):
-            try:
-                chat_json_text = self._sse_chat_to_json(raw_stream_text)
-                msg_json_text = self.convert_response(chat_json_text)
-                msg_obj = json.loads(msg_json_text)
-                content_blocks = msg_obj.get("content", []) if isinstance(msg_obj, dict) else []
-                usage_obj = msg_obj.get("usage", {}) if isinstance(msg_obj, dict) else {}
-
-                yield _messages_sse_event("message_start", {
-                    "type": "message_start",
-                    "message": {
-                        "id": msg_obj.get("id", msg_id),
-                        "type": "message",
-                        "role": "assistant",
-                        "model": msg_obj.get("model", model),
-                        "content": [],
-                        "usage": {"input_tokens": usage_obj.get("input_tokens", input_tokens)},
-                    },
-                })
-
-                for i, cb in enumerate(content_blocks):
-                    if not isinstance(cb, dict):
-                        continue
-                    cb_type = cb.get("type")
-                    if cb_type == "thinking":
-                        yield _messages_sse_event("content_block_start", {
-                            "type": "content_block_start",
-                            "index": i,
-                            "content_block": {"type": "thinking", "thinking": ""},
-                        })
-                        yield _messages_sse_event("content_block_delta", {
-                            "type": "content_block_delta",
-                            "index": i,
-                            "delta": {"type": "thinking_delta", "thinking": cb.get("thinking", "")},
-                        })
-                    elif cb_type == "tool_use":
-                        yield _messages_sse_event("content_block_start", {
-                            "type": "content_block_start",
-                            "index": i,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": cb.get("id", ""),
-                                "name": cb.get("name", ""),
-                                "input": {},
-                            },
-                        })
-                        yield _messages_sse_event("content_block_delta", {
-                            "type": "content_block_delta",
-                            "index": i,
-                            "delta": {
-                                "type": "input_json_delta",
-                                "partial_json": json.dumps(cb.get("input", {}), ensure_ascii=False),
-                            },
-                        })
-                    else:
-                        yield _messages_sse_event("content_block_start", {
-                            "type": "content_block_start",
-                            "index": i,
-                            "content_block": {"type": "text", "text": ""},
-                        })
-                        yield _messages_sse_event("content_block_delta", {
-                            "type": "content_block_delta",
-                            "index": i,
-                            "delta": {"type": "text_delta", "text": cb.get("text", "")},
-                        })
-
-                    yield _messages_sse_event("content_block_stop", {
-                        "type": "content_block_stop",
-                        "index": i,
-                    })
-
-                yield _messages_sse_event("message_delta", {
-                    "type": "message_delta",
-                    "delta": {
-                        "stop_reason": msg_obj.get("stop_reason", "end_turn"),
-                        "stop_sequence": msg_obj.get("stop_sequence"),
-                    },
-                    "usage": {
-                        "input_tokens": usage_obj.get("input_tokens", input_tokens),
-                        "output_tokens": usage_obj.get("output_tokens", output_tokens),
-                        "cached_tokens": usage_obj.get("cached_tokens", cached_tokens),
-                    },
-                })
+            rescued = build_rescue_messages_sse(
+                adapter=self,
+                raw_stream_text=raw_stream_text,
+                msg_id=msg_id,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+            )
+            if rescued:
+                rescue_lines, rescue_usage = rescued
                 self._last_usage_tokens = {
-                    "prompt_tokens": usage_obj.get("input_tokens", input_tokens) or 0,
-                    "completion_tokens": usage_obj.get("output_tokens", output_tokens) or 0,
-                    "total_tokens": (usage_obj.get("input_tokens", input_tokens) or 0)
-                    + (usage_obj.get("output_tokens", output_tokens) or 0),
-                    "cached_tokens": usage_obj.get("cached_tokens", cached_tokens) or 0,
+                    "prompt_tokens": rescue_usage.get("prompt_tokens", 0),
+                    "completion_tokens": rescue_usage.get("completion_tokens", 0),
+                    "total_tokens": rescue_usage.get("total_tokens", 0),
+                    "cached_tokens": rescue_usage.get("cached_tokens", 0),
                 }
-                yield _messages_sse_event("message_stop", {"type": "message_stop"})
-                yield "data: [DONE]\n\n"
+                for line in rescue_lines:
+                    yield line
                 return
-            except Exception:
-                pass
 
-        # 协议兜底：若上游全程未给 role/content/tool/reasoning，
-        # 也必须先发 message_start，避免直接 message_delta 导致客户端解析失败。
-        if not role_sent:
-            role_sent = True
-            yield _messages_sse_event("message_start", {
-                "type": "message_start",
-                "message": {
-                    "id": msg_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": [],
-                    "usage": {"input_tokens": input_tokens},
-                },
-            })
-
-        # 推理 content_block_stop
-        if thinking_block_sent:
-            yield _messages_sse_event("content_block_stop", {
-                "type": "content_block_stop",
-                "index": thinking_block_index,
-            })
-
-        # 兜底：若整段只有 thinking 没有正文，补一条可见文本，避免 Claude CLI 看起来“无返回”
-        if thinking_text and not text_block_sent:
-            self._fallback_thinking_to_text = True
-            if not text_block_emitted:
-                text_block_emitted = True
-                yield _messages_sse_event("content_block_start", {
-                    "type": "content_block_start",
-                    "index": text_block_index,
-                    "content_block": {"type": "text", "text": ""},
-                })
-            yield _messages_sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": text_block_index,
-                "delta": {"type": "text_delta", "text": thinking_text},
-            })
-            text_block_sent = True
-
-        # 兜底：若既无正文、也无工具、也无推理，补一条可见文本
-        has_any_tool_block = any(tc.get("started") and tc.get("valid") for tc in current_tool_calls.values())
-        if (not text_block_sent) and (not thinking_block_sent) and (not has_any_tool_block):
-            if not text_block_emitted:
-                text_block_emitted = True
-                yield _messages_sse_event("content_block_start", {
-                    "type": "content_block_start",
-                    "index": text_block_index,
-                    "content_block": {"type": "text", "text": ""},
-                })
-            yield _messages_sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": text_block_index,
-                "delta": {"type": "text_delta", "text": "当前请求未产生可用响应，请重试一次。"},
-            })
-            text_block_sent = True
-
-        # 防循环保险丝触发后，强制给出可见提示，避免 Claude Code 长时间 Roosting。
-        if loop_guard_triggered:
-            if not text_block_emitted:
-                text_block_emitted = True
-                yield _messages_sse_event("content_block_start", {
-                    "type": "content_block_start",
-                    "index": text_block_index,
-                    "content_block": {"type": "text", "text": ""},
-                })
-            yield _messages_sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": text_block_index,
-                "delta": {
-                    "type": "text_delta",
-                    "text": "\n[循环保护] 检测到同一工具调用重复下发，已终止该工具链并结束本轮。",
-                },
-            })
-            text_block_sent = True
-
-        # 文本 content_block_stop
-        if text_block_sent:
-            yield _messages_sse_event("content_block_stop", {
-                "type": "content_block_stop",
-                "index": text_block_index,
-            })
-
-        # 工具 content_block_stop（按 index 排序）
-        for tc in sorted(current_tool_calls.values(), key=lambda t: t.get("claude_index", 999)):
-            if tc.get("started") and tc.get("claude_index") is not None:
-                yield _messages_sse_event("content_block_stop", {
-                    "type": "content_block_stop",
-                    "index": tc["claude_index"],
-                })
-                self._tool_trace_events.append(
-                    f"tool_stop cb={tc['claude_index']} done={1 if tc.get('done') else 0}"
-                )
-
-        # finish_reason=tool_use 但无任何有效 tool 块时降级为 end_turn
-        has_any_tool_block = any(tc.get("started") and tc.get("valid") for tc in current_tool_calls.values())
-        if finish_reason == "tool_use" and not has_any_tool_block:
-            finish_reason = "end_turn"
-        if loop_guard_triggered:
-            finish_reason = "end_turn"
-        if force_early_end_turn:
-            finish_reason = "end_turn"
-
-        # ── message_delta ──
-        self._last_usage_tokens = {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-            "cached_tokens": cached_tokens,
-        }
-        yield _messages_sse_event("message_delta", {
-            "type": "message_delta",
-            "delta": {"stop_reason": finish_reason, "stop_sequence": None},
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cached_tokens": cached_tokens,
-            },
-        })
-
-        # ── message_stop + [DONE] ──
-        yield _messages_sse_event("message_stop", {
-            "type": "message_stop",
-        })
-        yield "data: [DONE]\n\n"
-
-
-def _messages_sse_event(event_name: str, data: dict) -> str:
-    """构建一条 Messages SSE 事件"""
-    return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        state = make_finalize_state(
+            role_sent=role_sent,
+            msg_id=msg_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=cached_tokens,
+            thinking_block_sent=thinking_block_sent,
+            thinking_block_index=thinking_block_index,
+            thinking_text=thinking_text,
+            text_block_sent=text_block_sent,
+            text_block_emitted=text_block_emitted,
+            text_block_index=text_block_index,
+            current_tool_calls=current_tool_calls,
+            loop_guard_triggered=loop_guard_triggered,
+            force_early_end_turn=force_early_end_turn,
+            finish_reason=finish_reason,
+        )
+        for line in finalize_messages_sse(self, state):
+            yield line

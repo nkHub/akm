@@ -24,6 +24,9 @@ mv pyproject.toml pyproject.toml.bak
 python setup.py py2app
 mv pyproject.toml.bak pyproject.toml
 
+# 推荐：使用脚本打包（自动处理 pyproject 备份恢复）
+./scripts/build_app.sh
+
 # 可选：清理构建缓存后重新打包
 rm -rf build dist
 python setup.py py2app
