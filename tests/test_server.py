@@ -162,3 +162,12 @@ def test_extract_tokens_prefers_anthropic_cache_read_input_tokens():
     assert out["completion_tokens"] == 80
     assert out["cached_tokens"] == 900
     assert out["cache_creation_tokens"] == 300
+
+
+def test_estimate_tokens_light_when_usage_missing():
+    from akm.server import _estimate_tokens_light
+    req = {"model": "x", "messages": [{"role": "user", "content": "你好，帮我总结一下这段文本"}]}
+    out = _estimate_tokens_light(req, "")
+    assert out["prompt_tokens"] > 0
+    assert out["completion_tokens"] == 0
+    assert out["total_tokens"] == out["prompt_tokens"]
