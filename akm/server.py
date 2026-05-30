@@ -12,6 +12,7 @@ import httpx
 from fastapi import FastAPI, Request, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from akm import __version__
 from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
@@ -54,7 +55,7 @@ async def lifespan(app: FastAPI):
         await app.state.http_client.aclose()
 
 
-app = FastAPI(title="AI Key Manager", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
 
 
 @app.exception_handler(Exception)
@@ -159,6 +160,12 @@ def _render_template(name: str, **kwargs) -> str:
 async def health():
     """健康检查"""
     return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def api_version():
+    """返回当前应用版本，供前端页面和外部脚本统一读取。"""
+    return {"version": __version__}
 
 
 @app.get("/favicon.ico")
@@ -884,7 +891,7 @@ async def settings_page(request: Request):
 @app.get("/about")
 async def about_page(request: Request):
     """关于页面"""
-    return HTMLResponse(_render_template("about.html", title="关于", active="about"))
+    return HTMLResponse(_render_template("about.html", title="关于", active="about", version=__version__))
 
 
 @app.get("/admin")
