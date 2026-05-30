@@ -600,6 +600,12 @@ class ResponsesAdapter(BaseAdapter):
         prompt_tokens = 0
         completion_tokens = 0
         cached_tokens = 0
+        self._last_usage_tokens = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+        }
 
         tool_calls_state: dict[int, dict] = {}
         seen_tool_indices: set[int] = set()
@@ -937,6 +943,12 @@ class ResponsesAdapter(BaseAdapter):
                 "usage": completed_usage,
             },
         })
+        self._last_usage_tokens = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total,
+            "cached_tokens": cached_tokens,
+        }
         yield "data: [DONE]\n\n"
 
 

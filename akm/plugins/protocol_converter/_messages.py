@@ -628,6 +628,12 @@ class MessagesAdapter(BaseAdapter):
         # 供 server.py 写审计日志时读取的内部标记
         self._fallback_thinking_to_text = False
         self._tool_trace_events: list[str] = []
+        self._last_usage_tokens = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+        }
         model = ""
         input_tokens = 0
         output_tokens = 0
@@ -643,12 +649,22 @@ class MessagesAdapter(BaseAdapter):
         thinking_block_index = None  # 推理内容块索引（如果有的话动态分配）
         thinking_block_sent = False
         thinking_text = ""
+        thinking_mirrored_to_text = False
+        stream_started_at = time.monotonic()
+        first_thinking_at = None
+        force_early_end_turn = False
 
         # tool_call 增量跟踪：{index: {id, name, args_buffer, started, claude_index}}
         current_tool_calls: dict[int, dict] = {}
+        # 防循环保险丝：同名 + 同参数工具调用重复计数
+        tool_signature_counts: dict[str, int] = {}
+        loop_guard_triggered = False
+        loop_guard_threshold = 2
+        raw_stream_text = ""
 
         async for raw_line in upstream_stream:
             line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else raw_line
+            raw_stream_text += line
             if not line.startswith("data: "):
                 continue
             if line.startswith("data: [DONE]"):
@@ -683,6 +699,8 @@ class MessagesAdapter(BaseAdapter):
             # ── 推理/思考内容 (reasoning_content) ──
             reasoning = delta.get("reasoning_content", "")
             if reasoning:
+                if first_thinking_at is None:
+                    first_thinking_at = time.monotonic()
                 thinking_text += reasoning
                 # 首次推理内容出现时初始化索引
                 if thinking_block_index is None:
@@ -717,6 +735,40 @@ class MessagesAdapter(BaseAdapter):
                     "index": thinking_block_index,
                     "delta": {"type": "thinking_delta", "thinking": reasoning},
                 })
+
+                # 可见性增强：当长时间只有 thinking 而无正文/工具时，提前镜像一份可见文本。
+                # 这样 Claude Code 不会一直显示 Razzmatazzing/Channeling 而无任何可见输出。
+                has_any_tool_started = any(tc.get("started") for tc in current_tool_calls.values())
+                if (
+                    (not thinking_mirrored_to_text)
+                    and (not text_block_sent)
+                    and (not has_any_tool_started)
+                    and len(thinking_text) >= 120
+                ):
+                    self._fallback_thinking_to_text = True
+                    if not text_block_emitted:
+                        text_block_emitted = True
+                        yield _messages_sse_event("content_block_start", {
+                            "type": "content_block_start",
+                            "index": text_block_index,
+                            "content_block": {"type": "text", "text": ""},
+                        })
+                    preview = thinking_text[:200]
+                    yield _messages_sse_event("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": text_block_index,
+                        "delta": {"type": "text_delta", "text": preview},
+                    })
+                    text_block_sent = True
+                    thinking_mirrored_to_text = True
+
+                # 超时收敛：若持续仅有 thinking 且无正文/工具，主动结束本轮，避免客户端长时间“Flowing”。
+                has_any_tool_started = any(tc.get("started") for tc in current_tool_calls.values())
+                elapsed = time.monotonic() - (first_thinking_at or stream_started_at)
+                if (not text_block_sent) and (not has_any_tool_started) and elapsed >= 8.0:
+                    force_early_end_turn = True
+                    self._tool_trace_events.append("early_end_turn_only_thinking")
+                    break
 
             # ── role delta（消息开始，去重）──
             if delta.get("role") and not role_sent:
@@ -811,6 +863,20 @@ class MessagesAdapter(BaseAdapter):
                             tc["valid"] = self._validate_tool_input(tool_name, parsed_dict)
 
                             if tc["id"] and tc["name"] and tc["valid"] and not tc["started"]:
+                                # 循环判定签名：name + args + tool_call_id。
+                                # 关键点：同一轮里不同 call_id 的多个 Read/Bash 属于合法并行工具调用，
+                                # 不应被误判为循环；仅当同一 call_id 反复下发相同参数才计数。
+                                sig = f"{tc['name']}|{tc['args_buffer'] or '{}'}|{tc.get('id') or tc_index}"
+                                tool_signature_counts[sig] = tool_signature_counts.get(sig, 0) + 1
+                                if tool_signature_counts[sig] > loop_guard_threshold:
+                                    loop_guard_triggered = True
+                                    self._tool_trace_events.append(
+                                        f"loop_guard_drop sig={tc['name']} id={tc.get('id') or ''} cnt={tool_signature_counts[sig]}"
+                                    )
+                                    # 不再继续下发重复工具块，避免客户端陷入循环等待
+                                    tc["started"] = False
+                                    tc["valid"] = False
+                                    continue
                                 if not role_sent:
                                     role_sent = True
                                     yield _messages_sse_event("message_start", {
@@ -919,6 +985,104 @@ class MessagesAdapter(BaseAdapter):
         #  SSE 收尾：content_block_stop × N
         # ═══════════════════════════════════════
 
+        # 兜底救援：若流式阶段完全未产出 role（常见于上游 SSE 被分片导致逐行解析失败），
+        # 尝试基于完整原始 SSE 文本聚合为 Chat JSON，再一次性还原为 Messages 事件。
+        if (not role_sent) and raw_stream_text and ("data:" in raw_stream_text):
+            try:
+                chat_json_text = self._sse_chat_to_json(raw_stream_text)
+                msg_json_text = self.convert_response(chat_json_text)
+                msg_obj = json.loads(msg_json_text)
+                content_blocks = msg_obj.get("content", []) if isinstance(msg_obj, dict) else []
+                usage_obj = msg_obj.get("usage", {}) if isinstance(msg_obj, dict) else {}
+
+                yield _messages_sse_event("message_start", {
+                    "type": "message_start",
+                    "message": {
+                        "id": msg_obj.get("id", msg_id),
+                        "type": "message",
+                        "role": "assistant",
+                        "model": msg_obj.get("model", model),
+                        "content": [],
+                        "usage": {"input_tokens": usage_obj.get("input_tokens", input_tokens)},
+                    },
+                })
+
+                for i, cb in enumerate(content_blocks):
+                    if not isinstance(cb, dict):
+                        continue
+                    cb_type = cb.get("type")
+                    if cb_type == "thinking":
+                        yield _messages_sse_event("content_block_start", {
+                            "type": "content_block_start",
+                            "index": i,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        })
+                        yield _messages_sse_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": i,
+                            "delta": {"type": "thinking_delta", "thinking": cb.get("thinking", "")},
+                        })
+                    elif cb_type == "tool_use":
+                        yield _messages_sse_event("content_block_start", {
+                            "type": "content_block_start",
+                            "index": i,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": cb.get("id", ""),
+                                "name": cb.get("name", ""),
+                                "input": {},
+                            },
+                        })
+                        yield _messages_sse_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": i,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": json.dumps(cb.get("input", {}), ensure_ascii=False),
+                            },
+                        })
+                    else:
+                        yield _messages_sse_event("content_block_start", {
+                            "type": "content_block_start",
+                            "index": i,
+                            "content_block": {"type": "text", "text": ""},
+                        })
+                        yield _messages_sse_event("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": i,
+                            "delta": {"type": "text_delta", "text": cb.get("text", "")},
+                        })
+
+                    yield _messages_sse_event("content_block_stop", {
+                        "type": "content_block_stop",
+                        "index": i,
+                    })
+
+                yield _messages_sse_event("message_delta", {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": msg_obj.get("stop_reason", "end_turn"),
+                        "stop_sequence": msg_obj.get("stop_sequence"),
+                    },
+                    "usage": {
+                        "input_tokens": usage_obj.get("input_tokens", input_tokens),
+                        "output_tokens": usage_obj.get("output_tokens", output_tokens),
+                        "cached_tokens": usage_obj.get("cached_tokens", cached_tokens),
+                    },
+                })
+                self._last_usage_tokens = {
+                    "prompt_tokens": usage_obj.get("input_tokens", input_tokens) or 0,
+                    "completion_tokens": usage_obj.get("output_tokens", output_tokens) or 0,
+                    "total_tokens": (usage_obj.get("input_tokens", input_tokens) or 0)
+                    + (usage_obj.get("output_tokens", output_tokens) or 0),
+                    "cached_tokens": usage_obj.get("cached_tokens", cached_tokens) or 0,
+                }
+                yield _messages_sse_event("message_stop", {"type": "message_stop"})
+                yield "data: [DONE]\n\n"
+                return
+            except Exception:
+                pass
+
         # 协议兜底：若上游全程未给 role/content/tool/reasoning，
         # 也必须先发 message_start，避免直接 message_delta 导致客户端解析失败。
         if not role_sent:
@@ -976,6 +1140,25 @@ class MessagesAdapter(BaseAdapter):
             })
             text_block_sent = True
 
+        # 防循环保险丝触发后，强制给出可见提示，避免 Claude Code 长时间 Roosting。
+        if loop_guard_triggered:
+            if not text_block_emitted:
+                text_block_emitted = True
+                yield _messages_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": text_block_index,
+                    "content_block": {"type": "text", "text": ""},
+                })
+            yield _messages_sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": text_block_index,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "\n[循环保护] 检测到同一工具调用重复下发，已终止该工具链并结束本轮。",
+                },
+            })
+            text_block_sent = True
+
         # 文本 content_block_stop
         if text_block_sent:
             yield _messages_sse_event("content_block_stop", {
@@ -998,8 +1181,18 @@ class MessagesAdapter(BaseAdapter):
         has_any_tool_block = any(tc.get("started") and tc.get("valid") for tc in current_tool_calls.values())
         if finish_reason == "tool_use" and not has_any_tool_block:
             finish_reason = "end_turn"
+        if loop_guard_triggered:
+            finish_reason = "end_turn"
+        if force_early_end_turn:
+            finish_reason = "end_turn"
 
         # ── message_delta ──
+        self._last_usage_tokens = {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "cached_tokens": cached_tokens,
+        }
         yield _messages_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": finish_reason, "stop_sequence": None},

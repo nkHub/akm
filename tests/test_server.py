@@ -132,3 +132,33 @@ async def test_api_logs_adds_conv_warning_labels(monkeypatch):
     assert "responses_include_not_fully_mapped" in row["conv_warning_codes"]
     assert "store 未映射" in row["conv_warning_labels"]
     assert "include 未完整映射" in row["conv_warning_labels"]
+
+
+def test_extract_tokens_from_messages_sse_fallback():
+    from akm.server import _extract_tokens
+    sse = (
+        'event: message_start\n'
+        'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"x","content":[],"usage":{"input_tokens":123}}}\n\n'
+        'event: message_delta\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":7,"cached_tokens":100}}\n\n'
+        'event: message_stop\n'
+        'data: {"type":"message_stop"}\n\n'
+        'data: [DONE]\n\n'
+    )
+    out = _extract_tokens(sse)
+    assert out is not None
+    assert out["prompt_tokens"] == 123
+    assert out["completion_tokens"] == 7
+    assert out["total_tokens"] == 130
+    assert out["cached_tokens"] == 100
+
+
+def test_extract_tokens_prefers_anthropic_cache_read_input_tokens():
+    from akm.server import _extract_tokens
+    body = '{"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900,"cache_creation_input_tokens":300}}'
+    out = _extract_tokens(body)
+    assert out is not None
+    assert out["prompt_tokens"] == 1200
+    assert out["completion_tokens"] == 80
+    assert out["cached_tokens"] == 900
+    assert out["cache_creation_tokens"] == 300
