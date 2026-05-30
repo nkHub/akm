@@ -19,7 +19,7 @@ from akm.key_pool import (
 )
 from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
-from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents
+from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.plugins.plugin_manager import PluginManager
 
 
@@ -399,6 +399,128 @@ def _extract_tokens(response_body: str) -> dict | None:
         }
 
     return None
+
+
+def _estimate_tokens_light(request_body: dict, response_body: str = "") -> dict:
+    """轻量 token 估算兜底（仅在真实 usage 缺失时使用）。
+
+    说明：
+    - 这是近似估算，不用于计费，仅用于日志可观测性避免全 0。
+    - 估算策略尽量保守：按字符长度折算，英文/JSON 取约 4 字符/Token。
+    """
+    try:
+        req_len = len(json.dumps(request_body or {}, ensure_ascii=False))
+    except Exception:
+        req_len = len(str(request_body or ""))
+
+    prompt_tokens = max(1, req_len // 4) if req_len > 0 else 0
+
+    resp_len = len(response_body or "")
+    # 响应中包含大量 SSE 包装字段，做更保守折算，避免估算过高
+    completion_tokens = max(0, resp_len // 8)
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cached_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+
+
+async def _try_count_tokens_fallback(
+    request: Request,
+    request_body: dict,
+    api_path: str,
+    key_alias: str,
+    provider: str,
+) -> dict | None:
+    """在 messages+anthropic 场景尝试用 /messages/count_tokens 回填输入 token。"""
+    if api_path != "messages" or provider != "anthropic" or not key_alias:
+        return None
+    if not isinstance(request_body.get("messages"), list):
+        return None
+
+    key = get_key(key_alias)
+    if not key:
+        return None
+
+    agent = get_agent(key.get("provider", "anthropic"))
+    url = agent.resolve_url(key, "messages/count_tokens")
+    headers = agent.build_headers(key, "messages")
+
+    count_body = {
+        "model": request_body.get("model", ""),
+        "messages": request_body.get("messages", []),
+    }
+    if "system" in request_body:
+        count_body["system"] = request_body.get("system")
+    if "tools" in request_body:
+        count_body["tools"] = request_body.get("tools")
+
+    try:
+        resp = await request.app.state.http_client.post(url, json=count_body, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return None
+        data = resp.json() if resp.content else {}
+        input_tokens = int(data.get("input_tokens", 0) or 0)
+        if input_tokens <= 0:
+            return None
+        return {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": 0,
+            "total_tokens": input_tokens,
+            "cached_tokens": 0,
+            "cache_creation_tokens": 0,
+        }
+    except Exception:
+        return None
+
+
+async def _build_usage_metrics(
+    request: Request,
+    request_body: dict,
+    response_body: str,
+    api_path: str,
+    key_alias: str,
+    provider: str,
+    adapter,
+) -> tuple[dict, list[str]]:
+    """统一 usage 构建器：标准解析 -> CountTokens -> Adapter -> 轻量估算。"""
+    flags: list[str] = []
+    tokens = _extract_tokens(response_body) or {}
+
+    has_tokens = (tokens.get("prompt_tokens", 0) > 0 or tokens.get("completion_tokens", 0) > 0)
+    if not has_tokens:
+        ct = await _try_count_tokens_fallback(request, request_body, api_path, key_alias, provider)
+        if ct:
+            tokens = ct
+            flags.append("count_tokens_fallback")
+            has_tokens = True
+
+    if not has_tokens and adapter:
+        last_usage = getattr(adapter, "_last_usage_tokens", None)
+        if isinstance(last_usage, dict):
+            p = int(last_usage.get("prompt_tokens", 0) or 0)
+            c = int(last_usage.get("completion_tokens", 0) or 0)
+            t = int(last_usage.get("total_tokens", 0) or (p + c))
+            cached = int(last_usage.get("cached_tokens", 0) or 0)
+            if p > 0 or c > 0:
+                tokens = {
+                    "prompt_tokens": p,
+                    "completion_tokens": c,
+                    "total_tokens": t,
+                    "cached_tokens": cached,
+                    "cache_creation_tokens": int(last_usage.get("cache_creation_tokens", 0) or 0),
+                }
+                flags.append("usage_fallback_adapter")
+                has_tokens = True
+
+    if not has_tokens:
+        tokens = _estimate_tokens_light(request_body, response_body)
+        flags.append("usage_estimated_light")
+
+    return tokens, flags
 
 
 # ── 统计内存缓存（30 秒过期，减少重复解析）──
@@ -907,25 +1029,15 @@ async def _handle_ai_request(request: Request, api_path: str):
                 latency = int((__import__("time").time() - t0) * 1000)
                 body_str = b"".join(chunks).decode("utf-8", errors="replace")
                 status = 200 if not stream_error else 502
-                tokens = _extract_tokens(body_str) or {}
-                used_adapter_usage_fallback = False
-                # adapter 兜底：某些 messages/responses SSE 缺失标准 usage 时，
-                # 从适配器收尾阶段记录的 _last_usage_tokens 补齐统计。
-                if adapter and (tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0):
-                    last_usage = getattr(adapter, "_last_usage_tokens", None)
-                    if isinstance(last_usage, dict):
-                        p = int(last_usage.get("prompt_tokens", 0) or 0)
-                        c = int(last_usage.get("completion_tokens", 0) or 0)
-                        t = int(last_usage.get("total_tokens", 0) or (p + c))
-                        cached = int(last_usage.get("cached_tokens", 0) or 0)
-                        if p > 0 or c > 0:
-                            tokens = {
-                                "prompt_tokens": p,
-                                "completion_tokens": c,
-                                "total_tokens": t,
-                                "cached_tokens": cached,
-                            }
-                            used_adapter_usage_fallback = True
+                tokens, usage_flags = await _build_usage_metrics(
+                    request=request,
+                    request_body=body,
+                    response_body=body_str,
+                    api_path=api_path,
+                    key_alias=key_alias,
+                    provider=provider,
+                    adapter=adapter,
+                )
                 # 在审计 headers 中追加转换标记，便于后续筛查
                 request_headers_for_log = request_headers_json
                 try:
@@ -936,8 +1048,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if status == 200 and not stream_error:
                         if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
                             flags.append("missing_usage_upstream")
-                    if used_adapter_usage_fallback:
-                        flags.append("usage_fallback_adapter")
+                    flags.extend(usage_flags)
                     if adapter and getattr(adapter, "_tool_trace_events", None):
                         if any("loop_guard_drop" in x for x in getattr(adapter, "_tool_trace_events", [])):
                             flags.append("loop_guard_triggered")
@@ -988,7 +1099,15 @@ async def _handle_ai_request(request: Request, api_path: str):
         )
 
     # ── 非流式响应 ──
-    tokens = _extract_tokens(result.get("body", "")) or {}
+    tokens, usage_flags = await _build_usage_metrics(
+        request=request,
+        request_body=body,
+        response_body=result.get("body", ""),
+        api_path=api_path,
+        key_alias=result.get("key_alias", ""),
+        provider=result.get("provider", ""),
+        adapter=result.get("adapter"),
+    )
     request_headers_for_log = request_headers_json
     try:
         headers_obj = json.loads(request_headers_json) if request_headers_json else {}
@@ -998,6 +1117,14 @@ async def _handle_ai_request(request: Request, api_path: str):
             if conv_warn:
                 headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
                 request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+        if usage_flags:
+            prev = headers_obj.get("x-akm-flags", "")
+            merged = [x.strip() for x in (prev.split(",") if prev else []) if x.strip()]
+            for f in usage_flags:
+                if f not in merged:
+                    merged.append(f)
+            headers_obj["x-akm-flags"] = ",".join(merged)
+            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
     except Exception:
         request_headers_for_log = request_headers_json
     asyncio.create_task(write_log_async({
