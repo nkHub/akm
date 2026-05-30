@@ -100,7 +100,7 @@ create-dmg --volname "AI Key Manager" --volicon "../logo.icns" "AI Key Manager.d
 
 ## 三、更新控制方案（选型）
 
-### 方案 A：无需自动更新（当前状态）
+### 方案 A：无需自动更新（过渡方案）
 
 **适用场景**：开发测试阶段，手动分发
 
@@ -163,6 +163,16 @@ updater = SparkleUpdater(
 
 **原理**：启动时请求 GitHub Releases API 获取最新版本号，与本地比对，有更新则在菜单栏添加「新版可用」提示。
 
+**当前选型**：✅ 采用方案 C（当前项目更新管理基线）
+
+**落地步骤**：
+
+1. 统一版本号来源（`akm/__init__.py`）并确保发布时先升级版本号。
+2. 启动时调用 `releases/latest` 检查最新 tag。
+3. 当 `latest != __version__` 时，在菜单栏显示「更新到 vX.Y.Z」。
+4. 点击菜单项后打开对应 Release 页面，让用户手动下载并替换 `.app`。
+5. 为避免触发 GitHub API 限流，结果建议本地缓存 24 小时（已有 `CHECK_INTERVAL = 86400`）。
+
 **实现示例** (`akm/menubar.py`)：
 
 ```python
@@ -194,6 +204,100 @@ def check_update():
 ```
 
 然后在菜单栏动态添加「更新到 vX.X.X」菜单项，点击打开浏览器到 Release 页面。
+
+**GitHub 发布版本设置（一次性配置 + 每次发布流程）**：
+
+1. **仓库准备**
+   - 确认代码托管在 GitHub 仓库（例如 `nkHub/akm`）。
+   - 确认本地 `GITHUB_REPO` 与真实仓库一致。
+
+2. **首次约定版本标签规则**
+   - 建议统一使用 `v` 前缀标签：`v0.1.0`、`v0.2.0`。
+   - 代码中已用 `lstrip("v")` 兼容本地版本号比较。
+
+3. **每次发布操作（Web UI）**
+   - 进入 GitHub 仓库 → `Releases` → `Draft a new release`。
+   - `Choose a tag`：新建或选择标签（如 `v0.2.0`）。
+   - `Release title`：建议填写 `v0.2.0`。
+   - 描述本次更新内容（新增 / 修复 / 兼容性说明）。
+   - 在 `Attach binaries` 上传分发包（zip / DMG）。
+   - 点击 `Publish release`。
+
+4. **预发布与正式发布**
+   - 测试版勾选 `Set as a pre-release`（如 `v0.2.0-beta.1`）。
+   - 正式版不勾选 pre-release，必要时勾选 `Set as the latest release`。
+
+5. **发布后自检**
+   - 打开 `https://api.github.com/repos/<owner>/<repo>/releases/latest`。
+   - 确认返回的 `tag_name`、`html_url` 与刚发布版本一致。
+   - 本地启动应用验证菜单栏是否出现更新提示。
+
+**命令行发布流程（git tag + push + gh release）**：
+
+> 首次使用需安装并登录 GitHub CLI：`brew install gh && gh auth login`
+
+1. **确认版本号与工作区**
+
+```bash
+# 确认当前版本号
+python -c 'from akm import __version__; print(__version__)'
+
+# 确认工作区干净（避免把未完成改动带入发布）
+git status
+```
+
+2. **构建分发包（示例为 zip）**
+
+```bash
+# 清理并重新打包
+rm -rf build dist && python setup.py py2app
+
+# 生成 zip（文件名带版本号）
+cd dist && zip -r "AI Key Manager-$(python -c 'from akm import __version__; print(__version__)').zip" "AI Key Manager.app"
+```
+
+3. **创建并推送版本标签**
+
+```bash
+# 以 v 前缀创建标签（示例：v0.2.0）
+git tag -a v0.2.0 -m "release: v0.2.0"
+
+# 推送代码与标签
+git push origin main
+git push origin v0.2.0
+```
+
+4. **通过 gh 创建 Release 并上传附件**
+
+```bash
+gh release create v0.2.0 \
+  "dist/AI Key Manager-0.2.0.zip" \
+  --title "v0.2.0" \
+  --notes "- 新增功能 X\n- 修复问题 Y"
+```
+
+5. **发布后快速核验**
+
+```bash
+# 查看 latest 是否已切换到新版本
+curl -s https://api.github.com/repos/nkHub/akm/releases/latest
+
+# 查看 Release 列表
+gh release list
+```
+
+**可复用模板（自动读取 `__version__`）**：
+
+```bash
+VER=$(python -c 'from akm import __version__; print(__version__)')
+TAG="v${VER}"
+ZIP="dist/AI Key Manager-${VER}.zip"
+
+git tag -a "$TAG" -m "release: $TAG"
+git push origin main && git push origin "$TAG"
+
+gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
+```
 
 **优点**：无需托管额外文件，完全免费  
 **缺点**：用户需手动下载替换 `.app`
