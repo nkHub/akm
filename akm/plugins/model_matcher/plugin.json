@@ -71,7 +71,7 @@
       "key": "smart_bypass_min_improve",
       "label": "最小改善阈值",
       "type": "number",
-      "default": 0.15,
+      "default": "0.15",
       "min": 0,
       "max": 5,
       "description": "候选 key 相比当前 key 至少改善多少分才执行切换"
