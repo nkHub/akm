@@ -17,16 +17,6 @@
   </div>
 
   <div class="bg-surface-light border border-border rounded-lg p-6">
-    <h3 class="text-sm font-semibold text-white mb-3">Token 统计三种来源</h3>
-    <ul class="space-y-2 text-xs text-gray-400 mb-4">
-      <li class="flex items-start gap-2"><span class="text-cyan-400 mt-0.5">CT</span> <span><code>count_tokens_fallback</code>：Anthropic Messages 在 usage 缺失时通过 <code>messages/count_tokens</code> 回填输入 token。</span></li>
-      <li class="flex items-start gap-2"><span class="text-emerald-400 mt-0.5">AF</span> <span><code>usage_fallback_adapter</code>：协议适配器收尾阶段输出的 <code>_last_usage_tokens</code> 回填。</span></li>
-      <li class="flex items-start gap-2"><span class="text-yellow-300 mt-0.5">EST</span> <span><code>usage_estimated_light</code>：前两者都不可用时的轻量估算（仅用于可观测，不用于计费）。</span></li>
-    </ul>
-    <p class="text-xs text-gray-500">审计页模型列会显示 CT/AF/EST 徽标，便于快速判断该条 token 的来源路径。</p>
-  </div>
-
-  <div class="bg-surface-light border border-border rounded-lg p-6">
     <h3 class="text-sm font-semibold text-white mb-3">其他功能</h3>
     <ul class="space-y-2 text-xs text-gray-400">
       <li class="flex items-start gap-2"><span class="text-indigo-400 mt-0.5">-</span> 多供应商 Key 管理 + 自定义供应商代理配置</li>
