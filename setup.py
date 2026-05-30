@@ -2,6 +2,7 @@
 
 import os
 from setuptools import setup
+from akm import __version__
 
 APP = ["akm/menubar.py"]
 DATA_FILES = [
@@ -37,8 +38,8 @@ OPTIONS = {
         "CFBundleName": "AI Key Manager",
         "CFBundleDisplayName": "AI Key Manager",
         "CFBundleIdentifier": "com.akm.app",
-        "CFBundleVersion": "0.1.0",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": __version__,
+        "CFBundleShortVersionString": __version__,
         "LSUIElement": True,  # 菜单栏应用，不显示 Dock 图标
         "NSHighResolutionCapable": True,
     },

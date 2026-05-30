@@ -7,8 +7,16 @@ import threading
 import webbrowser
 import socket
 
+import httpx
 import rumps
+from akm import __version__
 from akm.config import get as config_get
+
+
+# GitHub 仓库标识，格式固定为 "owner/repo"，用于拼接 Releases API 地址。
+GITHUB_REPO = "nkHub/akm"
+# 更新检查时间间隔（秒）。这里使用 24 小时，避免每次唤醒都请求 API，降低限流风险。
+CHECK_INTERVAL = 86400
 
 
 def _round_corners(input_path: str) -> str:
@@ -60,6 +68,8 @@ class AKMApp(rumps.App):
         self.host = "127.0.0.1"
         self._uvicorn_server = None  # uvicorn.Server 实例，用于优雅关闭
         self._first_start = True     # 首次启动标记，仅首次自动打开浏览器
+        # 更新菜单项对象。默认没有更新提示，只有检测到新版本后才动态插入菜单。
+        self.update_item: rumps.MenuItem | None = None
 
         # 动态菜单项
         self.status_item = rumps.MenuItem(title="🟡 启动中...")
@@ -73,6 +83,80 @@ class AKMApp(rumps.App):
 
         # 后台启动服务并监控状态
         self._start_server()
+        # 后台启动更新检查线程。该线程与服务启动解耦，即使服务未成功启动也可提示新版本。
+        self._start_update_checker()
+
+    def _fetch_update_info(self) -> dict:
+        """从 GitHub Releases API 拉取最新版本信息并与本地版本比对。"""
+        try:
+            resp = httpx.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return {"has_update": False}
+
+            payload = resp.json()
+            latest = payload.get("tag_name", "").lstrip("v")
+            if latest and latest != __version__:
+                return {
+                    "has_update": True,
+                    "latest": latest,
+                    "current": __version__,
+                    "url": payload.get("html_url", ""),
+                }
+        except Exception:
+            # 更新检查属于非关键路径：网络异常、API 失败都不影响主功能，静默降级即可。
+            pass
+        return {"has_update": False}
+
+    def _open_release_page(self, _):
+        """点击更新菜单后打开 Release 页面。"""
+        if self.update_item and self.update_item.key:
+            webbrowser.open(self.update_item.key)
+
+    def _apply_update_menu(self, info: dict):
+        """根据检查结果动态维护“更新到 vX.Y.Z”菜单项。"""
+        has_update = info.get("has_update", False)
+        if not has_update:
+            # 已无更新时，移除旧的更新菜单，避免 UI 残留过期提示。
+            if self.update_item and self.update_item in self.menu:
+                self.menu.pop(self.menu.index(self.update_item))
+            self.update_item = None
+            return
+
+        latest = info.get("latest", "")
+        release_url = info.get("url", "")
+        if not latest or not release_url:
+            return
+
+        title = f"更新到 v{latest}"
+        if self.update_item is None:
+            self.update_item = rumps.MenuItem(title=title, callback=self._open_release_page)
+            # 利用 MenuItem.key 暂存链接，减少额外状态字段，保持改动最小。
+            self.update_item.key = release_url
+            # 插在“打开管理”后面，保证更新入口显眼但不干扰状态项。
+            self.menu.insert_after("打开管理", self.update_item)
+            return
+
+        self.update_item.title = title
+        self.update_item.key = release_url
+
+    def _start_update_checker(self):
+        """后台循环检查更新并更新菜单提示。"""
+
+        def run_checker():
+            # 首次立即检查一次，启动后尽快给用户反馈。
+            info = self._fetch_update_info()
+            self._apply_update_menu(info)
+
+            # 后续按固定间隔轮询，避免频繁请求 API。
+            while True:
+                time.sleep(CHECK_INTERVAL)
+                info = self._fetch_update_info()
+                self._apply_update_menu(info)
+
+        threading.Thread(target=run_checker, daemon=True).start()
 
     def _get_icon(self) -> str | None:
         """获取菜单栏图标，支持圆角处理"""

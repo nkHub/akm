@@ -5,6 +5,7 @@ import asyncio
 import webbrowser
 import threading
 import click
+from akm import __version__
 from akm.db import get_connection, init_db
 from akm.key_pool import (
     add_key, list_keys, remove_key, set_priority, set_base_url, set_api_key, set_status, get_key,
@@ -21,7 +22,7 @@ def _ensure_db():
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="akm")
+@click.version_option(version=__version__, prog_name="akm")
 def main():
     """AI Key Manager — 本地 AI API key 管理代理
 
