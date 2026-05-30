@@ -144,3 +144,81 @@ async def test_model_matcher_on_response_recycles_inflight_count():
     await plugin.on_response({}, {"key_alias": "k1"})
     assert "k1" not in plugin._inflight_counts
     assert "k1" not in plugin._inflight_oldest_ts
+
+
+@pytest.mark.asyncio
+async def test_model_matcher_smart_bypass_picks_best_scored_candidate(monkeypatch):
+    plugin = Plugin()
+    plugin.config = {
+        "enable_inflight_bypass": True,
+        "enable_smart_bypass": True,
+        "max_inflight_per_key": 1,
+        "slow_inflight_threshold_sec": 10,
+        "smart_bypass_candidate_pool": 3,
+        "smart_bypass_min_improve": 0.01,
+        "smart_bypass_error_cooldown_sec": 30,
+    }
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    # 当前 key 拥塞且历史较差
+    plugin._inflight_counts["k1"] = 2
+    plugin._health_stats["k1"] = {"ema_latency_ms": 500, "ema_error": 0.5, "last_error_ts": 0}
+    # 候选 k2 一般，k3 更优
+    plugin._health_stats["k2"] = {"ema_latency_ms": 200, "ema_error": 0.2, "last_error_ts": 0}
+    plugin._health_stats["k3"] = {"ema_latency_ms": 80, "ema_error": 0.0, "last_error_ts": 0}
+
+    seq = [
+        {"alias": "k2", "provider": "openai"},
+        {"alias": "k3", "provider": "openai"},
+        None,
+    ]
+
+    async def _pick(model, exclude_aliases=None):
+        return seq.pop(0)
+
+    monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
+
+    out = await plugin.on_key_selected(
+        model="gpt-5",
+        key={"alias": "k1", "provider": "openai"},
+        request={"model": "gpt-5"},
+    )
+    assert out["alias"] == "k3"
+
+
+@pytest.mark.asyncio
+async def test_model_matcher_smart_bypass_keeps_current_when_improve_not_enough(monkeypatch):
+    plugin = Plugin()
+    plugin.config = {
+        "enable_inflight_bypass": True,
+        "enable_smart_bypass": True,
+        "max_inflight_per_key": 1,
+        "slow_inflight_threshold_sec": 10,
+        "smart_bypass_candidate_pool": 2,
+        "smart_bypass_min_improve": 2.0,
+        "smart_bypass_error_cooldown_sec": 30,
+    }
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    plugin._inflight_counts["k1"] = 1
+    plugin._health_stats["k1"] = {"ema_latency_ms": 200, "ema_error": 0.1, "last_error_ts": 0}
+    plugin._health_stats["k2"] = {"ema_latency_ms": 180, "ema_error": 0.1, "last_error_ts": 0}
+
+    seq = [
+        {"alias": "k2", "provider": "openai"},
+        None,
+    ]
+
+    async def _pick(model, exclude_aliases=None):
+        return seq.pop(0)
+
+    monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
+
+    out = await plugin.on_key_selected(
+        model="gpt-5",
+        key={"alias": "k1", "provider": "openai"},
+        request={"model": "gpt-5"},
+    )
+    assert out["alias"] == "k1"

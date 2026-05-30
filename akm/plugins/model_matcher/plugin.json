@@ -50,6 +50,40 @@
       "min": 1,
       "max": 600,
       "description": "当某 key 最老 in-flight 请求持续超过该秒数时触发旁路（需先开启拥塞旁路）"
+    },
+    {
+      "key": "enable_smart_bypass",
+      "label": "智能旁路",
+      "type": "boolean",
+      "default": false,
+      "description": "在拥塞触发后，从多个候选 key 计算健康分择优切换（默认关闭）"
+    },
+    {
+      "key": "smart_bypass_candidate_pool",
+      "label": "智能候选数量",
+      "type": "number",
+      "default": 4,
+      "min": 1,
+      "max": 10,
+      "description": "智能旁路时最多评估多少个候选 key"
+    },
+    {
+      "key": "smart_bypass_min_improve",
+      "label": "最小改善阈值",
+      "type": "number",
+      "default": 0.15,
+      "min": 0,
+      "max": 5,
+      "description": "候选 key 相比当前 key 至少改善多少分才执行切换"
+    },
+    {
+      "key": "smart_bypass_error_cooldown_sec",
+      "label": "错误冷却秒",
+      "type": "number",
+      "default": 15,
+      "min": 1,
+      "max": 600,
+      "description": "key 最近报错后，在该秒数窗口内增加额外惩罚"
     }
   ]
 }
