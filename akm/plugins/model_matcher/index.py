@@ -25,7 +25,130 @@ class Plugin(PluginBase):
         # 记录每个 key 的并发请求数与最早开始时间，用于并发/慢 key 旁路
         self._inflight_counts: dict[str, int] = {}
         self._inflight_oldest_ts: dict[str, float] = {}
+        # 记录每个 key 的健康度滑动统计，用于“更智能”的旁路打分。
+        # 字段说明：
+        # - ema_latency_ms: 指数滑动平均延迟（毫秒），越低越好
+        # - ema_error: 指数滑动平均错误率（0~1），越低越好
+        # - last_error_ts: 最近一次错误时间戳（用于短时冷却惩罚）
+        self._health_stats: dict[str, dict] = {}
         self._parse_aliases()
+
+    def _get_cfg(self) -> dict:
+        """统一读取插件配置，便于后续策略函数复用。"""
+        return self.config or {}
+
+    def _update_health_stats(self, alias: str, response: dict):
+        """根据 on_response 元信息更新 key 健康统计。
+
+        设计说明：
+        1. 仅在 response 含 key_alias 且可判定成功/失败时更新。
+        2. 使用 EMA 平滑瞬时抖动，避免因为单次毛刺造成频繁切换。
+        3. 错误事件会刷新 last_error_ts，供短时冷却惩罚使用。
+        """
+        if not alias or not isinstance(response, dict):
+            return
+
+        ok = bool(response.get("ok", False))
+        latency_ms = response.get("latency_ms", 0)
+        try:
+            latency_ms = float(latency_ms)
+        except Exception:
+            latency_ms = 0.0
+
+        stat = self._health_stats.get(alias) or {
+            "ema_latency_ms": 0.0,
+            "ema_error": 0.0,
+            "last_error_ts": 0.0,
+        }
+
+        # EMA 系数：0.2 偏保守，既能跟踪变化又不过度敏感。
+        alpha = 0.2
+        prev_latency = float(stat.get("ema_latency_ms", 0.0) or 0.0)
+        if latency_ms > 0:
+            stat["ema_latency_ms"] = latency_ms if prev_latency <= 0 else (1 - alpha) * prev_latency + alpha * latency_ms
+
+        err = 0.0 if ok else 1.0
+        prev_err = float(stat.get("ema_error", 0.0) or 0.0)
+        stat["ema_error"] = (1 - alpha) * prev_err + alpha * err
+        if err > 0:
+            stat["last_error_ts"] = time.time()
+
+        self._health_stats[alias] = stat
+
+    def _calc_key_score(self, alias: str, now_ts: float) -> float:
+        """计算 key 的路由分数（越低越好）。
+
+        分数组成（全部是加法惩罚项）：
+        - 并发惩罚：in-flight 数越高，分数越高
+        - 慢请求惩罚：最老请求时长越大，分数越高
+        - 延迟惩罚：EMA 延迟按百毫秒归一化
+        - 错误惩罚：EMA 错误率权重较高
+        - 冷却惩罚：最近出现错误时，短窗口内附加固定惩罚
+        """
+        cfg = self._get_cfg()
+        slow_threshold_sec = float(cfg.get("slow_inflight_threshold_sec", 8) or 8)
+        max_inflight = max(1, int(cfg.get("max_inflight_per_key", 3) or 3))
+        cooldown_sec = float(cfg.get("smart_bypass_error_cooldown_sec", 15) or 15)
+
+        inflight = float(self._inflight_counts.get(alias, 0) or 0)
+        oldest_ts = self._inflight_oldest_ts.get(alias)
+        oldest_age = max(0.0, now_ts - float(oldest_ts)) if oldest_ts else 0.0
+
+        stat = self._health_stats.get(alias) or {}
+        ema_latency = float(stat.get("ema_latency_ms", 0.0) or 0.0)
+        ema_error = float(stat.get("ema_error", 0.0) or 0.0)
+        last_error_ts = float(stat.get("last_error_ts", 0.0) or 0.0)
+
+        inflight_penalty = inflight / max_inflight
+        slow_penalty = (oldest_age / slow_threshold_sec) if slow_threshold_sec > 0 else 0.0
+        latency_penalty = ema_latency / 100.0
+        error_penalty = ema_error * 5.0
+
+        cooldown_penalty = 0.0
+        if last_error_ts > 0 and (now_ts - last_error_ts) < cooldown_sec:
+            cooldown_penalty = 1.0
+
+        return inflight_penalty + slow_penalty + latency_penalty + error_penalty + cooldown_penalty
+
+    async def _pick_better_alternate_key(self, model: str, current_alias: str) -> dict | None:
+        """在候选 key 集合中选择比当前 key 更优的替代项。
+
+        说明：
+        - 只在插件内部完成决策，尽量不改 proxy 主逻辑。
+        - 候选通过多次调用 pick_key_async 获取（逐步扩大 exclude）。
+        - 若替代 key 改善幅度不足，则保持当前 key，避免无意义抖动。
+        """
+        cfg = self._get_cfg()
+        candidate_pool = max(1, int(cfg.get("smart_bypass_candidate_pool", 4) or 4))
+        min_improve = float(cfg.get("smart_bypass_min_improve", 0.15) or 0.15)
+
+        now_ts = time.time()
+        current_score = self._calc_key_score(current_alias, now_ts)
+        exclude = [current_alias]
+        best_key = None
+        best_score = None
+
+        for _ in range(candidate_pool):
+            cand = await pick_key_async(model, exclude)
+            if not isinstance(cand, dict):
+                break
+            alias = str(cand.get("alias", ""))
+            if not alias:
+                break
+            exclude.append(alias)
+
+            score = self._calc_key_score(alias, now_ts)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_key = cand
+
+        if best_key is None or best_score is None:
+            return None
+
+        # 需要有明显改善才切换，防止频繁横跳。
+        if (current_score - best_score) < min_improve:
+            return None
+        return best_key
 
     def _parse_aliases(self):
         """从配置中解析模型别名映射"""
@@ -144,6 +267,7 @@ class Plugin(PluginBase):
         """
         cfg = self.config or {}
         enable_bypass = bool(cfg.get("enable_inflight_bypass", False))
+        enable_smart_bypass = bool(cfg.get("enable_smart_bypass", False))
         max_inflight = int(cfg.get("max_inflight_per_key", 3))
         slow_threshold_sec = float(cfg.get("slow_inflight_threshold_sec", 8))
 
@@ -163,8 +287,24 @@ class Plugin(PluginBase):
         )
 
         if should_bypass:
-            alt = await pick_key_async(model, [current_alias])
+            # 智能旁路（默认关闭）：在多个候选中做健康打分，择优切换。
+            # 关闭时维持原有行为，仅尝试下一个可用 key。
+            if enable_smart_bypass:
+                alt = await self._pick_better_alternate_key(model, current_alias)
+            else:
+                alt = await pick_key_async(model, [current_alias])
             if isinstance(alt, dict) and alt.get("alias") and alt.get("alias") != current_alias:
+                if enable_smart_bypass:
+                    now_ts = time.time()
+                    src_score = self._calc_key_score(current_alias, now_ts)
+                    dst_score = self._calc_key_score(str(alt.get("alias", "")), now_ts)
+                    self.logger.info(
+                        "[model_matcher] 智能旁路 key: %s(score=%.3f) -> %s(score=%.3f)",
+                        current_alias,
+                        src_score,
+                        alt.get("alias"),
+                        dst_score,
+                    )
                 self.logger.info(
                     "[model_matcher] 旁路拥塞 key: %s(count=%s, oldest=%.2fs) -> %s",
                     current_alias,
@@ -189,6 +329,10 @@ class Plugin(PluginBase):
         alias = str(response.get("key_alias", "") or "")
         if not alias:
             return
+
+        # 先更新健康统计，再回收并发计数。
+        self._update_health_stats(alias, response)
+
         count = int(self._inflight_counts.get(alias, 0))
         if count <= 1:
             self._inflight_counts.pop(alias, None)
