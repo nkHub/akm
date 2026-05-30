@@ -12,7 +12,7 @@ async def test_model_matcher_sets_required_tool_choice_for_gpt_when_enabled():
 
     req = {
         "model": "gpt-5",
-        "messages": [{"role": "user", "content": "hi"}],
+        "messages": [{"role": "user", "content": "请运行测试并修复失败"}],
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
     }
     out = await plugin.on_request(req)
@@ -46,7 +46,24 @@ async def test_model_matcher_respects_disable_flag_for_tool_choice_policy():
 
     req = {
         "model": "gpt-5",
-        "messages": [{"role": "user", "content": "hi"}],
+        "messages": [{"role": "user", "content": "请运行测试并修复失败"}],
+        "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
+    }
+    out = await plugin.on_request(req)
+    assert out is None
+    assert "tool_choice" not in req
+
+
+@pytest.mark.asyncio
+async def test_model_matcher_does_not_force_tool_choice_for_small_talk():
+    plugin = Plugin()
+    plugin.config = {"force_tool_choice_required_for_gpt": True}
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "你好"}],
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
     }
     out = await plugin.on_request(req)

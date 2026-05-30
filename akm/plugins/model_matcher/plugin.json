@@ -22,7 +22,7 @@
       "key": "force_tool_choice_required_for_gpt",
       "label": "GPT工具强制调用",
       "type": "boolean",
-      "default": true,
+      "default": false,
       "description": "对 gpt-*/codex 且带 tools 的请求，在未显式提供 tool_choice 时自动设置为 required"
     }
   ]

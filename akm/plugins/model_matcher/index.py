@@ -61,7 +61,7 @@ class Plugin(PluginBase):
         # 对 GPT/Codex 模型且携带 tools 的请求，在未显式传 tool_choice 时默认强制 required。
         # 该策略从 protocol_converter 下沉到 matcher 层，减少协议层与模型策略耦合。
         cfg = self.config or {}
-        force_required = cfg.get("force_tool_choice_required_for_gpt", True)
+        force_required = cfg.get("force_tool_choice_required_for_gpt", False)
         if force_required:
             req_model = str(request.get("model", ""))
             tools = request.get("tools")
@@ -70,12 +70,66 @@ class Plugin(PluginBase):
                 and tools
                 and "tool_choice" not in request
                 and (req_model.startswith("gpt-") or "codex" in req_model)
+                and self._is_tool_task_intent(request)
             ):
                 request["tool_choice"] = "required"
                 changed = True
                 self.logger.info("[model_matcher] 自动设置 tool_choice=required (gpt/codex + tools)")
 
         return request if changed else None
+
+    def _is_tool_task_intent(self, request: dict) -> bool:
+        """判断请求是否属于“明确需要工具执行”的任务意图。
+
+        设计目标：避免把普通闲聊（如“你好”）误判成必须调用工具，导致模型进入工具循环。
+        仅在用户表达了“执行命令/改代码/读写文件/运行测试”等操作性意图时，才允许强制 required。
+        """
+        messages = request.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return False
+
+        # 找最后一条 user 消息，尽量贴近用户当前意图
+        last_user_text = ""
+        for m in reversed(messages):
+            if not isinstance(m, dict):
+                continue
+            if m.get("role") != "user":
+                continue
+            content = m.get("content", "")
+            if isinstance(content, str):
+                last_user_text = content
+            elif isinstance(content, list):
+                parts = []
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        parts.append(c.get("text", ""))
+                last_user_text = "\n".join(parts)
+            break
+
+        text = (last_user_text or "").strip().lower()
+        if not text:
+            return False
+
+        # 明确排除常见闲聊/问候，防止误触发
+        small_talk = (
+            "你好", "hello", "hi", "hey", "在吗", "在么", "早上好", "晚上好",
+            "谢谢", "thank you", "how are you", "你是谁",
+        )
+        if any(k in text for k in small_talk):
+            return False
+
+        # 操作性任务关键词：命令执行、代码修改、文件操作、测试构建、git 等
+        tool_intent_keywords = (
+            "run", "execute", "command", "bash", "shell", "terminal", "script",
+            "test", "pytest", "build", "lint", "compile",
+            "edit", "modify", "refactor", "fix", "patch", "apply",
+            "file", "read", "write", "open", "search", "grep", "diff",
+            "git", "commit", "branch", "log", "status",
+            "运行", "执行", "命令", "终端", "脚本", "测试", "构建", "编译",
+            "修改", "重构", "修复", "补丁", "文件", "读取", "写入", "搜索",
+            "提交", "分支", "日志", "状态",
+        )
+        return any(k in text for k in tool_intent_keywords)
 
     async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
         """Key 选择后回调：可在此实现自定义路由策略

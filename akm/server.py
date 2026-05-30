@@ -312,8 +312,12 @@ def _extract_tokens(response_body: str) -> dict | None:
         total = usage.get("total_tokens", 0)
         prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
         completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+        cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
         # 安全提取缓存 token：先查 Chat 格式的 *_details，再查 Messages 格式的直接 cached_tokens 字段
         cached = usage.get("cached_tokens", 0) or 0
+        # Anthropic Messages: cache_read_input_tokens 表示缓存命中读取 token
+        if not cached:
+            cached = usage.get("cache_read_input_tokens", 0) or 0
         if not cached:
             for key in ("prompt_tokens_details", "input_tokens_details"):
                 details = usage.get(key)
@@ -324,7 +328,13 @@ def _extract_tokens(response_body: str) -> dict | None:
         if total == 0 and (prompt > 0 or completion > 0):
             total = prompt + completion
         if total > 0:
-            return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total, "cached_tokens": cached}
+            return {
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": total,
+                "cached_tokens": cached,
+                "cache_creation_tokens": cache_creation,
+            }
         return None
 
     # 1. 尝试直接解析为 JSON
@@ -339,6 +349,9 @@ def _extract_tokens(response_body: str) -> dict | None:
 
     # 2. 尝试解析 SSE 流式响应（多行 data: {...} 格式）
     usage = None
+    msg_input_tokens = 0
+    msg_output_tokens = 0
+    msg_cached_tokens = 0
     for line in response_body.split("\n"):
         line = line.strip()
         if line.startswith("data: ") and not line.startswith("data: [DONE]"):
@@ -349,10 +362,41 @@ def _extract_tokens(response_body: str) -> dict | None:
                 # responses SSE 格式: response.completed 事件中包含 usage
                 if chunk.get("type") == "response.completed" and chunk.get("response", {}).get("usage"):
                     usage = chunk["response"]["usage"]
+
+                # messages SSE: message_start.message.usage.input_tokens
+                if chunk.get("type") == "message_start":
+                    msg = chunk.get("message", {}) if isinstance(chunk.get("message"), dict) else {}
+                    u = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
+                    msg_input_tokens = u.get("input_tokens", msg_input_tokens) or msg_input_tokens
+
+                # messages SSE: message_delta.usage.output_tokens/cached_tokens
+                if chunk.get("type") == "message_delta":
+                    u = chunk.get("usage", {}) if isinstance(chunk.get("usage"), dict) else {}
+                    msg_output_tokens = u.get("output_tokens", msg_output_tokens) or msg_output_tokens
+                    msg_cached_tokens = u.get("cached_tokens", msg_cached_tokens) or msg_cached_tokens
             except (json.JSONDecodeError, TypeError):
                 pass
     if usage:
-        return _parse_usage(usage)
+        parsed = _parse_usage(usage)
+        if parsed:
+            # messages SSE 常见情况：message_delta.usage 只有 output_tokens，
+            # input_tokens 需要从 message_start.message.usage 补齐。
+            if parsed.get("prompt_tokens", 0) == 0 and msg_input_tokens > 0:
+                parsed["prompt_tokens"] = msg_input_tokens
+                parsed["total_tokens"] = parsed.get("prompt_tokens", 0) + parsed.get("completion_tokens", 0)
+                if msg_cached_tokens > 0:
+                    parsed["cached_tokens"] = msg_cached_tokens
+            return parsed
+
+    # messages SSE 兜底：即便上游没给标准 usage，也尽量从 message_start/message_delta 拼回 token 信息
+    if msg_input_tokens > 0 or msg_output_tokens > 0:
+        total = msg_input_tokens + msg_output_tokens
+        return {
+            "prompt_tokens": msg_input_tokens,
+            "completion_tokens": msg_output_tokens,
+            "total_tokens": total,
+            "cached_tokens": msg_cached_tokens,
+        }
 
     return None
 
@@ -501,6 +545,7 @@ async def api_logs(
         c = log.get("completion_tokens", 0) or 0
         t = log.get("total_tokens", 0) or 0
         cached = log.get("cached_tokens", 0) or 0
+        cache_creation = log.get("cache_creation_tokens", 0) or 0
         if not t and log.get("response_body"):
             tokens = _extract_tokens(log["response_body"])
             if tokens:
@@ -508,10 +553,12 @@ async def api_logs(
                 c = tokens.get("completion_tokens", 0) or c
                 t = tokens.get("total_tokens", 0) or t
                 cached = tokens.get("cached_tokens", 0) or cached
+                cache_creation = tokens.get("cache_creation_tokens", 0) or cache_creation
         log["prompt_tokens"] = p
         log["completion_tokens"] = c
         log["total_tokens"] = t
         log["cached_tokens"] = cached
+        log["cache_creation_tokens"] = cache_creation
 
         # 补充转换告警派生字段，前端可直接展示可读文本，避免重复解析逻辑
         conv_codes: list[str] = []
@@ -861,6 +908,24 @@ async def _handle_ai_request(request: Request, api_path: str):
                 body_str = b"".join(chunks).decode("utf-8", errors="replace")
                 status = 200 if not stream_error else 502
                 tokens = _extract_tokens(body_str) or {}
+                used_adapter_usage_fallback = False
+                # adapter 兜底：某些 messages/responses SSE 缺失标准 usage 时，
+                # 从适配器收尾阶段记录的 _last_usage_tokens 补齐统计。
+                if adapter and (tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0):
+                    last_usage = getattr(adapter, "_last_usage_tokens", None)
+                    if isinstance(last_usage, dict):
+                        p = int(last_usage.get("prompt_tokens", 0) or 0)
+                        c = int(last_usage.get("completion_tokens", 0) or 0)
+                        t = int(last_usage.get("total_tokens", 0) or (p + c))
+                        cached = int(last_usage.get("cached_tokens", 0) or 0)
+                        if p > 0 or c > 0:
+                            tokens = {
+                                "prompt_tokens": p,
+                                "completion_tokens": c,
+                                "total_tokens": t,
+                                "cached_tokens": cached,
+                            }
+                            used_adapter_usage_fallback = True
                 # 在审计 headers 中追加转换标记，便于后续筛查
                 request_headers_for_log = request_headers_json
                 try:
@@ -871,6 +936,11 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if status == 200 and not stream_error:
                         if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
                             flags.append("missing_usage_upstream")
+                    if used_adapter_usage_fallback:
+                        flags.append("usage_fallback_adapter")
+                    if adapter and getattr(adapter, "_tool_trace_events", None):
+                        if any("loop_guard_drop" in x for x in getattr(adapter, "_tool_trace_events", [])):
+                            flags.append("loop_guard_triggered")
                     tool_trace = ""
                     if adapter and getattr(adapter, "_tool_trace_events", None):
                         tool_trace = "; ".join(getattr(adapter, "_tool_trace_events", []))
@@ -900,6 +970,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     "completion_tokens": tokens.get("completion_tokens", 0),
                     "total_tokens": tokens.get("total_tokens", 0),
                     "cached_tokens": tokens.get("cached_tokens", 0),
+                    "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
                 }))
                 logger.info(
                     f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)"
@@ -943,6 +1014,7 @@ async def _handle_ai_request(request: Request, api_path: str):
         "completion_tokens": tokens.get("completion_tokens", 0),
         "total_tokens": tokens.get("total_tokens", 0),
         "cached_tokens": tokens.get("cached_tokens", 0),
+        "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
     }))
 
     if result["key_alias"]:

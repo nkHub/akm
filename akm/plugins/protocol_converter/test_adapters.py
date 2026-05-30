@@ -1163,6 +1163,34 @@ class TestMessagesAdapterSSETools:
         msg_delta = [e for e in events if e[0] == "message_delta"][0]
         assert msg_delta[1]["delta"]["stop_reason"] == "tool_use"
 
+    @pytest.mark.asyncio
+    async def test_convert_sse_loop_guard_drops_repeated_tool_calls(self):
+        """验证重复同签名 tool_use 超阈值时触发防循环保险丝并降级 end_turn"""
+        adapter = MessagesAdapter()
+        # 同签名（name=bash + arguments={"command":"ls"} + 同一 call_id）重复 3 次，超过阈值 2
+        chat_sse = [
+            b'data: {"id":"chatcmpl-1","model":"gpt","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_same","type":"function","function":{"name":"bash","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_same","type":"function","function":{"name":"bash","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_same","type":"function","function":{"name":"bash","arguments":"{\\"command\\":\\"ls\\"}"}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}\n\n',
+        ]
+
+        lines = []
+        async for line in adapter.convert_sse_stream(_async_bytes_iter(chat_sse)):
+            lines.append(line)
+
+        events = _parse_sse_helper(lines)
+        msg_delta = [e for e in events if e[0] == "message_delta"][0]
+        assert msg_delta[1]["delta"]["stop_reason"] == "end_turn"
+
+        text_deltas = [
+            e for e in events
+            if e[0] == "content_block_delta"
+            and e[1].get("delta", {}).get("type") == "text_delta"
+        ]
+        assert any("循环保护" in (d[1]["delta"].get("text") or "") for d in text_deltas)
+
 
 class TestChatAdapter:
 

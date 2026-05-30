@@ -53,7 +53,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             prompt_tokens     INTEGER DEFAULT 0,
             completion_tokens INTEGER DEFAULT 0,
             total_tokens      INTEGER DEFAULT 0,
-            cached_tokens     INTEGER DEFAULT 0
+            cached_tokens     INTEGER DEFAULT 0,
+            cache_creation_tokens INTEGER DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp
@@ -82,6 +83,7 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
         ("completion_tokens", "0"),
         ("total_tokens", "0"),
         ("cached_tokens", "0"),
+        ("cache_creation_tokens", "0"),
     ]:
         try:
             conn.execute(f"ALTER TABLE audit_logs ADD COLUMN {col} INTEGER DEFAULT {default}")
