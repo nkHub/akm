@@ -8,6 +8,7 @@
 """
 import importlib.util
 import sys
+import contextvars
 from pathlib import Path
 from typing import AsyncIterator
 from akm.plugins import PluginBase
@@ -40,11 +41,25 @@ class Plugin(PluginBase):
                     spec.loader.exec_module(module)
                     setattr(self, name, module)
 
-        # 实例化适配器
+        # 默认适配器（兜底）
         self._responses_adapter = self._responses.ResponsesAdapter() if hasattr(self, "_responses") else None
         self._messages_adapter = self._messages.MessagesAdapter() if hasattr(self, "_messages") else None
         self._chat_adapter = self._chat.ChatAdapter() if hasattr(self, "_chat") else None
-        self._source_format: str = ""  # convert_request 时设置
+        self._source_format: str = ""  # 保留兼容
+
+        # 请求级上下文，避免并发请求互相覆盖 source_format/adapter 状态
+        self._ctx_source_format = contextvars.ContextVar("protocol_converter_source_format", default="chat")
+        self._ctx_active_adapter = contextvars.ContextVar("protocol_converter_active_adapter", default=None)
+
+    def _new_adapter(self, source_format: str):
+        """按源格式创建请求级 adapter 实例（隔离可变状态）"""
+        if source_format == "responses" and hasattr(self, "_responses"):
+            return self._responses.ResponsesAdapter()
+        if source_format == "messages" and hasattr(self, "_messages"):
+            return self._messages.MessagesAdapter()
+        if hasattr(self, "_chat"):
+            return self._chat.ChatAdapter()
+        return None
 
     # ── 请求转换 ──
 
@@ -58,23 +73,49 @@ class Plugin(PluginBase):
         """
         if "input" in body:
             self._source_format = "responses"
-            return self._responses_adapter.convert_request(body)
+            adapter = self._new_adapter("responses") or self._responses_adapter
+            self._fallback_thinking_to_text = False
+            self._tool_trace_events = []
+            self._conversion_warnings = []
+            self._ctx_source_format.set("responses")
+            self._ctx_active_adapter.set(adapter)
+            return adapter.convert_request(body)
         elif "messages" in body and isinstance(body.get("messages"), list):
             self._source_format = "messages"
-            return self._messages_adapter.convert_request(body)
+            adapter = self._new_adapter("messages") or self._messages_adapter
+            self._fallback_thinking_to_text = False
+            self._tool_trace_events = []
+            self._conversion_warnings = []
+            self._ctx_source_format.set("messages")
+            self._ctx_active_adapter.set(adapter)
+            return adapter.convert_request(body)
         else:
             self._source_format = "chat"
-            return self._chat_adapter.convert_request(body)
+            adapter = self._new_adapter("chat") or self._chat_adapter
+            self._fallback_thinking_to_text = False
+            self._tool_trace_events = []
+            self._conversion_warnings = []
+            self._ctx_source_format.set("chat")
+            self._ctx_active_adapter.set(adapter)
+            return adapter.convert_request(body)
 
     # ── 非流式响应转换 ──
 
     def convert_response(self, body: str) -> str:
         """非流式响应体转换"""
-        if self._source_format == "responses":
-            return self._responses_adapter.convert_response(body)
-        elif self._source_format == "messages":
-            return self._messages_adapter.convert_response(body)
-        return self._chat_adapter.convert_response(body)
+        source_format = self._ctx_source_format.get() or self._source_format
+        adapter = self._ctx_active_adapter.get()
+        if source_format == "responses":
+            a = adapter or self._responses_adapter
+            self._conversion_warnings = getattr(a, "_conversion_warnings", [])
+            return a.convert_response(body)
+        elif source_format == "messages":
+            a = adapter or self._messages_adapter
+            self._conversion_warnings = getattr(a, "_conversion_warnings", [])
+            return a.convert_response(body)
+        a = adapter or self._chat_adapter
+        self._conversion_warnings = getattr(a, "_conversion_warnings", [])
+        return a.convert_response(body)
 
     # ── 流式 SSE 转换 ──
 
@@ -82,12 +123,26 @@ class Plugin(PluginBase):
         self, upstream_stream: AsyncIterator[bytes]
     ) -> AsyncIterator[str]:
         """SSE 流转换 — 按 source_format 选择对应适配器"""
-        if self._source_format == "responses":
-            async for line in self._responses_adapter.convert_sse_stream(upstream_stream):
+        source_format = self._ctx_source_format.get() or self._source_format
+        adapter = self._ctx_active_adapter.get()
+        if source_format == "responses":
+            a = adapter or self._responses_adapter
+            async for line in a.convert_sse_stream(upstream_stream):
+                self._fallback_thinking_to_text = getattr(a, "_fallback_thinking_to_text", False)
+                self._tool_trace_events = getattr(a, "_tool_trace_events", [])
+                self._conversion_warnings = getattr(a, "_conversion_warnings", [])
                 yield line
-        elif self._source_format == "messages":
-            async for line in self._messages_adapter.convert_sse_stream(upstream_stream):
+        elif source_format == "messages":
+            a = adapter or self._messages_adapter
+            async for line in a.convert_sse_stream(upstream_stream):
+                self._fallback_thinking_to_text = getattr(a, "_fallback_thinking_to_text", False)
+                self._tool_trace_events = getattr(a, "_tool_trace_events", [])
+                self._conversion_warnings = getattr(a, "_conversion_warnings", [])
                 yield line
         else:
-            async for line in self._chat_adapter.convert_sse_stream(upstream_stream):
+            a = adapter or self._chat_adapter
+            async for line in a.convert_sse_stream(upstream_stream):
+                self._fallback_thinking_to_text = getattr(a, "_fallback_thinking_to_text", False)
+                self._tool_trace_events = getattr(a, "_tool_trace_events", [])
+                self._conversion_warnings = getattr(a, "_conversion_warnings", [])
                 yield line

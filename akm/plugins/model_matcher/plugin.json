@@ -17,6 +17,13 @@
       "type": "text",
       "default": "",
       "description": "模型名映射规则，格式: old1=new1,old2=new2，如 gpt-4=gpt-4-turbo"
+    },
+    {
+      "key": "force_tool_choice_required_for_gpt",
+      "label": "GPT工具强制调用",
+      "type": "boolean",
+      "default": true,
+      "description": "对 gpt-*/codex 且带 tools 的请求，在未显式提供 tool_choice 时自动设置为 required"
     }
   ]
 }

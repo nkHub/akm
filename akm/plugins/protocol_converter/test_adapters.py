@@ -3,6 +3,13 @@ import json
 import pytest
 from akm.plugins.protocol_converter._responses import ResponsesAdapter
 from akm.plugins.protocol_converter._messages import MessagesAdapter
+from akm.plugins.protocol_converter._chat import ChatAdapter
+from akm.plugins.protocol_converter._warnings import (
+    RESPONSES_INCLUDE_NOT_FULLY_MAPPED,
+    RESPONSES_STORE_NOT_MAPPED,
+    RESPONSES_REASONING_SUMMARY_NOT_MAPPED,
+    RESPONSES_PARALLEL_TOOL_CALLS_NOT_MAPPED,
+)
 
 
 # ═══════════════════════════════════════
@@ -171,6 +178,95 @@ class TestResponsesAdapterRequest:
         body = {"model": "test", "input": "hi", "tools": tools}
         result = adapter.convert_request(body)
         assert result["tools"] == tools
+
+    def test_convert_request_response_format_passthrough(self):
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": "hi",
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "person",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                        "required": ["name"],
+                    },
+                },
+            },
+        }
+        result = adapter.convert_request(body)
+        assert result["response_format"]["type"] == "json_schema"
+        assert result["response_format"]["json_schema"]["name"] == "person"
+
+    def test_convert_request_text_format_to_response_format(self):
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": "hi",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "obj",
+                        "schema": {"type": "object", "properties": {}},
+                    },
+                }
+            },
+        }
+        result = adapter.convert_request(body)
+        assert result["response_format"]["type"] == "json_schema"
+        assert result["response_format"]["json_schema"]["name"] == "obj"
+
+    def test_convert_request_metadata_and_previous_response_id_passthrough(self):
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": "hi",
+            "metadata": {"trace_id": "t-1", "scene": "unit-test"},
+            "previous_response_id": "resp_prev_123",
+        }
+        result = adapter.convert_request(body)
+        assert result["metadata"]["trace_id"] == "t-1"
+        assert result["previous_response_id"] == "resp_prev_123"
+
+    def test_convert_request_sets_conversion_warnings_for_unmapped_fields(self):
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": "hi",
+            "include": ["reasoning.encrypted_content"],
+            "store": False,
+            "reasoning": {"summary": "concise"},
+            "parallel_tool_calls": True,
+        }
+        adapter.convert_request(body)
+        warns = getattr(adapter, "_conversion_warnings", [])
+        assert RESPONSES_INCLUDE_NOT_FULLY_MAPPED in warns
+        assert RESPONSES_STORE_NOT_MAPPED in warns
+        assert RESPONSES_REASONING_SUMMARY_NOT_MAPPED in warns
+        assert RESPONSES_PARALLEL_TOOL_CALLS_NOT_MAPPED in warns
+
+
+class TestResponsesAdapterResponse:
+
+    def test_convert_response_from_chat_sse_text(self):
+        """验证 responses 非流式路径可直接消费 Chat SSE 原文并完成聚合转换"""
+        adapter = ResponsesAdapter()
+        sse_text = (
+            'data: {"id":"chatcmpl-1","model":"gpt-5","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n'
+            'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hello"},"index":0}]}\n\n'
+            'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n'
+            'data: [DONE]\n\n'
+        )
+        result = json.loads(adapter.convert_response(sse_text))
+        assert result["object"] == "response"
+        assert result["model"] == "gpt-5"
+        assert result["output"][0]["content"][0]["text"] == "Hello"
+        assert result["usage"]["input_tokens"] == 3
+        assert result["usage"]["output_tokens"] == 2
+        assert result["usage"]["total_tokens"] == 5
 
     def test_clean_schema_removes_additional_properties(self):
         """验证 _clean_schema 递归移除 additionalProperties 字段"""
@@ -418,6 +514,50 @@ class TestResponsesAdapterResponse:
         assert result["usage"]["input_tokens"] == 120
         assert result["usage"]["output_tokens"] == 8
         assert result["usage"]["input_tokens_details"]["cached_tokens"] == 96
+
+    def test_convert_response_preserves_tool_calls_as_function_call_items(self):
+        adapter = ResponsesAdapter()
+        chat_resp = json.dumps({
+            "id": "chatcmpl-tool1",
+            "model": "gpt-5",
+            "choices": [{
+                "message": {
+                    "content": "I will call a tool",
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"ls"}'},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        })
+        result = json.loads(adapter.convert_response(chat_resp))
+        fc_items = [x for x in result["output"] if x.get("type") == "function_call"]
+        assert len(fc_items) == 1
+        assert fc_items[0]["call_id"] == "call_abc"
+        assert fc_items[0]["name"] == "bash"
+        assert fc_items[0]["arguments"] == '{"command":"ls"}'
+
+    def test_convert_response_preserves_reasoning_item(self):
+        adapter = ResponsesAdapter()
+        chat_resp = json.dumps({
+            "id": "chatcmpl-rsn1",
+            "model": "gpt-5",
+            "choices": [{
+                "message": {
+                    "content": "final answer",
+                    "reasoning_content": "step by step analysis",
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13},
+        })
+        result = json.loads(adapter.convert_response(chat_resp))
+        reasoning_items = [x for x in result["output"] if x.get("type") == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["summary"][0]["text"] == "step by step analysis"
 
 
 # ═══════════════════════════════════════
@@ -709,7 +849,7 @@ class TestMessagesAdapterRequest:
             "messages": [{"role": "user", "content": "Hi"}],
         }
         result = adapter.convert_request(body)
-        assert result["messages"][0]["content"] == "You are helpful\nBe concise"
+        assert result["messages"][0]["content"] == "You are helpful\n\nBe concise"
 
     def test_convert_content_list_with_image(self):
         adapter = MessagesAdapter()
@@ -724,7 +864,12 @@ class TestMessagesAdapterRequest:
             }],
         }
         result = adapter.convert_request(body)
-        assert result["messages"][0]["content"] == "What is this?\n[image]"
+        # 图片应转换为 OpenAI 多模态 content 数组格式
+        content = result["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "What is this?"}
+        assert content[1]["type"] == "image_url"
+        assert "image_url" in content[1]
 
     def test_convert_stop_sequences(self):
         adapter = MessagesAdapter()
@@ -739,6 +884,47 @@ class TestMessagesAdapterRequest:
         assert result["max_tokens"] == 1000
         assert result["temperature"] == 0.7
         assert result["top_p"] == 0.9
+
+    def test_convert_tools_without_explicit_tool_choice_keeps_protocol_neutral(self):
+        """验证协议层不注入模型策略：未显式传 tool_choice 时保持中立"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                }
+            ],
+        }
+        result = adapter.convert_request(body)
+        assert "tool_choice" not in result
+
+    def test_convert_tools_keeps_explicit_tool_choice(self):
+        """验证已显式传入 tool_choice 时不被自动策略覆盖"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "read_file"},
+        }
+        result = adapter.convert_request(body)
+        assert result["tool_choice"] == {"type": "function", "function": {"name": "read_file"}}
 
 
 class TestMessagesAdapterResponse:
@@ -760,16 +946,158 @@ class TestMessagesAdapterResponse:
         assert result["usage"]["input_tokens"] == 10
         assert result["usage"]["output_tokens"] == 5
 
+    def test_convert_response_with_tool_calls(self):
+        """验证非流式响应中 tool_calls 被转换为 tool_use content block"""
+        adapter = MessagesAdapter()
+        chat_resp = json.dumps({
+            "id": "chatcmpl-tc1",
+            "model": "gpt-5.4",
+            "choices": [{
+                "message": {
+                    "content": "Let me check",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function",
+                         "function": {"name": "read_file", "arguments": '{"path":"/tmp/x"}'}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80},
+        })
+        result = json.loads(adapter.convert_response(chat_resp))
+        # 应有 text + tool_use 两个 content block
+        assert len(result["content"]) == 2
+        assert result["content"][0]["type"] == "text"
+        assert result["content"][0]["text"] == "Let me check"
+        assert result["content"][1]["type"] == "tool_use"
+        assert result["content"][1]["name"] == "read_file"
+        assert result["content"][1]["input"] == {"path": "/tmp/x"}
+        assert result["stop_reason"] == "tool_use"
 
-class TestMessagesAdapterSSE:
+    def test_convert_response_with_reasoning(self):
+        """验证非流式响应中 reasoning_content 被转换为 thinking 块"""
+        adapter = MessagesAdapter()
+        chat_resp = json.dumps({
+            "id": "chatcmpl-rs1",
+            "model": "deepseek-v4",
+            "choices": [{
+                "message": {
+                    "content": "Answer",
+                    "reasoning_content": "Deep thinking process...",
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 10},
+        })
+        result = json.loads(adapter.convert_response(chat_resp))
+        # 应有 thinking + text 两个 content block
+        assert len(result["content"]) == 2
+        assert result["content"][0]["type"] == "thinking"
+        assert result["content"][0]["thinking"] == "Deep thinking process..."
+        assert result["content"][1]["type"] == "text"
+        assert result["content"][1]["text"] == "Answer"
+
+    def test_convert_response_tool_calls_only(self):
+        """验证纯 tool_calls（无文本）时 content 不包含空 text 块"""
+        adapter = MessagesAdapter()
+        chat_resp = json.dumps({
+            "id": "chatcmpl-tc2",
+            "model": "gpt-5.4",
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_x", "type": "function",
+                         "function": {"name": "bash", "arguments": '{"cmd":"ls"}'}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {},
+        })
+        result = json.loads(adapter.convert_response(chat_resp))
+        assert len(result["content"]) == 1
+        assert result["content"][0]["type"] == "tool_use"
+        assert result["content"][0]["name"] == "bash"
+
+
+class TestMessagesAdapterRequestTools:
+
+    def test_convert_tools(self):
+        """验证 tools 定义的转换"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "claude",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {"name": "read_file", "description": "Read a file",
+                 "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+            ],
+        }
+        result = adapter.convert_request(body)
+        assert "tools" in result
+        assert result["tools"][0]["type"] == "function"
+        assert result["tools"][0]["function"]["name"] == "read_file"
+        assert result["tools"][0]["function"]["parameters"]["properties"]["path"]["type"] == "string"
+
+    def test_convert_tool_use_in_assistant(self):
+        """验证 assistant 消息中 tool_use → tool_calls"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "claude",
+            "messages": [
+                {"role": "user", "content": "Read /tmp/x"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Let me read that."},
+                    {"type": "tool_use", "id": "tool_001", "name": "read_file",
+                     "input": {"path": "/tmp/x"}},
+                ]},
+            ],
+        }
+        result = adapter.convert_request(body)
+        assistant_msg = result["messages"][1]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["content"] == "Let me read that."
+        assert len(assistant_msg["tool_calls"]) == 1
+        assert assistant_msg["tool_calls"][0]["function"]["name"] == "read_file"
+        assert json.loads(assistant_msg["tool_calls"][0]["function"]["arguments"]) == {"path": "/tmp/x"}
+
+    def test_convert_tool_result(self):
+        """验证 user 消息中 tool_result → role=tool"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "claude",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tool_001", "name": "read_file",
+                     "input": {"path": "/tmp/x"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tool_001",
+                     "content": "file contents here"},
+                ]},
+            ],
+        }
+        result = adapter.convert_request(body)
+        # 应有 assistant + tool 两条消息
+        assert len(result["messages"]) == 2
+        tool_msg = result["messages"][1]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "tool_001"
+        assert tool_msg["content"] == "file contents here"
+
+
+class TestMessagesAdapterSSETools:
 
     @pytest.mark.asyncio
-    async def test_convert_sse_basic(self):
+    async def test_convert_sse_with_reasoning(self):
+        """验证 reasoning_content 转换为 thinking delta 事件"""
         adapter = MessagesAdapter()
         chat_sse = [
-            b'data: {"id":"chatcmpl-1","model":"claude","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n',
-            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Hello"},"index":0}]}\n\n',
-            b'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"end_turn"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n',
+            b'data: {"id":"chatcmpl-1","model":"deepseek","choices":[{"delta":{"role":"assistant","reasoning_content":""},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"reasoning_content":"thinking..."},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"Answer"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
         ]
 
         lines = []
@@ -778,12 +1106,151 @@ class TestMessagesAdapterSSE:
 
         events = _parse_sse_helper(lines)
         event_names = [e[0] for e in events]
-        assert event_names[0] == "message_start"
-        assert event_names[1] == "content_block_start"
-        assert event_names[2] == "content_block_delta"
-        assert event_names[3] == "content_block_stop"
-        assert event_names[4] == "message_delta"
-        assert event_names[5] == "message_stop"
+
+        # 推理内容块：content_block_start(index=0, thinking) → delta → stop
+        assert "message_start" in event_names
+        # 新语义：不再 role 预发 text 占位块，出现 reasoning 时先发 thinking
+        # 通常 thinking 为 index=0，随后 text 为 index=1
+        cb_starts = [e for e in events if e[0] == "content_block_start"]
+        assert len(cb_starts) >= 2
+        # thinking 块
+        thinking_start = [c for c in cb_starts if c[1]["content_block"]["type"] == "thinking"]
+        assert len(thinking_start) == 1
+        assert thinking_start[0][1]["index"] == 0
+        # text 块
+        text_start = [c for c in cb_starts if c[1]["content_block"]["type"] == "text"]
+        assert len(text_start) == 1
+        assert text_start[0][1]["index"] == 1
+
+        thinking_deltas = [e for e in events if e[0] == "content_block_delta" and e[1]["delta"].get("type") == "thinking_delta"]
+        assert len(thinking_deltas) == 1
+
+        # content_block_stop 应有 text + thinking（可能还有 tool）
+        stops = [e for e in events if e[0] == "content_block_stop"]
+        assert len(stops) >= 2
+
+    @pytest.mark.asyncio
+    async def test_convert_sse_with_single_tool_call(self):
+        """验证单个 tool_call 增量转换为 tool_use 事件序列"""
+        adapter = MessagesAdapter()
+        chat_sse = [
+            b'data: {"id":"chatcmpl-1","model":"gpt","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":""}}]},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"}"}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"cmd\\":\\"ls\\""}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-1","choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}\n\n',
+        ]
+
+        lines = []
+        async for line in adapter.convert_sse_stream(_async_bytes_iter(chat_sse)):
+            lines.append(line)
+
+        events = _parse_sse_helper(lines)
+
+        # 应有 tool_use content_block_start
+        cb_starts = [e for e in events if e[0] == "content_block_start"]
+        # 第一个是 text (index=0), 第二个是 tool_use (index=1)
+        tool_start = [c for c in cb_starts if c[1]["content_block"]["type"] == "tool_use"]
+        assert len(tool_start) == 1
+        assert tool_start[0][1]["content_block"]["name"] == "bash"
+
+        # tool content_block_stop 也应有（text 占位块 + tool 块）
+        stops = [e for e in events if e[0] == "content_block_stop"]
+        assert len(stops) >= 1  # 至少 tool 块，text 占位块也可能存在
+
+        # message_delta stop_reason 应为 tool_use
+        msg_delta = [e for e in events if e[0] == "message_delta"][0]
+        assert msg_delta[1]["delta"]["stop_reason"] == "tool_use"
+
+
+class TestChatAdapter:
+
+    def test_convert_request_chat_to_messages(self):
+        adapter = ChatAdapter()
+        body = {
+            "model": "claude-sonnet",
+            "messages": [
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Let me call tool",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": '{"path":"/tmp/x"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "description": "read file",
+                        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+            "stop": ["END"],
+        }
+        result = adapter.convert_request(body)
+        assert result["model"] == "claude-sonnet"
+        assert result["system"] == "You are helpful"
+        assert result["stop_sequences"] == ["END"]
+        assert result["tool_choice"] == {"type": "any"}
+        assert result["tools"][0]["name"] == "read_file"
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][1]["role"] == "assistant"
+        assert result["messages"][1]["content"][1]["type"] == "tool_use"
+        assert result["messages"][2]["content"][0]["type"] == "tool_result"
+
+    def test_convert_response_messages_json_to_chat_json(self):
+        adapter = ChatAdapter()
+        msg_json = json.dumps({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet",
+            "content": [
+                {"type": "thinking", "thinking": "analysis"},
+                {"type": "text", "text": "answer"},
+                {"type": "tool_use", "id": "call_2", "name": "bash", "input": {"command": "ls"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        })
+        result = json.loads(adapter.convert_response(msg_json))
+        assert result["object"] == "chat.completion"
+        assert result["choices"][0]["message"]["content"] == "answer"
+        assert result["choices"][0]["message"]["reasoning_content"] == "analysis"
+        assert result["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "bash"
+        assert result["choices"][0]["finish_reason"] == "tool_calls"
+
+    def test_convert_response_messages_sse_to_chat_json(self):
+        adapter = ChatAdapter()
+        sse_text = (
+            'event: message_start\n'
+            'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet","content":[],"usage":{"input_tokens":7}}}\n\n'
+            'event: content_block_delta\n'
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n'
+            'event: message_delta\n'
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}\n\n'
+            'event: message_stop\n'
+            'data: {"type":"message_stop"}\n\n'
+            'data: [DONE]\n\n'
+        )
+        result = json.loads(adapter.convert_response(sse_text))
+        assert result["object"] == "chat.completion"
+        assert result["model"] == "claude-sonnet"
+        assert result["choices"][0]["message"]["content"] == "Hello"
+        assert result["usage"]["prompt_tokens"] == 7
+        assert result["usage"]["completion_tokens"] == 3
 
 
 # ── 工具函数 ──

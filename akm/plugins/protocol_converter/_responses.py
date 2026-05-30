@@ -15,6 +15,13 @@ import logging
 from uuid import uuid4
 from typing import AsyncIterator
 from akm.adapter import BaseAdapter
+from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_responses_output
+from akm.plugins.protocol_converter._warnings import (
+    RESPONSES_INCLUDE_NOT_FULLY_MAPPED,
+    RESPONSES_STORE_NOT_MAPPED,
+    RESPONSES_REASONING_SUMMARY_NOT_MAPPED,
+    RESPONSES_PARALLEL_TOOL_CALLS_NOT_MAPPED,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -32,6 +39,7 @@ class ResponsesAdapter(BaseAdapter):
 
     def convert_request(self, body: dict) -> dict:
         """Responses API 请求 → Chat Completions 请求"""
+        self._conversion_warnings = []
         chat_body = {}
 
         if "model" in body:
@@ -96,6 +104,43 @@ class ResponsesAdapter(BaseAdapter):
             chat_body["tools"] = self._convert_tools(body["tools"])
         if "tool_choice" in body:
             chat_body["tool_choice"] = body["tool_choice"]
+
+        # ── 结构化输出映射（P1 最小集）──
+        # OpenAI Responses 常见写法：
+        # 1) response_format={"type":"json_schema", ...}
+        # 2) text={"format": {...}}
+        # 目标：尽量映射到 Chat Completions 兼容字段 response_format。
+        response_format = body.get("response_format")
+        if isinstance(response_format, dict):
+            chat_body["response_format"] = response_format
+        else:
+            text_cfg = body.get("text")
+            if isinstance(text_cfg, dict):
+                fmt = text_cfg.get("format")
+                if isinstance(fmt, dict):
+                    chat_body["response_format"] = fmt
+
+        # ── metadata 透传（用于审计/追踪）──
+        # 多数 OpenAI 兼容后端会忽略未知字段；透传比静默丢弃更安全。
+        if isinstance(body.get("metadata"), dict):
+            chat_body["metadata"] = body["metadata"]
+
+        # ── previous_response_id 兼容策略（当前仅保留，不强行改写上下文）──
+        # Chat Completions 无统一等价字段，这里保留到扩展字段供上游/网关自行处理。
+        # 若上游不识别通常会忽略；若识别可用于会话续接。
+        if body.get("previous_response_id"):
+            chat_body["previous_response_id"] = body.get("previous_response_id")
+
+        # ── 降级可观测性：记录当前未完整映射的字段 ──
+        if body.get("include"):
+            self._conversion_warnings.append(RESPONSES_INCLUDE_NOT_FULLY_MAPPED)
+        if body.get("store") is not None:
+            self._conversion_warnings.append(RESPONSES_STORE_NOT_MAPPED)
+        reasoning_cfg = body.get("reasoning")
+        if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("summary") is not None:
+            self._conversion_warnings.append(RESPONSES_REASONING_SUMMARY_NOT_MAPPED)
+        if body.get("parallel_tool_calls") is not None:
+            self._conversion_warnings.append(RESPONSES_PARALLEL_TOOL_CALLS_NOT_MAPPED)
 
         return chat_body
 
@@ -388,6 +433,10 @@ class ResponsesAdapter(BaseAdapter):
 
     def convert_response(self, body: str) -> str:
         """Chat Completions JSON → Responses API JSON"""
+        # 若输入是 Chat SSE 原文，先在插件内完成 SSE->Chat 聚合（协议语义在插件内处理）
+        if isinstance(body, str) and body.lstrip().startswith("data: "):
+            body = self._sse_chat_to_json(body)
+
         try:
             chat = json.loads(body)
         except (json.JSONDecodeError, TypeError):
@@ -396,7 +445,7 @@ class ResponsesAdapter(BaseAdapter):
         choice = (chat.get("choices", [{}]) or [{}])[0]
         message = choice.get("message", {})
         usage = chat.get("usage", {})
-        output_text = message.get("content", "")
+        ir = chat_message_to_ir(message)
 
         resp_id = chat.get("id", "").replace("chatcmpl-", "resp_")
         cached_tokens = 0
@@ -423,14 +472,114 @@ class ResponsesAdapter(BaseAdapter):
         if cached_tokens:
             resp["usage"]["input_tokens_details"] = {"cached_tokens": cached_tokens}
 
-        if output_text:
+        resp["output"] = ir_to_responses_output(ir)
+
+        # 兜底：当只有工具调用或推理时，仍补一条 message，避免部分客户端空输出误判
+        if not ir.get("text") and (ir.get("reasoning") or ir.get("tool_calls")):
             resp["output"].append({
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "output_text", "text": output_text, "annotations": []}],
+                "content": [{"type": "output_text", "text": "", "annotations": []}],
             })
 
         return json.dumps(resp, ensure_ascii=False)
+
+    def _sse_chat_to_json(self, sse_text: str) -> str:
+        """将 Chat Completions SSE 聚合为 Chat JSON（插件内版本）
+
+        用于 responses 非流式路径，把协议语义（tool_calls 重组/finish 降级）
+        从 proxy 下沉到协议转换插件，保持职责边界清晰。
+        """
+        content = ""
+        reasoning = ""
+        tool_calls_map: dict[int, dict] = {}
+        model = ""
+        msg_id = ""
+        usage = None
+        finish_reason = "stop"
+
+        for line in sse_text.split("\n"):
+            line = line.strip()
+            if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+                continue
+            try:
+                chunk = json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+
+            if not model:
+                model = chunk.get("model", "")
+            if not msg_id:
+                msg_id = chunk.get("id", "")
+            if "usage" in chunk and chunk["usage"]:
+                usage = chunk["usage"]
+
+            choices = chunk.get("choices", []) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta", {}) or {}
+
+            if delta.get("content"):
+                content += delta["content"]
+            if delta.get("reasoning_content"):
+                reasoning += delta["reasoning_content"]
+
+            if delta.get("tool_calls"):
+                for tc in delta["tool_calls"]:
+                    idx = tc.get("index", 0)
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {
+                            "id": tc.get("id", ""),
+                            "type": tc.get("type", "function") or "function",
+                            "function": {
+                                "name": "",
+                                "arguments": "",
+                            },
+                        }
+                    cur = tool_calls_map[idx]
+                    if tc.get("id"):
+                        cur["id"] = tc["id"]
+                    if tc.get("type"):
+                        cur["type"] = tc["type"]
+                    fn = tc.get("function", {}) or {}
+                    if fn.get("name"):
+                        cur["function"]["name"] = fn["name"]
+                    if "arguments" in fn and fn.get("arguments") is not None:
+                        cur["function"]["arguments"] += fn.get("arguments", "")
+
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+
+        result = {
+            "id": msg_id,
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+            }],
+        }
+        if tool_calls_map:
+            tool_calls = []
+            for i in sorted(tool_calls_map.keys()):
+                tc = tool_calls_map[i]
+                if tc.get("function", {}).get("name"):
+                    tool_calls.append(tc)
+            if tool_calls:
+                result["choices"][0]["message"]["tool_calls"] = tool_calls
+
+        if finish_reason == "tool_calls":
+            msg = result["choices"][0].get("message", {})
+            if not msg.get("tool_calls"):
+                result["choices"][0]["finish_reason"] = "stop"
+
+        if reasoning:
+            result["choices"][0]["message"]["reasoning_content"] = reasoning
+        if usage:
+            result["usage"] = usage
+        return json.dumps(result, ensure_ascii=False)
 
     # ── 流式 SSE 转换：Chat SSE → Responses SSE ──
 

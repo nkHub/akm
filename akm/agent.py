@@ -36,15 +36,34 @@ class Agent:
         """
         raw = key.get("base_url") or ""
         base = raw.rstrip("/") if raw else self.default_base_url.rstrip("/")
+
+        # DeepSeek 官方 Claude Code 兼容入口：/anthropic/v1/messages
+        if self.name == "deepseek" and api_path == "messages":
+            # 先剥离尾部 /v1，避免出现 /v1/anthropic/v1/messages 的错误拼接
+            base_norm = base[:-3] if base.endswith("/v1") else base
+            # 若用户未显式配置 /anthropic，则自动补齐
+            if "/anthropic" not in base_norm:
+                base_norm = f"{base_norm}/anthropic"
+            # DeepSeek Anthropic 兼容入口：/anthropic/v1/messages
+            return f"{base_norm}/v1/{api_path}"
+
         if base.endswith("/v1"):
             return f"{base}/{api_path}"
         return f"{base}/v1/{api_path}"
 
-    def build_headers(self, key: dict) -> dict:
+    def build_headers(self, key: dict, api_path: str = "") -> dict:
         """构建请求头（含 Authorization）
 
         auth_header 模板中的 {api_key} 会被替换为解密后的 Key
         """
+        # DeepSeek Messages 走 Anthropic 协议头
+        if self.name == "deepseek" and api_path == "messages":
+            return {
+                "x-api-key": key["api_key"],
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+
         template = key.get("auth_header") or self.default_auth_header
         return {
             "Authorization": template.format(api_key=key["api_key"]),
@@ -59,6 +78,8 @@ class Agent:
         if api_path == "responses" and not self.supports_responses:
             if self.supports_chat:
                 return "chat/completions"
+            if self.supports_messages:
+                return "messages"
         if api_path == "messages" and not self.supports_messages:
             if self.supports_chat:
                 return "chat/completions"
@@ -80,6 +101,7 @@ BUILTIN_AGENTS: dict[str, Agent] = {
         default_base_url="https://api.deepseek.com",
         supports_responses=False,
         supports_chat=True,
+        supports_messages=True,
     ),
     "anthropic": Agent(
         name="anthropic",

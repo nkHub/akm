@@ -59,6 +59,14 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 logger = logging.getLogger("akm")
 
+# 转换告警码 -> 可读文案（供日志 API 补充派生字段）
+_CONV_WARNING_LABELS = {
+    "responses_include_not_fully_mapped": "include 未完整映射",
+    "responses_store_not_mapped": "store 未映射",
+    "responses_reasoning_summary_not_mapped": "reasoning.summary 未映射",
+    "responses_parallel_tool_calls_not_mapped": "parallel_tool_calls 未映射",
+}
+
 # 静态文件
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
@@ -304,14 +312,15 @@ def _extract_tokens(response_body: str) -> dict | None:
         total = usage.get("total_tokens", 0)
         prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
         completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-        # 安全提取缓存 token：上游可能返回非字典类型（字符串、null 等）
-        cached = 0
-        for key in ("prompt_tokens_details", "input_tokens_details"):
-            details = usage.get(key)
-            if isinstance(details, dict):
-                cached = details.get("cached_tokens", 0)
-                if cached:
-                    break
+        # 安全提取缓存 token：先查 Chat 格式的 *_details，再查 Messages 格式的直接 cached_tokens 字段
+        cached = usage.get("cached_tokens", 0) or 0
+        if not cached:
+            for key in ("prompt_tokens_details", "input_tokens_details"):
+                details = usage.get(key)
+                if isinstance(details, dict):
+                    cached = details.get("cached_tokens", 0)
+                    if cached:
+                        break
         if total == 0 and (prompt > 0 or completion > 0):
             total = prompt + completion
         if total > 0:
@@ -503,6 +512,21 @@ async def api_logs(
         log["completion_tokens"] = c
         log["total_tokens"] = t
         log["cached_tokens"] = cached
+
+        # 补充转换告警派生字段，前端可直接展示可读文本，避免重复解析逻辑
+        conv_codes: list[str] = []
+        conv_labels: list[str] = []
+        try:
+            headers_obj = json.loads(log.get("request_headers") or "{}")
+            raw = headers_obj.get("x-akm-conv-warnings", "")
+            if isinstance(raw, str) and raw.strip():
+                conv_codes = [x.strip() for x in raw.split(",") if x.strip()]
+                conv_labels = [_CONV_WARNING_LABELS.get(code, code) for code in conv_codes]
+        except (json.JSONDecodeError, TypeError):
+            conv_codes = []
+            conv_labels = []
+        log["conv_warning_codes"] = conv_codes
+        log["conv_warning_labels"] = conv_labels
     return {"data": logs, "total": total}
 
 
@@ -743,6 +767,13 @@ async def chat_completions(request: Request):
     return await _handle_ai_request(request, "chat/completions")
 
 
+@app.post("/v1/messages")
+@app.post("/messages")
+async def messages(request: Request):
+    """Anthropic Messages API 兼容端点"""
+    return await _handle_ai_request(request, "messages")
+
+
 @app.post("/v1/responses")
 @app.post("/responses")
 async def responses(request: Request):
@@ -779,6 +810,23 @@ async def _handle_ai_request(request: Request, api_path: str):
     save_response_body = cfg.get("log_response_body", False)
     result = await forward_request(body, request.app.state.http_client, api_path=api_path, plugin_manager=request.app.state.plugin_manager)
 
+    # ── 503 无可用 key 时补充来源信息 ──
+    if result["status_code"] == 503:
+        ua = (_trace_headers.get("user-agent") or "").lower()
+        source = ""
+        if "opencode" in ua:
+            source = "opencode"
+        elif "claude-cli" in ua or "claude code" in ua:
+            source = "claude"
+        elif "codex" in ua:
+            source = "codex"
+        elif "cursor" in ua:
+            source = "cursor"
+        elif "curl" in ua:
+            source = "curl"
+        if source:
+            result["error"] = f"[{source}] {result['error']}"
+
     # ── 流式响应：逐块转发，边收边发 ──
     if result.get("stream"):
         resp = result["response"]
@@ -813,12 +861,41 @@ async def _handle_ai_request(request: Request, api_path: str):
                 body_str = b"".join(chunks).decode("utf-8", errors="replace")
                 status = 200 if not stream_error else 502
                 tokens = _extract_tokens(body_str) or {}
+                # 在审计 headers 中追加转换标记，便于后续筛查
+                request_headers_for_log = request_headers_json
+                try:
+                    headers_obj = json.loads(request_headers_json) if request_headers_json else {}
+                    flags = []
+                    if adapter and getattr(adapter, "_fallback_thinking_to_text", False):
+                        flags.append("fallback_thinking_to_text")
+                    if status == 200 and not stream_error:
+                        if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
+                            flags.append("missing_usage_upstream")
+                    tool_trace = ""
+                    if adapter and getattr(adapter, "_tool_trace_events", None):
+                        tool_trace = "; ".join(getattr(adapter, "_tool_trace_events", []))
+                        if tool_trace:
+                            # 控制字段长度，避免 headers 过大
+                            headers_obj["x-akm-tool-trace"] = tool_trace[:2000]
+                    if adapter and getattr(adapter, "_conversion_warnings", None):
+                        conv_warn = ",".join(getattr(adapter, "_conversion_warnings", []))
+                        if conv_warn:
+                            headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
+                    if flags:
+                        headers_obj["x-akm-flags"] = ",".join(flags)
+                        request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+                    elif tool_trace:
+                        request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+                    elif adapter and getattr(adapter, "_conversion_warnings", None):
+                        request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+                except Exception:
+                    request_headers_for_log = request_headers_json
                 asyncio.create_task(write_log_async({
                     "provider": provider, "key_alias": key_alias, "model": model,
                     "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
                     "response_body": body_str if save_response_body else "", "status_code": status,
                     "latency_ms": latency, "error": stream_error,
-                    "request_headers": request_headers_json,
+                    "request_headers": request_headers_for_log,
                     "prompt_tokens": tokens.get("prompt_tokens", 0),
                     "completion_tokens": tokens.get("completion_tokens", 0),
                     "total_tokens": tokens.get("total_tokens", 0),
@@ -840,24 +917,33 @@ async def _handle_ai_request(request: Request, api_path: str):
         )
 
     # ── 非流式响应 ──
-    # 只有真正转发了的请求才写审计日志（没有可用 key 的 503 不记录）
-    if result["status_code"] != 503:
-        tokens = _extract_tokens(result.get("body", "")) or {}
-        asyncio.create_task(write_log_async({
-            "provider": result["provider"],
-            "key_alias": result["key_alias"],
-            "model": result["model"],
-            "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
-            "response_body": result["body"] if save_response_body else "",
-            "status_code": result["status_code"],
-            "latency_ms": result["latency_ms"],
-            "error": result["error"],
-            "request_headers": request_headers_json,
-            "prompt_tokens": tokens.get("prompt_tokens", 0),
-            "completion_tokens": tokens.get("completion_tokens", 0),
-            "total_tokens": tokens.get("total_tokens", 0),
-            "cached_tokens": tokens.get("cached_tokens", 0),
-        }))
+    tokens = _extract_tokens(result.get("body", "")) or {}
+    request_headers_for_log = request_headers_json
+    try:
+        headers_obj = json.loads(request_headers_json) if request_headers_json else {}
+        adapter_for_log = result.get("adapter")
+        if adapter_for_log and getattr(adapter_for_log, "_conversion_warnings", None):
+            conv_warn = ",".join(getattr(adapter_for_log, "_conversion_warnings", []))
+            if conv_warn:
+                headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
+                request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+    except Exception:
+        request_headers_for_log = request_headers_json
+    asyncio.create_task(write_log_async({
+        "provider": result["provider"],
+        "key_alias": result["key_alias"],
+        "model": result["model"],
+        "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+        "response_body": result["body"] if save_response_body else "",
+        "status_code": result["status_code"],
+        "latency_ms": result["latency_ms"],
+        "error": result["error"],
+        "request_headers": request_headers_for_log,
+        "prompt_tokens": tokens.get("prompt_tokens", 0),
+        "completion_tokens": tokens.get("completion_tokens", 0),
+        "total_tokens": tokens.get("total_tokens", 0),
+        "cached_tokens": tokens.get("cached_tokens", 0),
+    }))
 
     if result["key_alias"]:
         status = result["status_code"]

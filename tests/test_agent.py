@@ -135,6 +135,12 @@ def test_needs_conversion_anthropic_messages():
     assert agent.needs_conversion("messages") is None
 
 
+def test_needs_conversion_anthropic_responses():
+    """Anthropic 不支持 responses 且不支持 chat → 需转为 messages"""
+    agent = AGENT_REGISTRY["anthropic"]
+    assert agent.needs_conversion("responses") == "messages"
+
+
 def test_needs_conversion_unknown_path():
     """未知路径不需要转换"""
     agent = AGENT_REGISTRY["deepseek"]

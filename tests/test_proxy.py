@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 import httpx
 from akm.proxy import forward_request
+from akm.agent import AGENT_REGISTRY
 
 
 class FakeStreamResponse:
@@ -157,3 +158,63 @@ async def test_forward_all_keys_exhausted(monkeypatch):
     )
     assert result["status_code"] == 503
     assert "没有可用" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
+    """responses 在 messages-only provider 下可通过两段转换器链路转发"""
+
+    class DummyRespToChat:
+        _source_format = "responses"
+
+        def convert_request(self, body):
+            out = dict(body)
+            out["_from_resp"] = True
+            return out
+
+        def convert_response(self, body):
+            return body + "|resp"
+
+    class DummyChatToMsg:
+        _source_format = "chat"
+
+        def convert_request(self, body):
+            out = dict(body)
+            out["_to_msg"] = True
+            return out
+
+        def convert_response(self, body):
+            return body + "|chat"
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            if (from_fmt, to_fmt) == ("responses", "chat"):
+                return DummyRespToChat()
+            if (from_fmt, to_fmt) == ("chat", "messages"):
+                return DummyChatToMsg()
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1",
+        "provider": "anthropic",
+        "api_key": "sk-ant",
+        "base_url": "https://api.anthropic.com",
+    }))
+
+    # 构造上游成功返回（非流式路径）
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeStreamResponse(200, "hello")])
+
+    result = await forward_request(
+        body={"model": "claude-3", "input": "hi", "stream": False},
+        client=mock_client,
+        api_path="responses",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    # 两段 convert_response：second 后 first，最终应为 hello|chat|resp
+    assert result["body"] == "hello|chat|resp"
