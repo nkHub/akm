@@ -8,7 +8,8 @@
   "required": true,
   "hooks": {
     "on_request": true,
-    "on_key_selected": true
+    "on_key_selected": true,
+    "on_response": true
   },
   "settings": [
     {
@@ -24,6 +25,31 @@
       "type": "boolean",
       "default": false,
       "description": "对 gpt-*/codex 且带 tools 的请求，在未显式提供 tool_choice 时自动设置为 required"
+    },
+    {
+      "key": "enable_inflight_bypass",
+      "label": "拥塞旁路",
+      "type": "boolean",
+      "default": false,
+      "description": "启用后，当当前 key 并发过高或存在慢请求时，尝试旁路到其他可用 key"
+    },
+    {
+      "key": "max_inflight_per_key",
+      "label": "单key并发上限",
+      "type": "number",
+      "default": 3,
+      "min": 1,
+      "max": 100,
+      "description": "当 in-flight 请求数达到该阈值时触发旁路（需先开启拥塞旁路）"
+    },
+    {
+      "key": "slow_inflight_threshold_sec",
+      "label": "慢请求阈值秒",
+      "type": "number",
+      "default": 8,
+      "min": 1,
+      "max": 600,
+      "description": "当某 key 最老 in-flight 请求持续超过该秒数时触发旁路（需先开启拥塞旁路）"
     }
   ]
 }

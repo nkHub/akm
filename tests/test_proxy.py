@@ -218,3 +218,72 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
     assert result["status_code"] == 200
     # 两段 convert_response：second 后 first，最终应为 hello|chat|resp
     assert result["body"] == "hello|chat|resp"
+
+
+@pytest.mark.asyncio
+async def test_forward_emits_on_response_meta_for_failure_and_success(monkeypatch):
+    """验证 proxy 会在失败与成功路径都触发 on_response 元信息。"""
+    keys_called = []
+
+    async def pick_key_mock(model, exclude_aliases=None):
+        keys_called.append(model)
+        if len(keys_called) == 1:
+            return {
+                "alias": "k1",
+                "provider": "openai",
+                "api_key": "sk-a",
+                "base_url": "https://api.openai.com",
+            }
+        return {
+            "alias": "k2",
+            "provider": "openai",
+            "api_key": "sk-b",
+            "base_url": "https://api.openai.com",
+        }
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", pick_key_mock)
+    monkeypatch.setattr("akm.proxy.mark_rate_limited", lambda alias: None)
+
+    class DummyPM:
+        def __init__(self):
+            self.events = []
+
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            if hook == "on_response":
+                self.events.append(kwargs)
+            return kwargs
+
+    pm = DummyPM()
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [
+        FakeStreamResponse(429),
+        FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}'),
+    ])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
+        client=mock_client,
+        plugin_manager=pm,
+    )
+
+    assert result["status_code"] == 200
+    assert len(pm.events) >= 2
+
+    # 第一条事件应来自 429 错误路径
+    first = pm.events[0]["response"]
+    assert first["ok"] is False
+    assert first["phase"] == "upstream"
+    assert first["status_code"] == 429
+    assert first["key_alias"] == "k1"
+    assert first["action"] == "block"
+
+    # 最后一条事件应来自成功路径
+    last = pm.events[-1]["response"]
+    assert last["ok"] is True
+    assert last["phase"] == "upstream"
+    assert last["status_code"] == 200
+    assert last["key_alias"] == "k2"

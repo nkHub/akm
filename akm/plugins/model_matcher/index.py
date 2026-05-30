@@ -8,6 +8,8 @@
 - aliases: 逗号分隔的模型别名映射，如 "gpt-4=gpt-4-turbo,claude-3=claude-3-opus"
 """
 from akm.plugins import PluginBase
+from akm.key_pool import pick_key_async
+import time
 
 
 class Plugin(PluginBase):
@@ -20,6 +22,9 @@ class Plugin(PluginBase):
     async def on_load(self):
         """初始化时解析别名映射表"""
         self._aliases: dict[str, str] = {}
+        # 记录每个 key 的并发请求数与最早开始时间，用于并发/慢 key 旁路
+        self._inflight_counts: dict[str, int] = {}
+        self._inflight_oldest_ts: dict[str, float] = {}
         self._parse_aliases()
 
     def _parse_aliases(self):
@@ -137,4 +142,58 @@ class Plugin(PluginBase):
         默认行为：返回 None（不修改选中的 key）
         可重写为：根据请求内容（如 model、用户标识）返回替换的 key
         """
-        return None
+        cfg = self.config or {}
+        enable_bypass = bool(cfg.get("enable_inflight_bypass", False))
+        max_inflight = int(cfg.get("max_inflight_per_key", 3))
+        slow_threshold_sec = float(cfg.get("slow_inflight_threshold_sec", 8))
+
+        current_alias = str(key.get("alias", ""))
+        now = time.time()
+        current_count = int(self._inflight_counts.get(current_alias, 0))
+        oldest_ts = self._inflight_oldest_ts.get(current_alias)
+        oldest_age = (now - oldest_ts) if oldest_ts else 0.0
+
+        should_bypass = (
+            enable_bypass
+            and current_alias
+            and (
+                (max_inflight > 0 and current_count >= max_inflight)
+                or (slow_threshold_sec > 0 and oldest_age >= slow_threshold_sec)
+            )
+        )
+
+        if should_bypass:
+            alt = await pick_key_async(model, [current_alias])
+            if isinstance(alt, dict) and alt.get("alias") and alt.get("alias") != current_alias:
+                self.logger.info(
+                    "[model_matcher] 旁路拥塞 key: %s(count=%s, oldest=%.2fs) -> %s",
+                    current_alias,
+                    current_count,
+                    oldest_age,
+                    alt.get("alias"),
+                )
+                key = alt
+                current_alias = str(key.get("alias", ""))
+
+        # 将最终选择的 key 记为 in-flight；由 on_response 生命周期回收
+        if current_alias:
+            self._inflight_counts[current_alias] = int(self._inflight_counts.get(current_alias, 0)) + 1
+            self._inflight_oldest_ts.setdefault(current_alias, now)
+
+        return key
+
+    async def on_response(self, request, response) -> None:
+        """请求完成生命周期回调：回收 in-flight 计数，避免并发统计累积失真。"""
+        if not isinstance(response, dict):
+            return
+        alias = str(response.get("key_alias", "") or "")
+        if not alias:
+            return
+        count = int(self._inflight_counts.get(alias, 0))
+        if count <= 1:
+            self._inflight_counts.pop(alias, None)
+            self._inflight_oldest_ts.pop(alias, None)
+            return
+        self._inflight_counts[alias] = count - 1
+        if alias not in self._inflight_oldest_ts:
+            self._inflight_oldest_ts[alias] = time.time()

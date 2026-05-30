@@ -54,7 +54,6 @@ MAX_RETRIES_PER_KEY = 2
 # 重试退避基础等待秒数
 RETRY_BACKOFF_BASE = 0.5
 
-
 def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     """诊断为什么没有可用的 key，返回详细错误信息"""
     conn = get_connection()
@@ -158,6 +157,16 @@ async def forward_request(
             body = hook_result["request"]
             model = body.get("model", model)
 
+    async def _emit_on_response_meta(meta: dict):
+        """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。"""
+        if not plugin_manager:
+            return
+        try:
+            await plugin_manager.run_hook("on_response", request=body, response=meta)
+        except Exception:
+            # hook 内异常由插件管理器隔离；此处双保险避免影响主链路
+            pass
+
     while tries < MAX_KEY_TRIES:
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
         if use_fallback:
@@ -171,13 +180,25 @@ async def forward_request(
                 use_fallback = True
                 continue
             # 兜底也无可用 key
+            err_msg = _diagnose_no_key(model, tried_aliases)
+            await _emit_on_response_meta({
+                "ok": False,
+                "phase": "select_key",
+                "status_code": 502 if tried_aliases else 503,
+                "key_alias": "",
+                "provider": "",
+                "model": model,
+                "latency_ms": 0,
+                "error": err_msg,
+                "api_path": api_path,
+            })
             return {
                 "status_code": 502 if tried_aliases else 503,
                 "body": "",
                 "key_alias": "",
                 "provider": "",
                 "model": model,
-                "error": _diagnose_no_key(model, tried_aliases),
+                "error": err_msg,
                 "latency_ms": 0,
             }
 
@@ -215,6 +236,19 @@ async def forward_request(
                     adapter = _ChainedAdapter(first, second)
             if adapter is None:
                 # 找不到转换器则返回明确报错
+                err_msg = f"缺少 {from_fmt}→{to_fmt} 转换器"
+                await _emit_on_response_meta({
+                    "ok": False,
+                    "phase": "converter",
+                    "status_code": 400,
+                    "key_alias": key.get("alias", ""),
+                    "provider": key.get("provider", ""),
+                    "model": model,
+                    "latency_ms": 0,
+                    "error": err_msg,
+                    "api_path": api_path,
+                    "upstream_api_path": target_api_path,
+                })
                 return {
                     "status_code": 400,
                     "body": json.dumps({
@@ -223,7 +257,7 @@ async def forward_request(
                     "key_alias": key.get("alias", ""),
                     "provider": key.get("provider", ""),
                     "model": model,
-                    "error": f"缺少 {from_fmt}→{to_fmt} 转换器",
+                    "error": err_msg,
                     "latency_ms": 0,
                 }
 
@@ -255,12 +289,41 @@ async def forward_request(
                 action = await _handle_upstream_error(
                     plugin_manager, body, 0, error_type, attempt, key
                 )
+                await _emit_on_response_meta({
+                    "ok": False,
+                    "phase": "request",
+                    "status_code": 0,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": str(e),
+                    "error_type": error_type,
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                    "action": action,
+                })
                 if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
                 last_error = str(e)
                 break
             except Exception as e:
+                await _emit_on_response_meta({
+                    "ok": False,
+                    "phase": "request",
+                    "status_code": 0,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": str(e),
+                    "error_type": "unknown",
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                })
                 last_error = str(e)
                 break
 
@@ -278,6 +341,21 @@ async def forward_request(
                     else:
                         set_status(key["alias"], "disabled")
                 await resp.aclose()
+                await _emit_on_response_meta({
+                    "ok": False,
+                    "phase": "upstream",
+                    "status_code": resp.status_code,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": last_error,
+                    "error_type": "http",
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                    "action": action,
+                })
                 if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
@@ -285,6 +363,20 @@ async def forward_request(
 
             # ── 成功：客户端流式 → 透传或标记转换 ──
             if client_wants_stream:
+                await _emit_on_response_meta({
+                    "ok": True,
+                    "phase": "upstream",
+                    "status_code": 200,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": "",
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                    "stream": True,
+                })
                 return {
                     "stream": True,
                     "status_code": 200,
@@ -306,6 +398,21 @@ async def forward_request(
                 )
                 last_error = f"读取流式响应失败: {e}"
                 await resp.aclose()
+                await _emit_on_response_meta({
+                    "ok": False,
+                    "phase": "read_stream",
+                    "status_code": 0,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": last_error,
+                    "error_type": "chunk",
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                    "action": action,
+                })
                 if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
                     await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
@@ -323,6 +430,20 @@ async def forward_request(
             # 协议转换：响应体格式转回客户端期望的格式
             if adapter:
                 json_body = adapter.convert_response(json_body)
+            await _emit_on_response_meta({
+                "ok": True,
+                "phase": "upstream",
+                "status_code": resp.status_code,
+                "key_alias": key["alias"],
+                "provider": key["provider"],
+                "model": model,
+                "latency_ms": latency,
+                "error": "",
+                "attempt": attempt,
+                "api_path": api_path,
+                "upstream_api_path": upstream_api_path,
+                "stream": False,
+            })
             return {
                 "status_code": resp.status_code,
                 "body": json_body,
@@ -349,6 +470,17 @@ async def forward_request(
                 "error": last_error,
             })
 
+    await _emit_on_response_meta({
+        "ok": False,
+        "phase": "exhausted",
+        "status_code": 502,
+        "key_alias": "",
+        "provider": "",
+        "model": model,
+        "latency_ms": 0,
+        "error": "所有 key 均已尝试但均失败",
+        "api_path": api_path,
+    })
     return {
         "status_code": 502,
         "body": "",

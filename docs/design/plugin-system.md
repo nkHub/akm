@@ -418,7 +418,7 @@ PluginManager.load_all(app, db)
 | `on_request` | proxy 转发请求之前 | `request: Request` | 请求日志、参数校验、请求改写（含模型名映射） |
 | `on_key_selected` | 根据 model 匹配到 key 之后 | `model, key, request` | 模型匹配插件修改 key 选择结果 |
 | `on_upstream_error` | 上游返回错误（非 2xx） | `request, response, key` | 错误处理插件决定是否重试、切换模型 |
-| `on_response` | proxy 转发响应之后 | `request: Request, response: Response` | 响应日志、结果缓存、告警通知 |
+| `on_response` | proxy 每次上游尝试结束后（成功/失败） | `request: dict, response: dict` | 响应日志、并发回收、告警通知 |
 
 ### 8.2 约定
 
@@ -462,9 +462,41 @@ request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C 
 | `on_upstream_error` | `(request, response, key)` | `"retry"` / `"switch"` / `None` | 第一个非 None 返回值即为最终决策 |
 | `on_response` | `(request, response)` | `None`（无状态传递） | 纯粹观察，按优先级依次执行 |
 
+`on_response` 当前由 proxy 传入的 `response` 为结构化元信息（并非 FastAPI Response 对象），常用字段如下：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ok` | bool | 本次上游尝试是否成功 |
+| `phase` | string | 阶段：`select_key` / `request` / `upstream` / `read_stream` / `converter` / `exhausted` |
+| `status_code` | int | 上游 HTTP 状态码，网络错误时为 `0` |
+| `key_alias` | string | 本次尝试使用的 key 别名 |
+| `provider` | string | key 对应 provider |
+| `model` | string | 本次请求模型 |
+| `latency_ms` | int | 本次尝试耗时毫秒 |
+| `error` | string | 错误信息（成功时为空） |
+| `error_type` | string | 错误类型（如 `timeout` / `connect` / `http` / `chunk`） |
+| `attempt` | int | 当前 key 内部重试序号 |
+| `action` | string | 错误策略决策（`retry` / `switch` / `block`） |
+| `api_path` | string | 客户端请求路径（如 `chat/completions`） |
+| `upstream_api_path` | string | 转换后的上游路径（如 `messages`） |
+| `stream` | bool | 是否流式（仅成功场景提供） |
+
 > 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。
 
 **崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留其输入原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
+
+### 8.4 matcher 并发/慢 key 旁路策略（model_matcher）
+
+`model_matcher` 内置了一个默认关闭的保守策略，用于缓解单 key 拥塞：
+
+- `enable_inflight_bypass=false`（默认）时，保持原有选 key 行为不变。
+- 开启后，在 `on_key_selected` 阶段检查当前 key 的 in-flight 状态：
+  - 当并发数 `>= max_inflight_per_key`（默认 `3`）时触发旁路；
+  - 或最老 in-flight 请求时长 `>= slow_inflight_threshold_sec`（默认 `8` 秒）时触发旁路。
+- 触发后尝试改选其他可用 key；若无可替代 key，则继续使用当前 key（不硬失败）。
+- in-flight 计数在 `on_key_selected` 增加，在 `on_response` 按 `response.key_alias` 回收，形成闭环。
+
+该策略的设计目标是“只在明显拥塞时轻量旁路”，避免对现有流量分配造成激进扰动。
 
 ## 九、与 server.py 集成
 
