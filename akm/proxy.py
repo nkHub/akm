@@ -9,6 +9,44 @@ from akm.db import get_connection
 from akm.agent import get_agent
 
 
+class _ChainedAdapter:
+    """串联两个协议转换器，支持两段式转换（A->B->C）"""
+
+    def __init__(self, first, second):
+        self.first = first
+        self.second = second
+        self._source_format = getattr(first, "_source_format", "")
+
+    def convert_request(self, body: dict) -> dict:
+        return self.second.convert_request(self.first.convert_request(body))
+
+    def convert_response(self, body: str) -> str:
+        return self.first.convert_response(self.second.convert_response(body))
+
+    async def convert_sse_stream(self, upstream_stream):
+        # 先把 bytes 流解码为文本流，供第二段适配器消费
+        async def _bytes_to_text():
+            async for chunk in upstream_stream:
+                if isinstance(chunk, bytes):
+                    yield chunk.decode("utf-8", errors="replace")
+                else:
+                    yield str(chunk)
+
+        # 第二段：上游目标协议 -> 中间协议
+        mid_lines = []
+        async for line in self.second.convert_sse_stream(_bytes_to_text()):
+            mid_lines.append(line)
+
+        mid_text = "".join(mid_lines)
+
+        # 第一段：中间协议 -> 源协议
+        async def _mid_iter():
+            yield mid_text
+
+        async for line in self.first.convert_sse_stream(_mid_iter()):
+            yield line
+
+
 # 最大尝试 key 数量，防止无限循环
 MAX_KEY_TRIES = 20
 # 5xx 最大重试次数（单个 key）
@@ -17,7 +55,7 @@ MAX_RETRIES_PER_KEY = 2
 RETRY_BACKOFF_BASE = 0.5
 
 
-def _diagnose_no_key(model: str) -> str:
+def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     """诊断为什么没有可用的 key，返回详细错误信息"""
     conn = get_connection()
     total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
@@ -47,60 +85,13 @@ def _diagnose_no_key(model: str) -> str:
         if matching_disabled:
             aliases = [r["alias"] for r in matching_disabled]
             parts.append(f"模型匹配但不可用: {', '.join(aliases)}")
+        elif tried_aliases:
+            parts.append(f"模型匹配 key 已尝试但全部失败: {', '.join(sorted(tried_aliases))}")
         elif active == 0:
             parts.append("所有 Key 均被禁用或限流")
         else:
             parts.append("没有 Key 的 models 匹配该模型，也没有 models='*' 的通配 Key")
     return " | ".join(parts)
-
-
-def _sse_to_json(sse_text: str) -> str:
-    """将 SSE 流式响应文本转换为标准 JSON 响应格式"""
-    content = ""
-    reasoning = ""
-    model = ""
-    msg_id = ""
-    usage = None
-    finish_reason = "stop"
-
-    for line in sse_text.split("\n"):
-        line = line.strip()
-        if not line.startswith("data: ") or line.startswith("data: [DONE]"):
-            continue
-        try:
-            chunk = json.loads(line[6:])
-        except json.JSONDecodeError:
-            continue
-        if not model:
-            model = chunk.get("model", "")
-        if not msg_id:
-            msg_id = chunk.get("id", "")
-        if "usage" in chunk and chunk["usage"]:
-            usage = chunk["usage"]
-        if chunk.get("choices"):
-            delta = chunk["choices"][0].get("delta", {})
-            if delta.get("content"):
-                content += delta["content"]
-            if delta.get("reasoning_content"):
-                reasoning += delta["reasoning_content"]
-            if chunk["choices"][0].get("finish_reason"):
-                finish_reason = chunk["choices"][0]["finish_reason"]
-
-    result = {
-        "id": msg_id,
-        "object": "chat.completion",
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": finish_reason,
-        }],
-    }
-    if reasoning:
-        result["choices"][0]["message"]["reasoning_content"] = reasoning
-    if usage:
-        result["usage"] = usage
-    return json.dumps(result, ensure_ascii=False)
 
 
 async def _handle_upstream_error(
@@ -181,12 +172,12 @@ async def forward_request(
                 continue
             # 兜底也无可用 key
             return {
-                "status_code": 503,
+                "status_code": 502 if tried_aliases else 503,
                 "body": "",
                 "key_alias": "",
                 "provider": "",
                 "model": model,
-                "error": _diagnose_no_key(model),
+                "error": _diagnose_no_key(model, tried_aliases),
                 "latency_ms": 0,
             }
 
@@ -216,6 +207,12 @@ async def forward_request(
             from_fmt = api_path.replace("/completions", "")
             to_fmt = target_api_path.replace("/completions", "")
             adapter = plugin_manager.get_converter(from_fmt, to_fmt)
+            # 两段式兜底：responses -> chat -> messages
+            if adapter is None and from_fmt == "responses" and to_fmt == "messages":
+                first = plugin_manager.get_converter("responses", "chat")
+                second = plugin_manager.get_converter("chat", "messages")
+                if first and second:
+                    adapter = _ChainedAdapter(first, second)
             if adapter is None:
                 # 找不到转换器则返回明确报错
                 return {
@@ -233,11 +230,19 @@ async def forward_request(
         # 构建上游 URL：转换后走目标路径
         upstream_api_path = target_api_path or api_path
         url = agent.resolve_url(key, upstream_api_path)
-        headers = agent.build_headers(key)
+        headers = agent.build_headers(key, upstream_api_path)
 
         # ── 内部统一向上游发 stream=true，边收边拼，减少首 token 延迟 ──
         upstream_body = adapter.convert_request(body) if adapter else dict(body)
+
         upstream_body["stream"] = True
+        # 对 OpenAI Chat 流式显式请求 usage，提升 token 统计稳定性
+        if upstream_api_path == "chat/completions":
+            stream_options = upstream_body.get("stream_options")
+            if isinstance(stream_options, dict):
+                stream_options["include_usage"] = True
+            else:
+                upstream_body["stream_options"] = {"include_usage": True}
 
         last_error = ""
         for attempt in range(1 + MAX_RETRIES_PER_KEY):
@@ -309,9 +314,10 @@ async def forward_request(
 
             latency = int((time.time() - t0) * 1000)
             resp_body = b"".join(chunks).decode("utf-8", errors="replace")
-            # chat/completions 将 SSE 流转为 JSON，其他路径透传原始响应
+            # chat/completions 非流式：统一将原始 SSE 交由协议插件聚合并转换，
+            # 未走转换插件时保持透传原始 SSE 文本。
             if upstream_api_path == "chat/completions":
-                json_body = _sse_to_json(resp_body)
+                json_body = resp_body
             else:
                 json_body = resp_body
             # 协议转换：响应体格式转回客户端期望的格式
@@ -320,6 +326,7 @@ async def forward_request(
             return {
                 "status_code": resp.status_code,
                 "body": json_body,
+                "adapter": adapter,
                 "key_alias": key["alias"],
                 "provider": key["provider"],
                 "model": model,
@@ -362,7 +369,7 @@ async def test_key_connectivity(key: dict) -> dict:
     agent = get_agent(key.get("provider", "openai"))
     url = agent.resolve_url(key, "chat/completions")
     model = key.get("models", "*").split(",")[0].strip() or "gpt-3.5-turbo"
-    headers = agent.build_headers(key)
+    headers = agent.build_headers(key, "chat/completions")
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "hi"}],

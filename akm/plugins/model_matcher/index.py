@@ -48,16 +48,34 @@ class Plugin(PluginBase):
         # 重新解析别名（热更新，无需重启）
         self._parse_aliases()
 
-        if not self._aliases:
-            return None
+        changed = False
 
         model = request.get("model", "")
-        if model in self._aliases:
+        if self._aliases and model in self._aliases:
             new_model = self._aliases[model]
             request["model"] = new_model
+            changed = True
             self.logger.info(f"[model_matcher] 模型别名映射: {model} → {new_model}")
 
-        return request
+        # 工具调用策略（可配置）：
+        # 对 GPT/Codex 模型且携带 tools 的请求，在未显式传 tool_choice 时默认强制 required。
+        # 该策略从 protocol_converter 下沉到 matcher 层，减少协议层与模型策略耦合。
+        cfg = self.config or {}
+        force_required = cfg.get("force_tool_choice_required_for_gpt", True)
+        if force_required:
+            req_model = str(request.get("model", ""))
+            tools = request.get("tools")
+            if (
+                isinstance(tools, list)
+                and tools
+                and "tool_choice" not in request
+                and (req_model.startswith("gpt-") or "codex" in req_model)
+            ):
+                request["tool_choice"] = "required"
+                changed = True
+                self.logger.info("[model_matcher] 自动设置 tool_choice=required (gpt/codex + tools)")
+
+        return request if changed else None
 
     async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
         """Key 选择后回调：可在此实现自定义路由策略

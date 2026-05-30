@@ -13,15 +13,16 @@ def setup(monkeypatch):
     conn = get_connection()
     init_db(conn)
     conn.close()
-    # 为 lifespan 未生效的测试环境提供模拟 http_client
+    # 为 lifespan 未生效的测试环境提供模拟 http_client 和 plugin_manager
     app.state.http_client = AsyncMock()
+    app.state.plugin_manager = None
     yield
 
 
 @pytest.mark.asyncio
 async def test_chat_completions_success(monkeypatch):
     """正常请求返回上游响应"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions"):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"hello"}}]}',
@@ -48,7 +49,7 @@ async def test_chat_completions_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_no_keys(monkeypatch):
     """没有可用 key 时返回 503"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions"):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
         return {
             "status_code": 503,
             "body": "",
@@ -104,3 +105,30 @@ async def test_list_models(monkeypatch):
     # disabled key 的模型不出现
     # models='*' 的不出现
     assert len(data["data"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_api_logs_adds_conv_warning_labels(monkeypatch):
+    """/api/logs 返回转换告警派生字段（codes + labels）"""
+    monkeypatch.setattr("akm.server.list_logs", lambda **kwargs: [{
+        "request_headers": '{"x-akm-conv-warnings":"responses_store_not_mapped,responses_include_not_fully_mapped"}',
+        "response_body": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+    }])
+    monkeypatch.setattr("akm.server.count_logs", lambda **kwargs: 1)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 1
+    row = data["data"][0]
+    assert "responses_store_not_mapped" in row["conv_warning_codes"]
+    assert "responses_include_not_fully_mapped" in row["conv_warning_codes"]
+    assert "store 未映射" in row["conv_warning_labels"]
+    assert "include 未完整映射" in row["conv_warning_labels"]
