@@ -732,7 +732,10 @@ async def api_clean_logs(request: Request):
     from datetime import datetime as _dt
     from akm.audit import clean_logs as _clean_logs
     body = await request.json()
-    before = body.get("before", _dt.now().strftime("%Y-%m-%d"))
+    if body.get("all") is True:
+        before = "2999-01-01"
+    else:
+        before = body.get("before", _dt.now().strftime("%Y-%m-%d"))
     try:
         count = _clean_logs(before)
         return {"ok": True, "deleted": count}

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 from httpx import ASGITransport, AsyncClient
 from akm.db import get_connection, init_db
 from akm.server import app
+from akm.audit import write_log, list_logs
 
 
 @pytest.fixture(autouse=True)
@@ -171,3 +172,19 @@ def test_estimate_tokens_light_when_usage_missing():
     assert out["prompt_tokens"] > 0
     assert out["completion_tokens"] == 0
     assert out["total_tokens"] == out["prompt_tokens"]
+
+
+@pytest.mark.asyncio
+async def test_api_clean_logs_all_flag_clears_everything():
+    write_log({"provider": "o", "key_alias": "k1", "model": "m", "request_body": "", "response_body": "", "status_code": 200, "latency_ms": 0, "error": ""})
+    write_log({"provider": "o", "key_alias": "k2", "model": "m", "request_body": "", "response_body": "", "status_code": 200, "latency_ms": 0, "error": ""})
+    assert len(list_logs(limit=10)) == 2
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/logs/clean", json={"all": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert resp.json()["deleted"] == 2
+    assert len(list_logs(limit=10)) == 0
