@@ -4,8 +4,12 @@ import os
 import asyncio
 import webbrowser
 import threading
+import time
+
 import click
+import httpx
 from akm import __version__
+from akm.agent import get_agent
 from akm.db import get_connection, init_db
 from akm.key_pool import (
     add_key, list_keys, remove_key, set_priority, set_base_url, set_api_key, set_status, get_key,
@@ -19,6 +23,43 @@ def _ensure_db():
     conn = get_connection()
     init_db(conn)
     conn.close()
+
+
+async def _test_health_endpoint(key: dict) -> dict:
+    """测试上游网关的 health 端点，并复用该 key 的认证头配置。"""
+    agent = get_agent(key.get("provider", "openai"))
+    base_url = key.get("base_url") or agent.default_base_url
+    url = f"{base_url.rstrip('/')}/health"
+    headers = agent.build_headers(key, "health")
+    started_at = time.time()
+    result = {
+        "ok": False,
+        "url": url,
+        "status_code": 0,
+        "latency_ms": 0,
+        "error": "",
+        "response_body": "",
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=15)
+        result["status_code"] = resp.status_code
+        result["latency_ms"] = int((time.time() - started_at) * 1000)
+        result["response_body"] = resp.text[:500]
+        if 200 <= resp.status_code < 300:
+            result["ok"] = True
+            return result
+        result["error"] = f"HTTP {resp.status_code}"
+        return result
+    except httpx.TimeoutException:
+        result["error"] = "请求超时"
+        return result
+    except httpx.ConnectError as e:
+        result["error"] = f"连接失败: {e}"
+        return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
 
 
 @click.group()
@@ -158,16 +199,26 @@ def key_enable(alias):
 
 @key.command("test")
 @click.argument("alias")
-def key_test(alias):
+@click.option("--health", is_flag=True, help="改为请求 {base_url}/health，仅测试网关可达性")
+@click.option("--fallback", is_flag=True, help="测试失败时允许按兼容接口继续尝试，默认关闭")
+def key_test(alias, health, fallback):
     """测试 key 连通性"""
     k = get_key(alias)
     if k is None:
         click.echo(f"Key '{alias}' 不存在", err=True)
         return
     click.echo(f"测试 [{alias}] {k['provider']} → {k['base_url']} ...")
-    result = asyncio.run(test_key_connectivity(k))
-    click.echo(f"  请求 URL : {result['url']}")
-    click.echo(f"  请求模型 : {result['model']}")
+    if health:
+        result = asyncio.run(_test_health_endpoint(k))
+        click.echo(f"  请求 URL : {result['url']}")
+        click.echo("  测试模式 : health")
+    else:
+        result = asyncio.run(test_key_connectivity(k, allow_fallback=fallback))
+        click.echo(f"  请求 URL : {result['url']}")
+        click.echo(f"  测试接口 : {result['api_path']}")
+        click.echo(f"  请求模型 : {result['model']}")
+        if result.get("fallback_used"):
+            click.echo(f"  回退链路 : {' -> '.join(result.get('attempted_paths', []))}")
     if result["ok"]:
         click.echo(f"  结果     : ✅ 连接成功 ({result['latency_ms']}ms)")
     else:

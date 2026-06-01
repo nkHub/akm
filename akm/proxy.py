@@ -492,55 +492,119 @@ async def forward_request(
     }
 
 
-async def test_key_connectivity(key: dict) -> dict:
-    """测试单个 key 的连通性，发送一条最小请求
+async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict:
+    """测试单个 key 的连通性，按供应商能力选择主接口。
 
-    返回: {"ok": bool, "url": str, "model": str, "status_code": int,
-           "latency_ms": int, "error": str, "response_body": str}
+    allow_fallback 为 true 时，允许按兼容协议继续尝试；默认关闭。
+
+    返回: {"ok": bool, "url": str, "model": str, "api_path": str,
+           "status_code": int, "latency_ms": int, "error": str,
+           "response_body": str, "attempted_paths": list[str],
+           "fallback_used": bool}
     """
     agent = get_agent(key.get("provider", "openai"))
-    url = agent.resolve_url(key, "chat/completions")
     model = key.get("models", "*").split(",")[0].strip() or "gpt-3.5-turbo"
-    headers = agent.build_headers(key, "chat/completions")
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
-    }
 
-    def _result(**kw):
-        base = {"ok": False, "url": url, "model": model,
-                "status_code": 0, "latency_ms": 0, "error": "", "response_body": ""}
+    if agent.supports_responses:
+        candidate_paths = ["responses"]
+        if allow_fallback:
+            if agent.supports_chat:
+                candidate_paths.append("chat/completions")
+            if agent.supports_messages:
+                candidate_paths.append("messages")
+    elif agent.supports_chat:
+        candidate_paths = ["chat/completions"]
+        if allow_fallback and agent.supports_messages:
+            candidate_paths.append("messages")
+    elif agent.supports_messages:
+        candidate_paths = ["messages"]
+    else:
+        candidate_paths = ["chat/completions"]
+
+    attempted_paths: list[str] = []
+
+    def _make_body(api_path: str) -> dict:
+        if api_path == "responses":
+            return {
+                "model": model,
+                "input": "hi",
+                "max_output_tokens": 1,
+            }
+        if api_path == "messages":
+            return {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            }
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        }
+
+    def _result(url: str, api_path: str, **kw):
+        base = {
+            "ok": False,
+            "url": url,
+            "model": model,
+            "api_path": api_path,
+            "status_code": 0,
+            "latency_ms": 0,
+            "error": "",
+            "response_body": "",
+            "attempted_paths": list(attempted_paths),
+            "fallback_used": len(attempted_paths) > 1,
+        }
         base.update(kw)
         return base
 
-    t0 = time.time()
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=body, headers=headers, timeout=30)
-            latency = int((time.time() - t0) * 1000)
-            resp_text = resp.text[:500]
-            if resp.status_code == 200:
-                return _result(ok=True, status_code=200, latency_ms=latency)
-            if resp.status_code == 429:
-                return _result(status_code=429, latency_ms=latency, error="429 限流")
-            if resp.status_code in (401, 403):
-                return _result(status_code=resp.status_code, latency_ms=latency,
-                               error="认证失败，key 无效", response_body=resp_text)
-            if resp.status_code == 402:
-                return _result(status_code=402, latency_ms=latency,
-                               error="余额不足", response_body=resp_text)
-            # 解析响应体中的错误信息
+    async with httpx.AsyncClient() as client:
+        last_result = None
+        for api_path in candidate_paths:
+            attempted_paths.append(api_path)
+            url = agent.resolve_url(key, api_path)
+            headers = agent.build_headers(key, api_path)
+            body = _make_body(api_path)
+            t0 = time.time()
             try:
-                detail = resp.json()
-                err_msg = str(detail.get("error", {}).get("message", f"HTTP {resp.status_code}"))
-            except Exception:
-                err_msg = f"HTTP {resp.status_code}"
-            return _result(status_code=resp.status_code, latency_ms=latency,
-                           error=err_msg, response_body=resp_text)
-    except httpx.TimeoutException:
-        return _result(error="请求超时")
-    except httpx.ConnectError as e:
-        return _result(error=f"连接失败: {e}")
-    except Exception as e:
-        return _result(error=str(e))
+                resp = await client.post(url, json=body, headers=headers, timeout=30)
+                latency = int((time.time() - t0) * 1000)
+                resp_text = resp.text[:500]
+                if resp.status_code == 200:
+                    return _result(url, api_path, ok=True, status_code=200, latency_ms=latency)
+                if resp.status_code == 429:
+                    return _result(url, api_path, status_code=429, latency_ms=latency, error="429 限流")
+                if resp.status_code in (401, 403):
+                    try:
+                        detail = resp.json()
+                        err_msg = str(detail.get("error", {}).get("message", "认证失败，key 无效"))
+                        err_code = str(detail.get("error", {}).get("code", "") or "")
+                    except Exception:
+                        err_msg = "认证失败，key 无效"
+                        err_code = ""
+                    last_result = _result(url, api_path, status_code=resp.status_code, latency_ms=latency, error=err_msg, response_body=resp_text)
+                    if allow_fallback and api_path == "responses" and resp.status_code == 403 and err_code == "codex_access_restricted":
+                        continue
+                    return last_result
+                if resp.status_code == 402:
+                    return _result(url, api_path, status_code=402, latency_ms=latency, error="余额不足", response_body=resp_text)
+                try:
+                    detail = resp.json()
+                    err_msg = str(detail.get("error", {}).get("message", f"HTTP {resp.status_code}"))
+                except Exception:
+                    err_msg = f"HTTP {resp.status_code}"
+                last_result = _result(url, api_path, status_code=resp.status_code, latency_ms=latency, error=err_msg, response_body=resp_text)
+                if allow_fallback and resp.status_code == 404 and api_path != candidate_paths[-1]:
+                    continue
+                return last_result
+            except httpx.TimeoutException:
+                last_result = _result(url, api_path, error="请求超时")
+                return last_result
+            except httpx.ConnectError as e:
+                last_result = _result(url, api_path, error=f"连接失败: {e}")
+                return last_result
+            except Exception as e:
+                last_result = _result(url, api_path, error=str(e))
+                return last_result
+
+        return last_result or _result(agent.resolve_url(key, candidate_paths[0]), candidate_paths[0], error="测试失败")

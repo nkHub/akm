@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 import httpx
-from akm.proxy import forward_request
+from akm.proxy import forward_request, test_key_connectivity
 from akm.agent import AGENT_REGISTRY
 
 
@@ -22,6 +22,18 @@ class FakeStreamResponse:
 
     async def aread(self):
         return self._body
+
+
+class FakeTestResponse:
+    """模拟 test_key_connectivity 使用的 httpx 响应对象。"""
+
+    def __init__(self, status_code, body_text=""):
+        self.status_code = status_code
+        self.text = body_text
+
+    def json(self):
+        import json
+        return json.loads(self.text)
 
 
 def _make_send_mock(client_mock, responses):
@@ -287,3 +299,137 @@ async def test_forward_emits_on_response_meta_for_failure_and_success(monkeypatc
     assert last["phase"] == "upstream"
     assert last["status_code"] == 200
     assert last["key_alias"] == "k2"
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_openai_uses_responses_only(monkeypatch):
+    """默认情况下 openai 类 key 测试时只请求 responses，不自动回退。"""
+
+    called_urls = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called_urls.append(url)
+            return FakeTestResponse(403, '{"error":{"message":"restricted","code":"codex_access_restricted"}}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await test_key_connectivity({
+        "alias": "share",
+        "provider": "openai",
+        "api_key": "sk-test",
+        "base_url": "https://example.com",
+        "models": "gpt-5.4",
+    })
+
+    assert result["ok"] is False
+    assert result["api_path"] == "responses"
+    assert result["attempted_paths"] == ["responses"]
+    assert called_urls == ["https://example.com/v1/responses"]
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch):
+    """显式开启 fallback 后，openai 类 key 可从 responses 回退到 chat/completions。"""
+
+    responses = [
+        FakeTestResponse(403, '{"error":{"message":"restricted","code":"codex_access_restricted"}}'),
+        FakeTestResponse(200, '{"id":"ok"}'),
+    ]
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            return responses.pop(0)
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await test_key_connectivity({
+        "alias": "share",
+        "provider": "openai",
+        "api_key": "sk-test",
+        "base_url": "https://example.com",
+        "models": "gpt-5.4",
+    }, allow_fallback=True)
+
+    assert result["ok"] is True
+    assert result["api_path"] == "chat/completions"
+    assert result["attempted_paths"] == ["responses", "chat/completions"]
+    assert result["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_deepseek_prefers_chat(monkeypatch):
+    """deepseek 不支持 responses，测试时应直接选择 chat/completions。"""
+
+    called_urls = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called_urls.append(url)
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await test_key_connectivity({
+        "alias": "gs",
+        "provider": "deepseek",
+        "api_key": "sk-test",
+        "base_url": "https://api.deepseek.com/v1",
+        "models": "deepseek-v4-pro",
+    })
+
+    assert result["ok"] is True
+    assert result["api_path"] == "chat/completions"
+    assert result["attempted_paths"] == ["chat/completions"]
+    assert called_urls == ["https://api.deepseek.com/v1/chat/completions"]
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_anthropic_uses_messages(monkeypatch):
+    """anthropic 仅支持 messages，测试时应直接走 messages。"""
+
+    called = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called.append((url, headers, json))
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await test_key_connectivity({
+        "alias": "claude",
+        "provider": "anthropic",
+        "api_key": "sk-test",
+        "base_url": "https://api.anthropic.com",
+        "models": "claude-3-7-sonnet",
+    })
+
+    assert result["ok"] is True
+    assert result["api_path"] == "messages"
+    assert result["attempted_paths"] == ["messages"]
+    assert called[0][0] == "https://api.anthropic.com/v1/messages"
