@@ -6,6 +6,7 @@
 </div>
 <div id="key-list-container"></div>
 <div id="key-empty" class="hidden text-center py-16 text-gray-500">暂无 Key</div>
+<div id="key-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></div>
 {% endblock %}
 
 {% block extra_html %}
@@ -31,18 +32,73 @@
     </form>
   </div>
 </div>
+
+<div id="test-result-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 fade-in">
+  <div class="absolute inset-0 bg-black/60" onclick="closeTestResultModal()"></div>
+  <div class="relative bg-surface-light border border-border rounded-lg w-full max-w-2xl shadow-2xl" style="animation: slideUp 0.2s ease">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div class="min-w-0">
+        <h3 class="text-sm font-semibold text-white">Key 测试结果</h3>
+        <p id="test-result-subtitle" class="text-xs text-gray-500 mt-1"></p>
+      </div>
+      <button onclick="closeTestResultModal()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
+      <div id="test-result-banner" class="rounded-lg border px-3 py-2 text-sm"></div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+        <div class="bg-surface border border-border rounded-lg p-3">
+          <div class="text-xs text-gray-500 mb-1">测试接口</div>
+          <div id="test-result-api-path" class="text-gray-200 break-all">-</div>
+        </div>
+        <div class="bg-surface border border-border rounded-lg p-3">
+          <div class="text-xs text-gray-500 mb-1">请求模型</div>
+          <div id="test-result-model" class="text-gray-200 break-all">-</div>
+        </div>
+        <div class="bg-surface border border-border rounded-lg p-3 md:col-span-2">
+          <div class="text-xs text-gray-500 mb-1">请求 URL</div>
+          <div id="test-result-url" class="text-gray-200 break-all">-</div>
+        </div>
+        <div class="bg-surface border border-border rounded-lg p-3">
+          <div class="text-xs text-gray-500 mb-1">状态码</div>
+          <div id="test-result-status" class="text-gray-200">-</div>
+        </div>
+        <div class="bg-surface border border-border rounded-lg p-3">
+          <div class="text-xs text-gray-500 mb-1">耗时</div>
+          <div id="test-result-latency" class="text-gray-200">-</div>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 mb-1">错误信息</div>
+        <div id="test-result-error" class="bg-surface border border-border rounded-lg p-3 text-sm text-gray-200 whitespace-pre-wrap break-words min-h-[52px]">-</div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 mb-1">响应体</div>
+        <pre id="test-result-response" class="bg-surface border border-border rounded-lg p-3 text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-words min-h-[96px]">-</pre>
+      </div>
+      <div class="flex justify-end pt-1">
+        <button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
 var _keysData = [];
 var _agentsMap = {};
+var _keyPageSize = 12;
+var _keyCurrentPage = 1;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function loadKeys() {
   fetch('/api/keys').then(function(r){ return r.json(); }).then(function(json){
     _keysData = json.data || [];
+    var totalPages = Math.max(1, Math.ceil(_keysData.length / _keyPageSize));
+    if (_keyCurrentPage > totalPages) _keyCurrentPage = totalPages;
     renderKeys();
   }).catch(function(e){ console.error('Keys:', e); });
 }
@@ -74,11 +130,14 @@ function loadProviders() {
 function renderKeys() {
   var container = document.getElementById('key-list-container');
   var empty = document.getElementById('key-empty');
-  if (!_keysData.length) { container.innerHTML=''; empty.classList.remove('hidden'); return; }
+  var pagination = document.getElementById('key-pagination');
+  if (!_keysData.length) { container.innerHTML=''; empty.classList.remove('hidden'); pagination.classList.add('hidden'); return; }
   empty.classList.add('hidden');
 
-  var html = '';
-  _keysData.forEach(function(k){
+  var html = '<div class="grid grid-cols-1 xl:grid-cols-2 gap-3">';
+  var start = (_keyCurrentPage - 1) * _keyPageSize;
+  var end = start + _keyPageSize;
+  _keysData.slice(start, end).forEach(function(k){
     var sc = 'status-'+k.status;
     var sl = { active:'启用', disabled:'禁用', rate_limited:'限流' }[k.status]||k.status;
 
@@ -92,7 +151,7 @@ function renderKeys() {
       });
     }
 
-    html += '<div class="border border-border rounded-lg mb-3 bg-surface-light/50 overflow-hidden">'+
+    html += '<div class="border border-border rounded-lg bg-surface-light/50 overflow-hidden min-w-0">'+
       '<div class="flex items-center justify-between px-4 py-3 flex-wrap gap-2">'+
       '<div class="flex items-center gap-3 min-w-0">'+
       '<span class="text-indigo-300 font-medium text-sm truncate">'+esc(k.alias)+'</span>'+
@@ -108,7 +167,37 @@ function renderKeys() {
       modelTags+
       '</div></div>';
   });
+  html += '</div>';
   container.innerHTML = html;
+  renderKeyPagination();
+}
+
+function goToKeyPage(page) {
+  var totalPages = Math.max(1, Math.ceil(_keysData.length / _keyPageSize));
+  if (page < 1) page = 1;
+  if (page > totalPages) page = totalPages;
+  _keyCurrentPage = page;
+  renderKeys();
+}
+
+function renderKeyPagination() {
+  var pg = document.getElementById('key-pagination');
+  var totalPages = Math.ceil(_keysData.length / _keyPageSize);
+  if (totalPages <= 1) { pg.classList.add('hidden'); return; }
+  pg.classList.remove('hidden');
+
+  var html = '';
+  html += '<button onclick="goToKeyPage(1)" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===1?'disabled':'') + '>首页</button>';
+  html += '<button onclick="goToKeyPage(' + (_keyCurrentPage-1) + ')" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===1?'disabled':'') + '>上一页</button>';
+  html += '<select onchange="goToKeyPage(parseInt(this.value))" class="bg-surface-light border border-border rounded px-2 py-1 text-xs text-gray-300 cursor-pointer focus:outline-none focus:border-indigo-500">';
+  for (var p = 1; p <= totalPages; p++) {
+    html += '<option value="' + p + '"' + (p === _keyCurrentPage ? ' selected' : '') + '>第 ' + p + ' 页</option>';
+  }
+  html += '</select>';
+  html += '<button onclick="goToKeyPage(' + (_keyCurrentPage+1) + ')" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===totalPages?'disabled':'') + '>下一页</button>';
+  html += '<button onclick="goToKeyPage(' + totalPages + ')" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===totalPages?'disabled':'') + '>末页</button>';
+  html += '<span class="text-xs text-gray-500 ml-2">共 ' + _keysData.length + ' 条 / ' + totalPages + ' 页</span>';
+  pg.innerHTML = html;
 }
 
 function openAddModal() {
@@ -129,6 +218,33 @@ function openAddModal() {
 }
 
 function closeModal() { document.getElementById('key-modal').classList.add('hidden'); }
+
+function closeTestResultModal() {
+  document.getElementById('test-result-modal').classList.add('hidden');
+}
+
+function showTestResultModal(alias, data) {
+  var ok = !!data.ok;
+  document.getElementById('test-result-subtitle').textContent = alias ? ('别名: ' + alias) : '';
+  document.getElementById('test-result-api-path').textContent = data.api_path || '-';
+  document.getElementById('test-result-model').textContent = data.model || '-';
+  document.getElementById('test-result-url').textContent = data.url || '-';
+  document.getElementById('test-result-status').textContent = data.status_code || '-';
+  document.getElementById('test-result-latency').textContent = data.latency_ms ? (data.latency_ms + 'ms') : '-';
+  document.getElementById('test-result-error').textContent = data.error || (ok ? '无' : '-');
+  document.getElementById('test-result-response').textContent = data.response_body || '-';
+
+  var banner = document.getElementById('test-result-banner');
+  if (ok) {
+    banner.className = 'rounded-lg border px-3 py-2 text-sm border-green-500/30 bg-green-500/10 text-green-300';
+    banner.textContent = '连接成功，当前 key 的主测试接口可正常访问。';
+  } else {
+    banner.className = 'rounded-lg border px-3 py-2 text-sm border-red-500/30 bg-red-500/10 text-red-300';
+    banner.textContent = '连接失败，请根据状态码、错误信息和响应体继续排查。';
+  }
+
+  document.getElementById('test-result-modal').classList.remove('hidden');
+}
 
 function editKey(alias) {
   fetch('/api/keys').then(function(r){ return r.json(); }).then(function(json){
@@ -190,11 +306,19 @@ function testConnect(alias) {
   fetch('/api/keys/'+encodeURIComponent(alias)+'/test', { method:'POST' })
     .then(function(r){ return r.json(); })
     .then(function(d){
-      var msg = '测试 '+alias+':\\n';
-      msg += 'URL: '+(d.url||'-')+'\\n模型: '+(d.model||'-')+'\\n';
-      msg += d.ok ? '成功 ('+(d.latency_ms||0)+'ms)' : '失败\\n状态码: '+(d.status_code||'-')+'\\n错误: '+(d.error||'-');
-      alert(msg);
-    }).catch(function(e){ alert('请求失败: '+e.message); });
+      showTestResultModal(alias, d || {});
+    }).catch(function(e){
+      showTestResultModal(alias, {
+        ok: false,
+        api_path: '',
+        model: '',
+        url: '',
+        status_code: '',
+        latency_ms: 0,
+        error: '请求失败: ' + e.message,
+        response_body: ''
+      });
+    });
 }
 
 function exportKeys() {
