@@ -1,8 +1,20 @@
 """py2app 打包脚本 — 生成 macOS .app 应用"""
 
 import os
+import re
+from pathlib import Path
 from setuptools import setup
-from akm import __version__
+
+
+def _read_version() -> str:
+    content = Path("akm/__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', content)
+    if not match:
+        raise RuntimeError("无法读取版本号")
+    return match.group(1)
+
+
+__version__ = _read_version()
 
 APP = ["akm/menubar.py"]
 DATA_FILES = [
