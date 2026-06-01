@@ -295,13 +295,10 @@ function savePort() {
 
 function cleanLogs() {
   if (!confirm('确认删除所有审计日志？此操作不可撤销。')) return;
-  var tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  var before = tomorrow.toISOString().slice(0, 10);
   fetch('/api/logs/clean', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({before: before})
+    body: JSON.stringify({all: true})
   }).then(function(r){ return r.json(); }).then(function(data){
     var msg = document.getElementById('clean-msg');
     msg.textContent = '已清理 ' + (data.deleted || 0) + ' 条日志';
