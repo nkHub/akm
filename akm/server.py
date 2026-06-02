@@ -199,8 +199,49 @@ def _mask_key(api_key: str) -> str:
 async def api_list_keys():
     """列出所有 key（api_key 脱敏）"""
     keys = list_keys()
+    from akm.db import get_connection
+    conn = get_connection()
+    latency_rows = conn.execute(
+        """
+        SELECT
+            k.alias AS alias,
+            (
+                SELECT AVG(x.latency_ms)
+                FROM (
+                    SELECT latency_ms
+                    FROM audit_logs
+                    WHERE key_alias = k.alias AND status_code = 200 AND latency_ms > 0
+                    ORDER BY id DESC
+                    LIMIT 10
+                ) AS x
+            ) AS recent_avg_latency_ms,
+            (
+                SELECT COUNT(1)
+                FROM (
+                    SELECT 1
+                    FROM audit_logs
+                    WHERE key_alias = k.alias AND status_code = 200 AND latency_ms > 0
+                    ORDER BY id DESC
+                    LIMIT 10
+                ) AS y
+            ) AS recent_latency_sample_count
+        FROM keys AS k
+        """
+    ).fetchall()
+    conn.close()
+    latency_map = {
+        row["alias"]: {
+            "recent_avg_latency_ms": round(float(row["recent_avg_latency_ms"]), 1)
+            if row["recent_avg_latency_ms"] is not None else None,
+            "recent_latency_sample_count": int(row["recent_latency_sample_count"] or 0),
+        }
+        for row in latency_rows
+    }
     for k in keys:
         k["api_key"] = _mask_key(k["api_key"])
+        latency = latency_map.get(k["alias"], {})
+        k["recent_avg_latency_ms"] = latency.get("recent_avg_latency_ms")
+        k["recent_latency_sample_count"] = latency.get("recent_latency_sample_count", 0)
     return {"data": keys}
 
 
