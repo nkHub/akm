@@ -28,6 +28,7 @@ class Agent:
     supports_responses: bool = False
     supports_chat: bool = True
     supports_messages: bool = False
+    messages_use_anthropic_path: bool = False
 
     def resolve_url(self, key: dict, api_path: str) -> str:
         """根据 Key 配置解析最终上游 URL
@@ -37,14 +38,16 @@ class Agent:
         raw = key.get("base_url") or ""
         base = raw.rstrip("/") if raw else self.default_base_url.rstrip("/")
 
-        # DeepSeek 官方 Claude Code 兼容入口：/anthropic/v1/messages
-        if self.name == "deepseek" and api_path == "messages":
-            # 先剥离尾部 /v1，避免出现 /v1/anthropic/v1/messages 的错误拼接
+        # 某些供应商的 Messages 入口挂在 /anthropic/v1/messages 下。
+        # 这里通过显式开关控制，避免把 /anthropic 规则错误应用到所有
+        # supports_messages 的供应商。
+        if self.messages_use_anthropic_path and api_path == "messages":
+            # 先剥离尾部 /v1，避免出现 /v1/anthropic/v1/messages 的错误拼接。
             base_norm = base[:-3] if base.endswith("/v1") else base
-            # 若用户未显式配置 /anthropic，则自动补齐
+            # 若用户未显式配置 /anthropic，则自动补齐。
             if "/anthropic" not in base_norm:
                 base_norm = f"{base_norm}/anthropic"
-            # DeepSeek Anthropic 兼容入口：/anthropic/v1/messages
+            # 最终落到 /anthropic/v1/messages。
             return f"{base_norm}/v1/{api_path}"
 
         if base.endswith("/v1"):
@@ -56,8 +59,8 @@ class Agent:
 
         auth_header 模板中的 {api_key} 会被替换为解密后的 Key
         """
-        # DeepSeek Messages 走 Anthropic 协议头
-        if self.name == "deepseek" and api_path == "messages":
+        # 走 /anthropic/v1/messages 的供应商需要使用 Anthropic 风格请求头。
+        if self.messages_use_anthropic_path and api_path == "messages":
             return {
                 "x-api-key": key["api_key"],
                 "anthropic-version": "2023-06-01",
@@ -102,6 +105,7 @@ BUILTIN_AGENTS: dict[str, Agent] = {
         supports_responses=False,
         supports_chat=True,
         supports_messages=True,
+        messages_use_anthropic_path=True,
     ),
     "anthropic": Agent(
         name="anthropic",
@@ -139,6 +143,7 @@ def register_agent(
     supports_responses: bool = False,
     supports_chat: bool = True,
     supports_messages: bool = False,
+    messages_use_anthropic_path: bool = False,
 ) -> None:
     """注册自定义 Agent，持久化到 config.json"""
     global _CUSTOM_AGENTS_DIRTY
@@ -151,6 +156,7 @@ def register_agent(
         supports_responses=supports_responses,
         supports_chat=supports_chat,
         supports_messages=supports_messages,
+        messages_use_anthropic_path=messages_use_anthropic_path,
     )
     _CUSTOM_AGENTS_DIRTY = True
     _save_custom_agents()
@@ -177,6 +183,7 @@ def _agent_to_dict(agent: Agent) -> dict:
         "supports_responses": agent.supports_responses,
         "supports_chat": agent.supports_chat,
         "supports_messages": agent.supports_messages,
+        "messages_use_anthropic_path": agent.messages_use_anthropic_path,
     }
 
 
@@ -189,6 +196,7 @@ def _agent_from_dict(name: str, data: dict) -> Agent:
         supports_responses=data.get("supports_responses", False),
         supports_chat=data.get("supports_chat", True),
         supports_messages=data.get("supports_messages", False),
+        messages_use_anthropic_path=data.get("messages_use_anthropic_path", False),
     )
 
 

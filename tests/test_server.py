@@ -188,3 +188,16 @@ async def test_api_clean_logs_all_flag_clears_everything():
     assert resp.json()["ok"] is True
     assert resp.json()["deleted"] == 2
     assert len(list_logs(limit=10)) == 0
+
+
+@pytest.mark.asyncio
+async def test_api_list_agents_returns_messages_anthropic_switch():
+    """/api/agents 返回 messages 的 /anthropic 开关状态。"""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/agents")
+
+    assert resp.status_code == 200
+    agents = {item["name"]: item for item in resp.json()["data"]}
+    assert agents["deepseek"]["messages_use_anthropic_path"] is True
+    assert agents["openai"]["messages_use_anthropic_path"] is False

@@ -132,6 +132,13 @@
               <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-messages"> Messages</label>
             </div>
           </div>
+          <div>
+            <label class="text-xs text-gray-400">Messages 路径开关</label>
+            <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer mt-1.5">
+              <input type="checkbox" id="agent-messages-anthropic-path">
+              <span>将 `/v1/messages` 自动转到 `/anthropic/v1/messages`</span>
+            </label>
+          </div>
         </div>
         <div class="flex gap-2">
           <button onclick="addAgent()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded cursor-pointer">保存</button>
@@ -342,6 +349,7 @@ function toggleAgentForm() {
     document.getElementById('agent-chat').checked = true;
     document.getElementById('agent-responses').checked = false;
     document.getElementById('agent-messages').checked = false;
+    document.getElementById('agent-messages-anthropic-path').checked = false;
     document.getElementById('agent-msg').classList.add('hidden');
   }
 }
@@ -360,7 +368,8 @@ function addAgent() {
       name: name, default_base_url: url, default_auth_header: auth,
       supports_responses: document.getElementById('agent-responses').checked,
       supports_chat: document.getElementById('agent-chat').checked,
-      supports_messages: document.getElementById('agent-messages').checked
+      supports_messages: document.getElementById('agent-messages').checked,
+      messages_use_anthropic_path: document.getElementById('agent-messages-anthropic-path').checked
     })
   }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, body: d}; }); })
   .then(function(r){
@@ -392,7 +401,7 @@ function loadAgents() {
     if (agents.length === 0) {
       html = '<div class="text-gray-600">暂无可用的供应商代理</div>';
     } else {
-      html = '<table class="w-full text-xs"><thead><tr class="text-gray-500"><th class="text-left py-1.5 font-medium">名称</th><th class="text-left py-1.5 font-medium">Base URL</th><th class="text-left py-1.5 font-medium">认证头</th><th class="text-center py-1.5 font-medium w-16">Chat</th><th class="text-center py-1.5 font-medium w-16">Responses</th><th class="text-center py-1.5 font-medium w-16">Messages</th><th class="text-center py-1.5 font-medium w-12"></th></tr></thead><tbody>';
+      html = '<table class="w-full text-xs"><thead><tr class="text-gray-500"><th class="text-left py-1.5 font-medium">名称</th><th class="text-left py-1.5 font-medium">Base URL</th><th class="text-left py-1.5 font-medium">认证头</th><th class="text-center py-1.5 font-medium w-16">Chat</th><th class="text-center py-1.5 font-medium w-16">Responses</th><th class="text-center py-1.5 font-medium w-16">Messages</th><th class="text-center py-1.5 font-medium">/anthropic</th><th class="text-center py-1.5 font-medium w-12"></th></tr></thead><tbody>';
       agents.forEach(function(a){
         html += '<tr class="border-t border-border">';
         html += '<td class="py-1.5 text-gray-300">' + esc(a.name) + (a.is_custom ? '' : ' <span class="text-gray-600">(内置)</span>') + '</td>';
@@ -401,6 +410,7 @@ function loadAgents() {
         html += '<td class="py-1.5 text-center">' + (a.supports_chat ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.supports_responses ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.supports_messages ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
+        html += '<td class="py-1.5 text-center">' + (a.messages_use_anthropic_path ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.is_custom ? '<button onclick="deleteAgent(\'' + esc(a.name) + '\')" class="text-red-400 hover:text-red-300 cursor-pointer text-xs">删除</button>' : '') + '</td>';
         html += '</tr>';
       });

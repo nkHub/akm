@@ -827,6 +827,7 @@ async def api_add_agent(request: Request):
             supports_responses=body.get("supports_responses", False),
             supports_chat=body.get("supports_chat", True),
             supports_messages=body.get("supports_messages", False),
+            messages_use_anthropic_path=body.get("messages_use_anthropic_path", False),
         )
         return {"ok": True, "name": name}
     except ValueError as e:
