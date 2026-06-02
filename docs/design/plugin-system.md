@@ -95,7 +95,7 @@ akm/
 | 内置 | `akm/plugins/` | 随项目分发，`plugin.json` 中 `builtin: true`，可禁用但建议保留 |
 | 第三方 | `~/.akm/plugins/` | 用户自行安装，可安装/启用/禁用/删除 |
 
-其中 `data_filter_guard` 是一个“内置但默认关闭”的数据安全插件：通过 `plugin.json` 中的 `default_enabled: false` 控制首次加载状态，避免在未配置规则时直接干预所有请求/响应。
+其中 `data_filter_guard` 是一个“内置但默认关闭”的数据安全插件：通过 `plugin.json` 中的 `default_enabled: false` 控制首次加载状态，避免在未配置规则时直接干预所有请求/响应。它的请求侧当前保留手动敏感字段脱敏、关键词替换、正则替换，以及可选的轻量代码敏感识别，并内置一组保守默认值：默认敏感字段覆盖常见凭据/令牌名称，默认正则替换覆盖手机号、邮箱、身份证、银行卡、常见 API Key 与 JWT，默认代码敏感规则覆盖 OpenAI / Anthropic / GitHub / GitLab / GitHub OAuth / AWS / AWS Secret Assignment / Google / SendGrid / Mailgun / Heroku / Slack / Slack Webhook / JWT / Bearer Token / 私钥 / 连接串 / URL 内密码等高确定性开发凭据，且已拆分为 `llm_keys`、`vcs_tokens`、`cloud_keys`、`chatops_tokens`、`auth_tokens`、`private_keys`、`db_urls`、`credential_assignments` 分组便于按场景启用。插件页同时内置“开发基线 / 前端基线 / 后端基线 / 严格阻断 / 环境变量泄露”代码敏感模板：前端基线仅保留更贴近前端泄漏面的凭据组，后端基线则额外包含私钥、连接串与凭据赋值类规则。默认响应风险规则覆盖常见命令执行与脚本投递片段。流式响应扫描与普通响应扫描已拆分为独立开关，前者默认关闭，避免用户仅启用请求脱敏时影响 SSE 首包时延。开启流式响应扫描后，`warn` / `block` 动作基于滑动缓存做增量检测，不再等待整段 SSE 收齐；只有 `mask` 因为需要改写已输出内容，才继续使用整段缓冲模式。
 
 ## 五、plugin.json 定义
 

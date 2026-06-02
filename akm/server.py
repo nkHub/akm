@@ -1086,18 +1086,67 @@ async def _handle_ai_request(request: Request, api_path: str):
             security_changed = False
             try:
                 if security_plugin:
-                    buffered_parts = []
-                    if adapter:
-                        async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                            buffered_parts.append(line if isinstance(line, str) else line.decode("utf-8", errors="replace"))
+                    if security_plugin.stream_guard_requires_buffering():
+                        buffered_parts = []
+                        if adapter:
+                            async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                                buffered_parts.append(line if isinstance(line, str) else line.decode("utf-8", errors="replace"))
+                        else:
+                            async for chunk in resp.aiter_bytes():
+                                buffered_parts.append(chunk.decode("utf-8", errors="replace"))
+                        body_str = "".join(buffered_parts)
+                        body_str, security_changed, security_reason, security_action = security_plugin.protect_stream_payload(api_path, body_str)
+                        out_chunk = body_str.encode("utf-8")
+                        chunks.append(out_chunk)
+                        yield out_chunk
                     else:
-                        async for chunk in resp.aiter_bytes():
-                            buffered_parts.append(chunk.decode("utf-8", errors="replace"))
-                    body_str = "".join(buffered_parts)
-                    body_str, security_changed, security_reason, security_action = security_plugin.protect_stream_payload(api_path, body_str)
-                    out_chunk = body_str.encode("utf-8")
-                    chunks.append(out_chunk)
-                    yield out_chunk
+                        # 增量扫描模式：每拿到一个 chunk 就立刻下发，同时仅维护一小段尾部缓存。
+                        # 这样 `warn` / `block` 可以持续观察已返回内容，而不会把整个 SSE 攒满后再返回。
+                        stream_guard_state = security_plugin.create_stream_guard_state()
+                        blocked = False
+                        if adapter:
+                            async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                                chunk = line.encode("utf-8") if isinstance(line, str) else line
+                                chunk_text = chunk.decode("utf-8", errors="replace")
+                                stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
+                                    api_path, chunk_text, stream_guard_state
+                                )
+                                if should_rewrite and hit_action == "blocked":
+                                    security_changed = True
+                                    security_reason = hit_reason
+                                    security_action = "blocked"
+                                    safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
+                                    chunks.append(safe_chunk)
+                                    yield safe_chunk
+                                    blocked = True
+                                    break
+                                if hit_action == "warn" and not security_action:
+                                    security_reason = hit_reason
+                                    security_action = "warn"
+                                chunks.append(chunk)
+                                yield chunk
+                        else:
+                            async for chunk in resp.aiter_bytes():
+                                chunk_text = chunk.decode("utf-8", errors="replace")
+                                stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
+                                    api_path, chunk_text, stream_guard_state
+                                )
+                                if should_rewrite and hit_action == "blocked":
+                                    security_changed = True
+                                    security_reason = hit_reason
+                                    security_action = "blocked"
+                                    safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
+                                    chunks.append(safe_chunk)
+                                    yield safe_chunk
+                                    blocked = True
+                                    break
+                                if hit_action == "warn" and not security_action:
+                                    security_reason = hit_reason
+                                    security_action = "warn"
+                                chunks.append(chunk)
+                                yield chunk
+                        if blocked:
+                            await resp.aclose()
                 else:
                     if adapter:
                         # 协议转换：边收 Chat SSE 边转 Responses SSE
