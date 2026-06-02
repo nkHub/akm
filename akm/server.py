@@ -88,6 +88,8 @@ def _render_template(name: str, **kwargs) -> str:
     """读取模板文件，替换 {{ var }} 占位符，支持 {% extends %}, {% include %}, {% block %}"""
     # 为静态资源提供默认版本参数，前端可用于 querystring 破缓存，避免替换 logo 后仍命中旧缓存。
     kwargs.setdefault("asset_version", __version__)
+    # 为所有页面统一注入当前应用版本，供 header/about 等模板直接展示。
+    kwargs.setdefault("version", __version__)
     _file_cache: dict[str, str] = {}
 
     def _load(path: str) -> str:
