@@ -19,6 +19,7 @@ def test_agent_defaults():
     assert agent.supports_chat is True
     assert agent.supports_responses is False
     assert agent.supports_messages is False
+    assert agent.messages_use_anthropic_path is False
 
 
 # ───────────────────────────────────────────────
@@ -69,6 +70,31 @@ def test_resolve_url_responses_path():
     assert url == "https://api.openai.com/v1/responses"
 
 
+def test_resolve_url_messages_with_anthropic_path_switch():
+    """开启开关后，messages 路径自动补到 /anthropic/v1/messages。"""
+    agent = Agent(
+        name="vendor",
+        default_base_url="https://vendor.example.com",
+        supports_messages=True,
+        messages_use_anthropic_path=True,
+    )
+    key = {}
+    url = agent.resolve_url(key, "messages")
+    assert url == "https://vendor.example.com/anthropic/v1/messages"
+
+
+def test_resolve_url_messages_without_anthropic_path_switch():
+    """未开启开关时，messages 仍走普通 /v1/messages。"""
+    agent = Agent(
+        name="vendor",
+        default_base_url="https://vendor.example.com",
+        supports_messages=True,
+    )
+    key = {}
+    url = agent.resolve_url(key, "messages")
+    assert url == "https://vendor.example.com/v1/messages"
+
+
 # ───────────────────────────────────────────────
 # build_headers
 # ───────────────────────────────────────────────
@@ -99,6 +125,21 @@ def test_build_headers_agent_custom_default():
     key = {"api_key": "secret"}
     headers = agent.build_headers(key)
     assert headers["Authorization"] == "Api-Key secret"
+
+
+def test_build_headers_messages_with_anthropic_path_switch():
+    """开启开关后，messages 请求使用 Anthropic 风格请求头。"""
+    agent = Agent(
+        name="vendor",
+        default_base_url="https://vendor.example.com",
+        supports_messages=True,
+        messages_use_anthropic_path=True,
+    )
+    key = {"api_key": "secret"}
+    headers = agent.build_headers(key, "messages")
+    assert headers["x-api-key"] == "secret"
+    assert headers["anthropic-version"] == "2023-06-01"
+    assert headers["Content-Type"] == "application/json"
 
 
 # ───────────────────────────────────────────────
@@ -165,6 +206,7 @@ def test_registry_deepseek():
     assert agent.default_base_url == "https://api.deepseek.com"
     assert agent.supports_responses is False
     assert agent.supports_chat is True
+    assert agent.messages_use_anthropic_path is True
 
 
 def test_registry_anthropic():
@@ -213,6 +255,7 @@ def test_register_custom_agent(monkeypatch, tmp_path):
         cfg = json.load(f)
     assert "dmxapi" in cfg.get("custom_agents", {})
     assert cfg["custom_agents"]["dmxapi"]["default_auth_header"] == "{api_key}"
+    assert cfg["custom_agents"]["dmxapi"]["messages_use_anthropic_path"] is False
 
     # 清理：从注册表移除，避免影响后续测试
     del AGENT_REGISTRY["dmxapi"]
@@ -265,6 +308,7 @@ def test_load_custom_agents(monkeypatch, tmp_path):
                 "supports_chat": True,
                 "supports_responses": False,
                 "supports_messages": False,
+                "messages_use_anthropic_path": True,
             }
         }}, f)
 
@@ -273,5 +317,6 @@ def test_load_custom_agents(monkeypatch, tmp_path):
     agent = AGENT_REGISTRY["myapi"]
     assert agent.default_base_url == "https://myapi.example.com"
     assert agent.default_auth_header == "X-Key {api_key}"
+    assert agent.messages_use_anthropic_path is True
 
     del AGENT_REGISTRY["myapi"]

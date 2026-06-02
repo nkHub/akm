@@ -433,3 +433,48 @@ async def test_test_key_connectivity_anthropic_uses_messages(monkeypatch):
     assert result["api_path"] == "messages"
     assert result["attempted_paths"] == ["messages"]
     assert called[0][0] == "https://api.anthropic.com/v1/messages"
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_messages_provider_without_anthropic_switch(monkeypatch):
+    """供应商即使原生支持 messages，未开启开关时也不应自动改写到 /anthropic。"""
+
+    called = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called.append((url, headers, json))
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    AGENT_REGISTRY["vendor-msg"] = AGENT_REGISTRY["openai"].__class__(
+        name="vendor-msg",
+        default_base_url="https://vendor.example.com",
+        supports_chat=False,
+        supports_messages=True,
+        messages_use_anthropic_path=False,
+    )
+
+    try:
+        result = await test_key_connectivity({
+            "alias": "vendor-msg-key",
+            "provider": "vendor-msg",
+            "api_key": "sk-test",
+            "base_url": "https://vendor.example.com",
+            "models": "claude-like-model",
+        })
+    finally:
+        del AGENT_REGISTRY["vendor-msg"]
+
+    assert result["ok"] is True
+    assert result["api_path"] == "messages"
+    assert result["attempted_paths"] == ["messages"]
+    assert called[0][0] == "https://vendor.example.com/v1/messages"
+    assert called[0][1]["Authorization"] == "Bearer sk-test"
