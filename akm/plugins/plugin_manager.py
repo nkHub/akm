@@ -255,8 +255,12 @@ class PluginManager:
                     # on_key_selected: 返回的 key 替换当前 key
                     current["key"] = ret
                 elif hook == "on_request" and ret is not None:
-                    # on_request: 返回的 request 替换当前 request
-                    current["request"] = ret
+                    # on_request: 默认返回新的 request；
+                    # 对少数需要“在转发前直接阻断请求”的插件，允许显式返回控制结构。
+                    if isinstance(ret, dict) and ret.get("__akm_action__") == "block":
+                        current["on_request_block"] = ret
+                    else:
+                        current["request"] = ret
                 elif hook == "on_response" and ret is not None:
                     # on_response: 允许插件在结构化元信息基础上补充/改写响应数据。
                     # 这样像“数据安全插件”这类能力可以在不侵入 proxy 主流程的前提下，

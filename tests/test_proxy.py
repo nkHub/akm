@@ -173,6 +173,39 @@ async def test_forward_all_keys_exhausted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_request_can_be_blocked_by_on_request_plugin(monkeypatch):
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "unused", "provider": "openai", "api_key": "sk-xxx",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        async def run_hook(self, hook, **kwargs):
+            if hook == "on_request":
+                return {
+                    "request": kwargs["request"],
+                    "on_request_block": {
+                        "__akm_action__": "block",
+                        "status_code": 400,
+                        "error": "blocked by guard",
+                        "security_action": "block",
+                        "security_reason": "request_code_secret:messages[0].content",
+                        "body": '{"error":"blocked by guard"}',
+                    },
+                }
+            return kwargs
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
+        client=AsyncMock(),
+        plugin_manager=DummyPM(),
+    )
+    assert result["status_code"] == 400
+    assert result["error"] == "blocked by guard"
+    assert result["security_action"] == "block"
+
+
+@pytest.mark.asyncio
 async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
     """responses 在 messages-only provider 下可通过两段转换器链路转发"""
 

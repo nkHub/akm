@@ -81,12 +81,153 @@ var DATA_FILTER_GUARD_TEMPLATES = {
     ].join('\n')
   }
 };
+var CODE_SECRET_GUARD_TEMPLATES = {
+  dev_baseline: {
+    enabled: true,
+    enable_code_secret_guard: true,
+    code_secret_guard_mode: 'warn',
+    code_secret_rule_groups: 'llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens,private_keys,db_urls'
+  },
+  frontend_baseline: {
+    enabled: true,
+    enable_code_secret_guard: true,
+    code_secret_guard_mode: 'warn',
+    code_secret_rule_groups: 'llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens'
+  },
+  backend_baseline: {
+    enabled: true,
+    enable_code_secret_guard: true,
+    code_secret_guard_mode: 'warn',
+    code_secret_rule_groups: 'llm_keys,vcs_tokens,cloud_keys,auth_tokens,private_keys,db_urls,credential_assignments'
+  },
+  strict_block: {
+    enabled: true,
+    enable_code_secret_guard: true,
+    code_secret_guard_mode: 'block',
+    code_secret_rule_groups: 'llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens,private_keys,db_urls'
+  },
+  env_assignment: {
+    enabled: true,
+    enable_code_secret_guard: true,
+    code_secret_guard_mode: 'mask',
+    code_secret_confidence_threshold: 70,
+    code_secret_rule_groups: 'credential_assignments,cloud_keys,db_urls'
+  }
+};
 var DATA_FILTER_STRUCTURED_KEYS = {
+  sensitive_fields: true,
+  redact_replacement: true,
+  request_text_paths: true,
   keyword_rules: true,
   regex_rules: true,
+  code_secret_paths: true,
+  code_secret_max_text_length: true,
+  code_secret_confidence_threshold: true,
+  code_secret_mask_replacement: true,
+  code_secret_rule_set: true,
   response_block_patterns: true,
-  response_rule_actions: true
+  response_rule_actions: true,
+  enable_code_secret_guard: true,
+  code_secret_guard_mode: true,
+  code_secret_rule_groups: true,
+  enable_response_guard: true,
+  enable_stream_response_guard: true,
+  stream_guard_cache_chars: true,
+  response_guard_mode: true,
+  response_mask_replacement: true,
+  response_block_message: true
 };
+
+function parseSimpleItems(raw) {
+  var items = [];
+  String(raw || '').replace(/\r/g, '\n').split('\n').forEach(function(line){
+    String(line || '').split(',').forEach(function(part){
+      var item = String(part || '').trim();
+      if (item) items.push(item);
+    });
+  });
+  return items;
+}
+
+function renderDataFilterSection(title, desc, content) {
+  var html = '<div class="mb-4 rounded-lg border border-border bg-surface/40 px-3 py-3">';
+  html += '<div class="text-xs font-semibold text-gray-300 mb-1">' + esc(title) + '</div>';
+  if (desc) html += '<div class="text-[11px] text-gray-500 mb-3">' + esc(desc) + '</div>';
+  html += content;
+  html += '</div>';
+  return html;
+}
+
+function renderModelMatcherStructuredEditor(p) {
+  var cfg = p.config || {};
+  var name = esc(p.name);
+  var html = '';
+
+  var requestSection = '';
+  requestSection += '<label class="block mb-3">';
+  requestSection += '<div class="text-xs text-gray-300 mb-1">模型别名映射</div>';
+  requestSection += '<textarea data-plugin="' + name + '" data-key="aliases" data-type="text" rows="4" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.aliases || '') + '</textarea>';
+  requestSection += '<div class="text-[11px] text-gray-500 mt-1">格式：old=new，每行或逗号分隔，优先在请求进入时做模型名归一。</div>';
+  requestSection += '</label>';
+  requestSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  requestSection += '<input data-plugin="' + name + '" data-key="force_tool_choice_required_for_gpt" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.force_tool_choice_required_for_gpt ? 'checked' : '') + '>';
+  requestSection += '<span>对带 tools 的 gpt/codex 请求自动补齐 required tool_choice</span>';
+  requestSection += '</label>';
+  html += renderDataFilterSection('模型映射', '处理模型别名归一与工具调用兼容策略。', requestSection);
+
+  var bypassSection = '';
+  bypassSection += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">';
+  bypassSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  bypassSection += '<input data-plugin="' + name + '" data-key="enable_inflight_bypass" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.enable_inflight_bypass ? 'checked' : '') + '>';
+  bypassSection += '<span>启用拥塞旁路</span>';
+  bypassSection += '</label>';
+  bypassSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  bypassSection += '<input data-plugin="' + name + '" data-key="enable_smart_bypass" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.enable_smart_bypass ? 'checked' : '') + '>';
+  bypassSection += '<span>启用智能旁路</span>';
+  bypassSection += '</label>';
+  bypassSection += '<label class="block">';
+  bypassSection += '<div class="text-xs text-gray-300 mb-1">单 key 并发上限</div>';
+  bypassSection += '<input data-plugin="' + name + '" data-key="max_inflight_per_key" data-type="number" type="number" value="' + esc(cfg.max_inflight_per_key != null ? cfg.max_inflight_per_key : 3) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  bypassSection += '</label>';
+  bypassSection += '<label class="block">';
+  bypassSection += '<div class="text-xs text-gray-300 mb-1">慢请求阈值（秒）</div>';
+  bypassSection += '<input data-plugin="' + name + '" data-key="slow_inflight_threshold_sec" data-type="number" type="number" value="' + esc(cfg.slow_inflight_threshold_sec != null ? cfg.slow_inflight_threshold_sec : 8) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  bypassSection += '</label>';
+  bypassSection += '<label class="block">';
+  bypassSection += '<div class="text-xs text-gray-300 mb-1">智能候选数量</div>';
+  bypassSection += '<input data-plugin="' + name + '" data-key="smart_bypass_candidate_pool" data-type="number" type="number" value="' + esc(cfg.smart_bypass_candidate_pool != null ? cfg.smart_bypass_candidate_pool : 4) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  bypassSection += '</label>';
+  bypassSection += '<label class="block">';
+  bypassSection += '<div class="text-xs text-gray-300 mb-1">最小改善阈值</div>';
+  bypassSection += '<input data-plugin="' + name + '" data-key="smart_bypass_min_improve" data-type="number" type="number" step="0.01" value="' + esc(cfg.smart_bypass_min_improve != null ? cfg.smart_bypass_min_improve : 0.15) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  bypassSection += '</label>';
+  bypassSection += '<label class="block">';
+  bypassSection += '<div class="text-xs text-gray-300 mb-1">错误冷却秒</div>';
+  bypassSection += '<input data-plugin="' + name + '" data-key="smart_bypass_error_cooldown_sec" data-type="number" type="number" value="' + esc(cfg.smart_bypass_error_cooldown_sec != null ? cfg.smart_bypass_error_cooldown_sec : 15) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  bypassSection += '</label>';
+  bypassSection += '</div>';
+  html += renderDataFilterSection('并发旁路', '在 key 拥塞或慢请求场景下，决定是否旁路到其他可用 key。', bypassSection);
+
+  return html;
+}
+
+function renderErrorHandlerStructuredEditor(p) {
+  var cfg = p.config || {};
+  var name = esc(p.name);
+  var content = '<div class="grid grid-cols-1 md:grid-cols-2 gap-3">';
+  content += '<label class="block">';
+  content += '<div class="text-xs text-gray-300 mb-1">单 key 最大重试次数</div>';
+  content += '<input data-plugin="' + name + '" data-key="max_retries_per_key" data-type="number" type="number" value="' + esc(cfg.max_retries_per_key != null ? cfg.max_retries_per_key : 3) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  content += '<div class="text-[11px] text-gray-500 mt-1">控制 5xx / 连接错误在同一个 key 上的指数退避重试上限。</div>';
+  content += '</label>';
+  content += '<label class="block">';
+  content += '<div class="text-xs text-gray-300 mb-1">最大 key 切换次数</div>';
+  content += '<input data-plugin="' + name + '" data-key="max_key_tries" data-type="number" type="number" value="' + esc(cfg.max_key_tries != null ? cfg.max_key_tries : 5) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  content += '<div class="text-[11px] text-gray-500 mt-1">所有 key 轮换失败前，最多尝试多少个候选 key。</div>';
+  content += '</label>';
+  content += '</div>';
+  return renderDataFilterSection('错误重试策略', '统一控制上游失败时的重试与 key 切换上限。', content);
+}
 
 function getSettingValue(def, current) {
   if (current !== undefined && current !== null) return current;
@@ -160,6 +301,7 @@ function renderDataFilterStructuredEditor(p) {
   var keywordRows = parseSimpleRulePairs(cfg.keyword_rules || '', '=');
   var regexRows = parseSimpleRulePairs(cfg.regex_rules || '', '=>');
   var responseRows = parseResponseRuleRows(cfg.response_block_patterns || '', cfg.response_rule_actions || '');
+  var codeSecretGroups = parseSimpleItems(cfg.code_secret_rule_groups || '');
   if (!keywordRows.length) keywordRows = [{left:'', right:''}];
   if (!regexRows.length) regexRows = [{left:'', right:''}];
   if (!responseRows.length) responseRows = [{pattern:'', action:'default'}];
@@ -172,22 +314,124 @@ function renderDataFilterStructuredEditor(p) {
   html += '<button type="button" onclick="applyDataFilterTemplate(\'' + name + '\', \'prompt_injection\')" class="bg-surface border border-border hover:border-indigo-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">提示词注入</button>';
   html += '</div></div>';
 
-  html += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">关键词替换规则</div><div id="dfg-keyword-rows-' + name + '">';
-  keywordRows.forEach(function(row){ html += renderDataFilterRuleRow('keyword', row); });
-  html += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'keyword\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加关键词规则</button></div>';
+  html += '<div class="mb-3">';
+  html += '<div class="text-xs text-gray-400 mb-1">代码敏感模板</div>';
+  html += '<div class="flex flex-wrap gap-2">';
+  html += '<button type="button" onclick="applyCodeSecretTemplate(\'' + name + '\', \'dev_baseline\')" class="bg-surface border border-border hover:border-cyan-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">开发基线</button>';
+  html += '<button type="button" onclick="applyCodeSecretTemplate(\'' + name + '\', \'frontend_baseline\')" class="bg-surface border border-border hover:border-cyan-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">前端基线</button>';
+  html += '<button type="button" onclick="applyCodeSecretTemplate(\'' + name + '\', \'backend_baseline\')" class="bg-surface border border-border hover:border-cyan-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">后端基线</button>';
+  html += '<button type="button" onclick="applyCodeSecretTemplate(\'' + name + '\', \'strict_block\')" class="bg-surface border border-border hover:border-cyan-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">严格阻断</button>';
+  html += '<button type="button" onclick="applyCodeSecretTemplate(\'' + name + '\', \'env_assignment\')" class="bg-surface border border-border hover:border-cyan-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">环境变量泄露</button>';
+  html += '</div></div>';
 
-  html += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">正则替换规则</div><div id="dfg-regex-rows-' + name + '">';
-  regexRows.forEach(function(row){ html += renderDataFilterRuleRow('regex', row); });
-  html += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'regex\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加正则规则</button></div>';
+  var requestSection = '';
+  requestSection += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">';
+  requestSection += '<label class="block">';
+  requestSection += '<div class="text-xs text-gray-300 mb-1">脱敏占位符</div>';
+  requestSection += '<input data-plugin="' + name + '" data-key="redact_replacement" data-type="string" type="text" value="' + esc(cfg.redact_replacement || '[REDACTED]') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  requestSection += '</label>';
+  requestSection += '<label class="block">';
+  requestSection += '<div class="text-xs text-gray-300 mb-1">文本处理路径</div>';
+  requestSection += '<input data-plugin="' + name + '" data-key="request_text_paths" data-type="text" type="text" value="' + esc(cfg.request_text_paths || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  requestSection += '</label>';
+  requestSection += '</div>';
+  requestSection += '<label class="block mb-3">';
+  requestSection += '<div class="text-xs text-gray-300 mb-1">敏感字段名</div>';
+  requestSection += '<textarea data-plugin="' + name + '" data-key="sensitive_fields" data-type="text" rows="3" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.sensitive_fields || '') + '</textarea>';
+  requestSection += '</label>';
+  requestSection += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">关键词替换规则</div><div id="dfg-keyword-rows-' + name + '">';
+  keywordRows.forEach(function(row){ requestSection += renderDataFilterRuleRow('keyword', row); });
+  requestSection += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'keyword\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加关键词规则</button></div>';
+  requestSection += '<div class="mb-1"><div class="text-xs text-gray-300 mb-1">正则替换规则</div><div id="dfg-regex-rows-' + name + '">';
+  regexRows.forEach(function(row){ requestSection += renderDataFilterRuleRow('regex', row); });
+  requestSection += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'regex\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加正则规则</button></div>';
+  html += renderDataFilterSection('请求脱敏', '处理敏感字段、普通文本替换与路径范围。', requestSection);
 
-  html += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">响应风险规则</div><div id="dfg-response-rows-' + name + '">';
-  responseRows.forEach(function(row){ html += renderDataFilterRuleRow('response', row); });
-  html += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'response\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加响应规则</button></div>';
+  var codeSecretSection = '';
+  codeSecretSection += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">';
+  codeSecretSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  codeSecretSection += '<input data-plugin="' + name + '" data-key="enable_code_secret_guard" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.enable_code_secret_guard ? 'checked' : '') + '>';
+  codeSecretSection += '<span>启用代码敏感识别</span>';
+  codeSecretSection += '</label>';
+  codeSecretSection += '<label class="block">';
+  codeSecretSection += '<div class="text-xs text-gray-300 mb-1">处理模式</div>';
+  codeSecretSection += '<select data-plugin="' + name + '" data-key="code_secret_guard_mode" data-type="string" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-cyan-500">';
+  codeSecretSection += '<option value="warn"' + ((cfg.code_secret_guard_mode || 'warn') === 'warn' ? ' selected' : '') + '>warn</option>';
+  codeSecretSection += '<option value="mask"' + (cfg.code_secret_guard_mode === 'mask' ? ' selected' : '') + '>mask</option>';
+  codeSecretSection += '<option value="block"' + (cfg.code_secret_guard_mode === 'block' ? ' selected' : '') + '>block</option>';
+  codeSecretSection += '</select>';
+  codeSecretSection += '</label>';
+  codeSecretSection += '<label class="block">';
+  codeSecretSection += '<div class="text-xs text-gray-300 mb-1">扫描路径</div>';
+  codeSecretSection += '<input data-plugin="' + name + '" data-key="code_secret_paths" data-type="text" type="text" value="' + esc(cfg.code_secret_paths || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-cyan-500">';
+  codeSecretSection += '</label>';
+  codeSecretSection += '<label class="block">';
+  codeSecretSection += '<div class="text-xs text-gray-300 mb-1">最大文本长度</div>';
+  codeSecretSection += '<input data-plugin="' + name + '" data-key="code_secret_max_text_length" data-type="number" type="number" value="' + esc(cfg.code_secret_max_text_length || 8000) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-cyan-500">';
+  codeSecretSection += '</label>';
+  codeSecretSection += '<label class="block">';
+  codeSecretSection += '<div class="text-xs text-gray-300 mb-1">置信度阈值</div>';
+  codeSecretSection += '<input data-plugin="' + name + '" data-key="code_secret_confidence_threshold" data-type="number" type="number" value="' + esc(cfg.code_secret_confidence_threshold || 85) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-cyan-500">';
+  codeSecretSection += '</label>';
+  codeSecretSection += '<label class="block">';
+  codeSecretSection += '<div class="text-xs text-gray-300 mb-1">阻断占位符</div>';
+  codeSecretSection += '<input data-plugin="' + name + '" data-key="code_secret_mask_replacement" data-type="string" type="text" value="' + esc(cfg.code_secret_mask_replacement || '[CODE-SECRET]') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-cyan-500">';
+  codeSecretSection += '</label>';
+  codeSecretSection += '</div>';
+  codeSecretSection += '<input data-plugin="' + name + '" data-key="code_secret_rule_set" data-type="string" type="hidden" value="' + esc(cfg.code_secret_rule_set || 'default') + '">';
+  codeSecretSection += '<div class="text-xs text-gray-400 mb-1">当前代码敏感分组</div>';
+  codeSecretSection += '<div class="flex flex-wrap gap-1.5">';
+  if (codeSecretGroups.length) {
+    codeSecretGroups.forEach(function(group){
+      codeSecretSection += '<span class="px-2 py-0.5 rounded bg-cyan-400/10 text-cyan-300 text-[11px]">' + esc(group) + '</span>';
+    });
+  } else {
+    codeSecretSection += '<span class="text-[11px] text-gray-500">未配置分组</span>';
+  }
+  codeSecretSection += '</div>';
+  html += renderDataFilterSection('代码敏感识别', '对开发场景常见的 Key、Token、私钥、连接串做轻量运行时识别。', codeSecretSection);
+
+  var responseSection = '';
+  responseSection += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">';
+  responseSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  responseSection += '<input data-plugin="' + name + '" data-key="enable_response_guard" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.enable_response_guard ? 'checked' : '') + '>';
+  responseSection += '<span>启用响应安全拦截</span>';
+  responseSection += '</label>';
+  responseSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  responseSection += '<input data-plugin="' + name + '" data-key="enable_stream_response_guard" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.enable_stream_response_guard ? 'checked' : '') + '>';
+  responseSection += '<span>启用流式响应拦截</span>';
+  responseSection += '</label>';
+  responseSection += '<label class="block">';
+  responseSection += '<div class="text-xs text-gray-300 mb-1">响应处理模式</div>';
+  responseSection += '<select data-plugin="' + name + '" data-key="response_guard_mode" data-type="string" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  responseSection += '<option value="warn"' + (cfg.response_guard_mode === 'warn' ? ' selected' : '') + '>warn</option>';
+  responseSection += '<option value="mask"' + (cfg.response_guard_mode === 'mask' ? ' selected' : '') + '>mask</option>';
+  responseSection += '<option value="block"' + ((cfg.response_guard_mode || 'block') === 'block' ? ' selected' : '') + '>block</option>';
+  responseSection += '</select>';
+  responseSection += '</label>';
+  responseSection += '<label class="block">';
+  responseSection += '<div class="text-xs text-gray-300 mb-1">流式缓存长度</div>';
+  responseSection += '<input data-plugin="' + name + '" data-key="stream_guard_cache_chars" data-type="number" type="number" value="' + esc(cfg.stream_guard_cache_chars || 2048) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  responseSection += '</label>';
+  responseSection += '<label class="block">';
+  responseSection += '<div class="text-xs text-gray-300 mb-1">替换文本</div>';
+  responseSection += '<input data-plugin="' + name + '" data-key="response_mask_replacement" data-type="string" type="text" value="' + esc(cfg.response_mask_replacement || '[BLOCKED-RISKY-CONTENT]') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  responseSection += '</label>';
+  responseSection += '</div>';
+  responseSection += '<label class="block mb-3">';
+  responseSection += '<div class="text-xs text-gray-300 mb-1">响应拦截提示</div>';
+  responseSection += '<textarea data-plugin="' + name + '" data-key="response_block_message" data-type="text" rows="2" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.response_block_message || '') + '</textarea>';
+  responseSection += '</label>';
+  responseSection += '<div class="mb-1"><div class="text-xs text-gray-300 mb-1">响应风险规则</div><div id="dfg-response-rows-' + name + '">';
+  responseRows.forEach(function(row){ responseSection += renderDataFilterRuleRow('response', row); });
+  responseSection += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'response\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加响应规则</button></div>';
+  html += renderDataFilterSection('响应防护', '扫描非流式与可选流式输出，拦截明显高风险命令或恶意载荷。', responseSection);
 
   html += '<textarea data-plugin="' + name + '" data-key="keyword_rules" data-type="text" class="hidden">' + esc(cfg.keyword_rules || '') + '</textarea>';
   html += '<textarea data-plugin="' + name + '" data-key="regex_rules" data-type="text" class="hidden">' + esc(cfg.regex_rules || '') + '</textarea>';
   html += '<textarea data-plugin="' + name + '" data-key="response_block_patterns" data-type="text" class="hidden">' + esc(cfg.response_block_patterns || '') + '</textarea>';
   html += '<textarea data-plugin="' + name + '" data-key="response_rule_actions" data-type="text" class="hidden">' + esc(cfg.response_rule_actions || '') + '</textarea>';
+  html += '<textarea data-plugin="' + name + '" data-key="code_secret_rule_groups" data-type="text" class="hidden">' + esc(cfg.code_secret_rule_groups || '') + '</textarea>';
   return html;
 }
 
@@ -203,8 +447,12 @@ function renderPluginSettings(p) {
   if (!p.settings || !p.settings.length) return '';
   var html = '<details class="pt-3"><summary class="text-xs text-gray-400 mb-2 cursor-pointer select-none">配置</summary><div class="mt-2">';
   if (p.name === 'data_filter_guard') html += '<div id="dfg-structured-' + esc(p.name) + '">' + renderDataFilterStructuredEditor(p) + '</div>';
+  if (p.name === 'model_matcher') html += renderModelMatcherStructuredEditor(p);
+  if (p.name === 'error_handler') html += renderErrorHandlerStructuredEditor(p);
   p.settings.forEach(function(def){
     if (p.name === 'data_filter_guard' && DATA_FILTER_STRUCTURED_KEYS[def.key]) return;
+    if (p.name === 'model_matcher') return;
+    if (p.name === 'error_handler') return;
     var value = getSettingValue(def, p.config ? p.config[def.key] : undefined);
     html += '<label class="block mb-2">';
     if (def.type === 'boolean') {
@@ -251,6 +499,29 @@ function applyDataFilterTemplate(pluginName, templateName) {
   var msg = document.getElementById('plugin-config-msg-' + pluginName);
   if (msg) {
     msg.textContent = '已填充模板，点击“保存配置”生效';
+    msg.className = 'text-xs text-cyan-400';
+  }
+}
+
+function applyCodeSecretTemplate(pluginName, templateName) {
+  var tpl = CODE_SECRET_GUARD_TEMPLATES[templateName];
+  if (!tpl) return;
+  var plugin = (_plugins || []).find(function(item){ return item.name === pluginName; });
+  if (plugin) {
+    plugin.config = plugin.config || {};
+    Object.keys(tpl).forEach(function(key){ plugin.config[key] = tpl[key]; });
+  }
+  Object.keys(tpl).forEach(function(key){
+    var node = document.querySelector('[data-plugin="' + pluginName + '"][data-key="' + key + '"]');
+    if (!node) return;
+    var type = node.getAttribute('data-type');
+    if (type === 'boolean') node.checked = !!tpl[key];
+    else node.value = tpl[key];
+  });
+  if (pluginName === 'data_filter_guard') rerenderDataFilterStructuredEditor(pluginName);
+  var msg = document.getElementById('plugin-config-msg-' + pluginName);
+  if (msg) {
+    msg.textContent = '已填充代码敏感模板，点击“保存配置”生效';
     msg.className = 'text-xs text-cyan-400';
   }
 }

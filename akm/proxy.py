@@ -150,13 +150,6 @@ async def forward_request(
     tried_aliases: set[str] = set()
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
 
-    # ── 插件 hook: on_request（模型名映射等预处理）──
-    if plugin_manager:
-        hook_result = await plugin_manager.run_hook("on_request", request=body)
-        if isinstance(hook_result, dict) and "request" in hook_result:
-            body = hook_result["request"]
-            model = body.get("model", model)
-
     async def _emit_on_response_meta(meta: dict):
         """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。"""
         if not plugin_manager:
@@ -169,6 +162,46 @@ async def forward_request(
             # hook 内异常由插件管理器隔离；此处双保险避免影响主链路
             pass
         return meta
+
+    # ── 插件 hook: on_request（模型名映射等预处理）──
+    if plugin_manager:
+        hook_result = await plugin_manager.run_hook("on_request", request=body)
+        if isinstance(hook_result, dict) and "on_request_block" in hook_result:
+            blocked = hook_result["on_request_block"] or {}
+            status_code = int(blocked.get("status_code", 400) or 400)
+            error = str(blocked.get("error", "请求命中安全策略，已被拦截") or "请求命中安全策略，已被拦截")
+            response_body = blocked.get("body")
+            if not isinstance(response_body, str) or not response_body:
+                response_body = json.dumps({"error": error}, ensure_ascii=False)
+            security_action = str(blocked.get("security_action", "block") or "block")
+            security_reason = str(blocked.get("security_reason", "") or "")
+            await _emit_on_response_meta({
+                "ok": False,
+                "phase": "on_request",
+                "status_code": status_code,
+                "key_alias": "",
+                "provider": "",
+                "model": model,
+                "latency_ms": 0,
+                "error": error,
+                "api_path": api_path,
+                "security_action": security_action,
+                "security_reason": security_reason,
+            })
+            return {
+                "status_code": status_code,
+                "body": response_body,
+                "key_alias": "",
+                "provider": "",
+                "model": model,
+                "error": error,
+                "latency_ms": 0,
+                "security_action": security_action,
+                "security_reason": security_reason,
+            }
+        if isinstance(hook_result, dict) and "request" in hook_result:
+            body = hook_result["request"]
+            model = body.get("model", model)
 
     while tries < MAX_KEY_TRIES:
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
