@@ -339,6 +339,7 @@ gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
 
 - [ ] `akm/__init__.py` 版本号已更新
 - [ ] 功能开发完成，本地测试通过
+- [ ] 已检查并同步文档：`README.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`
 - [ ] 清理构建缓存：`rm -rf build dist`
 - [ ] 执行打包命令
 - [ ] 验证 `.app` 可正常启动
