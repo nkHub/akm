@@ -189,17 +189,17 @@ class PluginManager:
                 continue
             self._load_plugin(entry, "third_party")
 
-        # ── 3. 首次加载时自动启用所有内置插件 ──
+        # ── 3. 首次加载时按默认值初始化内置插件状态 ──
         cfg = self._load_config_json()
         plugin_states = cfg.get("plugin_states", {})
         changed = False
         for name, plugin in self.plugins.items():
             if name not in plugin_states and plugin.builtin:
-                plugin.enabled = True
-                plugin_states[name] = True
+                plugin.enabled = bool(plugin.meta.default_enabled)
+                plugin_states[name] = bool(plugin.meta.default_enabled)
                 changed = True
                 logger.info(
-                    f"[PluginManager] 首次加载，自动启用内置插件: {name}"
+                    f"[PluginManager] 首次加载，按默认值设置内置插件: {name} -> {'启用' if plugin.enabled else '禁用'}"
                 )
 
         if changed:
@@ -257,7 +257,11 @@ class PluginManager:
                 elif hook == "on_request" and ret is not None:
                     # on_request: 返回的 request 替换当前 request
                     current["request"] = ret
-                # on_response: 无返回值，纯观察
+                elif hook == "on_response" and ret is not None:
+                    # on_response: 允许插件在结构化元信息基础上补充/改写响应数据。
+                    # 这样像“数据安全插件”这类能力可以在不侵入 proxy 主流程的前提下，
+                    # 对非流式正文做拦截或替换。
+                    current["response"] = ret
 
             except Exception as e:
                 logger.error(

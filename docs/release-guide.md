@@ -329,7 +329,7 @@ gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
 | 预发布 | MAJOR.MINOR.PATCH-beta.N | `0.2.0-beta.1` |
 
 更新策略：
-- **PATCH** (`0.1.0` → `0.1.1`)：Bug 修复，向后兼容
+- **PATCH** (`0.1.1` → `0.1.2`)：Bug 修复，向后兼容
 - **MINOR** (`0.1.0` → `0.2.0`)：新功能，向后兼容
 - **MAJOR** (`0.1.0` → `1.0.0`)：重大变更，不兼容旧版本
 

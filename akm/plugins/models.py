@@ -22,6 +22,7 @@ class PluginMeta(BaseModel):
     category: str = ""           # filter / matcher / converter / handler / post / app
     description: str = ""
     builtin: bool = False        # 内置插件标记
+    default_enabled: bool = True # 首次加载且无显式状态时是否默认启用
     required: bool = False       # 不可禁用
     priority: int = 100          # 同 hook 执行优先级，越小越先，0-999
     menu: dict = {}

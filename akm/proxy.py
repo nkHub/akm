@@ -160,12 +160,15 @@ async def forward_request(
     async def _emit_on_response_meta(meta: dict):
         """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。"""
         if not plugin_manager:
-            return
+            return meta
         try:
-            await plugin_manager.run_hook("on_response", request=body, response=meta)
+            result = await plugin_manager.run_hook("on_response", request=body, response=meta)
+            if isinstance(result, dict) and "response" in result:
+                return result["response"]
         except Exception:
             # hook 内异常由插件管理器隔离；此处双保险避免影响主链路
             pass
+        return meta
 
     while tries < MAX_KEY_TRIES:
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
@@ -430,7 +433,7 @@ async def forward_request(
             # 协议转换：响应体格式转回客户端期望的格式
             if adapter:
                 json_body = adapter.convert_response(json_body)
-            await _emit_on_response_meta({
+            response_meta = await _emit_on_response_meta({
                 "ok": True,
                 "phase": "upstream",
                 "status_code": resp.status_code,
@@ -443,15 +446,18 @@ async def forward_request(
                 "api_path": api_path,
                 "upstream_api_path": upstream_api_path,
                 "stream": False,
+                "response_body": json_body,
             })
+            if isinstance(response_meta, dict):
+                json_body = response_meta.get("response_body", json_body)
             return {
-                "status_code": resp.status_code,
+                "status_code": int(response_meta.get("status_code", resp.status_code)) if isinstance(response_meta, dict) else resp.status_code,
                 "body": json_body,
                 "adapter": adapter,
                 "key_alias": key["alias"],
                 "provider": key["provider"],
                 "model": model,
-                "error": "",
+                "error": response_meta.get("error", "") if isinstance(response_meta, dict) else "",
                 "latency_ms": latency,
             }
 

@@ -201,3 +201,54 @@ async def test_api_list_agents_returns_messages_anthropic_switch():
     agents = {item["name"]: item for item in resp.json()["data"]}
     assert agents["deepseek"]["messages_use_anthropic_path"] is True
     assert agents["openai"]["messages_use_anthropic_path"] is False
+
+
+@pytest.mark.asyncio
+async def test_plugin_config_api_roundtrip():
+    class DummyPM:
+        def __init__(self):
+            self.saved = None
+
+        def get_config(self, name):
+            return {"enabled": True, "keyword_rules": "secret=***"} if name == "data_filter_guard" else None
+
+        def set_config(self, name, data):
+            self.saved = (name, data)
+            return {"ok": True}
+
+    app.state.plugin_manager = DummyPM()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        get_resp = await client.get("/api/plugin-config/data_filter_guard")
+        post_resp = await client.post("/api/plugin-config/data_filter_guard", json={"enabled": False})
+
+    assert get_resp.status_code == 200
+    assert get_resp.json()["enabled"] is True
+    assert post_resp.status_code == 200
+    assert app.state.plugin_manager.saved == ("data_filter_guard", {"enabled": False})
+
+
+@pytest.mark.asyncio
+async def test_api_logs_keeps_security_headers_for_frontend():
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("akm.server.list_logs", lambda **kwargs: [{
+        "request_headers": '{"x-akm-security":"warn:(?i)curl.*bash","x-akm-flags":"security_response_warned"}',
+        "response_body": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+    }])
+    monkeypatch.setattr("akm.server.count_logs", lambda **kwargs: 1)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs")
+
+    monkeypatch.undo()
+    assert resp.status_code == 200
+    data = resp.json()
+    row = data["data"][0]
+    assert "x-akm-security" in row["request_headers"]
+    assert "security_response_warned" in row["request_headers"]
