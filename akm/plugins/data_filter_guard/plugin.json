@@ -1,0 +1,108 @@
+{
+  "name": "data_filter_guard",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "数据安全插件：请求脱敏、关键词/正则过滤、非流式响应高风险内容拦截",
+  "builtin": true,
+  "default_enabled": false,
+  "required": false,
+  "priority": 20,
+  "hooks": {
+    "on_request": true,
+    "on_response": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用过滤",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保留已加载状态，但不改写请求体和响应体"
+    },
+    {
+      "key": "sensitive_fields",
+      "label": "敏感字段名",
+      "type": "text",
+      "default": "api_key,authorization,password,secret,token,access_token,refresh_token,cookie,set-cookie",
+      "description": "递归扫描这些字段名；命中后将整个字段值替换为脱敏占位符，支持逗号或换行分隔"
+    },
+    {
+      "key": "redact_replacement",
+      "label": "脱敏占位符",
+      "type": "string",
+      "default": "[REDACTED]",
+      "description": "敏感字段命中后的替换文本"
+    },
+    {
+      "key": "keyword_rules",
+      "label": "关键词替换规则",
+      "type": "text",
+      "default": "",
+      "description": "按行或逗号填写 keyword=replacement；会递归替换所有字符串值中的命中内容"
+    },
+    {
+      "key": "regex_rules",
+      "label": "正则替换规则",
+      "type": "text",
+      "default": "",
+      "description": "按行填写 regex=>replacement；会递归替换字符串值中命中的正则内容"
+    },
+    {
+      "key": "request_text_paths",
+      "label": "文本处理路径",
+      "type": "text",
+      "default": "messages[].content,input,instructions",
+      "description": "仅对这些路径下的字符串做关键词/正则替换，支持 messages[].content 这种简写；留空表示处理所有字符串"
+    },
+    {
+      "key": "process_keys_case_insensitive",
+      "label": "字段名忽略大小写",
+      "type": "boolean",
+      "default": true,
+      "description": "开启后 Authorization 和 authorization 会按同一字段处理"
+    },
+    {
+      "key": "enable_response_guard",
+      "label": "启用响应安全拦截",
+      "type": "boolean",
+      "default": true,
+      "description": "对非流式响应正文执行基础风险扫描，命中高风险模式时拦截返回"
+    },
+    {
+      "key": "response_guard_mode",
+      "label": "响应防护模式",
+      "type": "string",
+      "default": "block",
+      "description": "可选值：block（整条拦截）/ mask（替换命中片段）"
+    },
+    {
+      "key": "response_block_patterns",
+      "label": "响应拦截正则",
+      "type": "text",
+      "default": "(?i)rm\\s+-rf\\s+/,\n(?i)curl\\s+[^\\n|]+\\|\\s*(bash|sh),\n(?i)powershell\\s+-enc\\b,\n(?i)eval\\s*\\(.*base64,\n(?i)chmod\\s+\\+x\\s+.+&&\\s*\\./",
+      "description": "按行填写高风险正则；命中后按响应防护模式处理"
+    },
+    {
+      "key": "response_rule_actions",
+      "label": "响应规则动作",
+      "type": "text",
+      "default": "",
+      "description": "按行填写 regex=>warn|mask|block；可对单条规则覆盖全局响应防护模式"
+    },
+    {
+      "key": "response_mask_replacement",
+      "label": "响应命中替换文本",
+      "type": "string",
+      "default": "[BLOCKED-RISKY-CONTENT]",
+      "description": "当响应防护模式为 mask 时，用该文本替换命中的危险片段"
+    },
+    {
+      "key": "response_block_message",
+      "label": "响应拦截提示",
+      "type": "text",
+      "default": "检测到疑似高风险指令或恶意载荷，已由数据安全插件拦截。",
+      "description": "命中响应安全规则后，返回给客户端的提示文案"
+    }
+  ]
+}

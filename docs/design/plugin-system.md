@@ -95,6 +95,8 @@ akm/
 | 内置 | `akm/plugins/` | 随项目分发，`plugin.json` 中 `builtin: true`，可禁用但建议保留 |
 | 第三方 | `~/.akm/plugins/` | 用户自行安装，可安装/启用/禁用/删除 |
 
+其中 `data_filter_guard` 是一个“内置但默认关闭”的数据安全插件：通过 `plugin.json` 中的 `default_enabled: false` 控制首次加载状态，避免在未配置规则时直接干预所有请求/响应。
+
 ## 五、plugin.json 定义
 
 ### 5.1 有菜单插件（`has_menu: true`）
@@ -480,6 +482,9 @@ request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C 
 | `api_path` | string | 客户端请求路径（如 `chat/completions`） |
 | `upstream_api_path` | string | 转换后的上游路径（如 `messages`） |
 | `stream` | bool | 是否流式（仅成功场景提供） |
+| `response_body` | string | 非流式成功响应正文（仅允许需要安全处理的插件读取/改写） |
+
+对于 `on_response`，当前实现除“纯观察”外，也允许插件返回新的 `response` 元信息字典，用于最小范围内改写非流式响应结果。例如内置 `data_filter_guard` 会在命中高风险脚本/命令模式时，根据规则动作选择 `warn` / `mask` / `block`，必要时把 `response_body` 替换为安全提示，从而把它作为“数据安全插件”使用。相关安全动作会通过 `x-akm-security` 与 `x-akm-flags` 写入审计头，供日志页展示和后续安全事件分析。
 
 > 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。
 

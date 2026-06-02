@@ -1064,22 +1064,49 @@ async def _handle_ai_request(request: Request, api_path: str):
         key_alias = result["key_alias"]
         provider = result["provider"]
         model = result["model"]
+        plugin_manager = request.app.state.plugin_manager
+        security_plugin = None
+        if plugin_manager is not None:
+            candidate = plugin_manager.plugins.get("data_filter_guard")
+            if candidate and candidate.enabled and hasattr(candidate, "is_stream_guard_active"):
+                try:
+                    if candidate.is_stream_guard_active():
+                        security_plugin = candidate
+                except Exception:
+                    security_plugin = None
 
         async def stream_generator():
             chunks = []
             t0 = __import__("time").time()
             stream_error = ""
+            security_action = ""
+            security_reason = ""
+            security_changed = False
             try:
-                if adapter:
-                    # 协议转换：边收 Chat SSE 边转 Responses SSE
-                    async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                        chunk = line.encode("utf-8") if isinstance(line, str) else line
-                        chunks.append(chunk)
-                        yield chunk
+                if security_plugin:
+                    buffered_parts = []
+                    if adapter:
+                        async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                            buffered_parts.append(line if isinstance(line, str) else line.decode("utf-8", errors="replace"))
+                    else:
+                        async for chunk in resp.aiter_bytes():
+                            buffered_parts.append(chunk.decode("utf-8", errors="replace"))
+                    body_str = "".join(buffered_parts)
+                    body_str, security_changed, security_reason, security_action = security_plugin.protect_stream_payload(api_path, body_str)
+                    out_chunk = body_str.encode("utf-8")
+                    chunks.append(out_chunk)
+                    yield out_chunk
                 else:
-                    async for chunk in resp.aiter_bytes():
-                        chunks.append(chunk)
-                        yield chunk
+                    if adapter:
+                        # 协议转换：边收 Chat SSE 边转 Responses SSE
+                        async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                            chunk = line.encode("utf-8") if isinstance(line, str) else line
+                            chunks.append(chunk)
+                            yield chunk
+                    else:
+                        async for chunk in resp.aiter_bytes():
+                            chunks.append(chunk)
+                            yield chunk
             except Exception as e:
                 stream_error = f"上游连接中断: {e}"
                 logger.warning(
@@ -1123,10 +1150,16 @@ async def _handle_ai_request(request: Request, api_path: str):
                         conv_warn = ",".join(getattr(adapter, "_conversion_warnings", []))
                         if conv_warn:
                             headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
+                    if security_action:
+                        headers_obj["x-akm-security"] = f"{security_action}:{security_reason}"[:2000]
+                    if security_changed and security_action not in ("", "warn"):
+                        flags.append("security_response_rewritten")
+                    elif security_action == "warn":
+                        flags.append("security_response_warned")
                     if flags:
                         headers_obj["x-akm-flags"] = ",".join(flags)
                         request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-                    elif tool_trace:
+                    elif tool_trace or security_action:
                         request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
                     elif adapter and getattr(adapter, "_conversion_warnings", None):
                         request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
@@ -1136,7 +1169,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     "provider": provider, "key_alias": key_alias, "model": model,
                     "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
                     "response_body": body_str if save_response_body else "", "status_code": status,
-                    "latency_ms": latency, "error": stream_error,
+                    "latency_ms": latency, "error": stream_error or (f"{security_action}:{security_reason}" if security_action else ""),
                     "request_headers": request_headers_for_log,
                     "prompt_tokens": tokens.get("prompt_tokens", 0),
                     "completion_tokens": tokens.get("completion_tokens", 0),
@@ -1181,10 +1214,25 @@ async def _handle_ai_request(request: Request, api_path: str):
         if usage_flags:
             prev = headers_obj.get("x-akm-flags", "")
             merged = [x.strip() for x in (prev.split(",") if prev else []) if x.strip()]
+            if result.get("security_action") == "warn":
+                if "security_response_warned" not in merged:
+                    merged.append("security_response_warned")
+            elif result.get("security_action") in ("mask", "block"):
+                if "security_response_rewritten" not in merged:
+                    merged.append("security_response_rewritten")
+            if result.get("security_action") and result.get("security_reason"):
+                headers_obj["x-akm-security"] = f"{result.get('security_action')}:{result.get('security_reason')}"[:2000]
             for f in usage_flags:
                 if f not in merged:
                     merged.append(f)
             headers_obj["x-akm-flags"] = ",".join(merged)
+            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+        elif result.get("security_action") and result.get("security_reason"):
+            headers_obj["x-akm-security"] = f"{result.get('security_action')}:{result.get('security_reason')}"[:2000]
+            if result.get("security_action") == "warn":
+                headers_obj["x-akm-flags"] = "security_response_warned"
+            else:
+                headers_obj["x-akm-flags"] = "security_response_rewritten"
             request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
     except Exception:
         request_headers_for_log = request_headers_json

@@ -302,6 +302,39 @@ async def test_forward_emits_on_response_meta_for_failure_and_success(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_forward_allows_on_response_to_rewrite_non_stream_body(monkeypatch):
+    """on_response 可对非流式成功响应做正文改写。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1", "provider": "openai", "api_key": "sk-a",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            if hook == "on_response" and kwargs["response"].get("ok"):
+                resp = dict(kwargs["response"])
+                resp["response_body"] = '{"choices":[{"message":{"content":"blocked"}}]}'
+                return {"request": kwargs["request"], "response": resp}
+            return kwargs
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}], "stream": False},
+        client=mock_client,
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    assert result["body"] == '{"choices":[{"message":{"content":"blocked"}}]}'
+
+
+@pytest.mark.asyncio
 async def test_test_key_connectivity_openai_uses_responses_only(monkeypatch):
     """默认情况下 openai 类 key 测试时只请求 responses，不自动回退。"""
 

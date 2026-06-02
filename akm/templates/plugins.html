@@ -39,15 +39,325 @@ function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace
 function pluginRoute(name) { return '/plugins/' + encodeURIComponent(name || ''); }
 
 var _plugins = [];
+var DATA_FILTER_GUARD_TEMPLATES = {
+  command_risk: {
+    enabled: true,
+    enable_response_guard: true,
+    response_guard_mode: 'block',
+    response_block_patterns: [
+      '(?i)rm\\s+-rf\\s+/',
+      '(?i)curl\\s+[^\\n|]+\\|\\s*(bash|sh)',
+      '(?i)wget\\s+[^\\n|]+\\|\\s*(bash|sh)',
+      '(?i)powershell\\s+-enc\\b',
+      '(?i)chmod\\s+\\+x\\s+.+&&\\s*\\./'
+    ].join('\n'),
+    response_rule_actions: ''
+  },
+  credential_risk: {
+    enabled: true,
+    sensitive_fields: 'api_key,authorization,password,secret,token,access_token,refresh_token,cookie,set-cookie',
+    regex_rules: [
+      'sk-[A-Za-z0-9_-]{12,}=>[API-KEY]',
+      '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}=>[EMAIL]',
+      '1[3-9]\\d{9}=>[PHONE]'
+    ].join('\n'),
+    request_text_paths: 'messages[].content,input,instructions'
+  },
+  prompt_injection: {
+    enabled: true,
+    enable_response_guard: true,
+    response_guard_mode: 'warn',
+    response_block_patterns: [
+      '(?i)ignore\\s+(all\\s+)?previous\\s+instructions',
+      '(?i)reveal\\s+(the\\s+)?system\\s+prompt',
+      '(?i)dump\\s+all\\s+secrets',
+      '(?i)bypass\\s+safety'
+    ].join('\n'),
+    response_rule_actions: [
+      '(?i)ignore\\s+(all\\s+)?previous\\s+instructions=>warn',
+      '(?i)reveal\\s+(the\\s+)?system\\s+prompt=>warn',
+      '(?i)dump\\s+all\\s+secrets=>block',
+      '(?i)bypass\\s+safety=>warn'
+    ].join('\n')
+  }
+};
+var DATA_FILTER_STRUCTURED_KEYS = {
+  keyword_rules: true,
+  regex_rules: true,
+  response_block_patterns: true,
+  response_rule_actions: true
+};
+
+function getSettingValue(def, current) {
+  if (current !== undefined && current !== null) return current;
+  return def.default;
+}
+
+function parseSimpleRulePairs(raw, separator) {
+  var rows = [];
+  String(raw || '').replace(/\r/g, '\n').split('\n').forEach(function(line){
+    var item = line.trim();
+    if (!item || item.indexOf(separator) < 0) return;
+    var idx = item.indexOf(separator);
+    var left = item.slice(0, idx).trim();
+    var right = item.slice(idx + separator.length).trim();
+    if (left) rows.push({left:left, right:right});
+  });
+  return rows;
+}
+
+function parseResponseRuleRows(patternsRaw, actionsRaw) {
+  var actionsMap = {};
+  String(actionsRaw || '').replace(/\r/g, '\n').split('\n').forEach(function(line){
+    var item = line.trim();
+    if (!item || item.indexOf('=>') < 0) return;
+    var idx = item.lastIndexOf('=>');
+    var pattern = item.slice(0, idx).trim();
+    var action = item.slice(idx + 2).trim().toLowerCase();
+    if (pattern && action) actionsMap[pattern] = action;
+  });
+  var rows = [];
+  String(patternsRaw || '').replace(/\r/g, '\n').split('\n').forEach(function(line){
+    var pattern = line.trim();
+    if (!pattern) return;
+    rows.push({pattern: pattern, action: actionsMap[pattern] || 'default'});
+  });
+  return rows;
+}
+
+function renderDataFilterRuleRow(type, row) {
+  if (type === 'keyword') {
+    return '<div class="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="keyword">'
+      + '<input type="text" data-col="left" value="' + esc(row.left || '') + '" placeholder="原词" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+      + '<span class="text-xs text-gray-500">=</span>'
+      + '<input type="text" data-col="right" value="' + esc(row.right || '') + '" placeholder="替换词" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+      + '<button type="button" onclick="removeDataFilterRuleRow(this)" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>'
+      + '</div>';
+  }
+  if (type === 'regex') {
+    return '<div class="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="regex">'
+      + '<input type="text" data-col="left" value="' + esc(row.left || '') + '" placeholder="正则" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+      + '<span class="text-xs text-gray-500">=&gt;</span>'
+      + '<input type="text" data-col="right" value="' + esc(row.right || '') + '" placeholder="替换词" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+      + '<button type="button" onclick="removeDataFilterRuleRow(this)" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>'
+      + '</div>';
+  }
+  return '<div class="grid grid-cols-[1fr_110px_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="response">'
+    + '<input type="text" data-col="pattern" value="' + esc(row.pattern || '') + '" placeholder="高风险正则" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+    + '<select data-col="action" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+    + '<option value="default"' + ((row.action || 'default') === 'default' ? ' selected' : '') + '>跟随全局</option>'
+    + '<option value="warn"' + (row.action === 'warn' ? ' selected' : '') + '>warn</option>'
+    + '<option value="mask"' + (row.action === 'mask' ? ' selected' : '') + '>mask</option>'
+    + '<option value="block"' + (row.action === 'block' ? ' selected' : '') + '>block</option>'
+    + '</select>'
+    + '<button type="button" onclick="removeDataFilterRuleRow(this)" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>'
+    + '</div>';
+}
+
+function renderDataFilterStructuredEditor(p) {
+  var cfg = p.config || {};
+  var name = esc(p.name);
+  var keywordRows = parseSimpleRulePairs(cfg.keyword_rules || '', '=');
+  var regexRows = parseSimpleRulePairs(cfg.regex_rules || '', '=>');
+  var responseRows = parseResponseRuleRows(cfg.response_block_patterns || '', cfg.response_rule_actions || '');
+  if (!keywordRows.length) keywordRows = [{left:'', right:''}];
+  if (!regexRows.length) regexRows = [{left:'', right:''}];
+  if (!responseRows.length) responseRows = [{pattern:'', action:'default'}];
+
+  var html = '<div class="mb-3">';
+  html += '<div class="text-xs text-gray-400 mb-1">安全模板</div>';
+  html += '<div class="flex flex-wrap gap-2">';
+  html += '<button type="button" onclick="applyDataFilterTemplate(\'' + name + '\', \'command_risk\')" class="bg-surface border border-border hover:border-indigo-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">命令执行风险</button>';
+  html += '<button type="button" onclick="applyDataFilterTemplate(\'' + name + '\', \'credential_risk\')" class="bg-surface border border-border hover:border-indigo-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">凭据泄露风险</button>';
+  html += '<button type="button" onclick="applyDataFilterTemplate(\'' + name + '\', \'prompt_injection\')" class="bg-surface border border-border hover:border-indigo-500 text-gray-300 text-xs px-2.5 py-1 rounded cursor-pointer">提示词注入</button>';
+  html += '</div></div>';
+
+  html += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">关键词替换规则</div><div id="dfg-keyword-rows-' + name + '">';
+  keywordRows.forEach(function(row){ html += renderDataFilterRuleRow('keyword', row); });
+  html += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'keyword\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加关键词规则</button></div>';
+
+  html += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">正则替换规则</div><div id="dfg-regex-rows-' + name + '">';
+  regexRows.forEach(function(row){ html += renderDataFilterRuleRow('regex', row); });
+  html += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'regex\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加正则规则</button></div>';
+
+  html += '<div class="mb-3"><div class="text-xs text-gray-300 mb-1">响应风险规则</div><div id="dfg-response-rows-' + name + '">';
+  responseRows.forEach(function(row){ html += renderDataFilterRuleRow('response', row); });
+  html += '</div><button type="button" onclick="addDataFilterRuleRow(\'' + name + '\', \'response\')" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">+ 添加响应规则</button></div>';
+
+  html += '<textarea data-plugin="' + name + '" data-key="keyword_rules" data-type="text" class="hidden">' + esc(cfg.keyword_rules || '') + '</textarea>';
+  html += '<textarea data-plugin="' + name + '" data-key="regex_rules" data-type="text" class="hidden">' + esc(cfg.regex_rules || '') + '</textarea>';
+  html += '<textarea data-plugin="' + name + '" data-key="response_block_patterns" data-type="text" class="hidden">' + esc(cfg.response_block_patterns || '') + '</textarea>';
+  html += '<textarea data-plugin="' + name + '" data-key="response_rule_actions" data-type="text" class="hidden">' + esc(cfg.response_rule_actions || '') + '</textarea>';
+  return html;
+}
+
+function rerenderDataFilterStructuredEditor(pluginName) {
+  var plugin = (_plugins || []).find(function(item){ return item.name === pluginName; });
+  if (!plugin) return;
+  var host = document.getElementById('dfg-structured-' + pluginName);
+  if (!host) return;
+  host.innerHTML = renderDataFilterStructuredEditor(plugin);
+}
+
+function renderPluginSettings(p) {
+  if (!p.settings || !p.settings.length) return '';
+  var html = '<details class="pt-3"><summary class="text-xs text-gray-400 mb-2 cursor-pointer select-none">配置</summary><div class="mt-2">';
+  if (p.name === 'data_filter_guard') html += '<div id="dfg-structured-' + esc(p.name) + '">' + renderDataFilterStructuredEditor(p) + '</div>';
+  p.settings.forEach(function(def){
+    if (p.name === 'data_filter_guard' && DATA_FILTER_STRUCTURED_KEYS[def.key]) return;
+    var value = getSettingValue(def, p.config ? p.config[def.key] : undefined);
+    html += '<label class="block mb-2">';
+    if (def.type === 'boolean') {
+      html += '<div class="flex items-center justify-between gap-3">';
+      html += '<span class="text-xs text-gray-300 leading-5">' + esc(def.label || def.key) + '</span>';
+      html += '<input data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="boolean" type="checkbox" class="shrink-0" ' + (value ? 'checked' : '') + '>';
+      html += '</div>';
+    } else if (def.type === 'text') {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<textarea data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="text" rows="3" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(value || '') + '</textarea>';
+    } else if (def.type === 'number') {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<input data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="number" type="number" value="' + esc(value) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+    } else {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<input data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="string" type="text" value="' + esc(value || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+    }
+    if (def.description) html += '<div class="text-[11px] text-gray-500 mt-1">' + esc(def.description) + '</div>';
+    html += '</label>';
+  });
+  html += '<div class="flex items-center gap-2 mt-2">';
+  html += '<button onclick="savePluginConfig(\'' + esc(p.name) + '\')" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded cursor-pointer">保存配置</button>';
+  html += '<span id="plugin-config-msg-' + esc(p.name) + '" class="text-xs text-gray-500"></span>';
+  html += '</div></div></details>';
+  return html;
+}
+
+function applyDataFilterTemplate(pluginName, templateName) {
+  var tpl = DATA_FILTER_GUARD_TEMPLATES[templateName];
+  if (!tpl) return;
+  var plugin = (_plugins || []).find(function(item){ return item.name === pluginName; });
+  if (plugin) {
+    plugin.config = plugin.config || {};
+    Object.keys(tpl).forEach(function(key){ plugin.config[key] = tpl[key]; });
+  }
+  Object.keys(tpl).forEach(function(key){
+    var node = document.querySelector('[data-plugin="' + pluginName + '"][data-key="' + key + '"]');
+    if (!node) return;
+    var type = node.getAttribute('data-type');
+    if (type === 'boolean') node.checked = !!tpl[key];
+    else node.value = tpl[key];
+  });
+  if (pluginName === 'data_filter_guard') rerenderDataFilterStructuredEditor(pluginName);
+  var msg = document.getElementById('plugin-config-msg-' + pluginName);
+  if (msg) {
+    msg.textContent = '已填充模板，点击“保存配置”生效';
+    msg.className = 'text-xs text-cyan-400';
+  }
+}
+
+function addDataFilterRuleRow(pluginName, type) {
+  var containerId = type === 'keyword' ? 'dfg-keyword-rows-' + pluginName : (type === 'regex' ? 'dfg-regex-rows-' + pluginName : 'dfg-response-rows-' + pluginName);
+  var container = document.getElementById(containerId);
+  if (!container) return;
+  var row = type === 'response' ? {pattern:'', action:'default'} : {left:'', right:''};
+  container.insertAdjacentHTML('beforeend', renderDataFilterRuleRow(type, row));
+}
+
+function removeDataFilterRuleRow(btn) {
+  var row = btn.closest('.data-filter-row');
+  if (row) row.remove();
+}
+
+function syncDataFilterGuardEditors(pluginName) {
+  var keywordLines = [];
+  document.querySelectorAll('#dfg-keyword-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
+    var left = (row.querySelector('[data-col="left"]') || {}).value || '';
+    var right = (row.querySelector('[data-col="right"]') || {}).value || '';
+    left = left.trim(); right = right.trim();
+    if (left) keywordLines.push(left + '=' + right);
+  });
+  var regexLines = [];
+  document.querySelectorAll('#dfg-regex-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
+    var left = (row.querySelector('[data-col="left"]') || {}).value || '';
+    var right = (row.querySelector('[data-col="right"]') || {}).value || '';
+    left = left.trim(); right = right.trim();
+    if (left) regexLines.push(left + '=>' + right);
+  });
+  var responsePatterns = [];
+  var responseActions = [];
+  document.querySelectorAll('#dfg-response-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
+    var pattern = ((row.querySelector('[data-col="pattern"]') || {}).value || '').trim();
+    var action = ((row.querySelector('[data-col="action"]') || {}).value || 'default').trim();
+    if (!pattern) return;
+    responsePatterns.push(pattern);
+    if (action && action !== 'default') responseActions.push(pattern + '=>' + action);
+  });
+  var keywordNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="keyword_rules"]');
+  var regexNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="regex_rules"]');
+  var patternNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="response_block_patterns"]');
+  var actionNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="response_rule_actions"]');
+  if (keywordNode) keywordNode.value = keywordLines.join('\n');
+  if (regexNode) regexNode.value = regexLines.join('\n');
+  if (patternNode) patternNode.value = responsePatterns.join('\n');
+  if (actionNode) actionNode.value = responseActions.join('\n');
+}
 
 function loadPlugins() {
   fetch('/api/plugins').then(function(r){return r.json()}).then(function(data){
     _plugins = data;
-    document.getElementById('plugin-count').textContent = data.length;
-    renderPluginList(data);
+    fetchPluginConfigs(data).then(function(merged){
+      _plugins = merged;
+      document.getElementById('plugin-count').textContent = merged.length;
+      renderPluginList(merged);
+    });
   }).catch(function(e){
     document.getElementById('plugin-list').innerHTML = '<div class="text-xs text-red-400">加载失败: ' + esc(e.message) + '</div>';
   });
+}
+
+function fetchPluginConfigs(plugins) {
+  return Promise.all(plugins.map(function(p){
+    if (!p.settings || !p.settings.length) return Promise.resolve(p);
+    return fetch('/api/plugin-config/' + encodeURIComponent(p.name))
+      .then(function(r){ return r.ok ? r.json() : {}; })
+      .then(function(cfg){ p.config = cfg || {}; return p; })
+      .catch(function(){ p.config = {}; return p; });
+  }));
+}
+
+function savePluginConfig(name) {
+  var plugin = (_plugins || []).find(function(item){ return item.name === name; });
+  if (!plugin) return;
+  if (name === 'data_filter_guard') syncDataFilterGuardEditors(name);
+  var nodes = document.querySelectorAll('[data-plugin="' + name.replace(/"/g, '&quot;') + '"]');
+  var payload = {};
+  nodes.forEach(function(node){
+    var key = node.getAttribute('data-key');
+    var type = node.getAttribute('data-type');
+    if (type === 'boolean') payload[key] = !!node.checked;
+    else if (type === 'number') payload[key] = Number(node.value || 0);
+    else payload[key] = node.value;
+  });
+  var msg = document.getElementById('plugin-config-msg-' + name);
+  msg.textContent = '保存中...';
+  fetch('/api/plugin-config/' + encodeURIComponent(name), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, body: d}; }); })
+    .then(function(res){
+      if (res.ok && res.body.ok) {
+        msg.textContent = '已保存，当前进程立即生效';
+        msg.className = 'text-xs text-emerald-400';
+        loadPlugins();
+      } else {
+        msg.textContent = '保存失败';
+        msg.className = 'text-xs text-red-400';
+      }
+    }).catch(function(){
+      msg.textContent = '网络错误';
+      msg.className = 'text-xs text-red-400';
+    });
 }
 
 var CATEGORY_LABELS = {
@@ -83,7 +393,8 @@ function renderPluginList(plugins) {
         }
       }
 
-      html += '<div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">';
+      html += '<div class="bg-surface-light border border-border rounded-lg p-4">';
+      html += '<div class="flex items-center justify-between">';
       html += '<div class="flex-1 min-w-0">';
       html += '<div class="flex items-center gap-2 mb-1">';
       html += '<h4 class="text-sm font-semibold text-white">' + esc(p.name) + '</h4>';
@@ -106,7 +417,7 @@ function renderPluginList(plugins) {
       }
       html += '</div>';
 
-      html += '<div class="flex items-center gap-3 shrink-0 ml-4">';
+      html += '<div class="flex items-center self-center gap-3 shrink-0 ml-4">';
       if (p.required) {
         html += '<span class="text-xs text-gray-500">系统必需</span>';
       } else {
@@ -119,6 +430,12 @@ function renderPluginList(plugins) {
       }
       html += '</div>';
 
+      html += '</div>';
+      if (p.settings && p.settings.length) {
+        html += '<div class="mt-3 pt-3 border-t border-border">';
+        html += renderPluginSettings(p);
+        html += '</div>';
+      }
       html += '</div>';
     });
   }
