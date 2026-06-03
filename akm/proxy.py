@@ -141,11 +141,11 @@ async def forward_request(
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
-    客户端 stream=true 时流式返回，否则非流式返回。
-    内部统一向上游发 stream=true，边收边拼，减少首 token 延迟。
+    chat/messages/responses 支持流式；embeddings 始终走普通 JSON。
     """
     model = body.get("model", "")
-    client_wants_stream = body.get("stream", False)
+    supports_stream = api_path in {"chat/completions", "messages", "responses"}
+    client_wants_stream = body.get("stream", False) if supports_stream else False
     tries = 0
     tried_aliases: set[str] = set()
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
@@ -256,10 +256,10 @@ async def forward_request(
 
         agent = get_agent(key.get("provider", "openai"))
 
-        # ── 协议转换检测 ──
+        # ── 协议转换检测（embeddings 不参与协议转换）──
         target_api_path = agent.needs_conversion(api_path)
         adapter = None
-        if target_api_path and plugin_manager:
+        if api_path != "embeddings" and target_api_path and plugin_manager:
             # 从插件系统查找转换器：api_path 格式 → target_api_path 格式
             from_fmt = api_path.replace("/completions", "")
             to_fmt = target_api_path.replace("/completions", "")
@@ -302,12 +302,14 @@ async def forward_request(
         url = agent.resolve_url(key, upstream_api_path)
         headers = agent.build_headers(key, upstream_api_path)
 
-        # ── 内部统一向上游发 stream=true，边收边拼，减少首 token 延迟 ──
+        # ── 上游请求模式跟随客户端：流式接口按需走 SSE，其他接口直接请求 JSON ──
         upstream_body = adapter.convert_request(body) if adapter else dict(body)
 
-        upstream_body["stream"] = True
-        # 对 OpenAI Chat 流式显式请求 usage，提升 token 统计稳定性
-        if upstream_api_path == "chat/completions":
+        if supports_stream:
+            upstream_body["stream"] = client_wants_stream
+        # 对 OpenAI Chat 流式显式请求 usage，提升 token 统计稳定性。
+        # 非流式返回通常会自带完整 usage，这里不额外注入 stream_options。
+        if client_wants_stream and upstream_api_path == "chat/completions":
             stream_options = upstream_body.get("stream_options")
             if isinstance(stream_options, dict):
                 stream_options["include_usage"] = True
@@ -319,7 +321,7 @@ async def forward_request(
             t0 = time.time()
             try:
                 req = client.build_request("POST", url, json=upstream_body, headers=headers, timeout=120)
-                resp = await client.send(req, stream=True)
+                resp = await client.send(req, stream=client_wants_stream)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
                 action = await _handle_upstream_error(
@@ -423,27 +425,25 @@ async def forward_request(
                     "model": model,
                 }
 
-            # 非流式客户端：读完所有 chunk，拼接后返回
-            chunks = []
+            # 非流式客户端：直接读取上游普通 JSON 响应。
             try:
-                async for chunk in resp.aiter_bytes():
-                    chunks.append(chunk)
+                resp_body = (await resp.aread()).decode("utf-8", errors="replace")
             except Exception as e:
                 action = await _handle_upstream_error(
-                    plugin_manager, body, 0, "chunk", attempt, key
+                    plugin_manager, body, 0, "read", attempt, key
                 )
-                last_error = f"读取流式响应失败: {e}"
+                last_error = f"读取非流式响应失败: {e}"
                 await resp.aclose()
                 await _emit_on_response_meta({
                     "ok": False,
-                    "phase": "read_stream",
+                    "phase": "read_response",
                     "status_code": 0,
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
                     "latency_ms": int((time.time() - t0) * 1000),
                     "error": last_error,
-                    "error_type": "chunk",
+                    "error_type": "read",
                     "attempt": attempt,
                     "api_path": api_path,
                     "upstream_api_path": upstream_api_path,
@@ -456,13 +456,7 @@ async def forward_request(
             await resp.aclose()
 
             latency = int((time.time() - t0) * 1000)
-            resp_body = b"".join(chunks).decode("utf-8", errors="replace")
-            # chat/completions 非流式：统一将原始 SSE 交由协议插件聚合并转换，
-            # 未走转换插件时保持透传原始 SSE 文本。
-            if upstream_api_path == "chat/completions":
-                json_body = resp_body
-            else:
-                json_body = resp_body
+            json_body = resp_body
             # 协议转换：响应体格式转回客户端期望的格式
             if adapter:
                 json_body = adapter.convert_response(json_body)

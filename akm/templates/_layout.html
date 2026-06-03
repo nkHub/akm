@@ -8,6 +8,12 @@
 <script src="/static/tailwindcss.js"></script>
 <script src="/static/marked.min.js"></script>
 <script>
+try {
+  if (localStorage.getItem('akm.sidebar.collapsed') === '1') {
+    document.documentElement.classList.add('sidebar-collapsed');
+  }
+} catch (e) {}
+
 tailwind.config = {
   darkMode: 'class',
   theme: {

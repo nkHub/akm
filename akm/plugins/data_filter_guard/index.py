@@ -233,6 +233,7 @@ class Plugin(PluginBase):
         self._keyword_rules = self._parse_keyword_rules(cfg.get("keyword_rules", "") or "")
         self._regex_rules = self._parse_regex_rules(cfg.get("regex_rules", "") or "")
         self._request_text_paths = set(self._split_items(cfg.get("request_text_paths", "") or ""))
+        self._recent_message_scan_limit = max(0, int(cfg.get("recent_message_scan_limit", 5) or 5))
         self._enabled = cfg.get("enabled", True) is True
         self._enable_code_secret_guard = cfg.get("enable_code_secret_guard", False) is True
         self._code_secret_guard_mode = str(cfg.get("code_secret_guard_mode", "warn") or "warn").strip().lower()
@@ -395,9 +396,12 @@ class Plugin(PluginBase):
         if not self._request_text_paths:
             return True
         normalized = path.replace('.[', '[')
+        generalized = re.sub(r"\[\d+\]", "[]", normalized)
         for allowed in self._request_text_paths:
             candidate = allowed.replace('[]', '[0]')
             if normalized == allowed or normalized == candidate or normalized.startswith(candidate + '.'):
+                return True
+            if generalized == allowed or generalized.startswith(allowed + '.'):
                 return True
         return False
 
@@ -410,11 +414,27 @@ class Plugin(PluginBase):
         if not candidates:
             return True
         normalized = path.replace('.[', '[')
+        generalized = re.sub(r"\[\d+\]", "[]", normalized)
         for allowed in candidates:
             candidate = allowed.replace('[]', '[0]')
             if normalized == allowed or normalized == candidate or normalized.startswith(candidate + '.'):
                 return True
+            if generalized == allowed or generalized.startswith(allowed + '.'):
+                return True
         return False
+
+    def _should_scan_message_item(self, path: str, idx: int, total: int) -> bool:
+        """判断 `messages` 列表中的当前项是否需要进入文本扫描。"""
+        if path != "messages":
+            return True
+        if self._recent_message_scan_limit <= 0:
+            return True
+        start = max(0, total - self._recent_message_scan_limit)
+        return idx >= start
+
+    def _is_top_level_messages_list(self, path: str) -> bool:
+        """判断当前列表节点是否为请求顶层 `messages`。"""
+        return path == "messages"
 
     def _scan_code_secrets(self, text: str) -> list[dict]:
         """扫描字符串中的代码类敏感信息并返回命中列表。
@@ -557,7 +577,11 @@ class Plugin(PluginBase):
         if isinstance(value, list):
             changed = False
             result = []
+            total = len(value)
             for idx, item in enumerate(value):
+                if self._is_top_level_messages_list(path) and not self._should_scan_message_item(path, idx, total):
+                    result.append(item)
+                    continue
                 current_path = f"{path}[{idx}]" if path else f"[{idx}]"
                 new_item, sub_changed, blocked = self._mask_and_filter(item, current_path)
                 if blocked is not None:

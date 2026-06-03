@@ -84,6 +84,21 @@ if os.path.isdir(_static_dir):
 import re as _re
 _tpl_dir = os.path.join(os.path.dirname(__file__), "templates")
 
+
+def _build_trace_headers(request: Request) -> tuple[dict, str]:
+    """提取请求头中的来源线索，并返回对象与 JSON 文本。"""
+    trace_headers = {k.lower(): v for k, v in request.headers.items()}
+    trace_keys = [
+        "user-agent", "x-request-id", "x-stainless-os", "x-stainless-lang",
+        "x-stainless-package-version", "x-stainless-runtime", "x-stainless-runtime-version",
+        "x-forwarded-for", "x-real-ip", "origin", "referer", "host",
+    ]
+    trace_headers_json = json.dumps(
+        {k: trace_headers[k] for k in trace_keys if k in trace_headers},
+        ensure_ascii=False,
+    )
+    return trace_headers, trace_headers_json
+
 def _render_template(name: str, **kwargs) -> str:
     """读取模板文件，替换 {{ var }} 占位符，支持 {% extends %}, {% include %}, {% block %}"""
     # 为静态资源提供默认版本参数，前端可用于 querystring 破缓存，避免替换 logo 后仍命中旧缓存。
@@ -1013,8 +1028,15 @@ async def responses(request: Request):
     return await _handle_ai_request(request, "responses")
 
 
+@app.post("/v1/embeddings")
+@app.post("/embeddings")
+async def embeddings(request: Request):
+    """OpenAI Embeddings API 端点。"""
+    return await _handle_ai_request(request, "embeddings")
+
+
 async def _handle_ai_request(request: Request, api_path: str):
-    """通用 AI API 请求处理：chat/completions 和 responses 复用"""
+    """通用 AI API 请求处理：chat/completions / messages / responses / embeddings 复用"""
     content_type = request.headers.get("Content-Type", "")
     if "application/json" not in content_type:
         return JSONResponse(
@@ -1025,17 +1047,7 @@ async def _handle_ai_request(request: Request, api_path: str):
     body = await request.json()
     # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
     # starlette 的 headers 是大小写不敏感的 MutableHeaders
-    _trace_headers = {k.lower(): v for k, v in request.headers.items()}
-    # 只保留有溯源价值的头，去除 Authorization（太长且敏感）
-    _trace_keys = [
-        "user-agent", "x-request-id", "x-stainless-os", "x-stainless-lang",
-        "x-stainless-package-version", "x-stainless-runtime", "x-stainless-runtime-version",
-        "x-forwarded-for", "x-real-ip", "origin", "referer", "host",
-    ]
-    request_headers_json = json.dumps(
-        {k: _trace_headers[k] for k in _trace_keys if k in _trace_headers},
-        ensure_ascii=False,
-    )
+    _trace_headers, request_headers_json = _build_trace_headers(request)
     # 读取日志存储配置
     cfg = load_config()
     save_request_body = cfg.get("log_request_body", False)

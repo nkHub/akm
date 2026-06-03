@@ -75,6 +75,38 @@ async def test_chat_completions_no_keys(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_embeddings_forward_success(monkeypatch):
+    """/v1/embeddings 应复用通用转发链路返回普通 JSON。"""
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        assert api_path == "embeddings"
+        return {
+            "status_code": 200,
+            "body": '{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"total_tokens":8}}',
+            "key_alias": "embed-key",
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "error": "",
+            "latency_ms": 80,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/embeddings",
+            json={"model": "text-embedding-3-small", "input": "hello"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data"][0]["object"] == "embedding"
+    assert data["model"] == "text-embedding-3-small"
+
+
+@pytest.mark.asyncio
 async def test_health_endpoint():
     """健康检查端点"""
     transport = ASGITransport(app=app)

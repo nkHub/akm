@@ -8,6 +8,23 @@
   <button onclick="switchDays(30)" id="btn-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">30d</button>
   <span id="stat-cached-at" class="text-xs text-gray-600 ml-auto">—</span>
 </div>
+<script>
+try {
+  var savedDashboardDays = parseInt(localStorage.getItem('akm_dashboard_days') || '1', 10);
+  if (savedDashboardDays === 1 || savedDashboardDays === 7 || savedDashboardDays === 30) {
+    window.__akmDashboardInitialDays = savedDashboardDays;
+    [1, 7, 30].forEach(function(day) {
+      var btn = document.getElementById('btn-' + day + 'd');
+      if (!btn) return;
+      if (day === savedDashboardDays) {
+        btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer';
+      } else {
+        btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer';
+      }
+    });
+  }
+} catch (e) {}
+</script>
 <!-- 统计概览 -->
 <!-- 骨架屏 -->
 <div id="dashboard-skeleton">
@@ -94,6 +111,10 @@ var _currentDays = 1;
 var DASHBOARD_DAYS_KEY = 'akm_dashboard_days';
 
 function loadDaysFilter() {
+  if (window.__akmDashboardInitialDays === 1 || window.__akmDashboardInitialDays === 7 || window.__akmDashboardInitialDays === 30) {
+    _currentDays = window.__akmDashboardInitialDays;
+    return;
+  }
   try {
     var saved = parseInt(localStorage.getItem(DASHBOARD_DAYS_KEY) || '1', 10);
     if (saved === 1 || saved === 7 || saved === 30) {
