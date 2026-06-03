@@ -38,12 +38,22 @@ class FakeTestResponse:
 
 def _make_send_mock(client_mock, responses):
     """让 client.send 按顺序返回 FakeStreamResponse"""
+    calls = []
+
+    client_mock.build_request = MagicMock(
+        side_effect=lambda method, url, json=None, headers=None, timeout=None: httpx.Request(
+            method, url, json=json, headers=headers
+        )
+    )
+
     async def send_side_effect(req, stream=False):
+        calls.append({"req": req, "stream": stream})
         if not responses:
             raise StopIteration("no more mock responses")
         return responses.pop(0)
 
     client_mock.send = AsyncMock(side_effect=send_side_effect)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -54,7 +64,7 @@ async def test_forward_success(monkeypatch):
         "base_url": "https://api.openai.com",
     }))
     mock_client = AsyncMock()
-    _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"hi"}}]}')])
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"hi"}}]}')])
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
@@ -62,6 +72,8 @@ async def test_forward_success(monkeypatch):
     )
     assert result["status_code"] == 200
     assert result["key_alias"] == "ok"
+    assert send_calls[0]["stream"] is False
+    assert send_calls[0]["req"].content.decode("utf-8").find('"stream":false') != -1
 
 
 @pytest.mark.asyncio
@@ -251,7 +263,7 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
 
     # 构造上游成功返回（非流式路径）
     mock_client = AsyncMock()
-    _make_send_mock(mock_client, [FakeStreamResponse(200, "hello")])
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, "hello")])
 
     result = await forward_request(
         body={"model": "claude-3", "input": "hi", "stream": False},
@@ -263,6 +275,57 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
     assert result["status_code"] == 200
     # 两段 convert_response：second 后 first，最终应为 hello|chat|resp
     assert result["body"] == "hello|chat|resp"
+    assert send_calls[0]["stream"] is False
+    assert send_calls[0]["req"].content.decode("utf-8").find('"stream":false') != -1
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_request_still_forces_upstream_sse(monkeypatch):
+    """客户端要求流式时，仍应继续向上游发起 SSE 请求。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "ok", "provider": "openai", "api_key": "sk-xxx",
+        "base_url": "https://api.openai.com",
+    }))
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"delta":{"content":"hi"}}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}], "stream": True},
+        client=mock_client,
+    )
+
+    assert result["status_code"] == 200
+    assert result["stream"] is True
+    assert send_calls[0]["stream"] is True
+    payload = send_calls[0]["req"].content.decode("utf-8")
+    assert '"stream":true' in payload
+    assert '"include_usage":true' in payload
+
+
+@pytest.mark.asyncio
+async def test_forward_embeddings_request_does_not_inject_stream(monkeypatch):
+    """embeddings 转发不应强行注入 stream 字段，也不应走 SSE 请求。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "embed", "provider": "openai", "api_key": "sk-embed",
+        "base_url": "https://api.openai.com",
+    }))
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"object":"list","data":[],"model":"text-embedding-3-small"}')])
+
+    result = await forward_request(
+        body={"model": "text-embedding-3-small", "input": "hello"},
+        client=mock_client,
+        api_path="embeddings",
+    )
+
+    assert result["status_code"] == 200
+    assert send_calls[0]["stream"] is False
+    payload = send_calls[0]["req"].content.decode("utf-8")
+    assert '"stream":' not in payload
 
 
 @pytest.mark.asyncio

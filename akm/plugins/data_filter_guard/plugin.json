@@ -56,6 +56,13 @@
       "description": "仅对这些路径下的字符串做关键词/正则替换，支持 messages[].content 这种简写；留空表示处理所有字符串"
     },
     {
+      "key": "recent_message_scan_limit",
+      "label": "最近消息扫描条数",
+      "type": "number",
+      "default": 5,
+      "description": "对 messages[].content 仅扫描最近 N 条消息，默认 5；设为 0 表示扫描全部历史消息"
+    },
+    {
       "key": "enable_code_secret_guard",
       "label": "启用代码敏感识别",
       "type": "boolean",

@@ -41,6 +41,51 @@
     <button onclick="refreshLogs(1)" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">刷新</button>
   </div>
 </div>
+<script>
+try {
+  var savedLogFilters = JSON.parse(localStorage.getItem('akm_log_filters') || '{}');
+  window.__akmInitialLogFilters = savedLogFilters;
+
+  var savedStatus = savedLogFilters.status;
+  if (savedStatus === 'success' || savedStatus === 'failed') {
+    var statusButton = document.getElementById('btn-status');
+    if (statusButton) {
+      statusButton.textContent = savedStatus === 'success' ? '成功' : '失败';
+    }
+  }
+
+  var savedOrderAsc = savedLogFilters.orderAsc === true;
+  var orderButton = document.getElementById('btn-order');
+  if (orderButton) {
+    orderButton.textContent = savedOrderAsc ? '↑ 正序' : '↓ 倒序';
+  }
+
+  var hideEmptyToggle = document.getElementById('hide-empty-toggle');
+  if (hideEmptyToggle && savedLogFilters.hideEmpty === true) {
+    hideEmptyToggle.classList.add('switch-on');
+    hideEmptyToggle.classList.remove('switch-off');
+    hideEmptyToggle.querySelector('.switch-track').classList.replace('bg-gray-600', 'bg-indigo-600');
+  }
+
+  var savedDays = savedLogFilters.days;
+  [1, 7, 30].forEach(function(day) {
+    var dayButton = document.getElementById('btn-log-' + day + 'd');
+    if (!dayButton) return;
+    if (day === savedDays) {
+      dayButton.className = 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
+    } else {
+      dayButton.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
+    }
+  });
+
+  if (savedLogFilters.alias) {
+    var providerLabel = document.getElementById('provider-label');
+    if (providerLabel) {
+      providerLabel.textContent = savedLogFilters.alias;
+    }
+  }
+} catch (e) {}
+</script>
 <div id="log-table-container" class="rounded-lg border border-border overflow-x-auto"></div>
 <div id="log-empty" class="hidden text-center py-16 text-gray-500">暂无日志</div>
 <div id="log-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></div>
@@ -285,6 +330,15 @@ function saveFilters() {
   } catch(e) {}
 }
 function loadFilters() {
+  if (window.__akmInitialLogFilters && typeof window.__akmInitialLogFilters === 'object') {
+    var initial = window.__akmInitialLogFilters;
+    if (initial.status) _statusFilter = initial.status;
+    if (initial.days !== undefined) _currentDays = initial.days;
+    if (initial.hideEmpty !== undefined) _hideEmpty = initial.hideEmpty;
+    if (initial.orderAsc !== undefined) _orderAsc = initial.orderAsc;
+    if (initial.alias !== undefined) _currentAlias = initial.alias;
+    return;
+  }
   try {
     var saved = JSON.parse(localStorage.getItem(FILTER_KEY) || '{}');
     if (saved.status) _statusFilter = saved.status;

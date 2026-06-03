@@ -1,16 +1,17 @@
 <script>
-function toggleSidebar() {
-  var sidebar = document.getElementById('sidebar');
-  var labels = document.querySelectorAll('.sidebar-label');
-  var brand = document.querySelector('.sidebar-brand');
-  if (sidebar.style.width === '60px') {
-    sidebar.style.width = '220px';
-    labels.forEach(function(l) { l.style.display = ''; });
-    brand.style.display = '';
+var SIDEBAR_COLLAPSED_KEY = 'akm.sidebar.collapsed';
+
+function applySidebarState(collapsed) {
+  if (collapsed) {
+    document.documentElement.classList.add('sidebar-collapsed');
   } else {
-    sidebar.style.width = '60px';
-    labels.forEach(function(l) { l.style.display = 'none'; });
-    brand.style.display = 'none';
+    document.documentElement.classList.remove('sidebar-collapsed');
   }
+}
+
+function toggleSidebar() {
+  var collapsed = !document.documentElement.classList.contains('sidebar-collapsed');
+  applySidebarState(collapsed);
+  localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
 }
 </script>

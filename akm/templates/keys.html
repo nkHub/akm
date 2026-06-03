@@ -7,6 +7,7 @@
 <div id="key-list-container"></div>
 <div id="key-empty" class="hidden text-center py-16 text-gray-500">暂无 Key</div>
 <div id="key-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></div>
+<div id="copy-toast" class="hidden fixed right-6 bottom-6 z-50 rounded-lg border border-indigo-500/30 bg-surface-light px-3 py-2 text-xs text-indigo-200 shadow-lg">模型名已复制</div>
 {% endblock %}
 
 {% block extra_html %}
@@ -109,6 +110,28 @@ function formatProviderName(name) {
   return m[name] || name;
 }
 
+var _copyToastTimer = null;
+
+function showCopyToast(message) {
+  var toast = document.getElementById('copy-toast');
+  if (!toast) return;
+  toast.textContent = message || '模型名已复制';
+  toast.classList.remove('hidden');
+  if (_copyToastTimer) clearTimeout(_copyToastTimer);
+  _copyToastTimer = setTimeout(function() {
+    toast.classList.add('hidden');
+  }, 1600);
+}
+
+function copyModelName(modelName) {
+  if (!modelName) return;
+  navigator.clipboard.writeText(modelName).then(function() {
+    showCopyToast('模型名已复制');
+  }).catch(function() {
+    showCopyToast('复制失败，请手动复制');
+  });
+}
+
 function loadProviders() {
   fetch('/api/agents').then(function(r){ return r.json(); }).then(function(json){
     var agents = json.data || [];
@@ -147,7 +170,8 @@ function renderKeys() {
       modelTags = '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>';
     } else {
       (k.models||'').split(',').filter(Boolean).forEach(function(m){
-        modelTags += '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-400">'+esc(m.trim())+'</span>';
+        var modelName = m.trim();
+        modelTags += '<button type="button" onclick="copyModelName(' + JSON.stringify(modelName).replace(/"/g, '&quot;') + ')" title="点击复制模型名" class="inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-400 hover:text-indigo-300 hover:border-indigo-500 transition-colors cursor-pointer">'+esc(modelName)+'</button>';
       });
     }
 

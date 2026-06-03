@@ -8,6 +8,9 @@
   .status-disabled { background: #991b1b; color: #fecaca; }
   .status-rate_limited { background: #854d0e; color: #fde68a; }
   .sidebar-transition { transition: width 0.2s ease; }
+  html.sidebar-collapsed #sidebar { width: 60px !important; }
+  html.sidebar-collapsed .sidebar-label,
+  html.sidebar-collapsed .sidebar-brand { display: none !important; }
   .switch-track { width: 44px; height: 24px; border-radius: 12px; transition: background 0.2s; }
   .switch-thumb { width: 18px; height: 18px; border-radius: 50%; transition: transform 0.2s; transform: translateX(3px); }
   .switch-on .switch-thumb { transform: translateX(23px); }

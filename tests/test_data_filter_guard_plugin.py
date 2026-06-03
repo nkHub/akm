@@ -122,6 +122,83 @@ async def test_data_filter_guard_supports_regex_rules_and_path_scope():
 
 
 @pytest.mark.asyncio
+async def test_data_filter_guard_only_scans_recent_messages_by_default():
+    plugin = _load_plugin_class()()
+    plugin.config = {
+        "enabled": True,
+        "request_text_paths": "messages[].content",
+        "regex_rules": "1[3-9]\\d{9}=>[PHONE]",
+        "recent_message_scan_limit": 1,
+    }
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "messages": [
+            {"role": "user", "content": "历史手机号 13800138000"},
+            {"role": "user", "content": "最新手机号 13700137000"},
+        ],
+    }
+    out = await plugin.on_request(req)
+    assert out is not None
+    assert out["messages"][0]["content"] == "历史手机号 13800138000"
+    assert out["messages"][1]["content"] == "最新手机号 [PHONE]"
+
+
+@pytest.mark.asyncio
+async def test_data_filter_guard_can_scan_full_message_history_when_limit_is_zero():
+    plugin = _load_plugin_class()()
+    plugin.config = {
+        "enabled": True,
+        "request_text_paths": "messages[].content",
+        "regex_rules": "1[3-9]\\d{9}=>[PHONE]",
+        "recent_message_scan_limit": 0,
+    }
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "messages": [
+            {"role": "user", "content": "历史手机号 13800138000"},
+            {"role": "user", "content": "最新手机号 13700137000"},
+        ],
+    }
+    out = await plugin.on_request(req)
+    assert out is not None
+    assert out["messages"][0]["content"] == "历史手机号 [PHONE]"
+    assert out["messages"][1]["content"] == "最新手机号 [PHONE]"
+
+
+@pytest.mark.asyncio
+async def test_data_filter_guard_can_scan_only_recent_five_messages():
+    plugin = _load_plugin_class()()
+    plugin.config = {
+        "enabled": True,
+        "request_text_paths": "messages[].content",
+        "regex_rules": "1[3-9]\\d{9}=>[PHONE]",
+        "recent_message_scan_limit": 5,
+    }
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "messages": [
+            {"role": "user", "content": "m1 13800138000"},
+            {"role": "user", "content": "m2 13700137000"},
+            {"role": "user", "content": "m3 13600136000"},
+            {"role": "user", "content": "m4 13500135000"},
+            {"role": "user", "content": "m5 13400134000"},
+            {"role": "user", "content": "m6 13300133000"},
+        ],
+    }
+    out = await plugin.on_request(req)
+    assert out is not None
+    assert out["messages"][0]["content"] == "m1 13800138000"
+    assert out["messages"][1]["content"] == "m2 [PHONE]"
+    assert out["messages"][5]["content"] == "m6 [PHONE]"
+
+
+@pytest.mark.asyncio
 async def test_data_filter_guard_common_regex_rules_can_mask_sensitive_values():
     plugin = _load_plugin_class()()
     plugin.config = {
