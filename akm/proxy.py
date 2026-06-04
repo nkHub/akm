@@ -4,7 +4,13 @@ import time
 import json
 import asyncio
 import httpx
-from akm.key_pool import pick_key_async, pick_wildcard_key_async, mark_rate_limited, set_status
+from akm.key_pool import (
+    pick_key_async,
+    pick_wildcard_key_async,
+    mark_rate_limited,
+    set_status,
+    key_model_list,
+)
 from akm.db import get_connection
 from akm.agent import get_agent
 
@@ -67,13 +73,16 @@ def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     limited = conn.execute(
         "SELECT COUNT(*) FROM keys WHERE status = 'rate_limited'"
     ).fetchone()[0]
-    # 查有哪些 model 匹配的 key 但被禁用了
-    matching_disabled = conn.execute(
-        """SELECT alias FROM keys
-           WHERE status != 'active'
-             AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')""",
-        (model,),
-    ).fetchall()
+    # 这里不能再沿用旧 SQL 的 `models='*'` 全通配语义。
+    # wildcard key 只有在 provider_models 中显式包含当前模型时，才算“模型匹配”。
+    matching_disabled = []
+    for row in conn.execute(
+        "SELECT alias, models, provider_models, status FROM keys WHERE status != 'active'"
+    ).fetchall():
+        item = dict(row)
+        if model not in set(key_model_list(item)):
+            continue
+        matching_disabled.append(item["alias"])
     conn.close()
 
     parts = [f"没有可用的 API key (model={model})"]
@@ -82,14 +91,13 @@ def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     else:
         parts.append(f"共{total}个Key: active={active}, disabled={disabled}, rate_limited={limited}")
         if matching_disabled:
-            aliases = [r["alias"] for r in matching_disabled]
-            parts.append(f"模型匹配但不可用: {', '.join(aliases)}")
+            parts.append(f"模型匹配但不可用: {', '.join(matching_disabled)}")
         elif tried_aliases:
             parts.append(f"模型匹配 key 已尝试但全部失败: {', '.join(sorted(tried_aliases))}")
         elif active == 0:
             parts.append("所有 Key 均被禁用或限流")
         else:
-            parts.append("没有 Key 的 models 匹配该模型，也没有 models='*' 的通配 Key")
+            parts.append("没有 Key 的 models 匹配该模型，也没有 provider_models 包含该模型的 wildcard Key")
     return " | ".join(parts)
 
 
@@ -537,15 +545,21 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
     """
     agent = get_agent(key.get("provider", "openai"))
 
-    raw_models = str(key.get("models") or "*").strip()
-    if raw_models == "*":
-        provider_models = key.get("provider_models") or []
-        if isinstance(provider_models, list) and provider_models:
-            model = str(provider_models[0] or "").strip()
-        else:
-            model = "gpt-3.5-turbo"
-    else:
-        model = raw_models.split(",")[0].strip() or "gpt-3.5-turbo"
+    resolved_models = key_model_list(key)
+    if not resolved_models:
+        return {
+            "ok": False,
+            "url": "",
+            "model": "",
+            "api_path": "",
+            "status_code": 0,
+            "latency_ms": 0,
+            "error": "该 Key 当前没有可用模型列表，请先保存或刷新模型",
+            "response_body": "",
+            "attempted_paths": [],
+            "fallback_used": False,
+        }
+    model = str(resolved_models[0] or "").strip()
 
     if agent.supports_responses:
         candidate_paths = ["responses"]

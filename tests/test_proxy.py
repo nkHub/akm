@@ -1,8 +1,23 @@
 import pytest
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 import httpx
-from akm.proxy import forward_request, test_key_connectivity
+from akm.proxy import forward_request, test_key_connectivity, _diagnose_no_key
 from akm.agent import AGENT_REGISTRY
+from akm.db import get_connection, init_db
+from akm.key_pool import add_key, set_status
+
+
+@pytest.fixture(autouse=True)
+def setup_db(monkeypatch):
+    """每个测试使用独立数据库，避免诊断类测试互相污染。"""
+    tmpdir = tempfile.mkdtemp()
+    monkeypatch.setattr("akm.db.DB_DIR", tmpdir)
+    monkeypatch.setattr("akm.key_pool.SECRET_DIR", tmpdir)
+    monkeypatch.setattr("akm.key_pool._cipher", None)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
 
 
 class FakeStreamResponse:
@@ -182,6 +197,18 @@ async def test_forward_all_keys_exhausted(monkeypatch):
     )
     assert result["status_code"] == 503
     assert "没有可用" in result["error"]
+
+
+def test_diagnose_no_key_ignores_wildcard_without_provider_models():
+    """未同步 provider_models 的 wildcard key 不应再被诊断为模型匹配。"""
+    add_key("wild", "openai", "sk-wild", models="*")
+    add_key("disabled-exact", "openai", "sk-exact", models="gpt-4")
+    set_status("disabled-exact", "disabled")
+
+    message = _diagnose_no_key("gpt-4")
+
+    assert "模型匹配但不可用: disabled-exact" in message
+    assert "wild" not in message
 
 
 @pytest.mark.asyncio
@@ -643,23 +670,8 @@ async def test_test_key_connectivity_wildcard_uses_first_provider_model(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_test_key_connectivity_wildcard_without_provider_models_falls_back(monkeypatch):
-    """未同步 provider 模型列表时，保留默认测试模型兜底行为。"""
-
-    called = []
-
-    class DummyAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json=None, headers=None, timeout=None):
-            called.append(json)
-            return FakeTestResponse(200, '{"id":"ok"}')
-
-    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+async def test_test_key_connectivity_wildcard_without_provider_models_errors(monkeypatch):
+    """未同步 provider 模型列表时，应明确提示先同步模型列表。"""
 
     result = await test_key_connectivity({
         "alias": "wild",
@@ -670,6 +682,7 @@ async def test_test_key_connectivity_wildcard_without_provider_models_falls_back
         "provider_models": [],
     })
 
-    assert result["ok"] is True
-    assert result["model"] == "gpt-3.5-turbo"
-    assert called[0]["model"] == "gpt-3.5-turbo"
+    assert result["ok"] is False
+    assert result["model"] == ""
+    assert result["attempted_paths"] == []
+    assert "请先保存或刷新模型" in result["error"]
