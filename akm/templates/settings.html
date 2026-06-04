@@ -234,7 +234,7 @@ function loadLogStats() {
     document.getElementById('log-stats').textContent = '共 ' + json.total.toLocaleString() + ' 条审计日志';
   }).catch(function(){ document.getElementById('log-stats').textContent = '加载失败'; });
   fetch('/api/logs/size').then(function(r){return r.json()}).then(function(data){
-    document.getElementById('log-size').textContent = '（数据库 ' + formatSize(data.size || 0) + '）';
+    document.getElementById('log-size').textContent = '（缓存 ' + formatSize(data.cache_size || data.size || 0) + '：数据库 ' + formatSize(data.db_size || 0) + '，日志 ' + formatSize(data.log_size || 0) + '）';
   }).catch(function(){});
 }
 

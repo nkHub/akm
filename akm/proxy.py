@@ -73,16 +73,38 @@ def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     limited = conn.execute(
         "SELECT COUNT(*) FROM keys WHERE status = 'rate_limited'"
     ).fetchone()[0]
-    # 这里不能再沿用旧 SQL 的 `models='*'` 全通配语义。
-    # wildcard key 只有在 provider_models 中显式包含当前模型时，才算“模型匹配”。
+    # 这里显式展开每个 key 的候选判定结果，便于事后复查“为什么当时没有选中某个 key”。
     matching_disabled = []
+    candidate_details = []
     for row in conn.execute(
-        "SELECT alias, models, provider_models, status FROM keys WHERE status != 'active'"
+        "SELECT alias, models, provider_models, status FROM keys ORDER BY alias ASC"
     ).fetchall():
         item = dict(row)
-        if model not in set(key_model_list(item)):
-            continue
-        matching_disabled.append(item["alias"])
+        alias = str(item.get("alias") or "")
+        status = str(item.get("status") or "")
+        models = str(item.get("models") or "").strip()
+        model_list = key_model_list(item)
+        if status != "active" and model in set(model_list):
+            matching_disabled.append(alias)
+
+        if not model_list:
+            if models == "*":
+                reason = "wildcard_no_provider_models"
+            else:
+                reason = "empty_models"
+        elif model not in set(model_list):
+            reason = "model_not_matched"
+        elif status == "disabled":
+            reason = "disabled"
+        elif status == "rate_limited":
+            reason = "rate_limited"
+        elif tried_aliases and alias in tried_aliases:
+            reason = "tried_and_failed"
+        elif status == "active":
+            reason = "eligible"
+        else:
+            reason = status or "unknown"
+        candidate_details.append(f"{alias}:{reason}")
     conn.close()
 
     parts = [f"没有可用的 API key (model={model})"]
@@ -98,6 +120,8 @@ def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
             parts.append("所有 Key 均被禁用或限流")
         else:
             parts.append("没有 Key 的 models 匹配该模型，也没有 provider_models 包含该模型的 wildcard Key")
+        if candidate_details:
+            parts.append(f"候选判定: {', '.join(candidate_details)}")
     return " | ".join(parts)
 
 

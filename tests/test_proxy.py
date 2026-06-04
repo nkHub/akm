@@ -208,7 +208,23 @@ def test_diagnose_no_key_ignores_wildcard_without_provider_models():
     message = _diagnose_no_key("gpt-4")
 
     assert "模型匹配但不可用: disabled-exact" in message
-    assert "wild" not in message
+    assert "wildcard_no_provider_models" in message
+    assert "模型匹配但不可用: disabled-exact, wild" not in message
+
+
+def test_diagnose_no_key_includes_candidate_reasons():
+    """失败诊断应包含每个候选 key 的判定原因，便于事后复查。"""
+    add_key("wild-empty", "openai", "sk-wild", models="*")
+    add_key("disabled-exact", "openai", "sk-exact", models="gpt-4")
+    add_key("active-miss", "openai", "sk-miss", models="gpt-5")
+    set_status("disabled-exact", "disabled")
+
+    message = _diagnose_no_key("gpt-4")
+
+    assert "候选判定:" in message
+    assert "active-miss:model_not_matched" in message
+    assert "disabled-exact:disabled" in message
+    assert "wild-empty:wildcard_no_provider_models" in message
 
 
 @pytest.mark.asyncio

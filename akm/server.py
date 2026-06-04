@@ -7,6 +7,7 @@ import time
 import os
 import sys
 import traceback
+from datetime import datetime
 from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, Query, UploadFile
@@ -23,6 +24,7 @@ from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.plugins.plugin_manager import PluginManager
+from akm.db import get_keys_log_path
 from akm.usage_flags import (
     FLAG_COUNT_TOKENS_FALLBACK,
     FLAG_USAGE_FALLBACK_ADAPTER,
@@ -311,6 +313,34 @@ def _mask_key(api_key: str) -> str:
     return api_key[:8] + "..." if len(api_key) > 8 else api_key
 
 
+def _sanitize_key_snapshot(key: dict | None) -> dict:
+    """生成适合写入 keys.log 的 key 快照，显式排除敏感字段。"""
+    if not isinstance(key, dict):
+        return {}
+    return {
+        "alias": str(key.get("alias") or ""),
+        "provider": str(key.get("provider") or ""),
+        "base_url": str(key.get("base_url") or ""),
+        "models": str(key.get("models") or ""),
+        "provider_models": key.get("provider_models") if isinstance(key.get("provider_models"), list) else [],
+        "auth_header": str(key.get("auth_header") or ""),
+        "priority": int(key.get("priority", 0) or 0),
+        "status": str(key.get("status") or ""),
+    }
+
+
+def _write_key_change_log(event: str, alias: str, details: dict | None = None) -> None:
+    """将 Key 配置变更追加写入 ~/.akm/keys.log，便于线下复查。"""
+    payload = {
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "event": str(event or "unknown"),
+        "alias": str(alias or ""),
+        "details": details or {},
+    }
+    with open(get_keys_log_path(), "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 @app.get("/api/keys")
 async def api_list_keys():
     """列出所有 key（api_key 脱敏）"""
@@ -378,6 +408,15 @@ async def api_add_key(request: Request):
             auth_header=payload["auth_header"],
             priority=payload["priority"],
         )
+        created = get_key(payload["alias"])
+        _write_key_change_log(
+            event="key_created",
+            alias=payload["alias"],
+            details={
+                "after": _sanitize_key_snapshot(created),
+                "api_key_updated": True,
+            },
+        )
         return {"ok": True, "alias": payload["alias"], "provider_models_count": len(payload["provider_models"])}
     except ValueError as e:
         message = str(e)
@@ -399,6 +438,8 @@ async def api_update_key(alias: str, request: Request):
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
+    before = _sanitize_key_snapshot(existing)
+
     set_provider(alias, payload["provider"])
     set_base_url(alias, payload["base_url"] or "")
     set_auth_header(alias, payload["auth_header"])
@@ -407,6 +448,17 @@ async def api_update_key(alias: str, request: Request):
     set_provider_models(alias, payload["provider_models"])
     if "api_key" in body and body.get("api_key"):
         set_api_key(alias, payload["api_key"])
+
+    after = get_key(alias)
+    _write_key_change_log(
+        event="key_updated",
+        alias=alias,
+        details={
+            "before": before,
+            "after": _sanitize_key_snapshot(after),
+            "api_key_updated": bool("api_key" in body and body.get("api_key")),
+        },
+    )
 
     return {"ok": True, "alias": alias, "provider_models_count": len(payload["provider_models"])}
 
@@ -423,14 +475,31 @@ async def api_toggle_status(alias: str, request: Request):
     if status not in ("active", "disabled"):
         return JSONResponse(status_code=400, content={"detail": "status 必须为 active 或 disabled"})
 
+    before_status = existing.get("status", "")
     set_status(alias, status)
+    _write_key_change_log(
+        event="key_status_changed",
+        alias=alias,
+        details={
+            "before_status": before_status,
+            "after_status": status,
+        },
+    )
     return {"ok": True, "alias": alias, "status": status}
 
 
 @app.delete("/api/keys/{alias}")
 async def api_delete_key(alias: str):
     """删除指定 key"""
+    existing = get_key(alias)
     if remove_key(alias):
+        _write_key_change_log(
+            event="key_deleted",
+            alias=alias,
+            details={
+                "before": _sanitize_key_snapshot(existing),
+            },
+        )
         return {"ok": True, "alias": alias}
     return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
 
@@ -466,6 +535,7 @@ async def api_refresh_key_provider_models():
     failed = []
     for key in list_keys():
         try:
+            before_models = list(key.get("provider_models") or [])
             provider_models = await _fetch_provider_models(
                 key.get("provider", ""),
                 key.get("api_key", ""),
@@ -473,8 +543,25 @@ async def api_refresh_key_provider_models():
                 key.get("auth_header") or "Bearer {api_key}",
             )
             set_provider_models(key["alias"], provider_models)
+            _write_key_change_log(
+                event="key_provider_models_refreshed",
+                alias=key["alias"],
+                details={
+                    "before_provider_models": before_models,
+                    "after_provider_models": provider_models,
+                    "before_count": len(before_models),
+                    "after_count": len(provider_models),
+                },
+            )
             refreshed += 1
         except ValueError as exc:
+            _write_key_change_log(
+                event="key_provider_models_refresh_failed",
+                alias=key["alias"],
+                details={
+                    "error": str(exc),
+                },
+            )
             failed.append({
                 "alias": key["alias"],
                 "error": str(exc),
@@ -737,7 +824,7 @@ def _get_stats(days: int) -> dict:
     day_offset = 1 - days
     rows = conn.execute(
         """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                  provider, model, key_alias, timestamp, response_body
+                  provider, model, key_alias, timestamp, response_body, request_headers
            FROM audit_logs
            WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
            ORDER BY id DESC""",
@@ -745,7 +832,7 @@ def _get_stats(days: int) -> dict:
     ).fetchall()
     conn.close()
 
-    total_requests = len(rows)
+    total_requests = 0
     total_prompt = 0
     total_completion = 0
     total_tokens = 0
@@ -757,22 +844,40 @@ def _get_stats(days: int) -> dict:
 
     for row in rows:
         r = dict(row)
+        key_alias = str(r.get("key_alias") or "").strip()
+        # 首页统计只关注真正落到某个 key 上的请求。
+        # 没有 key_alias 的记录通常是选 key 失败或前置报错，不应混入总量与分组统计。
+        if not key_alias:
+            continue
+        total_requests += 1
         p = r.get("prompt_tokens", 0) or 0
         c = r.get("completion_tokens", 0) or 0
         t = r.get("total_tokens", 0) or 0
         cached = r.get("cached_tokens", 0) or 0
+        ignore_estimated_tokens = False
+        try:
+            headers_obj = json.loads(r.get("request_headers") or "{}")
+            flags_raw = str(headers_obj.get("x-akm-flags") or "")
+            flags = {x.strip() for x in flags_raw.split(",") if x.strip()}
+            ignore_estimated_tokens = FLAG_USAGE_ESTIMATED_LIGHT in flags
+        except (json.JSONDecodeError, TypeError):
+            ignore_estimated_tokens = False
         # 兼容旧数据：列值为 0 但有 response_body 时，仍从 body 提取
-        if not t and r.get("response_body"):
+        if not ignore_estimated_tokens and not t and r.get("response_body"):
             tokens = _extract_tokens(r["response_body"])
             if tokens:
                 p = tokens.get("prompt_tokens", 0) or p
                 c = tokens.get("completion_tokens", 0) or c
                 t = tokens.get("total_tokens", 0) or t
                 cached = tokens.get("cached_tokens", 0) or cached
+        if ignore_estimated_tokens:
+            p = 0
+            c = 0
+            t = 0
+            cached = 0
 
         provider = r.get("provider", "unknown")
         model = r.get("model", "unknown")
-        key_alias = r.get("key_alias", "unknown")
         ts = str(r.get("timestamp", ""))[:10]
 
         total_prompt += p - cached
@@ -887,13 +992,39 @@ async def api_logs(
 
 @app.get("/api/logs/size")
 async def api_logs_size():
-    """返回数据库文件大小（字节）"""
-    from akm.db import get_db_path
+    """返回本地缓存占用（数据库 + WAL/SHM + .log 文件）大小。"""
+    from akm.db import DB_DIR, get_db_path
+
+    db_path = get_db_path()
+    db_files = [db_path, f"{db_path}-wal", f"{db_path}-shm"]
+    db_size = 0
+    for path in db_files:
+        try:
+            db_size += os.path.getsize(path)
+        except OSError:
+            pass
+
+    log_size = 0
     try:
-        size = os.path.getsize(get_db_path())
-        return {"size": size}
+        for entry in os.listdir(DB_DIR):
+            if not entry.endswith(".log"):
+                continue
+            path = os.path.join(DB_DIR, entry)
+            if not os.path.isfile(path):
+                continue
+            try:
+                log_size += os.path.getsize(path)
+            except OSError:
+                pass
     except OSError:
-        return {"size": 0}
+        pass
+
+    return {
+        "size": db_size + log_size,
+        "cache_size": db_size + log_size,
+        "db_size": db_size,
+        "log_size": log_size,
+    }
 
 
 @app.post("/api/logs/clean")
