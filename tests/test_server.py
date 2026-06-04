@@ -245,6 +245,54 @@ async def test_api_refresh_key_provider_models(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_export_keys_omits_model_list(monkeypatch):
+    """导出备份时不应包含 model_list 这类派生字段。"""
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "gpt-4.1"}, {"id": "gpt-4.1-mini"}]}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            return DummyResponse()
+
+    monkeypatch.setattr("akm.server.httpx.AsyncClient", DummyAsyncClient)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": "export-key",
+                "provider": "openai",
+                "api_key": "sk-export",
+                "base_url": "https://example.com/v1",
+                "models": "*",
+            },
+        )
+        assert create_resp.status_code == 200
+
+        resp = await client.get("/api/keys/export")
+
+    assert resp.status_code == 200
+    rows = resp.json()["data"]
+    assert len(rows) == 1
+    assert "model_list" not in rows[0]
+    assert rows[0]["provider_models"] == ["gpt-4.1", "gpt-4.1-mini"]
+
+
+@pytest.mark.asyncio
 async def test_api_logs_adds_conv_warning_labels(monkeypatch):
     """/api/logs 返回转换告警派生字段（codes + labels）"""
     monkeypatch.setattr("akm.server.list_logs", lambda **kwargs: [{

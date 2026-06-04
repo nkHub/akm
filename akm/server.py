@@ -449,11 +449,12 @@ async def api_test_key(alias: str):
 async def api_export_keys():
     """导出所有 Key 配置（含完整 api_key），用于备份迁移"""
     keys = list_keys()
-    # list_keys 返回的是脱敏后的 api_key，需要重新获取完整值
+    # 导出仅保留持久化字段，避免把 model_list 这类派生字段混入备份。
     full_keys = []
     for k in keys:
         full = get_key(k["alias"])
         if full:
+            full.pop("model_list", None)
             full_keys.append(full)
     return {"data": full_keys}
 

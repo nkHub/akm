@@ -125,18 +125,14 @@ def _key_matches_model(row: dict, model: str) -> bool:
 
     设计说明：
     1. 自定义 models 仍然保持精确匹配。
-    2. 当 models='*' 时，不再无条件命中所有模型，而是优先使用
+    2. 当 models='*' 时，不再无条件命中所有模型，而是使用
        provider_models 做“提供商可用模型集合”匹配。
-    3. 若 provider_models 为空，说明该 key 尚未同步云端模型列表，此时
-       保持兼容旧行为，继续视作全通配，避免老数据立即失效。
+    3. 若 provider_models 为空，则视为当前 key 没有可用模型清单，不命中。
     """
     normalized_model = str(model or "").strip()
     if not normalized_model:
         return False
-    models = str(row.get("models") or "").strip()
     resolved_models = key_model_list(row)
-    if models == "*" and not resolved_models:
-        return True
     return normalized_model in set(resolved_models)
 
 
@@ -404,8 +400,8 @@ async def pick_key_async(model: str, exclude_aliases: list[str] | None = None) -
 def pick_wildcard_key(model: str = "", exclude_aliases: list[str] | None = None) -> dict | None:
     """选择 models='*' 的 active key（兜底用）。
 
-    当 key 已同步 provider_models 时，只有当前模型在提供商模型列表内才命中；
-    否则保持兼容旧行为，继续视作全通配。
+    只有当前模型在 provider_models 内时才命中；未同步模型列表的 wildcard
+    key 不再参与兜底匹配，避免旧兼容语义继续放大匹配范围。
     """
     clear_expired_rate_limits()
     conn = get_connection()
@@ -424,7 +420,9 @@ def pick_wildcard_key(model: str = "", exclude_aliases: list[str] | None = None)
     for row in rows:
         d = dict(row)
         provider_models = _provider_models_list(d.get("provider_models"))
-        if provider_models and normalized_model and normalized_model not in provider_models:
+        if not provider_models:
+            continue
+        if normalized_model and normalized_model not in provider_models:
             continue
         d["api_key"] = _decrypt(d["api_key"])
         d["provider_models"] = provider_models

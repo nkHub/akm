@@ -111,18 +111,23 @@ def test_pick_key_by_model(setup):
 
 
 def test_pick_key_skips_disabled(setup):
-    add_key("a", "openai", "sk-a", priority=0)
-    add_key("b", "openai", "sk-b", priority=1)
+    add_key("a", "openai", "sk-a", priority=0, provider_models=["gpt-4"])
+    add_key("b", "openai", "sk-b", priority=1, provider_models=["gpt-4"])
     set_status("a", "disabled")
     key = pick_key(model="gpt-4")
     assert key["alias"] == "b"
 
 
 def test_pick_key_wildcard_models(setup):
-    add_key("w", "openai", "sk-w", models="*")
+    add_key("w", "openai", "sk-w", models="*", provider_models=["any-model"])
     key = pick_key(model="any-model")
     assert key is not None
     assert key["alias"] == "w"
+
+
+def test_pick_key_wildcard_without_provider_models_no_longer_matches(setup):
+    add_key("w", "openai", "sk-w", models="*")
+    assert pick_key(model="any-model") is None
 
 
 def test_pick_key_wildcard_uses_provider_models_when_present(setup):
