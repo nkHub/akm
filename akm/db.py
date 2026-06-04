@@ -32,6 +32,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             api_key     TEXT NOT NULL,
             base_url    TEXT,
             models      TEXT DEFAULT '*',
+            provider_models TEXT DEFAULT '',
             auth_header TEXT DEFAULT 'Bearer {api_key}',
             priority    INTEGER DEFAULT 0,
             status      TEXT DEFAULT 'active',
@@ -70,6 +71,11 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
     # keys 表 — auth_header
     try:
         conn.execute("ALTER TABLE keys ADD COLUMN auth_header TEXT DEFAULT 'Bearer {api_key}'")
+    except sqlite3.OperationalError:
+        pass
+    # keys 表 — provider_models 列
+    try:
+        conn.execute("ALTER TABLE keys ADD COLUMN provider_models TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
     # audit_logs 表 — request_headers 列

@@ -1,5 +1,6 @@
 import tempfile
 import pytest
+import httpx
 from unittest.mock import AsyncMock
 from httpx import ASGITransport, AsyncClient
 from akm.db import get_connection, init_db
@@ -123,7 +124,7 @@ async def test_list_models(monkeypatch):
         {"alias": "k1", "provider": "openai", "status": "active", "models": "gpt-4,gpt-3.5-turbo"},
         {"alias": "k2", "provider": "deepseek", "status": "active", "models": "deepseek-chat"},
         {"alias": "k3", "provider": "openai", "status": "disabled", "models": "gpt-4"},
-        {"alias": "k4", "provider": "openai", "status": "active", "models": "*"},
+        {"alias": "k4", "provider": "openai", "status": "active", "models": "*", "provider_models": ["gpt-4.1", "gpt-4.1-mini"]},
     ])
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -135,9 +136,112 @@ async def test_list_models(monkeypatch):
     assert "gpt-4" in model_ids
     assert "gpt-3.5-turbo" in model_ids
     assert "deepseek-chat" in model_ids
+    assert "gpt-4.1" in model_ids
+    assert "gpt-4.1-mini" in model_ids
     # disabled key 的模型不出现
-    # models='*' 的不出现
-    assert len(data["data"]) == 3
+    assert len(data["data"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_api_add_key_syncs_provider_models_from_remote(monkeypatch):
+    """新增 key 时应同步拉取提供商模型列表并落库。"""
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "gpt-4.1"}, {"id": "gpt-4.1-mini"}]}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            return DummyResponse()
+
+    monkeypatch.setattr("akm.server.httpx.AsyncClient", DummyAsyncClient)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": "sync-key",
+                "provider": "openai",
+                "api_key": "sk-sync",
+                "base_url": "https://example.com/v1",
+                "models": "*",
+            },
+        )
+
+    assert resp.status_code == 200
+    key = get_connection().execute("SELECT provider_models FROM keys WHERE alias = ?", ("sync-key",)).fetchone()
+    assert key is not None
+    assert "gpt-4.1" in key["provider_models"]
+    assert "gpt-4.1-mini" in key["provider_models"]
+
+
+@pytest.mark.asyncio
+async def test_api_add_key_rejects_wildcard_with_custom_models(monkeypatch):
+    """保存 key 时，星号和自定义模型不能混用。"""
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": "bad-key",
+                "provider": "openai",
+                "api_key": "sk-bad",
+                "models": "*,gpt-4.1",
+            },
+        )
+
+    assert resp.status_code == 400
+    assert "星号不能和自定义模型同时使用" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_api_refresh_key_provider_models(monkeypatch):
+    """批量刷新 provider 模型列表接口应返回成功/失败统计。"""
+
+    add_key = get_connection().execute
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO keys (alias, provider, api_key, base_url, models, auth_header, priority, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("k1", "openai", "enc1", "https://example.com/v1", "*", "Bearer {api_key}", 0, "active"),
+    )
+    conn.execute(
+        "INSERT INTO keys (alias, provider, api_key, base_url, models, auth_header, priority, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("k2", "openai", "enc2", "https://bad.example.com/v1", "*", "Bearer {api_key}", 1, "active"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("akm.key_pool._decrypt", lambda value: "sk-test")
+
+    async def fake_fetch(provider, api_key, base_url, auth_header):
+        if "bad" in str(base_url):
+            raise ValueError("同步提供商模型列表失败: HTTP 500")
+        return ["gpt-4.1", "gpt-4.1-mini"]
+
+    monkeypatch.setattr("akm.server._fetch_provider_models", fake_fetch)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/keys/refresh-models")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["refreshed"] == 1
+    assert len(data["failed"]) == 1
+    assert data["failed"][0]["alias"] == "k2"
 
 
 @pytest.mark.asyncio

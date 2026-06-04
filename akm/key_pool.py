@@ -3,6 +3,7 @@
 import os
 import time
 import asyncio
+import json
 from cryptography.fernet import Fernet
 from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
@@ -44,12 +45,113 @@ def _decrypt(cipher_text: str) -> str:
     return _load_cipher().decrypt(cipher_text.encode()).decode()
 
 
+def _normalize_csv_models(models: str) -> str:
+    """规范逗号分隔模型串，避免因空格或空项导致匹配不一致。"""
+    if not models:
+        return ""
+    if models == "*":
+        return "*"
+    return ",".join(m.strip() for m in models.split(",") if m.strip())
+
+
+def _normalize_provider_models(provider_models) -> str:
+    """将提供商模型列表统一保存为 JSON 数组字符串。
+
+    这里统一做两层处理：
+    1. 去除空值与首尾空格，避免前端/上游脏数据落库。
+    2. 去重但保留原始顺序，保证展示稳定且不重复。
+    """
+    if not provider_models:
+        return ""
+    if isinstance(provider_models, str):
+        try:
+            provider_models = json.loads(provider_models)
+        except json.JSONDecodeError:
+            provider_models = [provider_models]
+    seen = set()
+    normalized = []
+    for item in provider_models:
+        name = str(item or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return json.dumps(normalized, ensure_ascii=False)
+
+
+def _provider_models_list(raw) -> list[str]:
+    """将数据库中的 provider_models 字段解析为字符串列表。"""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    result = []
+    for item in data:
+        name = str(item or "").strip()
+        if name:
+            result.append(name)
+    return result
+
+
+def key_model_list(key: dict) -> list[str]:
+    """返回 key 当前应暴露给管理端/调用方的模型列表。
+
+    规则：
+    1. `models='*'` 时，返回已同步的 provider_models。
+    2. `models` 为显式逗号分隔串时，返回切分后的模型列表。
+    3. 其他异常/空值场景返回空数组，避免调用侧再写分支判断。
+    """
+    if not isinstance(key, dict):
+        return []
+    models = str(key.get("models") or "").strip()
+    if not models:
+        return []
+    if models == "*":
+        provider_models = key.get("provider_models")
+        if isinstance(provider_models, list):
+            return [str(item).strip() for item in provider_models if str(item).strip()]
+        return _provider_models_list(provider_models)
+    if models != "*":
+        return [m.strip() for m in models.split(",") if m.strip()]
+    return []
+
+
+def _key_matches_model(row: dict, model: str) -> bool:
+    """判断单个 key 是否命中当前模型。
+
+    设计说明：
+    1. 自定义 models 仍然保持精确匹配。
+    2. 当 models='*' 时，不再无条件命中所有模型，而是优先使用
+       provider_models 做“提供商可用模型集合”匹配。
+    3. 若 provider_models 为空，说明该 key 尚未同步云端模型列表，此时
+       保持兼容旧行为，继续视作全通配，避免老数据立即失效。
+    """
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return False
+    models = str(row.get("models") or "").strip()
+    resolved_models = key_model_list(row)
+    if models == "*" and not resolved_models:
+        return True
+    return normalized_model in set(resolved_models)
+
+
+def _is_explicit_model_key(row: dict) -> bool:
+    """判断当前 key 是否使用了显式模型配置，而不是 `*` 通配。"""
+    return str(row.get("models") or "").strip() != "*"
+
+
 def add_key(
     alias: str,
     provider: str,
     api_key: str,
     base_url: str | None = None,
     models: str = "*",
+    provider_models=None,
     auth_header: str = "Bearer {api_key}",
     priority: int = 0,
 ) -> None:
@@ -58,18 +160,19 @@ def add_key(
     auth_header: 认证头模板，{api_key} 会被替换为实际 key
     """
     # 规范 models 字段：去除每个模型名前后空格，移除多余逗号
-    models = ",".join(m.strip() for m in models.split(",") if m.strip()) if models and models != "*" else models
+    models = _normalize_csv_models(models)
     if base_url is None:
         # 只查已知 provider 的默认地址，未知 provider 保留空字符串
         agent = AGENT_REGISTRY.get(provider)
         base_url = agent.default_base_url if agent else ""
     enc_key = _encrypt(api_key)
+    normalized_provider_models = _normalize_provider_models(provider_models)
     conn = get_connection()
     try:
         conn.execute(
-            """INSERT INTO keys (alias, provider, api_key, base_url, models, auth_header, priority)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (alias, provider, enc_key, base_url, models, auth_header, priority),
+            """INSERT INTO keys (alias, provider, api_key, base_url, models, provider_models, auth_header, priority)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (alias, provider, enc_key, base_url, models, normalized_provider_models, auth_header, priority),
         )
         conn.commit()
     except Exception:
@@ -87,6 +190,8 @@ def get_key(alias: str) -> dict | None:
         return None
     d = dict(row)
     d["api_key"] = _decrypt(d["api_key"])
+    d["provider_models"] = _provider_models_list(d.get("provider_models"))
+    d["model_list"] = key_model_list(d)
     return d
 
 
@@ -107,6 +212,8 @@ def list_keys(provider: str | None = None) -> list[dict]:
     for row in rows:
         d = dict(row)
         d["api_key"] = _decrypt(d["api_key"])
+        d["provider_models"] = _provider_models_list(d.get("provider_models"))
+        d["model_list"] = key_model_list(d)
         result.append(d)
     return result
 
@@ -136,6 +243,48 @@ def set_base_url(alias: str, base_url: str) -> None:
     conn = get_connection()
     conn.execute(
         "UPDATE keys SET base_url = ? WHERE alias = ?", (base_url, alias)
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_models(alias: str, models: str) -> None:
+    """修改指定 key 的模型匹配配置。"""
+    normalized = _normalize_csv_models(models)
+    conn = get_connection()
+    conn.execute(
+        "UPDATE keys SET models = ? WHERE alias = ?", (normalized, alias)
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_provider(alias: str, provider: str) -> None:
+    """修改指定 key 的 provider。"""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE keys SET provider = ? WHERE alias = ?", (provider, alias)
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_auth_header(alias: str, auth_header: str) -> None:
+    """修改指定 key 的认证头模板。"""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE keys SET auth_header = ? WHERE alias = ?", (auth_header, alias)
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_provider_models(alias: str, provider_models) -> None:
+    """保存指定 key 同步得到的提供商模型列表。"""
+    normalized = _normalize_provider_models(provider_models)
+    conn = get_connection()
+    conn.execute(
+        "UPDATE keys SET provider_models = ? WHERE alias = ?", (normalized, alias)
     )
     conn.commit()
     conn.close()
@@ -214,31 +363,37 @@ def pick_key(model: str, exclude_aliases: list[str] | None = None) -> dict | Non
     clear_expired_rate_limits()
     model = model.strip()
     conn = get_connection()
-    # 先选 models='*' 通配的 + models 包含指定 model 的 active key
+    # 先筛出 active key，再按优先级在 Python 侧做匹配。
+    # 这样可以让 models='*' 时结合 provider_models 精确判断是否命中。
     if exclude_aliases:
         placeholders = ",".join("?" * len(exclude_aliases))
         rows = conn.execute(
             f"""SELECT * FROM keys
                WHERE status = 'active'
-                 AND alias NOT IN ({placeholders})
-                 AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')
+                  AND alias NOT IN ({placeholders})
                ORDER BY priority ASC""",
-            (*exclude_aliases, model),
+            (*exclude_aliases,),
         ).fetchall()
     else:
         rows = conn.execute(
             """SELECT * FROM keys
                WHERE status = 'active'
-                 AND (models = '*' OR ',' || models || ',' LIKE '%,' || ? || ',%')
                ORDER BY priority ASC""",
-            (model,),
         ).fetchall()
     conn.close()
-    if not rows:
-        return None
-    d = dict(rows[0])
-    d["api_key"] = _decrypt(d["api_key"])
-    return d
+    # 先尝试显式模型 key，再回退到 `*` + provider_models 的兜底 key。
+    # 这样即便优先级相同，也能保证“明确声明的模型绑定”优先于通配策略。
+    for explicit_only in (True, False):
+        for row in rows:
+            d = dict(row)
+            if _is_explicit_model_key(d) != explicit_only:
+                continue
+            if not _key_matches_model(d, model):
+                continue
+            d["api_key"] = _decrypt(d["api_key"])
+            d["provider_models"] = _provider_models_list(d.get("provider_models"))
+            return d
+    return None
 
 
 async def pick_key_async(model: str, exclude_aliases: list[str] | None = None) -> dict | None:
@@ -246,21 +401,37 @@ async def pick_key_async(model: str, exclude_aliases: list[str] | None = None) -
     return await asyncio.to_thread(pick_key, model, exclude_aliases)
 
 
-def pick_wildcard_key() -> dict | None:
-    """选择 models='*' 的通配符 active key（兜底用）"""
+def pick_wildcard_key(model: str = "", exclude_aliases: list[str] | None = None) -> dict | None:
+    """选择 models='*' 的 active key（兜底用）。
+
+    当 key 已同步 provider_models 时，只有当前模型在提供商模型列表内才命中；
+    否则保持兼容旧行为，继续视作全通配。
+    """
     clear_expired_rate_limits()
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM keys WHERE status = 'active' AND models = '*' ORDER BY priority ASC",
-    ).fetchall()
+    if exclude_aliases:
+        placeholders = ",".join("?" * len(exclude_aliases))
+        rows = conn.execute(
+            f"SELECT * FROM keys WHERE status = 'active' AND models = '*' AND alias NOT IN ({placeholders}) ORDER BY priority ASC",
+            (*exclude_aliases,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM keys WHERE status = 'active' AND models = '*' ORDER BY priority ASC",
+        ).fetchall()
     conn.close()
-    if not rows:
-        return None
-    d = dict(rows[0])
-    d["api_key"] = _decrypt(d["api_key"])
-    return d
+    normalized_model = str(model or "").strip()
+    for row in rows:
+        d = dict(row)
+        provider_models = _provider_models_list(d.get("provider_models"))
+        if provider_models and normalized_model and normalized_model not in provider_models:
+            continue
+        d["api_key"] = _decrypt(d["api_key"])
+        d["provider_models"] = provider_models
+        return d
+    return None
 
 
-async def pick_wildcard_key_async() -> dict | None:
+async def pick_wildcard_key_async(model: str = "", exclude_aliases: list[str] | None = None) -> dict | None:
     """异步版本的 pick_wildcard_key"""
-    return await asyncio.to_thread(pick_wildcard_key)
+    return await asyncio.to_thread(pick_wildcard_key, model, exclude_aliases)

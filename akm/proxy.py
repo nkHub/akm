@@ -206,7 +206,7 @@ async def forward_request(
     while tries < MAX_KEY_TRIES:
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
         if use_fallback:
-            key = await pick_wildcard_key_async()
+            key = await pick_wildcard_key_async(model, list(tried_aliases))
         else:
             key = await pick_key_async(model, list(tried_aliases))
 
@@ -536,7 +536,16 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
            "fallback_used": bool}
     """
     agent = get_agent(key.get("provider", "openai"))
-    model = key.get("models", "*").split(",")[0].strip() or "gpt-3.5-turbo"
+
+    raw_models = str(key.get("models") or "*").strip()
+    if raw_models == "*":
+        provider_models = key.get("provider_models") or []
+        if isinstance(provider_models, list) and provider_models:
+            model = str(provider_models[0] or "").strip()
+        else:
+            model = "gpt-3.5-turbo"
+    else:
+        model = raw_models.split(",")[0].strip() or "gpt-3.5-turbo"
 
     if agent.supports_responses:
         candidate_paths = ["responses"]
