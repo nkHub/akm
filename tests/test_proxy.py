@@ -607,3 +607,69 @@ async def test_test_key_connectivity_messages_provider_without_anthropic_switch(
     assert result["attempted_paths"] == ["messages"]
     assert called[0][0] == "https://vendor.example.com/v1/messages"
     assert called[0][1]["Authorization"] == "Bearer sk-test"
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_wildcard_uses_first_provider_model(monkeypatch):
+    """models='*' 时，测试请求应优先使用已同步的第一个 provider 模型。"""
+
+    called = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called.append(json)
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await test_key_connectivity({
+        "alias": "wild",
+        "provider": "openai",
+        "api_key": "sk-test",
+        "base_url": "https://example.com/v1",
+        "models": "*",
+        "provider_models": ["moonshotai/kimi-k2.6:free", "openai/gpt-4.1"],
+    })
+
+    assert result["ok"] is True
+    assert result["model"] == "moonshotai/kimi-k2.6:free"
+    assert called[0]["model"] == "moonshotai/kimi-k2.6:free"
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_wildcard_without_provider_models_falls_back(monkeypatch):
+    """未同步 provider 模型列表时，保留默认测试模型兜底行为。"""
+
+    called = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called.append(json)
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await test_key_connectivity({
+        "alias": "wild",
+        "provider": "openai",
+        "api_key": "sk-test",
+        "base_url": "https://example.com/v1",
+        "models": "*",
+        "provider_models": [],
+    })
+
+    assert result["ok"] is True
+    assert result["model"] == "gpt-3.5-turbo"
+    assert called[0]["model"] == "gpt-3.5-turbo"

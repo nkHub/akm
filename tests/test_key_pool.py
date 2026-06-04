@@ -39,6 +39,7 @@ def test_add_and_get_key(setup):
     assert key["status"] == "active"
     assert key["priority"] == 0
     assert key["models"] == "*"
+    assert key["provider_models"] == []
 
 
 def test_add_duplicate_key_raises(setup):
@@ -122,3 +123,25 @@ def test_pick_key_wildcard_models(setup):
     key = pick_key(model="any-model")
     assert key is not None
     assert key["alias"] == "w"
+
+
+def test_pick_key_wildcard_uses_provider_models_when_present(setup):
+    add_key(
+        "w",
+        "openai",
+        "sk-w",
+        models="*",
+        provider_models=["gpt-4.1", "gpt-4.1-mini"],
+    )
+    key = pick_key(model="gpt-4.1")
+    assert key is not None
+    assert key["alias"] == "w"
+    assert pick_key(model="gpt-5.9") is None
+
+
+def test_pick_key_prefers_exact_match_before_wildcard_provider_models(setup):
+    add_key("wild", "openai", "sk-w", models="*", provider_models=["gpt-4"])
+    add_key("exact", "openai", "sk-e", models="gpt-4", priority=0)
+    key = pick_key(model="gpt-4")
+    assert key is not None
+    assert key["alias"] == "exact"

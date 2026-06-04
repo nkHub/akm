@@ -2,6 +2,7 @@
 {% block content %}
 <div class="flex justify-end mb-4 gap-2">
   <button onclick="exportKeys()" class="bg-surface border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">导出</button>
+  <button onclick="refreshProviderModels()" class="bg-surface border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">刷新模型</button>
   <button onclick="openAddModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">添加 Key</button>
 </div>
 <div id="key-list-container"></div>
@@ -26,7 +27,11 @@
       <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">加载中...</option></select></div>
       <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
       <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
-      <div><label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示全部）</label><input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
+      <div>
+        <label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示自动同步提供商模型列表）</label>
+        <input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+        <p class="mt-1 text-[11px] text-gray-500">保存时会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
+      </div>
       <div><label class="block text-xs text-gray-400 mb-1">认证头模板 ({api_key} 会被替换为实际 key)</label><input id="key-authheader" value="Bearer {api_key}" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500" placeholder="Bearer {api_key}"></div>
       <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
       <div class="flex gap-2 pt-2"><button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
@@ -164,18 +169,22 @@ function renderKeys() {
     var sc = 'status-'+k.status;
     var sl = { active:'启用', disabled:'禁用', rate_limited:'限流' }[k.status]||k.status;
 
-    // 模型 tag 标签
-    var modelTags = '';
-    if (k.models === '*') {
-      modelTags = '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>';
-    } else {
-      (k.models||'').split(',').filter(Boolean).forEach(function(m){
-        var modelName = m.trim();
-        modelTags += '<button type="button" onclick="copyModelName(' + JSON.stringify(modelName).replace(/"/g, '&quot;') + ')" title="点击复制模型名" class="inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-400 hover:text-indigo-300 hover:border-indigo-500 transition-colors cursor-pointer">'+esc(modelName)+'</button>';
-      });
-    }
-
+    var modelList = Array.isArray(k.model_list) ? k.model_list : [];
     var latencyText = '';
+    var effectiveModelTags = '';
+    if (k.models === '*') {
+      effectiveModelTags += '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>';
+    }
+    if (modelList.length) {
+      modelList.slice(0, 8).forEach(function(m){
+        effectiveModelTags += '<button type="button" onclick="copyModelName(' + JSON.stringify(m).replace(/"/g, '&quot;') + ')" title="点击复制模型名" class="max-w-full break-all inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-500 hover:text-indigo-300 hover:border-indigo-500 transition-colors cursor-pointer">'+esc(m)+'</button>';
+      });
+      if (modelList.length > 8) {
+        effectiveModelTags += '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-500">+' + (modelList.length - 8) + ' 个</span>';
+      }
+    } else {
+      effectiveModelTags = '<span class="text-xs text-gray-500">暂无可用模型</span>';
+    }
     if ((k.recent_latency_sample_count || 0) > 0 && k.recent_avg_latency_ms !== null && k.recent_avg_latency_ms !== undefined) {
       var avgLatency = Number(k.recent_avg_latency_ms);
       var latencyClass = avgLatency <= 5000 ? 'text-green-400' : 'text-red-400';
@@ -195,9 +204,10 @@ function renderKeys() {
       '<button onclick="editKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-gray-200 cursor-pointer transition-colors">编辑</button>'+
       '<button onclick="testConnect(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-indigo-400 cursor-pointer transition-colors">测试</button>'+
       '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">删除</button></div></div>'+
-      '<div class="px-4 pb-2 flex items-center gap-2 flex-wrap text-xs">'+
-      modelTags+
-      '</div></div>';
+      '<div class="px-4 pb-4 min-w-0">'+
+      '<div class="flex items-start gap-2 flex-wrap text-xs min-w-0">'+
+      effectiveModelTags+
+      '</div></div></div>';
   });
   html += '</div>';
   container.innerHTML = html;
@@ -301,13 +311,21 @@ function editKey(alias) {
 function submitForm(e) {
   e.preventDefault();
   var editing = document.getElementById('edit-alias').value;
+  var modelsValue = (document.getElementById('key-models').value || '').trim() || '*';
+  if (modelsValue !== '*') {
+    var hasWildcard = modelsValue.split(',').some(function(part){ return part.trim() === '*'; });
+    if (hasWildcard) {
+      alert('星号不能和自定义模型同时使用');
+      return;
+    }
+  }
   var body = {
     alias: document.getElementById('key-alias').value.trim(),
     provider: document.getElementById('key-provider').value,
     api_key: document.getElementById('key-apikey').value.trim(),
     base_url: document.getElementById('key-baseurl').value.trim()||null,
     auth_header: document.getElementById('key-authheader').value.trim()||'Bearer {api_key}',
-    models: document.getElementById('key-models').value.trim()||'*',
+    models: modelsValue,
     priority: parseInt(document.getElementById('key-priority').value)||0,
   };
   if (editing && !body.api_key) delete body.api_key;
@@ -363,6 +381,29 @@ function exportKeys() {
     a.click();
     URL.revokeObjectURL(url);
   }).catch(function(e){ alert('导出失败: '+e.message); });
+}
+
+function refreshProviderModels() {
+  fetch('/api/keys/refresh-models', { method: 'POST' })
+    .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,data:d}; }); })
+    .then(function(r){
+      if (!r.ok) {
+        alert('刷新失败: ' + ((r.data && r.data.detail) || '未知错误'));
+        return;
+      }
+      loadKeys();
+      var failed = Array.isArray(r.data.failed) ? r.data.failed : [];
+      if (!failed.length) {
+        alert('模型列表已刷新，共更新 ' + (r.data.refreshed || 0) + ' 个 Key');
+        return;
+      }
+      var lines = failed.slice(0, 5).map(function(item){
+        return item.alias + ': ' + item.error;
+      });
+      var suffix = failed.length > 5 ? ('\n... 另有 ' + (failed.length - 5) + ' 个失败') : '';
+      alert('模型列表已部分刷新，成功 ' + (r.data.refreshed || 0) + ' 个，失败 ' + failed.length + ' 个\n' + lines.join('\n') + suffix);
+    })
+    .catch(function(e){ alert('刷新失败: ' + e.message); });
 }
 
 document.addEventListener('DOMContentLoaded', function() {

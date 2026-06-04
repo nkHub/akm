@@ -17,6 +17,7 @@ from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
+    set_provider, set_models, set_auth_header, set_provider_models, key_model_list,
 )
 from akm.audit import write_log_async, list_logs, count_logs
 from akm.config import load_config, save_config, get as config_get
@@ -98,6 +99,104 @@ def _build_trace_headers(request: Request) -> tuple[dict, str]:
         ensure_ascii=False,
     )
     return trace_headers, trace_headers_json
+
+
+def _normalize_models_input(models: str) -> str:
+    """规范模型输入，统一去除空白和多余逗号。"""
+    raw = str(models or "").strip()
+    if not raw:
+        return "*"
+    if raw == "*":
+        return "*"
+    return ",".join(m.strip() for m in raw.split(",") if m.strip())
+
+
+def _parse_provider_model_ids(payload: dict) -> list[str]:
+    """从 `/models` 响应中提取模型 id 列表。
+
+    兼容常见 OpenAI 风格：
+    - {"data": [{"id": "gpt-4"}, ...]}
+    - {"data": ["gpt-4", ...]}
+    """
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    seen = set()
+    result = []
+    for item in data:
+        if isinstance(item, dict):
+            model_id = str(item.get("id") or "").strip()
+        else:
+            model_id = str(item or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        result.append(model_id)
+    return result
+
+
+async def _fetch_provider_models(provider: str, api_key: str, base_url: str | None, auth_header: str) -> list[str]:
+    """同步拉取指定 key 对应提供商的 `/models` 列表。
+
+    这里显式复用 Agent 的 URL 拼接和认证头逻辑，避免管理侧与转发链路
+    出现两套不一致的 provider 配置解释方式。
+    """
+    key_for_request = {
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url,
+        "auth_header": auth_header,
+    }
+    agent = get_agent(provider)
+    url = agent.resolve_url(key_for_request, "models")
+    headers = agent.build_headers(key_for_request, "models")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        body = resp.text[:300].replace("\n", " ")
+        raise ValueError(f"同步提供商模型列表失败: HTTP {resp.status_code} {body}".strip())
+    try:
+        payload = resp.json()
+    except json.JSONDecodeError as exc:
+        raise ValueError("同步提供商模型列表失败: 响应不是合法 JSON") from exc
+    model_ids = _parse_provider_model_ids(payload)
+    if not model_ids:
+        raise ValueError("同步提供商模型列表失败: /models 未返回可识别的模型列表")
+    return model_ids
+
+
+async def _resolve_key_save_payload(body: dict, existing: dict | None = None) -> dict:
+    """解析并校验 key 保存参数，同时同步 provider 模型列表。"""
+    alias = str(body.get("alias") or (existing or {}).get("alias") or "").strip()
+    provider = str(body.get("provider") or (existing or {}).get("provider") or "").strip()
+    api_key = str(body.get("api_key") or (existing or {}).get("api_key") or "").strip()
+    base_url = body.get("base_url")
+    if base_url is None:
+        base_url = (existing or {}).get("base_url") or None
+    else:
+        base_url = str(base_url).strip() or None
+    auth_header = str(body.get("auth_header") or (existing or {}).get("auth_header") or "Bearer {api_key}").strip() or "Bearer {api_key}"
+    priority = int(body.get("priority", (existing or {}).get("priority", 0)) or 0)
+    models = _normalize_models_input(body.get("models", (existing or {}).get("models", "*")))
+
+    if not alias or not provider or not api_key:
+        raise ValueError("alias、provider、api_key 为必填项")
+    if models != "*" and any(part.strip() == "*" for part in models.split(",")):
+        raise ValueError("星号不能和自定义模型同时使用")
+
+    provider_models = await _fetch_provider_models(provider, api_key, base_url, auth_header)
+    return {
+        "alias": alias,
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url,
+        "auth_header": auth_header,
+        "priority": priority,
+        "models": models,
+        "provider_models": provider_models,
+    }
 
 def _render_template(name: str, **kwargs) -> str:
     """读取模板文件，替换 {{ var }} 占位符，支持 {% extends %}, {% include %}, {% block %}"""
@@ -266,26 +365,24 @@ async def api_list_keys():
 async def api_add_key(request: Request):
     """添加一个新的 API key"""
     body = await request.json()
-    alias = body.get("alias", "").strip()
-    provider = body.get("provider", "").strip()
-    api_key = body.get("api_key", "").strip()
-
-    if not alias or not provider or not api_key:
-        return JSONResponse(status_code=400, content={"detail": "alias、provider、api_key 为必填项"})
 
     try:
+        payload = await _resolve_key_save_payload(body)
         add_key(
-            alias=alias,
-            provider=provider,
-            api_key=api_key,
-            base_url=body.get("base_url") or None,
-            models=body.get("models", "*"),
-            auth_header=body.get("auth_header", "Bearer {api_key}"),
-            priority=body.get("priority", 0),
+            alias=payload["alias"],
+            provider=payload["provider"],
+            api_key=payload["api_key"],
+            base_url=payload["base_url"],
+            models=payload["models"],
+            provider_models=payload["provider_models"],
+            auth_header=payload["auth_header"],
+            priority=payload["priority"],
         )
-        return {"ok": True, "alias": alias}
+        return {"ok": True, "alias": payload["alias"], "provider_models_count": len(payload["provider_models"])}
     except ValueError as e:
-        return JSONResponse(status_code=409, content={"detail": str(e)})
+        message = str(e)
+        status_code = 409 if "已存在" in message else 400
+        return JSONResponse(status_code=status_code, content={"detail": message})
 
 
 @app.put("/api/keys/{alias}")
@@ -297,34 +394,21 @@ async def api_update_key(alias: str, request: Request):
 
     body = await request.json()
 
-    if "api_key" in body and body["api_key"]:
-        set_api_key(alias, body["api_key"])
-    if "priority" in body:
-        set_priority(alias, body["priority"])
-    if "base_url" in body:
-        set_base_url(alias, body["base_url"])
-    if "provider" in body and body["provider"]:
-        from akm.db import get_connection
-        conn = get_connection()
-        conn.execute("UPDATE keys SET provider = ? WHERE alias = ?", (body["provider"], alias))
-        conn.commit()
-        conn.close()
-    if "models" in body:
-        from akm.db import get_connection
-        conn = get_connection()
-        # 规范 models 字段：去除每个模型名前后空格
-        models = ",".join(m.strip() for m in body["models"].split(",") if m.strip()) if body["models"] != "*" else body["models"]
-        conn.execute("UPDATE keys SET models = ? WHERE alias = ?", (models, alias))
-        conn.commit()
-        conn.close()
-    if "auth_header" in body:
-        from akm.db import get_connection
-        conn = get_connection()
-        conn.execute("UPDATE keys SET auth_header = ? WHERE alias = ?", (body["auth_header"], alias))
-        conn.commit()
-        conn.close()
+    try:
+        payload = await _resolve_key_save_payload(body, existing)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
 
-    return {"ok": True, "alias": alias}
+    set_provider(alias, payload["provider"])
+    set_base_url(alias, payload["base_url"] or "")
+    set_auth_header(alias, payload["auth_header"])
+    set_models(alias, payload["models"])
+    set_priority(alias, payload["priority"])
+    set_provider_models(alias, payload["provider_models"])
+    if "api_key" in body and body.get("api_key"):
+        set_api_key(alias, payload["api_key"])
+
+    return {"ok": True, "alias": alias, "provider_models_count": len(payload["provider_models"])}
 
 
 @app.patch("/api/keys/{alias}/status")
@@ -372,6 +456,33 @@ async def api_export_keys():
         if full:
             full_keys.append(full)
     return {"data": full_keys}
+
+
+@app.post("/api/keys/refresh-models")
+async def api_refresh_key_provider_models():
+    """批量刷新所有 key 的提供商模型列表。"""
+    refreshed = 0
+    failed = []
+    for key in list_keys():
+        try:
+            provider_models = await _fetch_provider_models(
+                key.get("provider", ""),
+                key.get("api_key", ""),
+                key.get("base_url") or None,
+                key.get("auth_header") or "Bearer {api_key}",
+            )
+            set_provider_models(key["alias"], provider_models)
+            refreshed += 1
+        except ValueError as exc:
+            failed.append({
+                "alias": key["alias"],
+                "error": str(exc),
+            })
+    return {
+        "ok": not failed,
+        "refreshed": refreshed,
+        "failed": failed,
+    }
 
 
 # ── 统计 API ───────────────────────────────────────────────
@@ -992,10 +1103,8 @@ async def list_models():
     for k in list_keys():
         if k["status"] != "active":
             continue
-        models = k["models"]
-        if models == "*":
-            continue  # 通配符跳过，不枚举
-        for m in models.split(","):
+        candidates = key_model_list(k)
+        for m in candidates:
             m = m.strip()
             if m and m not in seen:
                 seen.add(m)
