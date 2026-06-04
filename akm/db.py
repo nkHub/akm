@@ -8,6 +8,12 @@ from pathlib import Path
 DB_DIR = os.path.expanduser("~/.akm")
 
 
+def get_keys_log_path() -> str:
+    """返回 Key 变更日志文件路径，并确保目录存在。"""
+    os.makedirs(DB_DIR, exist_ok=True)
+    return os.path.join(DB_DIR, "keys.log")
+
+
 def get_db_path() -> str:
     """返回数据库文件完整路径，并确保目录存在"""
     os.makedirs(DB_DIR, exist_ok=True)

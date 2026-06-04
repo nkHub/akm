@@ -1,9 +1,11 @@
 import tempfile
+import json
+from pathlib import Path
 import pytest
 import httpx
 from unittest.mock import AsyncMock
 from httpx import ASGITransport, AsyncClient
-from akm.db import get_connection, init_db
+from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
 from akm.server import app
 from akm.audit import write_log, list_logs
 
@@ -15,6 +17,7 @@ def setup(monkeypatch):
     conn = get_connection()
     init_db(conn)
     conn.close()
+    monkeypatch.setattr("akm.server._stats_cache", {})
     # 为 lifespan 未生效的测试环境提供模拟 http_client 和 plugin_manager
     app.state.http_client = AsyncMock()
     app.state.plugin_manager = None
@@ -245,6 +248,69 @@ async def test_api_refresh_key_provider_models(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_key_change_log_written_without_api_key(monkeypatch):
+    """Key 变更应写入 keys.log，且不能包含 api_key 明文。"""
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "gpt-4.1"}, {"id": "gpt-4.1-mini"}]}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            return DummyResponse()
+
+    monkeypatch.setattr("akm.server.httpx.AsyncClient", DummyAsyncClient)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": "log-key",
+                "provider": "openai",
+                "api_key": "sk-secret-create",
+                "base_url": "https://example.com/v1",
+                "models": "*",
+            },
+        )
+        assert create_resp.status_code == 200
+
+        status_resp = await client.patch(
+            "/api/keys/log-key/status",
+            json={"status": "disabled"},
+        )
+        assert status_resp.status_code == 200
+
+        delete_resp = await client.delete("/api/keys/log-key")
+        assert delete_resp.status_code == 200
+
+    log_path = Path(get_keys_log_path())
+    assert log_path.exists()
+    content = log_path.read_text(encoding="utf-8")
+    assert "sk-secret-create" not in content
+
+    rows = [json.loads(line) for line in content.splitlines() if line.strip()]
+    events = [row["event"] for row in rows]
+    assert events == ["key_created", "key_status_changed", "key_deleted"]
+    assert rows[0]["details"]["api_key_updated"] is True
+    assert rows[0]["details"]["after"]["alias"] == "log-key"
+    assert rows[1]["details"]["before_status"] == "active"
+    assert rows[1]["details"]["after_status"] == "disabled"
+    assert rows[2]["details"]["before"]["alias"] == "log-key"
+
+
+@pytest.mark.asyncio
 async def test_api_export_keys_omits_model_list(monkeypatch):
     """导出备份时不应包含 model_list 这类派生字段。"""
 
@@ -290,6 +356,34 @@ async def test_api_export_keys_omits_model_list(monkeypatch):
     assert len(rows) == 1
     assert "model_list" not in rows[0]
     assert rows[0]["provider_models"] == ["gpt-4.1", "gpt-4.1-mini"]
+
+
+@pytest.mark.asyncio
+async def test_api_logs_size_includes_db_and_log_files():
+    db_path = Path(get_db_path())
+    db_path.write_bytes(b"db")
+    wal_path = db_path.parent / "akm.db-wal"
+    shm_path = db_path.parent / "akm.db-shm"
+    keys_log_path = db_path.parent / "keys.log"
+    extra_log_path = db_path.parent / "extra.log"
+    wal_path.write_bytes(b"wal")
+    shm_path.write_bytes(b"shm")
+    keys_log_path.write_text("hello", encoding="utf-8")
+    extra_log_path.write_text("world!!", encoding="utf-8")
+
+    expected_db_size = db_path.stat().st_size + wal_path.stat().st_size + shm_path.stat().st_size
+    expected_log_size = keys_log_path.stat().st_size + extra_log_path.stat().st_size
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs/size")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["db_size"] == expected_db_size
+    assert data["log_size"] == expected_log_size
+    assert data["cache_size"] == expected_db_size + expected_log_size
+    assert data["size"] == expected_db_size + expected_log_size
 
 
 @pytest.mark.asyncio
@@ -385,6 +479,103 @@ async def test_api_list_agents_returns_messages_anthropic_switch():
     agents = {item["name"]: item for item in resp.json()["data"]}
     assert agents["deepseek"]["messages_use_anthropic_path"] is True
     assert agents["openai"]["messages_use_anthropic_path"] is False
+
+
+@pytest.mark.asyncio
+async def test_api_stats_ignores_estimated_usage_tokens():
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 10,
+        "error": "",
+        "request_headers": '{"x-akm-flags":"usage_estimated_light"}',
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "cached_tokens": 10,
+        "cache_creation_tokens": 0,
+    })
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 12,
+        "error": "",
+        "request_headers": '{}',
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 30,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_requests"] == 2
+    assert data["total_prompt_tokens"] == 50
+    assert data["total_completion_tokens"] == 20
+    assert data["total_tokens"] == 100
+    assert data["total_cached_tokens"] == 30
+
+
+@pytest.mark.asyncio
+async def test_api_stats_ignores_rows_without_key_alias():
+    write_log({
+        "provider": "openai",
+        "key_alias": "",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 503,
+        "latency_ms": 5,
+        "error": "没有可用的 API key",
+        "request_headers": '{}',
+        "prompt_tokens": 999,
+        "completion_tokens": 888,
+        "total_tokens": 1887,
+        "cached_tokens": 0,
+        "cache_creation_tokens": 0,
+    })
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 12,
+        "error": "",
+        "request_headers": '{}',
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 30,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_requests"] == 1
+    assert data["total_prompt_tokens"] == 50
+    assert data["total_completion_tokens"] == 20
+    assert data["total_tokens"] == 100
+    assert "real-key" in data["by_key"]
+    assert "" not in data["by_key"]
 
 
 @pytest.mark.asyncio

@@ -122,7 +122,7 @@ akm-menubar
 }
 ```
 
-Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
+Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，仅用于本地复查，不包含 `api_key` 明文。
 
 ## API 端点
 
@@ -143,7 +143,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。
 | POST | `/api/keys/refresh-models` | 批量刷新所有 Key 的提供商模型列表 |
 | GET | `/api/keys/export` | 导出 Key 配置（含完整密钥） |
 | GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间） |
-| GET | `/api/logs/size` | 数据库文件大小 |
+| GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
 | POST | `/api/logs/clean-bodies` | 清空请求体/响应体（保留元数据与统计列） |
 | GET | `/api/stats` | Token 统计（支持 days 自然日范围：1=今天，7=近7天，30=近30天） |
