@@ -51,10 +51,19 @@ akm serve
 
 ```bash
 akm --help                    # 查看帮助
+akm status                    # 查看服务 / Key / 日志 / 插件总览
+
+# 配置
+akm config get                # 查看完整配置
+akm config get server_port    # 查看单个配置项
+akm config set server_port 8801 # 修改配置项
 
 # Key 管理
 akm key add <别名> <供应商>     # 添加 Key
 akm key list                   # 列出所有 Key
+akm key show <别名>             # 查看单个 Key 详情
+akm key edit <别名> --priority 1 --models gpt-4o,gpt-4.1 # 统一编辑 Key
+akm key health                 # 批量巡检 Key 可用性
 akm key remove <别名>           # 删除 Key
 akm key disable <别名>          # 禁用 Key
 akm key enable <别名>           # 启用 Key
@@ -70,7 +79,18 @@ akm serve --no-open            # 不自动打开浏览器
 
 # 日志
 akm log list                   # 查看最近日志
+akm log stats                  # 查看日志聚合统计
 akm log clean --before YYYY-MM-DD # 清理旧日志
+
+# 插件
+akm plugin list               # 查看插件列表
+akm plugin enable <名称>      # 启用插件
+akm plugin disable <名称>     # 禁用插件
+akm plugin config get <名称> [键] # 读取插件配置
+akm plugin config set <名称> <键> <值> # 修改插件配置
+
+# 自检
+akm doctor                    # 检查配置 / 数据库 / 插件 / 服务状态
 ```
 
 ## 菜单栏应用
