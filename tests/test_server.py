@@ -181,75 +181,6 @@ async def test_streaming_response_emits_on_response_only_after_stream_finishes(m
 
 
 @pytest.mark.asyncio
-async def test_streaming_response_blocks_when_security_buffer_limit_exceeded(monkeypatch):
-    """流式安全插件若必须整段缓冲且超过上限，应直接返回安全占位流。"""
-
-    class DummyResp:
-        def __init__(self):
-            self.closed = False
-
-        async def aiter_bytes(self):
-            yield (b"data: {\"choices\":[{\"delta\":{\"content\":\"" + (b"x" * 40000) + b"\"}}]}\n\n")
-            yield b"data: [DONE]\n\n"
-
-        async def aclose(self):
-            self.closed = True
-
-    class DummySecurityPlugin:
-        enabled = True
-
-        def is_stream_guard_active(self):
-            return True
-
-        def stream_guard_requires_buffering(self):
-            return True
-
-        def stream_guard_buffer_max_bytes(self):
-            return 16384
-
-        def _build_safe_stream_payload(self, api_path):
-            return 'data: {"choices":[{"delta":{"content":"[blocked]"}}]}\n\ndata: [DONE]\n\n'
-
-    class DummyPM:
-        def __init__(self):
-            self.plugins = {"data_filter_guard": DummySecurityPlugin()}
-
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
-
-    app.state.plugin_manager = DummyPM()
-    upstream_resp = DummyResp()
-
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
-        return {
-            "stream": True,
-            "status_code": 200,
-            "response": upstream_resp,
-            "adapter": None,
-            "key_alias": "stream-key",
-            "provider": "openai",
-            "model": "gpt-4",
-        }
-
-    monkeypatch.setattr("akm.server.forward_request", mock_forward)
-    monkeypatch.setattr("akm.server._submit_audit_log", AsyncMock(return_value=True))
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        async with client.stream(
-            "POST",
-            "/v1/chat/completions",
-            json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}], "stream": True},
-        ) as resp:
-            body = ""
-            async for chunk in resp.aiter_text():
-                body += chunk
-
-    assert "[blocked]" in body
-    assert upstream_resp.closed is True
-
-
-@pytest.mark.asyncio
 async def test_health_endpoint():
     """健康检查端点"""
     transport = ASGITransport(app=app)
@@ -845,7 +776,7 @@ async def test_api_stats_ignores_estimated_usage_tokens_by_default():
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["total_requests"] == 2
+    assert data["total_requests"] == 1
     assert data["total_prompt_tokens"] == 50
     assert data["total_completion_tokens"] == 20
     assert data["total_tokens"] == 100
@@ -959,13 +890,59 @@ async def test_api_stats_ignores_rows_without_key_alias():
 
 
 @pytest.mark.asyncio
+async def test_api_stats_ignores_failed_rows_even_with_key_alias():
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 502,
+        "latency_ms": 10,
+        "error": "upstream failed",
+        "request_headers": '{}',
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 30,
+        "cache_creation_tokens": 0,
+    })
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 12,
+        "error": "",
+        "request_headers": '{}',
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 30,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_requests"] == 1
+    assert data["by_key"]["real-key"]["requests"] == 1
+    assert data["by_provider"]["openai"]["requests"] == 1
+
+
+@pytest.mark.asyncio
 async def test_plugin_config_api_roundtrip():
     class DummyPM:
         def __init__(self):
             self.saved = None
 
         def get_config(self, name):
-            return {"enabled": True, "keyword_rules": "secret=***"} if name == "data_filter_guard" else None
+            return {"enabled": True} if name == "protocol_converter" else None
 
         def set_config(self, name, data):
             self.saved = (name, data)
@@ -975,13 +952,13 @@ async def test_plugin_config_api_roundtrip():
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        get_resp = await client.get("/api/plugin-config/data_filter_guard")
-        post_resp = await client.post("/api/plugin-config/data_filter_guard", json={"enabled": False})
+        get_resp = await client.get("/api/plugin-config/protocol_converter")
+        post_resp = await client.post("/api/plugin-config/protocol_converter", json={"enabled": False})
 
     assert get_resp.status_code == 200
     assert get_resp.json()["enabled"] is True
     assert post_resp.status_code == 200
-    assert app.state.plugin_manager.saved == ("data_filter_guard", {"enabled": False})
+    assert app.state.plugin_manager.saved == ("protocol_converter", {"enabled": False})
 
 
 @pytest.mark.asyncio
