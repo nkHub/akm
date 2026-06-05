@@ -33,12 +33,40 @@
 </div>
 {% endblock %}
 
+{% block extra_html %}
+<div id="plugin-config-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 fade-in">
+  <div class="absolute inset-0 bg-black/60" onclick="closePluginConfigModal()"></div>
+  <div class="relative bg-surface-light border border-border rounded-lg w-full max-w-3xl max-h-[80vh] shadow-2xl flex flex-col" style="animation: slideUp 0.2s ease">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-border">
+      <div class="min-w-0">
+        <h3 id="plugin-config-modal-title" class="text-sm font-semibold text-white">插件配置</h3>
+        <p id="plugin-config-modal-subtitle" class="text-xs text-gray-500 mt-1"></p>
+      </div>
+      <button onclick="closePluginConfigModal()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="p-4 overflow-y-auto flex-1 min-h-0">
+      <div id="plugin-config-modal-body"></div>
+    </div>
+    <div class="flex items-center justify-between gap-3 px-4 py-4 border-t border-border shrink-0 bg-surface-light rounded-b-lg">
+      <span id="plugin-config-modal-msg" class="text-xs text-gray-500"></span>
+      <div class="flex items-center gap-2">
+        <button type="button" onclick="closePluginConfigModal()" class="bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button>
+        <button type="button" onclick="saveActivePluginConfig()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存配置</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
 {% block extra_js %}
 <script>
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function pluginRoute(name) { return '/plugins/' + encodeURIComponent(name || ''); }
 
 var _plugins = [];
+var _activePluginConfigModal = '';
 var DATA_FILTER_GUARD_TEMPLATES = {
   command_risk: {
     enabled: true,
@@ -447,8 +475,6 @@ function renderPluginSettings(p) {
   if (!p.settings || !p.settings.length) return '';
   var html = '<details class="pt-3"><summary class="text-xs text-gray-400 mb-2 cursor-pointer select-none">配置</summary><div class="mt-2">';
   if (p.name === 'data_filter_guard') html += '<div id="dfg-structured-' + esc(p.name) + '">' + renderDataFilterStructuredEditor(p) + '</div>';
-  if (p.name === 'model_matcher') html += renderModelMatcherStructuredEditor(p);
-  if (p.name === 'error_handler') html += renderErrorHandlerStructuredEditor(p);
   p.settings.forEach(function(def){
     if (p.name === 'data_filter_guard' && DATA_FILTER_STRUCTURED_KEYS[def.key]) return;
     if (p.name === 'model_matcher') return;
@@ -573,6 +599,43 @@ function syncDataFilterGuardEditors(pluginName) {
   if (actionNode) actionNode.value = responseActions.join('\n');
 }
 
+function getPluginConfigMessageNode(name) {
+  if (_activePluginConfigModal === name) {
+    var modalMsg = document.getElementById('plugin-config-modal-msg');
+    if (modalMsg) return modalMsg;
+  }
+  return document.getElementById('plugin-config-msg-' + name);
+}
+
+function renderPluginConfigModalBody(plugin) {
+  if (!plugin) return '';
+  if (plugin.name === 'model_matcher') return renderModelMatcherStructuredEditor(plugin);
+  if (plugin.name === 'error_handler') return renderErrorHandlerStructuredEditor(plugin);
+  return '';
+}
+
+function openPluginConfigModal(name) {
+  var plugin = (_plugins || []).find(function(item){ return item.name === name; });
+  if (!plugin) return;
+  _activePluginConfigModal = name;
+  document.getElementById('plugin-config-modal-title').textContent = plugin.name + ' 配置';
+  document.getElementById('plugin-config-modal-subtitle').textContent = plugin.description || '调整插件运行参数，保存后立即写入当前配置。';
+  document.getElementById('plugin-config-modal-body').innerHTML = renderPluginConfigModalBody(plugin);
+  document.getElementById('plugin-config-modal-msg').textContent = '';
+  document.getElementById('plugin-config-modal-msg').className = 'text-xs text-gray-500';
+  document.getElementById('plugin-config-modal').classList.remove('hidden');
+}
+
+function closePluginConfigModal() {
+  _activePluginConfigModal = '';
+  document.getElementById('plugin-config-modal').classList.add('hidden');
+  document.getElementById('plugin-config-modal-body').innerHTML = '';
+}
+
+function saveActivePluginConfig() {
+  if (_activePluginConfigModal) savePluginConfig(_activePluginConfigModal);
+}
+
 function loadPlugins() {
   fetch('/api/plugins').then(function(r){return r.json()}).then(function(data){
     _plugins = data;
@@ -609,8 +672,10 @@ function savePluginConfig(name) {
     else if (type === 'number') payload[key] = Number(node.value || 0);
     else payload[key] = node.value;
   });
-  var msg = document.getElementById('plugin-config-msg-' + name);
+  var msg = getPluginConfigMessageNode(name);
+  if (!msg) return;
   msg.textContent = '保存中...';
+  msg.className = 'text-xs text-gray-500';
   fetch('/api/plugin-config/' + encodeURIComponent(name), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -620,6 +685,7 @@ function savePluginConfig(name) {
       if (res.ok && res.body.ok) {
         msg.textContent = '已保存，当前进程立即生效';
         msg.className = 'text-xs text-emerald-400';
+        if (_activePluginConfigModal === name) closePluginConfigModal();
         loadPlugins();
       } else {
         msg.textContent = '保存失败';
@@ -672,6 +738,10 @@ function renderPluginList(plugins) {
       html += sourceBadge + requiredBadge;
       html += '<span class="text-xs text-gray-500">v' + esc(p.version) + '</span>';
       html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
+      if (p.name === 'model_matcher' || p.name === 'error_handler') {
+        html += '<button type="button" onclick="openPluginConfigModal(\'' + esc(p.name) + '\')" class="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:text-indigo-200 hover:border-indigo-400 cursor-pointer">配置</button>';
+        html += '<span id="plugin-config-msg-' + esc(p.name) + '" class="text-xs text-gray-500"></span>';
+      }
       html += convertsInfo;
       html += '</div>';
       if (p.description) {
@@ -702,7 +772,7 @@ function renderPluginList(plugins) {
       html += '</div>';
 
       html += '</div>';
-      if (p.settings && p.settings.length) {
+      if (p.settings && p.settings.length && p.name !== 'model_matcher' && p.name !== 'error_handler') {
         html += '<div class="mt-3 pt-3 border-t border-border">';
         html += renderPluginSettings(p);
         html += '</div>';
