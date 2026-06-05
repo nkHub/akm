@@ -69,9 +69,11 @@
       </div>
       <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
         <div>
-          <h4 class="text-sm font-semibold text-white">清空日志</h4>
-          <p class="text-xs text-gray-500 mt-0.5">删除所有审计日志，此操作不可撤销</p>
-          <p class="text-xs text-gray-400 mt-1"><span id="log-stats">加载中...</span> <span id="log-size" class="text-gray-500"></span></p>
+          <div class="flex items-center gap-2 flex-wrap">
+            <h4 class="text-sm font-semibold text-white">清空日志</h4>
+            <span id="log-stats" class="text-xs text-gray-500">加载中...</span>
+          </div>
+          <p class="text-xs text-gray-400 mt-1"><span id="log-size" class="text-gray-500"></span></p>
         </div>
         <div class="flex flex-col items-end shrink-0">
           <div class="flex items-center gap-2">
@@ -234,7 +236,7 @@ function loadLogStats() {
     document.getElementById('log-stats').textContent = '共 ' + json.total.toLocaleString() + ' 条审计日志';
   }).catch(function(){ document.getElementById('log-stats').textContent = '加载失败'; });
   fetch('/api/logs/size').then(function(r){return r.json()}).then(function(data){
-    document.getElementById('log-size').textContent = '（缓存 ' + formatSize(data.cache_size || data.size || 0) + '：数据库 ' + formatSize(data.db_size || 0) + '，日志 ' + formatSize(data.log_size || 0) + '）';
+    document.getElementById('log-size').textContent = '缓存 ' + formatSize(data.cache_size || data.size || 0) + '：数据库 ' + formatSize(data.db_size || 0) + '，日志 ' + formatSize(data.log_size || 0);
   }).catch(function(){});
 }
 
