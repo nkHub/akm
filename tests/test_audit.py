@@ -5,7 +5,7 @@ import time
 import pytest
 
 from akm.db import get_connection, init_db
-from akm.audit import AuditLogQueue, write_log, list_logs, clean_logs
+from akm.audit import AuditLogQueue, write_log, list_logs, count_logs, clean_logs
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +78,60 @@ def test_clean_logs_partial(setup):
     count = clean_logs("2000-01-01")
     assert count == 0
     assert len(list_logs()) == 2
+
+
+def test_list_logs_hide_est_filters_only_low_latency_metadata_rows(setup):
+    write_log({
+        "provider": "openai",
+        "key_alias": "k1",
+        "model": "gpt-5.4",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 3,
+        "error": "",
+        "request_headers": '{"x-akm-flags":"usage_estimated_light"}',
+        "prompt_tokens": 24000,
+        "completion_tokens": 100,
+        "total_tokens": 24100,
+    })
+    write_log({
+        "provider": "openai",
+        "key_alias": "k1",
+        "model": "gpt-5.4",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 3000,
+        "error": "",
+        "request_headers": '{"x-akm-flags":"usage_estimated_light"}',
+        "prompt_tokens": 24000,
+        "completion_tokens": 800,
+        "total_tokens": 24800,
+    })
+    write_log({
+        "provider": "openai",
+        "key_alias": "k1",
+        "model": "gpt-5.4",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 200,
+        "error": "",
+        "request_headers": '{}',
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+    })
+
+    hidden = list_logs(limit=10, hide_est=True)
+    shown = list_logs(limit=10, hide_est=False)
+
+    assert len(shown) == 3
+    assert len(hidden) == 2
+    assert count_logs(hide_est=True) == 2
+    totals = sorted(row["total_tokens"] for row in hidden)
+    assert totals == [120, 24800]
 
 
 @pytest.mark.asyncio

@@ -1098,7 +1098,7 @@ def _get_stats(days: int) -> dict:
     day_offset = 1 - days
     rows = conn.execute(
         """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                  provider, model, key_alias, timestamp, response_body, request_headers
+                  provider, model, key_alias, timestamp, response_body, request_headers, status_code
            FROM audit_logs
            WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
            ORDER BY id DESC""",
@@ -1123,7 +1123,7 @@ def _get_stats(days: int) -> dict:
         # 没有 key_alias 的记录通常是选 key 失败或前置报错，不应混入总量与分组统计。
         if not key_alias:
             continue
-        total_requests += 1
+        status_code = int(r.get("status_code", 0) or 0)
         p = r.get("prompt_tokens", 0) or 0
         c = r.get("completion_tokens", 0) or 0
         t = r.get("total_tokens", 0) or 0
@@ -1149,6 +1149,15 @@ def _get_stats(days: int) -> dict:
             c = 0
             t = 0
             cached = 0
+
+        # 首页 requests 口径与 token 口径保持一致：
+        # 1. 始终排除失败请求；
+        # 2. 当隐藏 estimated token 时，同时排除 estimated 请求，避免“请求数算了、token 没算”带来的错觉。
+        include_request = (200 <= status_code < 300) and (not ignore_estimated_tokens)
+        if not include_request:
+            continue
+
+        total_requests += 1
 
         provider = r.get("provider", "unknown")
         model = r.get("model", "unknown")
@@ -1219,13 +1228,14 @@ async def api_logs(
     provider: str = Query(default=None),
     order: str = Query(default="DESC"),
     hide_empty: bool = Query(default=False),
+    hide_est: bool = Query(default=False),
     status: str = Query(default="all"),
     key_alias: str = Query(default=""),
     days: int = Query(default=0, ge=0, le=365),
 ):
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
-    logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
-    total = await count_logs_async(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
+    logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
+    total = await count_logs_async(provider=provider, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
     # 为每条日志附加 token 用量信息（优先读列，兼容旧数据才解析 body）
     for log in logs:
         p = log.get("prompt_tokens", 0) or 0
@@ -1607,16 +1617,6 @@ async def _handle_ai_request(request: Request, api_path: str):
             key_alias = result["key_alias"]
             provider = result["provider"]
             model = result["model"]
-            plugin_manager = request.app.state.plugin_manager
-            security_plugin = None
-            if plugin_manager is not None:
-                candidate = plugin_manager.plugins.get("data_filter_guard")
-                if candidate and candidate.enabled and hasattr(candidate, "is_stream_guard_active"):
-                    try:
-                        if candidate.is_stream_guard_active():
-                            security_plugin = candidate
-                    except Exception:
-                        security_plugin = None
 
             if monitor is not None:
                 monitor.stream_started()
@@ -1660,95 +1660,15 @@ async def _handle_ai_request(request: Request, api_path: str):
                     return meta
 
                 try:
-                    if security_plugin:
-                        if security_plugin.stream_guard_requires_buffering():
-                            buffered_parts = []
-                            buffered_size = 0
-                            buffer_limit = int(security_plugin.stream_guard_buffer_max_bytes())
-                            buffer_overflow = False
-                            if adapter:
-                                async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                                    part = line if isinstance(line, str) else line.decode("utf-8", errors="replace")
-                                    buffered_size += len(part.encode("utf-8", errors="replace"))
-                                    if buffered_size > buffer_limit:
-                                        buffer_overflow = True
-                                        break
-                                    buffered_parts.append(part)
-                            else:
-                                async for chunk in resp.aiter_bytes():
-                                    part = chunk.decode("utf-8", errors="replace")
-                                    buffered_size += len(part.encode("utf-8", errors="replace"))
-                                    if buffered_size > buffer_limit:
-                                        buffer_overflow = True
-                                        break
-                                    buffered_parts.append(part)
-                            if buffer_overflow:
-                                body_str = security_plugin._build_safe_stream_payload(api_path)
-                                security_changed = True
-                                security_reason = "stream_buffer_limit_exceeded"
-                                security_action = "blocked"
-                            else:
-                                body_str = "".join(buffered_parts)
-                                body_str, security_changed, security_reason, security_action = security_plugin.protect_stream_payload(api_path, body_str)
-                            out_chunk = body_str.encode("utf-8")
-                            capture.append(out_chunk)
-                            yield out_chunk
-                        else:
-                            stream_guard_state = security_plugin.create_stream_guard_state()
-                            blocked = False
-                            if adapter:
-                                async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                                    chunk = line.encode("utf-8") if isinstance(line, str) else line
-                                    chunk_text = chunk.decode("utf-8", errors="replace")
-                                    stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
-                                        api_path, chunk_text, stream_guard_state
-                                    )
-                                    if should_rewrite and hit_action == "blocked":
-                                        security_changed = True
-                                        security_reason = hit_reason
-                                        security_action = "blocked"
-                                        safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
-                                        capture.append(safe_chunk)
-                                        yield safe_chunk
-                                        blocked = True
-                                        break
-                                    if hit_action == "warn" and not security_action:
-                                        security_reason = hit_reason
-                                        security_action = "warn"
-                                    capture.append(chunk)
-                                    yield chunk
-                            else:
-                                async for chunk in resp.aiter_bytes():
-                                    chunk_text = chunk.decode("utf-8", errors="replace")
-                                    stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
-                                        api_path, chunk_text, stream_guard_state
-                                    )
-                                    if should_rewrite and hit_action == "blocked":
-                                        security_changed = True
-                                        security_reason = hit_reason
-                                        security_action = "blocked"
-                                        safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
-                                        capture.append(safe_chunk)
-                                        yield safe_chunk
-                                        blocked = True
-                                        break
-                                    if hit_action == "warn" and not security_action:
-                                        security_reason = hit_reason
-                                        security_action = "warn"
-                                    capture.append(chunk)
-                                    yield chunk
-                            if blocked:
-                                await resp.aclose()
+                    if adapter:
+                        async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                            chunk = line.encode("utf-8") if isinstance(line, str) else line
+                            capture.append(chunk)
+                            yield chunk
                     else:
-                        if adapter:
-                            async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                                chunk = line.encode("utf-8") if isinstance(line, str) else line
-                                capture.append(chunk)
-                                yield chunk
-                        else:
-                            async for chunk in resp.aiter_bytes():
-                                capture.append(chunk)
-                                yield chunk
+                        async for chunk in resp.aiter_bytes():
+                            capture.append(chunk)
+                            yield chunk
                 except Exception as exc:
                     stream_error = f"上游连接中断: {exc}"
                     logger.warning(f"[{key_alias}] {provider} model={model} → {stream_error}")

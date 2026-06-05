@@ -119,6 +119,7 @@ async def list_logs_async(
     offset: int = 0,
     order: str = "DESC",
     hide_empty: bool = False,
+    hide_est: bool = False,
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
@@ -131,6 +132,7 @@ async def list_logs_async(
         offset,
         order,
         hide_empty,
+        hide_est,
         status,
         key_alias,
         days,
@@ -140,6 +142,7 @@ async def list_logs_async(
 async def count_logs_async(
     provider: str | None = None,
     hide_empty: bool = False,
+    hide_est: bool = False,
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
@@ -149,6 +152,7 @@ async def count_logs_async(
         count_logs,
         provider,
         hide_empty,
+        hide_est,
         status,
         key_alias,
         days,
@@ -161,6 +165,7 @@ def list_logs(
     offset: int = 0,
     order: str = "DESC",
     hide_empty: bool = False,
+    hide_est: bool = False,
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
@@ -184,6 +189,11 @@ def list_logs(
         params.append(str(day_offset))
     if hide_empty:
         filters += " AND request_body != ''"
+    if hide_est:
+        # 默认隐藏 Codex Desktop 一类“est + 元数据特征”请求：
+        # 只有同时满足 estimated 标记、极低延迟、极小 completion 才过滤，
+        # 尽量避免误伤真正对话请求。
+        filters += " AND NOT (request_headers LIKE '%usage_estimated_light%' AND latency_ms <= 5 AND completion_tokens <= 200)"
     if status == "success":
         filters += " AND status_code >= 200 AND status_code < 300"
     elif status == "failed":
@@ -213,6 +223,7 @@ def list_logs(
 def count_logs(
     provider: str | None = None,
     hide_empty: bool = False,
+    hide_est: bool = False,
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
@@ -227,6 +238,8 @@ def count_logs(
         params.append(str(day_offset))
     if hide_empty:
         filters += " AND request_body != ''"
+    if hide_est:
+        filters += " AND NOT (request_headers LIKE '%usage_estimated_light%' AND latency_ms <= 5 AND completion_tokens <= 200)"
     if status == "success":
         filters += " AND status_code >= 200 AND status_code < 300"
     elif status == "failed":
