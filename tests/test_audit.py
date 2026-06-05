@@ -1,8 +1,11 @@
+import asyncio
 import tempfile
 import time
+
 import pytest
+
 from akm.db import get_connection, init_db
-from akm.audit import write_log, list_logs, clean_logs
+from akm.audit import AuditLogQueue, write_log, list_logs, clean_logs
 
 
 @pytest.fixture(autouse=True)
@@ -75,3 +78,27 @@ def test_clean_logs_partial(setup):
     count = clean_logs("2000-01-01")
     assert count == 0
     assert len(list_logs()) == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_log_queue_drops_when_full(monkeypatch):
+    """有界审计队列满载时应丢弃新增任务，而不是无限堆积后台任务。"""
+
+    queue = AuditLogQueue(maxsize=1)
+
+    gate = asyncio.Event()
+
+    async def fake_write_log_async(data):
+        await gate.wait()
+
+    monkeypatch.setattr("akm.audit.write_log_async", fake_write_log_async)
+
+    await queue.start()
+    try:
+        assert await queue.submit({"provider": "a"}) is True
+        assert await queue.submit({"provider": "b"}) is False
+        assert queue.dropped_count == 1
+        assert queue.qsize() == 1
+    finally:
+        gate.set()
+        await queue.stop()

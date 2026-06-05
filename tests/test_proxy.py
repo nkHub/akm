@@ -39,6 +39,22 @@ class FakeStreamResponse:
         return self._body
 
 
+class FakeChunkedStreamResponse(FakeStreamResponse):
+    """模拟分块 SSE 响应，并支持观测是否已关闭。"""
+
+    def __init__(self, status_code, chunks):
+        self.status_code = status_code
+        self._chunks = [c if isinstance(c, bytes) else str(c).encode("utf-8") for c in chunks]
+        self.closed = False
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
 class FakeTestResponse:
     """模拟 test_key_connectivity 使用的 httpx 响应对象。"""
 
@@ -471,6 +487,74 @@ async def test_forward_allows_on_response_to_rewrite_non_stream_body(monkeypatch
 
     assert result["status_code"] == 200
     assert result["body"] == '{"choices":[{"message":{"content":"blocked"}}]}'
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_does_not_emit_on_response_before_stream_end(monkeypatch):
+    """流式请求不应在 proxy 返回时就触发 on_response，避免提前回收并发计数。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1", "provider": "openai", "api_key": "sk-a",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def __init__(self):
+            self.events = []
+
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            if hook == "on_response":
+                self.events.append(kwargs)
+            return kwargs
+
+    pm = DummyPM()
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeChunkedStreamResponse(200, [b"data: one\n\n", b"data: [DONE]\n\n"])])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}], "stream": True},
+        client=mock_client,
+        plugin_manager=pm,
+    )
+
+    assert result["status_code"] == 200
+    assert result["stream"] is True
+    assert pm.events == []
+
+
+@pytest.mark.asyncio
+async def test_chained_adapter_streams_incrementally_without_buffering_full_midstream():
+    """链式协议转换应保持增量转发，不能先把整段中间流攒满再输出。"""
+    from akm.proxy import _ChainedAdapter
+
+    seen_mid_chunks = []
+
+    class FirstAdapter:
+        async def convert_sse_stream(self, upstream_stream):
+            async for part in upstream_stream:
+                seen_mid_chunks.append(part)
+                yield f"OUT:{part}"
+
+    class SecondAdapter:
+        async def convert_sse_stream(self, upstream_stream):
+            async for chunk in upstream_stream:
+                text = chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
+                yield f"MID:{text}"
+
+    async def upstream():
+        yield b"a"
+        yield b"b"
+
+    adapter = _ChainedAdapter(FirstAdapter(), SecondAdapter())
+    outputs = []
+    async for line in adapter.convert_sse_stream(upstream()):
+        outputs.append(line)
+
+    assert seen_mid_chunks == ["MID:a", "MID:b"]
+    assert outputs == ["OUT:MID:a", "OUT:MID:b"]
 
 
 @pytest.mark.asyncio

@@ -258,6 +258,7 @@ class Plugin(PluginBase):
         # 服务端会先缓冲整段 SSE，再统一做规则检查。因此默认单独关闭，
         # 避免用户只想做请求脱敏时误伤流式首字节返回体验。
         self._enable_stream_response_guard = cfg.get("enable_stream_response_guard", False) is True
+        self._stream_guard_buffer_max_bytes = max(16384, int(cfg.get("stream_guard_buffer_max_bytes", 262144) or 262144))
         self._stream_guard_cache_chars = max(0, int(cfg.get("stream_guard_cache_chars", 2048) or 2048))
         self._response_guard_mode = str(cfg.get("response_guard_mode", "block") or "block").strip().lower()
         self._response_rule_actions = self._parse_rule_actions(cfg.get("response_rule_actions", "") or "")
@@ -757,6 +758,11 @@ class Plugin(PluginBase):
         if self._response_guard_mode == "mask":
             return True
         return any(action == "mask" for action in self._response_rule_actions.values())
+
+    def stream_guard_buffer_max_bytes(self) -> int:
+        """返回整段缓冲模式允许占用的最大字节数。"""
+        self._reload_config()
+        return self._stream_guard_buffer_max_bytes
 
     def create_stream_guard_state(self) -> dict:
         """创建流式增量扫描状态。

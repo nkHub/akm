@@ -12,6 +12,8 @@ DEFAULTS = {
     "server_port": 8800,       # 默认服务端口
     "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）
     "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
+    "stream_capture_max_bytes": 262144,  # 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB）
+    "stats_include_estimated_usage": False,  # 首页统计是否计入 estimated token，默认关闭更保守
     "json_viewer_max_text_length": 600000,  # JSON 查看器超长文本阈值（超过后仅允许下载原文）
 }
 

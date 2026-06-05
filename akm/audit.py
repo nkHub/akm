@@ -46,6 +46,115 @@ async def write_log_async(data: dict) -> None:
     await asyncio.to_thread(_do_write, data)
 
 
+class AuditLogQueue:
+    """有界审计队列：使用固定 worker 消化写日志任务，避免无限 create_task 堆积。
+
+    设计目标：
+    1. 日志写入不阻塞主请求链路。
+    2. 高峰期不再为每条日志单独创建后台任务，避免任务数量失控。
+    3. 队列满时优先丢弃新增日志，并把背压信息暴露给健康监护层。
+    """
+
+    def __init__(self, maxsize: int = 512):
+        self.maxsize = max(1, int(maxsize or 512))
+        self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=self.maxsize)
+        self._worker_task: asyncio.Task | None = None
+        self._stopped = False
+        self.dropped_count = 0
+        self.failure_count = 0
+        self.last_error = ""
+        self.last_success_at = 0.0
+
+    def qsize(self) -> int:
+        return self._queue.qsize()
+
+    async def start(self) -> None:
+        """启动单 worker 消费队列。"""
+        if self._worker_task is not None and not self._worker_task.done():
+            return
+        self._stopped = False
+        self._worker_task = asyncio.create_task(self._worker_loop())
+
+    async def stop(self) -> None:
+        """停止 worker，并尽量等待队列中已提交任务完成。"""
+        self._stopped = True
+        await self._queue.join()
+        if self._worker_task is not None:
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+            self._worker_task = None
+
+    async def submit(self, data: dict) -> bool:
+        """提交一条日志；满载时直接丢弃并返回 False。"""
+        if self._stopped:
+            self.dropped_count += 1
+            return False
+        try:
+            self._queue.put_nowait(dict(data))
+            return True
+        except asyncio.QueueFull:
+            self.dropped_count += 1
+            return False
+
+    async def _worker_loop(self) -> None:
+        """持续消费队列，顺序写库，减少并发写 SQLite 的冲突。"""
+        while True:
+            item = await self._queue.get()
+            try:
+                await write_log_async(item)
+                self.last_success_at = asyncio.get_running_loop().time()
+            except Exception as exc:
+                self.failure_count += 1
+                self.last_error = str(exc)
+            finally:
+                self._queue.task_done()
+
+
+async def list_logs_async(
+    provider: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    order: str = "DESC",
+    hide_empty: bool = False,
+    status: str = "all",
+    key_alias: str = "",
+    days: int = 0,
+) -> list[dict]:
+    """异步查询日志，避免管理台轮询时阻塞事件循环。"""
+    return await asyncio.to_thread(
+        list_logs,
+        provider,
+        limit,
+        offset,
+        order,
+        hide_empty,
+        status,
+        key_alias,
+        days,
+    )
+
+
+async def count_logs_async(
+    provider: str | None = None,
+    hide_empty: bool = False,
+    status: str = "all",
+    key_alias: str = "",
+    days: int = 0,
+) -> int:
+    """异步统计日志数量，避免同步 COUNT 阻塞请求处理。"""
+    return await asyncio.to_thread(
+        count_logs,
+        provider,
+        hide_empty,
+        status,
+        key_alias,
+        days,
+    )
+
+
 def list_logs(
     provider: str | None = None,
     limit: int = 50,
@@ -161,6 +270,11 @@ def clean_logs(before: str) -> int:
     return count
 
 
+async def clean_logs_async(before: str) -> int:
+    """异步清理日志，避免 DELETE/VACUUM 长时间占用事件循环。"""
+    return await asyncio.to_thread(clean_logs, before)
+
+
 def clean_log_bodies() -> int:
     """清空所有审计日志的请求体/响应体内容，返回影响条数"""
     conn = get_connection()
@@ -175,3 +289,8 @@ def clean_log_bodies() -> int:
     conn.execute("VACUUM")
     conn.close()
     return count
+
+
+async def clean_log_bodies_async() -> int:
+    """异步清空日志体，避免大批量 UPDATE/VACUUM 阻塞服务。"""
+    return await asyncio.to_thread(clean_log_bodies)

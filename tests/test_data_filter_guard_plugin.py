@@ -659,3 +659,17 @@ def test_data_filter_guard_stream_mask_requires_buffering():
     plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
 
     assert plugin.stream_guard_requires_buffering() is True
+
+
+def test_data_filter_guard_stream_buffer_limit_is_configurable():
+    plugin = _load_plugin_class()()
+    plugin.config = {
+        "enabled": True,
+        "enable_response_guard": True,
+        "enable_stream_response_guard": True,
+        "response_guard_mode": "mask",
+        "stream_guard_buffer_max_bytes": 32768,
+    }
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    assert plugin.stream_guard_buffer_max_bytes() == 32768
