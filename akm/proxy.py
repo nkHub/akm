@@ -3,6 +3,7 @@
 import time
 import json
 import asyncio
+from contextlib import suppress
 import httpx
 from akm.key_pool import (
     pick_key_async,
@@ -38,19 +39,41 @@ class _ChainedAdapter:
                 else:
                     yield str(chunk)
 
-        # 第二段：上游目标协议 -> 中间协议
-        mid_lines = []
-        async for line in self.second.convert_sse_stream(_bytes_to_text()):
-            mid_lines.append(line)
+        # 第二段：上游目标协议 -> 中间协议。
+        # 之前这里会先把整段中间流全部攒进内存，再一次性喂给第一段，
+        # 导致链式协议转换场景下首字节被整段响应拖住，用户体感就像
+        # “一顿一顿地吐字”。这里改成基于队列的流式桥接，让第二段产出
+        # 的每一小段能尽快继续流向第一段，恢复真正的边收边转边发。
+        mid_queue: asyncio.Queue[str | BaseException | object] = asyncio.Queue()
+        sentinel = object()
 
-        mid_text = "".join(mid_lines)
+        async def _produce_mid_stream():
+            try:
+                async for line in self.second.convert_sse_stream(_bytes_to_text()):
+                    await mid_queue.put(line if isinstance(line, str) else str(line))
+            except Exception as exc:
+                await mid_queue.put(exc)
+            finally:
+                await mid_queue.put(sentinel)
 
-        # 第一段：中间协议 -> 源协议
         async def _mid_iter():
-            yield mid_text
+            while True:
+                item = await mid_queue.get()
+                if item is sentinel:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
 
-        async for line in self.first.convert_sse_stream(_mid_iter()):
-            yield line
+        producer = asyncio.create_task(_produce_mid_stream())
+        try:
+            async for line in self.first.convert_sse_stream(_mid_iter()):
+                yield line
+        finally:
+            if not producer.done():
+                producer.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer
 
 
 # 最大尝试 key 数量，防止无限循环
@@ -433,20 +456,11 @@ async def forward_request(
 
             # ── 成功：客户端流式 → 透传或标记转换 ──
             if client_wants_stream:
-                await _emit_on_response_meta({
-                    "ok": True,
-                    "phase": "upstream",
-                    "status_code": 200,
-                    "key_alias": key["alias"],
-                    "provider": key["provider"],
-                    "model": model,
-                    "latency_ms": int((time.time() - t0) * 1000),
-                    "error": "",
-                    "attempt": attempt,
-                    "api_path": api_path,
-                    "upstream_api_path": upstream_api_path,
-                    "stream": True,
-                })
+                # 流式请求在这里只表示“上游已经接受并开始返回数据”，并不代表
+                # 整个请求生命周期已经结束。真正的完成/失败信号要等 server.py
+                # 中的 StreamingResponse 生成器退出后再统一触发 on_response，
+                # 否则像 model_matcher 这类依赖该生命周期回收 in-flight 计数的
+                # 插件会过早减计数，导致并发判断失真，慢请求积压时表现为整服卡住。
                 return {
                     "stream": True,
                     "status_code": 200,

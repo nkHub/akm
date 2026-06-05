@@ -7,6 +7,9 @@ import time
 import os
 import sys
 import traceback
+import gc
+import resource
+import threading
 from datetime import datetime
 from contextlib import asynccontextmanager
 import httpx
@@ -20,11 +23,19 @@ from akm.key_pool import (
     set_priority, set_base_url, set_status, remove_key,
     set_provider, set_models, set_auth_header, set_provider_models, key_model_list,
 )
-from akm.audit import write_log_async, list_logs, count_logs
+from akm.audit import (
+    write_log_async,
+    list_logs_async,
+    count_logs_async,
+    clean_logs_async,
+    clean_log_bodies_async,
+    AuditLogQueue,
+)
 from akm.config import load_config, save_config, get as config_get
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.plugins.plugin_manager import PluginManager
 from akm.db import get_keys_log_path
+from akm.health import HealthMonitor
 from akm.usage_flags import (
     FLAG_COUNT_TOKENS_FALLBACK,
     FLAG_USAGE_FALLBACK_ADAPTER,
@@ -47,14 +58,23 @@ async def lifespan(app: FastAPI):
     plugin_manager = PluginManager()
     await plugin_manager.load_all(app, conn)
     app.state.plugin_manager = plugin_manager
-    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-    app.state.http_client = httpx.AsyncClient(
-        limits=limits,
-        timeout=httpx.Timeout(120.0, connect=10.0),
-    )
+    health_monitor = HealthMonitor()
+    app.state.health_monitor = health_monitor
+    app.state.health_task = asyncio.create_task(health_monitor.run_heartbeat())
+    audit_queue = AuditLogQueue(maxsize=512)
+    await audit_queue.start()
+    app.state.audit_log_queue = audit_queue
+    app.state.http_client_lock = asyncio.Lock()
+    app.state.http_client = _build_shared_http_client()
     try:
         yield
     finally:
+        await app.state.audit_log_queue.stop()
+        app.state.health_task.cancel()
+        try:
+            await app.state.health_task
+        except asyncio.CancelledError:
+            pass
         await app.state.http_client.aclose()
 
 
@@ -276,10 +296,260 @@ def _render_template(name: str, **kwargs) -> str:
     return _resolve(name)
 
 
+class _BoundedStreamCapture:
+    """有界流式捕获器：保留头尾两段，中间超出部分用标记替代。
+
+    设计目标：
+    1. 避免长流把完整响应一直堆在内存里。
+    2. 尽量保留 SSE 首尾信息，兼顾 usage 提取和事后排障。
+    3. 当达到上限后继续消费流，但不再无限增长内存占用。
+    """
+
+    _TRUNCATED_TEMPLATE = "\n[... stream truncated by akm: omitted {omitted} bytes ...]\n"
+
+    def __init__(self, max_bytes: int):
+        self.max_bytes = max(1024, int(max_bytes or 262144))
+        self._head_limit = max(512, self.max_bytes // 2)
+        self._tail_limit = max(512, self.max_bytes - self._head_limit)
+        self._head_parts: list[bytes] = []
+        self._head_size = 0
+        self._tail_parts: list[bytes] = []
+        self._tail_size = 0
+        self._total_seen = 0
+
+    def append(self, chunk: bytes) -> None:
+        """追加新分块：优先填充 head，超出后滚动维护 tail。"""
+        data = chunk if isinstance(chunk, bytes) else bytes(chunk)
+        if not data:
+            return
+        self._total_seen += len(data)
+
+        remaining_head = self._head_limit - self._head_size
+        if remaining_head > 0:
+            head_piece = data[:remaining_head]
+            if head_piece:
+                self._head_parts.append(head_piece)
+                self._head_size += len(head_piece)
+            data = data[len(head_piece):]
+
+        if not data:
+            return
+
+        self._tail_parts.append(data)
+        self._tail_size += len(data)
+        while self._tail_size > self._tail_limit and self._tail_parts:
+            overflow = self._tail_size - self._tail_limit
+            first = self._tail_parts[0]
+            if len(first) <= overflow:
+                self._tail_parts.pop(0)
+                self._tail_size -= len(first)
+            else:
+                self._tail_parts[0] = first[overflow:]
+                self._tail_size -= overflow
+
+    def build_text(self) -> str:
+        """生成供 token 提取和审计使用的截断文本。"""
+        head = b"".join(self._head_parts)
+        tail = b"".join(self._tail_parts)
+        if self._total_seen <= self.max_bytes:
+            return (head + tail).decode("utf-8", errors="replace")
+
+        omitted = max(0, self._total_seen - len(head) - len(tail))
+        marker = self._TRUNCATED_TEMPLATE.format(omitted=omitted).encode("utf-8")
+        return (head + marker + tail).decode("utf-8", errors="replace")
+
+    @property
+    def truncated(self) -> bool:
+        return self._total_seen > self.max_bytes
+
+
+def _create_monitored_task(app: FastAPI, coro):
+    """兼容旧逻辑的后台任务包装，当前仅保留给非审计类任务使用。"""
+    monitor = getattr(app.state, "health_monitor", None)
+    if monitor is not None:
+        monitor.audit_task_started()
+
+    async def _runner():
+        ok = True
+        try:
+            await coro
+        except Exception:
+            ok = False
+            raise
+        finally:
+            if monitor is not None:
+                monitor.audit_task_finished(ok)
+
+    return asyncio.create_task(_runner())
+
+
+def _get_health_monitor(app: FastAPI) -> HealthMonitor | None:
+    """统一获取健康监护实例，避免各链路散落 getattr 细节。"""
+    monitor = getattr(app.state, "health_monitor", None)
+    if isinstance(monitor, HealthMonitor):
+        return monitor
+    return None
+
+
+def _runtime_memory_rss_bytes() -> int:
+    """返回当前进程 RSS，按平台统一转换为字节。"""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss = int(getattr(usage, "ru_maxrss", 0) or 0)
+    # macOS 返回字节，Linux 常见返回 KB；当前环境是 darwin，但这里保留兼容转换。
+    if sys.platform.startswith("linux"):
+        return rss * 1024
+    return rss
+
+
+def _count_open_fds() -> int | None:
+    """尽量返回当前进程打开的 fd 数；当前平台不支持时返回 None。"""
+    fd_dir = "/dev/fd"
+    try:
+        return len(os.listdir(fd_dir))
+    except OSError:
+        return None
+
+
+def _build_runtime_debug_payload(app: FastAPI) -> dict:
+    """构建轻量运行时快照，帮助复现“假死/卡死”时快速定责。"""
+    monitor = _get_health_monitor(app)
+    audit_queue = getattr(app.state, "audit_log_queue", None)
+    http_client = getattr(app.state, "http_client", None)
+    return {
+        "process": {
+            "pid": os.getpid(),
+            "platform": sys.platform,
+            "python_version": sys.version.split()[0],
+            "rss_bytes": _runtime_memory_rss_bytes(),
+            "thread_count": threading.active_count(),
+            "gc_counts": list(gc.get_count()),
+            "open_fds": _count_open_fds(),
+        },
+        "health": monitor.detail_payload() if monitor is not None else {"status": "unknown", "reasons": [], "metrics": {}},
+        "audit_queue": {
+            "enabled": audit_queue is not None,
+            "size": audit_queue.qsize() if audit_queue is not None else 0,
+            "dropped": getattr(audit_queue, "dropped_count", 0),
+            "failures": getattr(audit_queue, "failure_count", 0),
+            "last_error": getattr(audit_queue, "last_error", ""),
+        },
+        "http_client": {
+            "configured": http_client is not None,
+            "class": http_client.__class__.__name__ if http_client is not None else "",
+        },
+    }
+
+
+async def _submit_audit_log(app: FastAPI, data: dict) -> bool:
+    """将审计日志提交到有界队列，并同步刷新监护指标。"""
+    audit_queue = getattr(app.state, "audit_log_queue", None)
+    monitor = _get_health_monitor(app)
+    if audit_queue is None:
+        if monitor is not None:
+            monitor.audit_task_started()
+        ok = True
+        try:
+            await write_log_async(data)
+        except Exception:
+            ok = False
+            raise
+        finally:
+            if monitor is not None:
+                monitor.audit_task_finished(ok)
+        return True
+
+    accepted = await audit_queue.submit(data)
+    if monitor is not None:
+        monitor.set_audit_backlog(
+            pending=audit_queue.qsize(),
+            dropped=audit_queue.dropped_count,
+            failures=audit_queue.failure_count,
+        )
+    return accepted
+
+
+def _build_shared_http_client() -> httpx.AsyncClient:
+    """统一构建共享 httpx 客户端，便于后续软重建时复用相同参数。"""
+    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+    return httpx.AsyncClient(
+        limits=limits,
+        timeout=httpx.Timeout(120.0, connect=10.0),
+    )
+
+
+async def _recreate_shared_http_client(app: FastAPI, reason: str) -> bool:
+    """软重建共享 http_client，并通过锁避免并发请求重复执行该操作。"""
+    lock = getattr(app.state, "http_client_lock", None)
+    monitor = _get_health_monitor(app)
+    if lock is None:
+        lock = asyncio.Lock()
+        app.state.http_client_lock = lock
+    async with lock:
+        if monitor is not None and not monitor.should_recreate_http_client():
+            return False
+        old_client = getattr(app.state, "http_client", None)
+        new_client = _build_shared_http_client()
+        app.state.http_client = new_client
+        if old_client is not None:
+            try:
+                await old_client.aclose()
+            except Exception:
+                pass
+        if monitor is not None:
+            monitor.record_http_client_recreated(reason)
+        return True
+
+
 @app.get("/health")
 async def health():
     """健康检查"""
-    return {"status": "ok"}
+    monitor = getattr(app.state, "health_monitor", None)
+    if monitor is None:
+        return {"status": "ok"}
+    return monitor.live_payload()
+
+
+@app.get("/health/live")
+async def health_live():
+    """存活探针：只回答进程是否仍在提供 HTTP 服务。"""
+    monitor = getattr(app.state, "health_monitor", None)
+    if monitor is None:
+        return {"status": "ok"}
+    return monitor.live_payload()
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """就绪探针：回答当前是否适合继续接收新流量。"""
+    monitor = getattr(app.state, "health_monitor", None)
+    if monitor is None:
+        return {"status": "healthy", "ready": True, "reasons": []}
+    body, status_code = monitor.ready_payload()
+    return JSONResponse(status_code=status_code, content=body)
+
+
+@app.get("/health/detail")
+async def health_detail():
+    """详细探针：返回聚合状态和关键运行时指标。"""
+    monitor = getattr(app.state, "health_monitor", None)
+    if monitor is None:
+        return {"status": "healthy", "reasons": [], "metrics": {}}
+    return monitor.detail_payload()
+
+
+@app.get("/debug/runtime")
+async def debug_runtime():
+    """运行时诊断快照：用于排查“服务假活着”“整服卡死”等问题。"""
+    return _build_runtime_debug_payload(app)
+
+
+@app.get("/debug/runtime/history")
+async def debug_runtime_history(limit: int = Query(default=50, ge=1, le=200)):
+    """最近运行时事件环形缓冲：用于复盘自愈、退化和失败链路。"""
+    monitor = _get_health_monitor(app)
+    if monitor is None:
+        return {"total_buffered": 0, "limit": limit, "events": []}
+    return monitor.recent_events_payload(limit=limit)
 
 
 @app.get("/api/version")
@@ -314,7 +584,7 @@ def _mask_key(api_key: str) -> str:
 
 
 def _sanitize_key_snapshot(key: dict | None) -> dict:
-    """生成适合写入 keys.log 的 key 快照，显式排除敏感字段。"""
+    """生成适合写入 keys.log 的 Key 审计快照，显式排除敏感字段。"""
     if not isinstance(key, dict):
         return {}
     return {
@@ -330,9 +600,11 @@ def _sanitize_key_snapshot(key: dict | None) -> dict:
 
 
 def _write_key_change_log(event: str, alias: str, details: dict | None = None) -> None:
-    """将 Key 配置变更追加写入 ~/.akm/keys.log，便于线下复查。"""
+    """将 Key 配置/状态审计事件追加写入 ~/.akm/keys.log。"""
     payload = {
         "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "category": "key_audit",
+        "scope": "configuration",
         "event": str(event or "unknown"),
         "alias": str(alias or ""),
         "details": details or {},
@@ -410,7 +682,7 @@ async def api_add_key(request: Request):
         )
         created = get_key(payload["alias"])
         _write_key_change_log(
-            event="key_created",
+            event="key.config.created",
             alias=payload["alias"],
             details={
                 "after": _sanitize_key_snapshot(created),
@@ -451,7 +723,7 @@ async def api_update_key(alias: str, request: Request):
 
     after = get_key(alias)
     _write_key_change_log(
-        event="key_updated",
+        event="key.config.updated",
         alias=alias,
         details={
             "before": before,
@@ -478,7 +750,7 @@ async def api_toggle_status(alias: str, request: Request):
     before_status = existing.get("status", "")
     set_status(alias, status)
     _write_key_change_log(
-        event="key_status_changed",
+        event="key.status.changed",
         alias=alias,
         details={
             "before_status": before_status,
@@ -494,7 +766,7 @@ async def api_delete_key(alias: str):
     existing = get_key(alias)
     if remove_key(alias):
         _write_key_change_log(
-            event="key_deleted",
+            event="key.config.deleted",
             alias=alias,
             details={
                 "before": _sanitize_key_snapshot(existing),
@@ -544,7 +816,7 @@ async def api_refresh_key_provider_models():
             )
             set_provider_models(key["alias"], provider_models)
             _write_key_change_log(
-                event="key_provider_models_refreshed",
+                event="key.models.refresh_succeeded",
                 alias=key["alias"],
                 details={
                     "before_provider_models": before_models,
@@ -556,7 +828,7 @@ async def api_refresh_key_provider_models():
             refreshed += 1
         except ValueError as exc:
             _write_key_change_log(
-                event="key_provider_models_refresh_failed",
+                event="key.models.refresh_failed",
                 alias=key["alias"],
                 details={
                     "error": str(exc),
@@ -802,14 +1074,16 @@ _stats_cache: dict[str, tuple[float, dict]] = {}
 @app.get("/api/stats")
 async def api_stats(days: int = Query(default=1, ge=1, le=365)):
     """Token 统计概览，可按天数筛选（30 秒内存缓存）"""
-    return _get_stats(days)
+    return await asyncio.to_thread(_get_stats, days)
 
 
 def _get_stats(days: int) -> dict:
     """带缓存的统计查询"""
     from datetime import datetime, timezone, timedelta
     tz = timezone(timedelta(hours=8))
-    cache_key = f"days={days}"
+    cfg = load_config()
+    include_estimated_usage = bool(cfg.get("stats_include_estimated_usage", False))
+    cache_key = f"days={days}|estimated={1 if include_estimated_usage else 0}"
     now = time.time()
     if cache_key in _stats_cache:
         ts, data = _stats_cache[cache_key]
@@ -859,7 +1133,7 @@ def _get_stats(days: int) -> dict:
             headers_obj = json.loads(r.get("request_headers") or "{}")
             flags_raw = str(headers_obj.get("x-akm-flags") or "")
             flags = {x.strip() for x in flags_raw.split(",") if x.strip()}
-            ignore_estimated_tokens = FLAG_USAGE_ESTIMATED_LIGHT in flags
+            ignore_estimated_tokens = (not include_estimated_usage) and (FLAG_USAGE_ESTIMATED_LIGHT in flags)
         except (json.JSONDecodeError, TypeError):
             ignore_estimated_tokens = False
         # 兼容旧数据：列值为 0 但有 response_body 时，仍从 body 提取
@@ -950,8 +1224,8 @@ async def api_logs(
     days: int = Query(default=0, ge=0, le=365),
 ):
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
-    logs = list_logs(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
-    total = count_logs(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
+    logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
+    total = await count_logs_async(provider=provider, hide_empty=hide_empty, status=status, key_alias=key_alias, days=days)
     # 为每条日志附加 token 用量信息（优先读列，兼容旧数据才解析 body）
     for log in logs:
         p = log.get("prompt_tokens", 0) or 0
@@ -1031,14 +1305,13 @@ async def api_logs_size():
 async def api_clean_logs(request: Request):
     """清空审计日志 API"""
     from datetime import datetime as _dt
-    from akm.audit import clean_logs as _clean_logs
     body = await request.json()
     if body.get("all") is True:
         before = "2999-01-01"
     else:
         before = body.get("before", _dt.now().strftime("%Y-%m-%d"))
     try:
-        count = _clean_logs(before)
+        count = await clean_logs_async(before)
         return {"ok": True, "deleted": count}
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
@@ -1047,8 +1320,7 @@ async def api_clean_logs(request: Request):
 @app.post("/api/logs/clean-bodies")
 async def api_clean_log_bodies():
     """清空审计日志请求体/响应体内容，保留统计字段与元数据"""
-    from akm.audit import clean_log_bodies as _clean_log_bodies
-    count = _clean_log_bodies()
+    count = await clean_log_bodies_async()
     return {"ok": True, "updated": count}
 
 
@@ -1278,305 +1550,387 @@ async def embeddings(request: Request):
 
 async def _handle_ai_request(request: Request, api_path: str):
     """通用 AI API 请求处理：chat/completions / messages / responses / embeddings 复用"""
+    monitor = _get_health_monitor(request.app)
+    if monitor is not None:
+        monitor.request_started()
     content_type = request.headers.get("Content-Type", "")
-    if "application/json" not in content_type:
-        return JSONResponse(
-            status_code=415,
-            content={"detail": "不支持的 Content-Type，需要 application/json"},
-        )
+    try:
+        if "application/json" not in content_type:
+            return JSONResponse(
+                status_code=415,
+                content={"detail": "不支持的 Content-Type，需要 application/json"},
+            )
 
-    body = await request.json()
-    # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
-    # starlette 的 headers 是大小写不敏感的 MutableHeaders
-    _trace_headers, request_headers_json = _build_trace_headers(request)
-    # 读取日志存储配置
-    cfg = load_config()
-    save_request_body = cfg.get("log_request_body", False)
-    save_response_body = cfg.get("log_response_body", False)
-    result = await forward_request(body, request.app.state.http_client, api_path=api_path, plugin_manager=request.app.state.plugin_manager)
+        body = await request.json()
+        # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
+        # starlette 的 headers 是大小写不敏感的 MutableHeaders
+        _trace_headers, request_headers_json = _build_trace_headers(request)
+        # 读取日志存储配置
+        cfg = load_config()
+        save_request_body = cfg.get("log_request_body", False)
+        save_response_body = cfg.get("log_response_body", False)
+        stream_capture_max_bytes = int(cfg.get("stream_capture_max_bytes", 262144) or 262144)
+        result = await forward_request(body, request.app.state.http_client, api_path=api_path, plugin_manager=request.app.state.plugin_manager)
 
-    # ── 503 无可用 key 时补充来源信息 ──
-    if result["status_code"] == 503:
-        ua = (_trace_headers.get("user-agent") or "").lower()
-        source = ""
-        if "opencode" in ua:
-            source = "opencode"
-        elif "claude-cli" in ua or "claude code" in ua:
-            source = "claude"
-        elif "codex" in ua:
-            source = "codex"
-        elif "cursor" in ua:
-            source = "cursor"
-        elif "curl" in ua:
-            source = "curl"
-        if source:
-            result["error"] = f"[{source}] {result['error']}"
+        # ── 503 无可用 key 时补充来源信息 ──
+        if result["status_code"] == 503:
+            ua = (_trace_headers.get("user-agent") or "").lower()
+            source = ""
+            if "opencode" in ua:
+                source = "opencode"
+            elif "claude-cli" in ua or "claude code" in ua:
+                source = "claude"
+            elif "codex" in ua:
+                source = "codex"
+            elif "cursor" in ua:
+                source = "cursor"
+            elif "curl" in ua:
+                source = "curl"
+            if source:
+                result["error"] = f"[{source}] {result['error']}"
 
-    # ── 流式响应：逐块转发，边收边发 ──
-    if result.get("stream"):
-        resp = result["response"]
-        adapter = result.get("adapter")  # 协议转换适配器（非 None 时需转换）
-        key_alias = result["key_alias"]
-        provider = result["provider"]
-        model = result["model"]
-        plugin_manager = request.app.state.plugin_manager
-        security_plugin = None
-        if plugin_manager is not None:
-            candidate = plugin_manager.plugins.get("data_filter_guard")
-            if candidate and candidate.enabled and hasattr(candidate, "is_stream_guard_active"):
+        if monitor is not None:
+            if int(result.get("status_code", 0) or 0) == 200:
+                monitor.record_upstream_success()
+            elif int(result.get("status_code", 0) or 0) >= 500 or result.get("error"):
+                monitor.record_upstream_failure(result.get("error", ""))
+                if monitor.should_recreate_http_client():
+                    await _recreate_shared_http_client(
+                        request.app,
+                        reason=result.get("error", "upstream_failures_high"),
+                    )
+
+        # ── 流式响应：逐块转发，边收边发 ──
+        if result.get("stream"):
+            resp = result["response"]
+            adapter = result.get("adapter")
+            key_alias = result["key_alias"]
+            provider = result["provider"]
+            model = result["model"]
+            plugin_manager = request.app.state.plugin_manager
+            security_plugin = None
+            if plugin_manager is not None:
+                candidate = plugin_manager.plugins.get("data_filter_guard")
+                if candidate and candidate.enabled and hasattr(candidate, "is_stream_guard_active"):
+                    try:
+                        if candidate.is_stream_guard_active():
+                            security_plugin = candidate
+                    except Exception:
+                        security_plugin = None
+
+            if monitor is not None:
+                monitor.stream_started()
+
+            async def stream_generator():
+                capture = _BoundedStreamCapture(stream_capture_max_bytes)
+                t0 = __import__("time").time()
+                stream_error = ""
+                security_action = ""
+                security_reason = ""
+                security_changed = False
+
+                async def _emit_stream_response_meta(status: int, latency: int, body_str: str):
+                    """在流式请求真正结束时统一触发 on_response 生命周期。"""
+                    current_pm = getattr(request.app.state, "plugin_manager", None)
+                    if not current_pm:
+                        return {"status_code": status, "response_body": body_str}
+                    meta = {
+                        "ok": status == 200,
+                        "phase": "upstream",
+                        "status_code": status,
+                        "key_alias": key_alias,
+                        "provider": provider,
+                        "model": model,
+                        "latency_ms": latency,
+                        "error": stream_error,
+                        "api_path": api_path,
+                        "stream": True,
+                        "response_body": body_str,
+                    }
+                    if security_action:
+                        meta["security_action"] = security_action
+                    if security_reason:
+                        meta["security_reason"] = security_reason
+                    try:
+                        hook_result = await current_pm.run_hook("on_response", request=body, response=meta)
+                        if isinstance(hook_result, dict) and isinstance(hook_result.get("response"), dict):
+                            return hook_result["response"]
+                    except Exception:
+                        pass
+                    return meta
+
                 try:
-                    if candidate.is_stream_guard_active():
-                        security_plugin = candidate
-                except Exception:
-                    security_plugin = None
-
-        async def stream_generator():
-            chunks = []
-            t0 = __import__("time").time()
-            stream_error = ""
-            security_action = ""
-            security_reason = ""
-            security_changed = False
-            try:
-                if security_plugin:
-                    if security_plugin.stream_guard_requires_buffering():
-                        buffered_parts = []
-                        if adapter:
-                            async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                                buffered_parts.append(line if isinstance(line, str) else line.decode("utf-8", errors="replace"))
+                    if security_plugin:
+                        if security_plugin.stream_guard_requires_buffering():
+                            buffered_parts = []
+                            buffered_size = 0
+                            buffer_limit = int(security_plugin.stream_guard_buffer_max_bytes())
+                            buffer_overflow = False
+                            if adapter:
+                                async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                                    part = line if isinstance(line, str) else line.decode("utf-8", errors="replace")
+                                    buffered_size += len(part.encode("utf-8", errors="replace"))
+                                    if buffered_size > buffer_limit:
+                                        buffer_overflow = True
+                                        break
+                                    buffered_parts.append(part)
+                            else:
+                                async for chunk in resp.aiter_bytes():
+                                    part = chunk.decode("utf-8", errors="replace")
+                                    buffered_size += len(part.encode("utf-8", errors="replace"))
+                                    if buffered_size > buffer_limit:
+                                        buffer_overflow = True
+                                        break
+                                    buffered_parts.append(part)
+                            if buffer_overflow:
+                                body_str = security_plugin._build_safe_stream_payload(api_path)
+                                security_changed = True
+                                security_reason = "stream_buffer_limit_exceeded"
+                                security_action = "blocked"
+                            else:
+                                body_str = "".join(buffered_parts)
+                                body_str, security_changed, security_reason, security_action = security_plugin.protect_stream_payload(api_path, body_str)
+                            out_chunk = body_str.encode("utf-8")
+                            capture.append(out_chunk)
+                            yield out_chunk
                         else:
-                            async for chunk in resp.aiter_bytes():
-                                buffered_parts.append(chunk.decode("utf-8", errors="replace"))
-                        body_str = "".join(buffered_parts)
-                        body_str, security_changed, security_reason, security_action = security_plugin.protect_stream_payload(api_path, body_str)
-                        out_chunk = body_str.encode("utf-8")
-                        chunks.append(out_chunk)
-                        yield out_chunk
+                            stream_guard_state = security_plugin.create_stream_guard_state()
+                            blocked = False
+                            if adapter:
+                                async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                                    chunk = line.encode("utf-8") if isinstance(line, str) else line
+                                    chunk_text = chunk.decode("utf-8", errors="replace")
+                                    stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
+                                        api_path, chunk_text, stream_guard_state
+                                    )
+                                    if should_rewrite and hit_action == "blocked":
+                                        security_changed = True
+                                        security_reason = hit_reason
+                                        security_action = "blocked"
+                                        safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
+                                        capture.append(safe_chunk)
+                                        yield safe_chunk
+                                        blocked = True
+                                        break
+                                    if hit_action == "warn" and not security_action:
+                                        security_reason = hit_reason
+                                        security_action = "warn"
+                                    capture.append(chunk)
+                                    yield chunk
+                            else:
+                                async for chunk in resp.aiter_bytes():
+                                    chunk_text = chunk.decode("utf-8", errors="replace")
+                                    stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
+                                        api_path, chunk_text, stream_guard_state
+                                    )
+                                    if should_rewrite and hit_action == "blocked":
+                                        security_changed = True
+                                        security_reason = hit_reason
+                                        security_action = "blocked"
+                                        safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
+                                        capture.append(safe_chunk)
+                                        yield safe_chunk
+                                        blocked = True
+                                        break
+                                    if hit_action == "warn" and not security_action:
+                                        security_reason = hit_reason
+                                        security_action = "warn"
+                                    capture.append(chunk)
+                                    yield chunk
+                            if blocked:
+                                await resp.aclose()
                     else:
-                        # 增量扫描模式：每拿到一个 chunk 就立刻下发，同时仅维护一小段尾部缓存。
-                        # 这样 `warn` / `block` 可以持续观察已返回内容，而不会把整个 SSE 攒满后再返回。
-                        stream_guard_state = security_plugin.create_stream_guard_state()
-                        blocked = False
                         if adapter:
                             async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
                                 chunk = line.encode("utf-8") if isinstance(line, str) else line
-                                chunk_text = chunk.decode("utf-8", errors="replace")
-                                stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
-                                    api_path, chunk_text, stream_guard_state
-                                )
-                                if should_rewrite and hit_action == "blocked":
-                                    security_changed = True
-                                    security_reason = hit_reason
-                                    security_action = "blocked"
-                                    safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
-                                    chunks.append(safe_chunk)
-                                    yield safe_chunk
-                                    blocked = True
-                                    break
-                                if hit_action == "warn" and not security_action:
-                                    security_reason = hit_reason
-                                    security_action = "warn"
-                                chunks.append(chunk)
+                                capture.append(chunk)
                                 yield chunk
                         else:
                             async for chunk in resp.aiter_bytes():
-                                chunk_text = chunk.decode("utf-8", errors="replace")
-                                stream_guard_state, should_rewrite, hit_reason, hit_action = security_plugin.inspect_stream_chunk(
-                                    api_path, chunk_text, stream_guard_state
-                                )
-                                if should_rewrite and hit_action == "blocked":
-                                    security_changed = True
-                                    security_reason = hit_reason
-                                    security_action = "blocked"
-                                    safe_chunk = security_plugin._build_safe_stream_payload(api_path).encode("utf-8")
-                                    chunks.append(safe_chunk)
-                                    yield safe_chunk
-                                    blocked = True
-                                    break
-                                if hit_action == "warn" and not security_action:
-                                    security_reason = hit_reason
-                                    security_action = "warn"
-                                chunks.append(chunk)
+                                capture.append(chunk)
                                 yield chunk
-                        if blocked:
-                            await resp.aclose()
-                else:
-                    if adapter:
-                        # 协议转换：边收 Chat SSE 边转 Responses SSE
-                        async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
-                            chunk = line.encode("utf-8") if isinstance(line, str) else line
-                            chunks.append(chunk)
-                            yield chunk
-                    else:
-                        async for chunk in resp.aiter_bytes():
-                            chunks.append(chunk)
-                            yield chunk
-            except Exception as e:
-                stream_error = f"上游连接中断: {e}"
-                logger.warning(
-                    f"[{key_alias}] {provider} model={model} → {stream_error}"
-                )
-            finally:
-                await resp.aclose()
-                latency = int((__import__("time").time() - t0) * 1000)
-                body_str = b"".join(chunks).decode("utf-8", errors="replace")
-                status = 200 if not stream_error else 502
-                tokens, usage_flags = await _build_usage_metrics(
-                    request=request,
-                    request_body=body,
-                    response_body=body_str,
-                    api_path=api_path,
-                    key_alias=key_alias,
-                    provider=provider,
-                    adapter=adapter,
-                )
-                # 在审计 headers 中追加转换标记，便于后续筛查
-                request_headers_for_log = request_headers_json
-                try:
-                    headers_obj = json.loads(request_headers_json) if request_headers_json else {}
-                    flags = []
-                    if adapter and getattr(adapter, "_fallback_thinking_to_text", False):
-                        flags.append("fallback_thinking_to_text")
-                    if status == 200 and not stream_error:
-                        if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
-                            flags.append(FLAG_MISSING_USAGE_UPSTREAM)
-                    flags.extend(usage_flags)
-                    if adapter and getattr(adapter, "_tool_trace_events", None):
-                        if any("loop_guard_drop" in x for x in getattr(adapter, "_tool_trace_events", [])):
-                            flags.append(FLAG_LOOP_GUARD_TRIGGERED)
-                    tool_trace = ""
-                    if adapter and getattr(adapter, "_tool_trace_events", None):
-                        tool_trace = "; ".join(getattr(adapter, "_tool_trace_events", []))
-                        if tool_trace:
-                            # 控制字段长度，避免 headers 过大
-                            headers_obj["x-akm-tool-trace"] = tool_trace[:2000]
-                    if adapter and getattr(adapter, "_conversion_warnings", None):
-                        conv_warn = ",".join(getattr(adapter, "_conversion_warnings", []))
-                        if conv_warn:
-                            headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
-                    if security_action:
-                        headers_obj["x-akm-security"] = f"{security_action}:{security_reason}"[:2000]
-                    if security_changed and security_action not in ("", "warn"):
-                        flags.append("security_response_rewritten")
-                    elif security_action == "warn":
-                        flags.append("security_response_warned")
-                    if flags:
-                        headers_obj["x-akm-flags"] = ",".join(flags)
-                        request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-                    elif tool_trace or security_action:
-                        request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-                    elif adapter and getattr(adapter, "_conversion_warnings", None):
-                        request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-                except Exception:
+                except Exception as exc:
+                    stream_error = f"上游连接中断: {exc}"
+                    logger.warning(f"[{key_alias}] {provider} model={model} → {stream_error}")
+                finally:
+                    await resp.aclose()
+                    if monitor is not None:
+                        monitor.stream_finished()
+                    latency = int((__import__("time").time() - t0) * 1000)
+                    body_str = capture.build_text()
+                    status = 200 if not stream_error else 502
+                    response_meta = await _emit_stream_response_meta(status, latency, body_str)
+                    if isinstance(response_meta, dict):
+                        status = int(response_meta.get("status_code", status) or status)
+                        body_str = str(response_meta.get("response_body", body_str) or "")
+                        security_action_from_meta = str(response_meta.get("security_action", security_action) or "")
+                        security_reason_from_meta = str(response_meta.get("security_reason", security_reason) or "")
+                        if security_action_from_meta:
+                            security_action = security_action_from_meta
+                        if security_reason_from_meta:
+                            security_reason = security_reason_from_meta
+                        stream_error = str(response_meta.get("error", stream_error) or "")
+                    tokens, usage_flags = await _build_usage_metrics(
+                        request=request,
+                        request_body=body,
+                        response_body=body_str,
+                        api_path=api_path,
+                        key_alias=key_alias,
+                        provider=provider,
+                        adapter=adapter,
+                    )
                     request_headers_for_log = request_headers_json
-                asyncio.create_task(write_log_async({
-                    "provider": provider, "key_alias": key_alias, "model": model,
-                    "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
-                    "response_body": body_str if save_response_body else "", "status_code": status,
-                    "latency_ms": latency, "error": stream_error or (f"{security_action}:{security_reason}" if security_action else ""),
-                    "request_headers": request_headers_for_log,
-                    "prompt_tokens": tokens.get("prompt_tokens", 0),
-                    "completion_tokens": tokens.get("completion_tokens", 0),
-                    "total_tokens": tokens.get("total_tokens", 0),
-                    "cached_tokens": tokens.get("cached_tokens", 0),
-                    "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
-                }))
-                logger.info(
-                    f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)"
-                )
+                    try:
+                        headers_obj = json.loads(request_headers_json) if request_headers_json else {}
+                        flags = []
+                        if adapter and getattr(adapter, "_fallback_thinking_to_text", False):
+                            flags.append("fallback_thinking_to_text")
+                        if status == 200 and not stream_error:
+                            if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
+                                flags.append(FLAG_MISSING_USAGE_UPSTREAM)
+                        if capture.truncated:
+                            flags.append("stream_capture_truncated")
+                        flags.extend(usage_flags)
+                        if adapter and getattr(adapter, "_tool_trace_events", None):
+                            if any("loop_guard_drop" in x for x in getattr(adapter, "_tool_trace_events", [])):
+                                flags.append(FLAG_LOOP_GUARD_TRIGGERED)
+                        tool_trace = ""
+                        if adapter and getattr(adapter, "_tool_trace_events", None):
+                            tool_trace = "; ".join(getattr(adapter, "_tool_trace_events", []))
+                            if tool_trace:
+                                headers_obj["x-akm-tool-trace"] = tool_trace[:2000]
+                        if adapter and getattr(adapter, "_conversion_warnings", None):
+                            conv_warn = ",".join(getattr(adapter, "_conversion_warnings", []))
+                            if conv_warn:
+                                headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
+                        if security_action:
+                            headers_obj["x-akm-security"] = f"{security_action}:{security_reason}"[:2000]
+                        if security_changed and security_action not in ("", "warn"):
+                            flags.append("security_response_rewritten")
+                        elif security_action == "warn":
+                            flags.append("security_response_warned")
+                        if flags:
+                            headers_obj["x-akm-flags"] = ",".join(flags)
+                            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+                        elif tool_trace or security_action:
+                            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+                        elif adapter and getattr(adapter, "_conversion_warnings", None):
+                            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+                    except Exception:
+                        request_headers_for_log = request_headers_json
+                    await _submit_audit_log(request.app, {
+                        "provider": provider,
+                        "key_alias": key_alias,
+                        "model": model,
+                        "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+                        "response_body": body_str if save_response_body else "",
+                        "status_code": status,
+                        "latency_ms": latency,
+                        "error": stream_error or (f"{security_action}:{security_reason}" if security_action else ""),
+                        "request_headers": request_headers_for_log,
+                        "prompt_tokens": tokens.get("prompt_tokens", 0),
+                        "completion_tokens": tokens.get("completion_tokens", 0),
+                        "total_tokens": tokens.get("total_tokens", 0),
+                        "cached_tokens": tokens.get("cached_tokens", 0),
+                        "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
+                    })
+                    logger.info(f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)")
 
-        return StreamingResponse(
-            stream_generator(),
-            status_code=200,
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            return StreamingResponse(
+                stream_generator(),
+                status_code=200,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        # ── 非流式响应 ──
+        tokens, usage_flags = await _build_usage_metrics(
+            request=request,
+            request_body=body,
+            response_body=result.get("body", ""),
+            api_path=api_path,
+            key_alias=result.get("key_alias", ""),
+            provider=result.get("provider", ""),
+            adapter=result.get("adapter"),
         )
-
-    # ── 非流式响应 ──
-    tokens, usage_flags = await _build_usage_metrics(
-        request=request,
-        request_body=body,
-        response_body=result.get("body", ""),
-        api_path=api_path,
-        key_alias=result.get("key_alias", ""),
-        provider=result.get("provider", ""),
-        adapter=result.get("adapter"),
-    )
-    request_headers_for_log = request_headers_json
-    try:
-        headers_obj = json.loads(request_headers_json) if request_headers_json else {}
-        adapter_for_log = result.get("adapter")
-        if adapter_for_log and getattr(adapter_for_log, "_conversion_warnings", None):
-            conv_warn = ",".join(getattr(adapter_for_log, "_conversion_warnings", []))
-            if conv_warn:
-                headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
-                request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-        if usage_flags:
-            prev = headers_obj.get("x-akm-flags", "")
-            merged = [x.strip() for x in (prev.split(",") if prev else []) if x.strip()]
-            if result.get("security_action") == "warn":
-                if "security_response_warned" not in merged:
-                    merged.append("security_response_warned")
-            elif result.get("security_action") in ("mask", "block"):
-                if "security_response_rewritten" not in merged:
-                    merged.append("security_response_rewritten")
-            if result.get("security_action") and result.get("security_reason"):
-                headers_obj["x-akm-security"] = f"{result.get('security_action')}:{result.get('security_reason')}"[:2000]
-            for f in usage_flags:
-                if f not in merged:
-                    merged.append(f)
-            headers_obj["x-akm-flags"] = ",".join(merged)
-            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-        elif result.get("security_action") and result.get("security_reason"):
-            headers_obj["x-akm-security"] = f"{result.get('security_action')}:{result.get('security_reason')}"[:2000]
-            if result.get("security_action") == "warn":
-                headers_obj["x-akm-flags"] = "security_response_warned"
-            else:
-                headers_obj["x-akm-flags"] = "security_response_rewritten"
-            request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
-    except Exception:
         request_headers_for_log = request_headers_json
-    asyncio.create_task(write_log_async({
-        "provider": result["provider"],
-        "key_alias": result["key_alias"],
-        "model": result["model"],
-        "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
-        "response_body": result["body"] if save_response_body else "",
-        "status_code": result["status_code"],
-        "latency_ms": result["latency_ms"],
-        "error": result["error"],
-        "request_headers": request_headers_for_log,
-        "prompt_tokens": tokens.get("prompt_tokens", 0),
-        "completion_tokens": tokens.get("completion_tokens", 0),
-        "total_tokens": tokens.get("total_tokens", 0),
-        "cached_tokens": tokens.get("cached_tokens", 0),
-        "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
-    }))
+        try:
+            headers_obj = json.loads(request_headers_json) if request_headers_json else {}
+            adapter_for_log = result.get("adapter")
+            if adapter_for_log and getattr(adapter_for_log, "_conversion_warnings", None):
+                conv_warn = ",".join(getattr(adapter_for_log, "_conversion_warnings", []))
+                if conv_warn:
+                    headers_obj["x-akm-conv-warnings"] = conv_warn[:2000]
+                    request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+            if usage_flags:
+                prev = headers_obj.get("x-akm-flags", "")
+                merged = [x.strip() for x in (prev.split(",") if prev else []) if x.strip()]
+                if result.get("security_action") == "warn":
+                    if "security_response_warned" not in merged:
+                        merged.append("security_response_warned")
+                elif result.get("security_action") in ("mask", "block"):
+                    if "security_response_rewritten" not in merged:
+                        merged.append("security_response_rewritten")
+                if result.get("security_action") and result.get("security_reason"):
+                    headers_obj["x-akm-security"] = f"{result.get('security_action')}:{result.get('security_reason')}"[:2000]
+                for f in usage_flags:
+                    if f not in merged:
+                        merged.append(f)
+                headers_obj["x-akm-flags"] = ",".join(merged)
+                request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+            elif result.get("security_action") and result.get("security_reason"):
+                headers_obj["x-akm-security"] = f"{result.get('security_action')}:{result.get('security_reason')}"[:2000]
+                if result.get("security_action") == "warn":
+                    headers_obj["x-akm-flags"] = "security_response_warned"
+                else:
+                    headers_obj["x-akm-flags"] = "security_response_rewritten"
+                request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
+        except Exception:
+            request_headers_for_log = request_headers_json
+        await _submit_audit_log(request.app, {
+            "provider": result["provider"],
+            "key_alias": result["key_alias"],
+            "model": result["model"],
+            "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+            "response_body": result["body"] if save_response_body else "",
+            "status_code": result["status_code"],
+            "latency_ms": result["latency_ms"],
+            "error": result["error"],
+            "request_headers": request_headers_for_log,
+            "prompt_tokens": tokens.get("prompt_tokens", 0),
+            "completion_tokens": tokens.get("completion_tokens", 0),
+            "total_tokens": tokens.get("total_tokens", 0),
+            "cached_tokens": tokens.get("cached_tokens", 0),
+            "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
+        })
 
-    if result["key_alias"]:
-        status = result["status_code"]
-        elapsed = f"{result['latency_ms']}ms"
-        err = f" error={result['error']}" if result["error"] else ""
-        logger.info(
-            f"[{result['key_alias']}] {result['provider']} "
-            f"model={result['model']} → {status} {elapsed}{err}"
+        if result["key_alias"]:
+            status = result["status_code"]
+            elapsed = f"{result['latency_ms']}ms"
+            err = f" error={result['error']}" if result["error"] else ""
+            logger.info(
+                f"[{result['key_alias']}] {result['provider']} "
+                f"model={result['model']} → {status} {elapsed}{err}"
+            )
+        else:
+            logger.warning(
+                f"[{api_path}] model={result['model']} → {result['error']}"
+            )
+
+        if result["status_code"] == 503:
+            return JSONResponse(status_code=503, content={"detail": result["error"]})
+        if result["status_code"] == 502:
+            return JSONResponse(status_code=502, content={"detail": result["error"]})
+
+        return Response(
+            content=result["body"],
+            status_code=result["status_code"],
+            media_type="application/json",
         )
-    else:
-        logger.warning(
-            f"[{api_path}] model={result['model']} → {result['error']}"
-        )
-
-    if result["status_code"] == 503:
-        return JSONResponse(status_code=503, content={"detail": result["error"]})
-    if result["status_code"] == 502:
-        return JSONResponse(status_code=502, content={"detail": result["error"]})
-
-    return Response(
-        content=result["body"],
-        status_code=result["status_code"],
-        media_type="application/json",
-    )
+    finally:
+        if monitor is not None:
+            monitor.request_finished()

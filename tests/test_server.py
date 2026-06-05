@@ -1,13 +1,17 @@
+import asyncio
 import tempfile
 import json
 from pathlib import Path
-import pytest
-import httpx
 from unittest.mock import AsyncMock
+
+import httpx
+import pytest
 from httpx import ASGITransport, AsyncClient
-from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
-from akm.server import app
+
 from akm.audit import write_log, list_logs
+from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
+from akm.health import HealthMonitor
+from akm.server import app
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +25,7 @@ def setup(monkeypatch):
     # 为 lifespan 未生效的测试环境提供模拟 http_client 和 plugin_manager
     app.state.http_client = AsyncMock()
     app.state.plugin_manager = None
+    app.state.health_monitor = HealthMonitor()
     yield
 
 
@@ -111,6 +116,140 @@ async def test_embeddings_forward_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_streaming_response_emits_on_response_only_after_stream_finishes(monkeypatch):
+    """流式请求结束后应由 server 侧统一触发一次 on_response。"""
+
+    class DummyResp:
+        def __init__(self):
+            self.closed = False
+
+        async def aiter_bytes(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            self.closed = True
+
+    class DummyPM:
+        def __init__(self):
+            self.events = []
+            self.plugins = {}
+
+        async def run_hook(self, hook, **kwargs):
+            if hook == "on_response":
+                self.events.append(kwargs)
+            return kwargs
+
+    pm = DummyPM()
+    app.state.plugin_manager = pm
+
+    upstream_resp = DummyResp()
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        return {
+            "stream": True,
+            "status_code": 200,
+            "response": upstream_resp,
+            "adapter": None,
+            "key_alias": "stream-key",
+            "provider": "openai",
+            "model": "gpt-4",
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        ) as resp:
+            assert resp.status_code == 200
+            chunks = []
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+
+    assert any("data: [DONE]" in chunk for chunk in chunks)
+    assert upstream_resp.closed is True
+    assert len(pm.events) == 1
+    meta = pm.events[0]["response"]
+    assert meta["ok"] is True
+    assert meta["stream"] is True
+    assert meta["key_alias"] == "stream-key"
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_blocks_when_security_buffer_limit_exceeded(monkeypatch):
+    """流式安全插件若必须整段缓冲且超过上限，应直接返回安全占位流。"""
+
+    class DummyResp:
+        def __init__(self):
+            self.closed = False
+
+        async def aiter_bytes(self):
+            yield (b"data: {\"choices\":[{\"delta\":{\"content\":\"" + (b"x" * 40000) + b"\"}}]}\n\n")
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            self.closed = True
+
+    class DummySecurityPlugin:
+        enabled = True
+
+        def is_stream_guard_active(self):
+            return True
+
+        def stream_guard_requires_buffering(self):
+            return True
+
+        def stream_guard_buffer_max_bytes(self):
+            return 16384
+
+        def _build_safe_stream_payload(self, api_path):
+            return 'data: {"choices":[{"delta":{"content":"[blocked]"}}]}\n\ndata: [DONE]\n\n'
+
+    class DummyPM:
+        def __init__(self):
+            self.plugins = {"data_filter_guard": DummySecurityPlugin()}
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    app.state.plugin_manager = DummyPM()
+    upstream_resp = DummyResp()
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        return {
+            "stream": True,
+            "status_code": 200,
+            "response": upstream_resp,
+            "adapter": None,
+            "key_alias": "stream-key",
+            "provider": "openai",
+            "model": "gpt-4",
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server._submit_audit_log", AsyncMock(return_value=True))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        ) as resp:
+            body = ""
+            async for chunk in resp.aiter_text():
+                body += chunk
+
+    assert "[blocked]" in body
+    assert upstream_resp.closed is True
+
+
+@pytest.mark.asyncio
 async def test_health_endpoint():
     """健康检查端点"""
     transport = ASGITransport(app=app)
@@ -118,6 +257,167 @@ async def test_health_endpoint():
         resp = await client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_debug_runtime_exposes_core_runtime_fields():
+    """运行时诊断端点应返回进程、健康和队列等核心观测字段。"""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/debug/runtime")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "process" in data
+    assert "health" in data
+    assert "audit_queue" in data
+    assert "http_client" in data
+    assert data["process"]["pid"] > 0
+    assert "rss_bytes" in data["process"]
+    assert "thread_count" in data["process"]
+
+
+@pytest.mark.asyncio
+async def test_debug_runtime_history_returns_recent_monitor_events():
+    """运行时事件历史端点应返回最近的自愈与退化事件。"""
+    monitor = HealthMonitor()
+    monitor.record_http_client_recreated("test recreate")
+    monitor.set_audit_backlog(pending=12, dropped=2, failures=1)
+    monitor.db_consecutive_failures = 3
+    monitor.db_last_error = "db locked"
+    monitor._append_event(
+        "db.probe.failed",
+        {"consecutive_failures": monitor.db_consecutive_failures, "error": monitor.db_last_error},
+    )
+    monitor.pending_audit_tasks = 350
+    monitor.ready_payload()
+    app.state.health_monitor = monitor
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/debug/runtime/history?limit=10")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    events = payload["events"]
+    event_names = [item["event"] for item in events]
+    assert "http_client.recreated" in event_names
+    assert "audit.queue.dropped" in event_names
+    assert "db.probe.failed" in event_names
+    assert "health.status.changed" in event_names
+
+
+@pytest.mark.asyncio
+async def test_health_ready_and_detail_endpoints_reflect_monitor_state():
+    """监护端点应返回 ready/detail 状态与关键指标。"""
+    monitor = HealthMonitor()
+    monitor.pending_audit_tasks = 350
+    monitor.consecutive_upstream_failures = 12
+    app.state.health_monitor = monitor
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        ready_resp = await client.get("/health/ready")
+        detail_resp = await client.get("/health/detail")
+
+    assert ready_resp.status_code == 200
+    ready = ready_resp.json()
+    assert ready["status"] == "degraded"
+    assert "audit_backlog_high" in ready["reasons"]
+
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["status"] == "degraded"
+    assert detail["metrics"]["pending_audit_tasks"] == 350
+    assert detail["metrics"]["consecutive_upstream_failures"] == 12
+
+
+@pytest.mark.asyncio
+async def test_health_detail_exposes_audit_queue_drop_signal():
+    """审计队列发生丢弃时，detail 端点应暴露该降级信号。"""
+    monitor = HealthMonitor()
+    monitor.set_audit_backlog(pending=0, dropped=3, failures=1)
+    app.state.health_monitor = monitor
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        detail_resp = await client.get("/health/detail")
+
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["status"] == "degraded"
+    assert "audit_queue_dropped" in detail["reasons"]
+    assert detail["metrics"]["audit_queue_dropped"] == 3
+
+
+@pytest.mark.asyncio
+async def test_health_detail_exposes_http_client_recreate_metrics():
+    """detail 端点应暴露共享客户端的软重建状态。"""
+    monitor = HealthMonitor()
+    monitor.record_http_client_recreated("too many upstream timeouts")
+    app.state.health_monitor = monitor
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        detail_resp = await client.get("/health/detail")
+
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["metrics"]["http_client_recreate_count"] == 1
+    assert detail["metrics"]["http_client_last_recreate_reason"] == "too many upstream timeouts"
+    assert detail["metrics"]["http_client_last_recreated_at"] != ""
+
+
+@pytest.mark.asyncio
+async def test_health_ready_returns_503_when_db_probe_is_critical():
+    """当 DB 探针连续失败过多时，就绪探针应返回 503。"""
+    monitor = HealthMonitor()
+    monitor.db_consecutive_failures = 10
+    app.state.health_monitor = monitor
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        ready_resp = await client.get("/health/ready")
+
+    assert ready_resp.status_code == 503
+    body = ready_resp.json()
+    assert body["status"] == "unhealthy"
+    assert body["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_recreate_shared_http_client_closes_old_client_and_resets_monitor(monkeypatch):
+    """连续失败触发软重建时，应替换共享客户端并关闭旧连接池。"""
+
+    class DummyClient:
+        def __init__(self, name):
+            self.name = name
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    old_client = DummyClient("old")
+    new_client = DummyClient("new")
+
+    app.state.http_client = old_client
+    app.state.http_client_lock = asyncio.Lock()
+    monitor = HealthMonitor()
+    monitor.consecutive_upstream_failures = monitor.UPSTREAM_FAILS_RECREATE
+    app.state.health_monitor = monitor
+
+    monkeypatch.setattr("akm.server._build_shared_http_client", lambda: new_client)
+
+    from akm.server import _recreate_shared_http_client
+
+    changed = await _recreate_shared_http_client(app, "too many upstream failures")
+
+    assert changed is True
+    assert app.state.http_client is new_client
+    assert old_client.closed is True
+    assert monitor.http_client_recreate_count == 1
+    assert monitor.http_client_last_recreate_reason == "too many upstream failures"
+    assert monitor.consecutive_upstream_failures == 0
 
 
 @pytest.mark.asyncio
@@ -302,7 +602,9 @@ async def test_key_change_log_written_without_api_key(monkeypatch):
 
     rows = [json.loads(line) for line in content.splitlines() if line.strip()]
     events = [row["event"] for row in rows]
-    assert events == ["key_created", "key_status_changed", "key_deleted"]
+    assert events == ["key.config.created", "key.status.changed", "key.config.deleted"]
+    assert all(row["category"] == "key_audit" for row in rows)
+    assert all(row["scope"] == "configuration" for row in rows)
     assert rows[0]["details"]["api_key_updated"] is True
     assert rows[0]["details"]["after"]["alias"] == "log-key"
     assert rows[1]["details"]["before_status"] == "active"
@@ -389,15 +691,21 @@ async def test_api_logs_size_includes_db_and_log_files():
 @pytest.mark.asyncio
 async def test_api_logs_adds_conv_warning_labels(monkeypatch):
     """/api/logs 返回转换告警派生字段（codes + labels）"""
-    monkeypatch.setattr("akm.server.list_logs", lambda **kwargs: [{
+    async def fake_list_logs_async(**kwargs):
+        return [{
         "request_headers": '{"x-akm-conv-warnings":"responses_store_not_mapped,responses_include_not_fully_mapped"}',
         "response_body": "",
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
         "cached_tokens": 0,
-    }])
-    monkeypatch.setattr("akm.server.count_logs", lambda **kwargs: 1)
+    }]
+
+    async def fake_count_logs_async(**kwargs):
+        return 1
+
+    monkeypatch.setattr("akm.server.list_logs_async", fake_list_logs_async)
+    monkeypatch.setattr("akm.server.count_logs_async", fake_count_logs_async)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -452,6 +760,21 @@ def test_estimate_tokens_light_when_usage_missing():
     assert out["total_tokens"] == out["prompt_tokens"]
 
 
+def test_bounded_stream_capture_keeps_head_and_tail_with_marker():
+    from akm.server import _BoundedStreamCapture
+
+    cap = _BoundedStreamCapture(1024)
+    cap.append(b"abcdefghij" * 80)
+    cap.append(b"klmnopqrst" * 80)
+    cap.append(b"uvwxyz1234567890" * 80)
+
+    text = cap.build_text()
+    assert text.startswith("abcdefghij")
+    assert "stream truncated by akm" in text
+    assert text.endswith("uvwxyz1234567890")
+    assert cap.truncated is True
+
+
 @pytest.mark.asyncio
 async def test_api_clean_logs_all_flag_clears_everything():
     write_log({"provider": "o", "key_alias": "k1", "model": "m", "request_body": "", "response_body": "", "status_code": 200, "latency_ms": 0, "error": ""})
@@ -482,7 +805,7 @@ async def test_api_list_agents_returns_messages_anthropic_switch():
 
 
 @pytest.mark.asyncio
-async def test_api_stats_ignores_estimated_usage_tokens():
+async def test_api_stats_ignores_estimated_usage_tokens_by_default():
     write_log({
         "provider": "openai",
         "key_alias": "real-key",
@@ -527,6 +850,63 @@ async def test_api_stats_ignores_estimated_usage_tokens():
     assert data["total_completion_tokens"] == 20
     assert data["total_tokens"] == 100
     assert data["total_cached_tokens"] == 30
+
+
+@pytest.mark.asyncio
+async def test_api_stats_can_include_estimated_usage_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": True,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 10,
+        "error": "",
+        "request_headers": '{"x-akm-flags":"usage_estimated_light"}',
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "cached_tokens": 10,
+        "cache_creation_tokens": 0,
+    })
+    write_log({
+        "provider": "openai",
+        "key_alias": "real-key",
+        "model": "gpt-4.1",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 12,
+        "error": "",
+        "request_headers": '{}',
+        "prompt_tokens": 80,
+        "completion_tokens": 20,
+        "total_tokens": 100,
+        "cached_tokens": 30,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_requests"] == 2
+    assert data["total_prompt_tokens"] == 140
+    assert data["total_completion_tokens"] == 70
+    assert data["total_tokens"] == 250
+    assert data["total_cached_tokens"] == 40
 
 
 @pytest.mark.asyncio
@@ -607,15 +987,21 @@ async def test_plugin_config_api_roundtrip():
 @pytest.mark.asyncio
 async def test_api_logs_keeps_security_headers_for_frontend():
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr("akm.server.list_logs", lambda **kwargs: [{
+    async def fake_list_logs_async(**kwargs):
+        return [{
         "request_headers": '{"x-akm-security":"warn:(?i)curl.*bash","x-akm-flags":"security_response_warned"}',
         "response_body": "",
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
         "cached_tokens": 0,
-    }])
-    monkeypatch.setattr("akm.server.count_logs", lambda **kwargs: 1)
+    }]
+
+    async def fake_count_logs_async(**kwargs):
+        return 1
+
+    monkeypatch.setattr("akm.server.list_logs_async", fake_list_logs_async)
+    monkeypatch.setattr("akm.server.count_logs_async", fake_count_logs_async)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
