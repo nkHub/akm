@@ -145,6 +145,8 @@ akm-menubar
 
 Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
 
+`image_supported_models` 也是 `config.json` 中的全局配置项，默认值为 `gpt-image-2`。它支持逗号分隔多个图片模型，首项会作为 `/v1/images/generations` 与 `/v1/images/edits` 在未显式传 `model` 时的默认回填值；只有当当前存在 active key 支持该默认模型时才会自动补齐，否则接口会直接返回明确报错。
+
 `stats_include_estimated_usage` 仅作为 `config.json` 隐藏配置项存在，默认 `false`，不会在设置页单独展示；如需让首页统计把 `usage_estimated_light` 这类估算 token 计入总量与请求数，可手动改为 `true`。
 
 ## API 端点

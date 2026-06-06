@@ -150,6 +150,7 @@
       </div>
       <!-- Agent 列表 -->
       <div id="agent-list" class="text-xs text-gray-400">加载中...</div>
+
     </div>
   </section>
 
@@ -175,6 +176,7 @@ function loadConfig() {
     updateLogReqToggle();
     updateLogRespToggle();
     document.getElementById('json-max-len').value = _jsonViewerMaxTextLength;
+    document.getElementById('image-models').value = cfg.image_supported_models || 'gpt-image-2';
     document.getElementById('retention-days').value = cfg.log_retention_days || 30;
     document.getElementById('server-port').value = cfg.server_port || 8800;
     loadLogStats();
@@ -278,6 +280,32 @@ function saveJsonMaxLen() {
   }).then(function(){
     _jsonViewerMaxTextLength = val;
     msg.textContent = '已保存：JSON 超长阈值 ' + val.toLocaleString();
+    msg.className = 'text-xs text-emerald-400 mt-1';
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  }).catch(function(){
+    msg.textContent = '保存失败，请稍后重试';
+    msg.className = 'text-xs text-red-400 mt-1';
+    msg.classList.remove('hidden');
+  });
+}
+
+function saveImageModels() {
+  var input = document.getElementById('image-models');
+  var msg = document.getElementById('image-models-msg');
+  var raw = String(input.value || '').trim();
+  if (!raw) {
+    msg.textContent = '请至少填写一个图片模型';
+    msg.className = 'text-xs text-red-400 mt-1';
+    msg.classList.remove('hidden');
+    return;
+  }
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({image_supported_models: raw})
+  }).then(function(){
+    msg.textContent = '已保存：' + raw;
     msg.className = 'text-xs text-emerald-400 mt-1';
     msg.classList.remove('hidden');
     setTimeout(function(){ msg.classList.add('hidden'); }, 3000);

@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from akm.audit import write_log, list_logs
 from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
 from akm.health import HealthMonitor
-from akm.server import app
+from akm.server import app, _default_image_generation_model, _image_supported_models_from_config
 
 
 @pytest.fixture(autouse=True)
@@ -167,6 +167,15 @@ async def test_image_generations_uses_default_model_when_omitted(monkeypatch):
     monkeypatch.setattr("akm.server.forward_request", mock_forward)
     monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
     monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "log_request_body": False,
+            "log_response_body": False,
+            "stream_capture_max_bytes": 262144,
+            "image_supported_models": "gpt-image-2,gpt-image-3",
+        },
+    )
+    monkeypatch.setattr(
         "akm.server.list_keys",
         lambda: [
             {"alias": "image-key", "provider": "openai", "status": "active", "models": "gpt-image-2"},
@@ -194,6 +203,15 @@ async def test_image_generations_returns_clear_error_when_default_model_unavaila
         lambda: [
             {"alias": "k1", "provider": "openai", "status": "active", "models": "gpt-4.1"},
         ],
+    )
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "log_request_body": False,
+            "log_response_body": False,
+            "stream_capture_max_bytes": 262144,
+            "image_supported_models": "gpt-image-2,gpt-image-3",
+        },
     )
     monkeypatch.setattr("akm.server.forward_request", AsyncMock())
     monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
@@ -267,6 +285,15 @@ async def test_image_edits_uses_default_model_when_omitted(monkeypatch):
     monkeypatch.setattr("akm.server.forward_request", mock_forward)
     monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
     monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "log_request_body": False,
+            "log_response_body": False,
+            "stream_capture_max_bytes": 262144,
+            "image_supported_models": "gpt-image-2,gpt-image-3",
+        },
+    )
+    monkeypatch.setattr(
         "akm.server.list_keys",
         lambda: [
             {"alias": "image-key", "provider": "openai", "status": "active", "models": "gpt-image-2"},
@@ -296,6 +323,15 @@ async def test_image_edits_returns_clear_error_when_default_model_unavailable(mo
             {"alias": "k1", "provider": "openai", "status": "active", "models": "gpt-4.1"},
         ],
     )
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "log_request_body": False,
+            "log_response_body": False,
+            "stream_capture_max_bytes": 262144,
+            "image_supported_models": "gpt-image-2,gpt-image-3",
+        },
+    )
     monkeypatch.setattr("akm.server.forward_request", AsyncMock())
     monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
 
@@ -310,6 +346,16 @@ async def test_image_edits_returns_clear_error_when_default_model_unavailable(mo
     assert resp.status_code == 400
     body = resp.json()
     assert "gpt-image-2" in body["detail"]
+
+
+def test_image_supported_models_from_config_supports_multiple_values():
+    models = _image_supported_models_from_config({"image_supported_models": "gpt-image-2, gpt-image-3 , gpt-image-fast"})
+    assert models == ["gpt-image-2", "gpt-image-3", "gpt-image-fast"]
+
+
+def test_default_image_generation_model_uses_first_configured_value():
+    model = _default_image_generation_model({"image_supported_models": "gpt-image-2,gpt-image-3"})
+    assert model == "gpt-image-2"
 
 
 @pytest.mark.asyncio
