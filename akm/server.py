@@ -1581,6 +1581,7 @@ async def _handle_ai_request(request: Request, api_path: str):
         save_response_body = cfg.get("log_response_body", False)
         stream_capture_max_bytes = int(cfg.get("stream_capture_max_bytes", 262144) or 262144)
         result = await forward_request(body, request.app.state.http_client, api_path=api_path, plugin_manager=request.app.state.plugin_manager)
+        request_body_for_log = str(result.get("request_body_for_log", "") or "")
 
         # ── 503 无可用 key 时补充来源信息 ──
         if result["status_code"] == 503:
@@ -1742,7 +1743,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "provider": provider,
                         "key_alias": key_alias,
                         "model": model,
-                        "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+                        "request_body": request_body_for_log if (save_request_body and request_body_for_log) else (json.dumps(body, ensure_ascii=False) if save_request_body else ""),
                         "response_body": body_str if save_response_body else "",
                         "status_code": status,
                         "latency_ms": latency,
@@ -1815,7 +1816,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             "provider": result["provider"],
             "key_alias": result["key_alias"],
             "model": result["model"],
-            "request_body": json.dumps(body, ensure_ascii=False) if save_request_body else "",
+            "request_body": request_body_for_log if (save_request_body and request_body_for_log) else (json.dumps(body, ensure_ascii=False) if save_request_body else ""),
             "response_body": result["body"] if save_response_body else "",
             "status_code": result["status_code"],
             "latency_ms": result["latency_ms"],

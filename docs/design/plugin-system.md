@@ -22,7 +22,7 @@
 
 | `category` | 名称 | 职责 | 核心 Hook | 示例 |
 |------------|------|------|-----------|------|
-| `filter` | 请求处理 | 请求到达时对数据做预处理（加密、参数注入、内容屏蔽） | `on_request` | 请求体加密、敏感词过滤 |
+| `filter` | 请求处理 | 请求到达时对数据做预处理（加密、参数注入、内容屏蔽） | `on_request` | 请求体加密、敏感词过滤、单向脱敏 |
 | `matcher` | 模型匹配 | 根据请求模型名选择/映射到实际的 key 或模型 | `on_key_selected` | 模型别名映射、权重路由 |
 | `converter` | 格式转换 | 请求/响应在不同协议格式间转换 | `convert_request` / `convert_sse_stream` | Responses→Chat、JSON→YAML |
 | `handler` | 错误处理 | 上游返回错误时的重试、切换、降级策略 | `on_upstream_error` | 5xx 重试、429 切换 key |
@@ -238,7 +238,15 @@ akm/
 async def on_request(self, request):
     if self.config.get("enable_cache"):
         ...
+
+# 也可以像 request_redactor 一样，仅对请求侧做“上游不可见”的单向脱敏：
+# 1. 递归扫描 messages/input/instructions 等文本路径；
+# 2. 命中常见 API Key、Token、PII 后替换为稳定占位符（如 __AKM_EMAIL_<hash12>__）；
+# 3. 不维护可逆映射，也不在响应侧做还原；
+# 4. 作为内置插件时，可通过 plugin.json 的 default_enabled=true 让首次启动自动写入 config.json 的 plugin_states。
 ```
+
+当稳定占位符需要尽量避免被外部字典反推时，可以复用本地已有 secret（例如 `~/.akm/secret.key`）参与 HMAC 计算，而不是直接对明文做裸哈希。这样既不需要引入新的 secret 文件，也能让相同明文在当前 AKM 环境中保持稳定映射。
 
 设置页通过 `settings` schema 自动渲染表单，保存后写入 `~/.akm/config.json`：
 

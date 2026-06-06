@@ -1,0 +1,79 @@
+{
+  "name": "request_redactor",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "请求侧单向脱敏：在转发到上游前按内置规则把敏感明文替换为稳定占位符",
+  "builtin": true,
+  "default_enabled": true,
+  "required": false,
+  "priority": 15,
+  "hooks": {
+    "on_request": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用请求脱敏",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保留已加载状态，但不改写请求体"
+    },
+    {
+      "key": "request_text_paths",
+      "label": "文本处理路径",
+      "type": "text",
+      "default": "messages[].content,input,instructions,tools[].function.arguments",
+      "description": "仅对这些路径下的字符串做脱敏，支持 messages[].content 这种简写；留空表示处理所有字符串"
+    },
+    {
+      "key": "sensitive_fields",
+      "label": "敏感字段名",
+      "type": "text",
+      "default": "api_key,apikey,api-key,x-api-key,authorization,proxy-authorization,password,passwd,pwd,secret,client_secret,private_key,token,access_token,refresh_token,id_token,session_token,cookie,set-cookie",
+      "description": "递归扫描这些字段名；命中后将整个字段值替换为稳定占位符，支持逗号或换行分隔"
+    },
+    {
+      "key": "placeholder_prefix",
+      "label": "占位符前缀",
+      "type": "string",
+      "default": "__AKM_",
+      "description": "稳定占位符前缀，默认格式为 __AKM_<CATEGORY>_<hash12>__"
+    },
+    {
+      "key": "builtin_rules_enabled",
+      "label": "启用内置规则",
+      "type": "boolean",
+      "default": true,
+      "description": "启用后会加载参考 opencode-vibeguard 的默认敏感信息规则集"
+    },
+    {
+      "key": "builtin_rule_groups",
+      "label": "内置规则分组",
+      "type": "text",
+      "default": "llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens,pii,network,system,credential_assignments",
+      "description": "按逗号或换行启用默认规则分组；可选 llm_keys、vcs_tokens、cloud_keys、chatops_tokens、auth_tokens、pii、network、system、credential_assignments"
+    },
+    {
+      "key": "custom_keyword_rules",
+      "label": "自定义关键词规则",
+      "type": "text",
+      "default": "",
+      "description": "按行填写 keyword=>label；右值作为类别标签参与生成稳定占位符，不会直接原样输出"
+    },
+    {
+      "key": "custom_regex_rules",
+      "label": "自定义正则规则",
+      "type": "text",
+      "default": "",
+      "description": "按行填写 regex=>label；右值作为类别标签参与生成稳定占位符，不会直接原样输出"
+    },
+    {
+      "key": "process_keys_case_insensitive",
+      "label": "字段名忽略大小写",
+      "type": "boolean",
+      "default": true,
+      "description": "开启后 Authorization 和 authorization 会按同一字段处理"
+    }
+  ]
+}
