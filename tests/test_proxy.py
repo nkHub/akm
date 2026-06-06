@@ -72,8 +72,8 @@ def _make_send_mock(client_mock, responses):
     calls = []
 
     client_mock.build_request = MagicMock(
-        side_effect=lambda method, url, json=None, headers=None, timeout=None: httpx.Request(
-            method, url, json=json, headers=headers
+        side_effect=lambda method, url, json=None, headers=None, timeout=None, data=None, files=None: httpx.Request(
+            method, url, json=json, data=data, files=files, headers=headers
         )
     )
 
@@ -422,6 +422,77 @@ async def test_forward_embeddings_request_does_not_inject_stream(monkeypatch):
     assert send_calls[0]["stream"] is False
     payload = send_calls[0]["req"].content.decode("utf-8")
     assert '"stream":' not in payload
+
+
+@pytest.mark.asyncio
+async def test_forward_image_generations_request_does_not_inject_stream_or_conversion(monkeypatch):
+    """图片生成转发应按普通 JSON 透传，不注入 stream，也不走协议转换。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "image", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            raise AssertionError("images/generations 不应尝试获取协议转换器")
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-image-1", "prompt": "draw a cat"},
+        client=mock_client,
+        api_path="images/generations",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    assert send_calls[0]["stream"] is False
+    payload = send_calls[0]["req"].content.decode("utf-8")
+    assert '"stream":' not in payload
+
+
+@pytest.mark.asyncio
+async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatch):
+    """图片编辑应使用 multipart 透传，不注入 JSON Content-Type，也不走协议转换。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "image", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            raise AssertionError("images/edits 不应尝试获取协议转换器")
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
+
+    result = await forward_request(
+        body={
+            "model": "gpt-image-2",
+            "__akm_multipart__": True,
+            "__akm_form_fields__": {"model": "gpt-image-2", "prompt": "edit it"},
+            "__akm_form_files__": {"image": ("cat.png", b"fake-bytes", "image/png")},
+        },
+        client=mock_client,
+        api_path="images/edits",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    assert send_calls[0]["stream"] is False
+    req = send_calls[0]["req"]
+    assert req.headers["Content-Type"].startswith("multipart/form-data;")
+    body = b"".join(req.stream)
+    assert b"filename=\"cat.png\"" in body
 
 
 @pytest.mark.asyncio

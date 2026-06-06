@@ -16,6 +16,7 @@ import httpx
 from fastapi import FastAPI, Request, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from akm import __version__
 from akm.proxy import forward_request, test_key_connectivity
 from akm.key_pool import (
@@ -90,6 +91,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 logger = logging.getLogger("akm")
 
+DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-2"
+
 # 转换告警码 -> 可读文案（供日志 API 补充派生字段）
 _CONV_WARNING_LABELS = {
     "responses_include_not_fully_mapped": "include 未完整映射",
@@ -121,6 +124,32 @@ def _build_trace_headers(request: Request) -> tuple[dict, str]:
         ensure_ascii=False,
     )
     return trace_headers, trace_headers_json
+
+
+def _safe_request_body_for_log(body) -> str:
+    """把请求体转换成适合审计日志落库的稳定 JSON 文本。
+
+    设计目标：
+    1. 普通 JSON 请求保持原样 `json.dumps`；
+    2. multipart 请求中如果包含 bytes / 文件对象元组，不再直接触发序列化异常；
+    3. 对文件内容只保留文件名、content_type、字节数等元信息，避免日志里塞入二进制大对象。
+    """
+    def _normalize(value):
+        if isinstance(value, bytes):
+            return {"__type__": "bytes", "size": len(value)}
+        if isinstance(value, tuple) and len(value) >= 3 and isinstance(value[1], (bytes, bytearray)):
+            return {
+                "filename": value[0],
+                "size": len(value[1]),
+                "content_type": value[2],
+            }
+        if isinstance(value, dict):
+            return {str(k): _normalize(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_normalize(v) for v in value]
+        return value
+
+    return json.dumps(_normalize(body), ensure_ascii=False)
 
 
 def _normalize_models_input(models: str) -> str:
@@ -1558,20 +1587,109 @@ async def embeddings(request: Request):
     return await _handle_ai_request(request, "embeddings")
 
 
+@app.post("/v1/images/generations")
+@app.post("/images/generations")
+async def image_generations(request: Request):
+    """OpenAI Images Generations API 端点。
+
+    当前按纯透传处理：
+    1. 不参与协议转换；
+    2. 不走流式链路；
+    3. 直接把上游 JSON 原样返回给客户端。
+    """
+    return await _handle_ai_request(request, "images/generations")
+
+
+@app.post("/v1/images/edits")
+@app.post("/images/edits")
+async def image_edits(request: Request):
+    """OpenAI Images Edits API 端点。
+
+    当前按 multipart 纯透传处理：
+    1. 接收 `multipart/form-data`；
+    2. 将图片文件与普通表单字段原样转发给上游；
+    3. 不参与协议转换。
+    """
+    return await _handle_ai_request(request, "images/edits")
+
+
 async def _handle_ai_request(request: Request, api_path: str):
-    """通用 AI API 请求处理：chat/completions / messages / responses / embeddings 复用"""
+    """通用 AI API 请求处理：chat/completions / messages / responses / embeddings / images/generations / images/edits 复用"""
     monitor = _get_health_monitor(request.app)
     if monitor is not None:
         monitor.request_started()
     content_type = request.headers.get("Content-Type", "")
     try:
-        if "application/json" not in content_type:
-            return JSONResponse(
-                status_code=415,
-                content={"detail": "不支持的 Content-Type，需要 application/json"},
-            )
+        if api_path == "images/edits":
+            if "multipart/form-data" not in content_type:
+                return JSONResponse(
+                    status_code=415,
+                    content={"detail": "不支持的 Content-Type，需要 multipart/form-data"},
+                )
+            form = await request.form()
+            fields: dict[str, str] = {}
+            files: dict[str, tuple[str, bytes, str]] = {}
+            body = {"__akm_multipart__": True, "__akm_form_fields__": fields, "__akm_form_files__": files}
+            for key, value in form.multi_items():
+                if isinstance(value, (UploadFile, StarletteUploadFile)):
+                    content = await value.read()
+                    files[key] = (
+                        value.filename or "upload.bin",
+                        content,
+                        value.content_type or "application/octet-stream",
+                    )
+                else:
+                    fields[key] = str(value)
+            if not str(fields.get("model") or "").strip():
+                default_model_available = False
+                for key in list_keys():
+                    if key.get("status") != "active":
+                        continue
+                    if DEFAULT_IMAGE_GENERATION_MODEL in set(key_model_list(key)):
+                        default_model_available = True
+                        break
+                if not default_model_available:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "detail": (
+                                f"未显式提供 model，且当前没有 active key 支持默认图片模型 "
+                                f"'{DEFAULT_IMAGE_GENERATION_MODEL}'。请手动传 model，或为某个 key 同步该模型。"
+                            )
+                        },
+                    )
+                fields["model"] = DEFAULT_IMAGE_GENERATION_MODEL
+            body["model"] = str(fields.get("model") or "")
+        else:
+            if "application/json" not in content_type:
+                return JSONResponse(
+                    status_code=415,
+                    content={"detail": "不支持的 Content-Type，需要 application/json"},
+                )
 
-        body = await request.json()
+            body = await request.json()
+        if api_path == "images/generations" and not str(body.get("model") or "").strip():
+            # 图片生成目前仅接了纯透传链路，这里仅在缺省时回填默认模型。
+            # 但默认模型必须先确认“当前确实有 active key 支持它”，否则直接给出可读错误，
+            # 避免请求继续下游后变成更难判断的 503/404/上游模型不存在错误。
+            default_model_available = False
+            for key in list_keys():
+                if key.get("status") != "active":
+                    continue
+                if DEFAULT_IMAGE_GENERATION_MODEL in set(key_model_list(key)):
+                    default_model_available = True
+                    break
+            if not default_model_available:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": (
+                            f"未显式提供 model，且当前没有 active key 支持默认图片模型 "
+                            f"'{DEFAULT_IMAGE_GENERATION_MODEL}'。请手动传 model，或为某个 key 同步该模型。"
+                        )
+                    },
+                )
+            body["model"] = DEFAULT_IMAGE_GENERATION_MODEL
         # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
         # starlette 的 headers 是大小写不敏感的 MutableHeaders
         _trace_headers, request_headers_json = _build_trace_headers(request)
@@ -1743,7 +1861,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "provider": provider,
                         "key_alias": key_alias,
                         "model": model,
-                        "request_body": request_body_for_log if (save_request_body and request_body_for_log) else (json.dumps(body, ensure_ascii=False) if save_request_body else ""),
+                        "request_body": request_body_for_log if (save_request_body and request_body_for_log) else (_safe_request_body_for_log(body) if save_request_body else ""),
                         "response_body": body_str if save_response_body else "",
                         "status_code": status,
                         "latency_ms": latency,
@@ -1816,7 +1934,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             "provider": result["provider"],
             "key_alias": result["key_alias"],
             "model": result["model"],
-            "request_body": request_body_for_log if (save_request_body and request_body_for_log) else (json.dumps(body, ensure_ascii=False) if save_request_body else ""),
+            "request_body": request_body_for_log if (save_request_body and request_body_for_log) else (_safe_request_body_for_log(body) if save_request_body else ""),
             "response_body": result["body"] if save_response_body else "",
             "status_code": result["status_code"],
             "latency_ms": result["latency_ms"],

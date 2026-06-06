@@ -196,7 +196,7 @@ async def forward_request(
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
-    chat/messages/responses 支持流式；embeddings 始终走普通 JSON。
+    chat/messages/responses 支持流式；embeddings/images/generations/images/edits 始终走普通响应。
     """
     model = body.get("model", "")
     supports_stream = api_path in {"chat/completions", "messages", "responses"}
@@ -311,10 +311,10 @@ async def forward_request(
 
         agent = get_agent(key.get("provider", "openai"))
 
-        # ── 协议转换检测（embeddings 不参与协议转换）──
+        # ── 协议转换检测（embeddings / images/generations / images/edits 不参与协议转换）──
         target_api_path = agent.needs_conversion(api_path)
         adapter = None
-        if api_path != "embeddings" and target_api_path and plugin_manager:
+        if api_path not in {"embeddings", "images/generations", "images/edits"} and target_api_path and plugin_manager:
             # 从插件系统查找转换器：api_path 格式 → target_api_path 格式
             from_fmt = api_path.replace("/completions", "")
             to_fmt = target_api_path.replace("/completions", "")
@@ -357,10 +357,32 @@ async def forward_request(
         url = agent.resolve_url(key, upstream_api_path)
         headers = agent.build_headers(key, upstream_api_path)
 
-        # ── 上游请求模式跟随客户端：流式接口按需走 SSE，其他接口直接请求 JSON ──
+        is_multipart_request = bool(body.get("__akm_multipart__"))
+        multipart_fields = body.get("__akm_form_fields__") if is_multipart_request else None
+        multipart_files = body.get("__akm_form_files__") if is_multipart_request else None
+
+        # ── 上游请求模式跟随客户端：流式接口按需走 SSE，其他接口直接请求普通响应 ──
         upstream_body = adapter.convert_request(body) if adapter else dict(body)
 
-        forwarded_request_body = json.dumps(upstream_body, ensure_ascii=False)
+        if is_multipart_request:
+            # multipart 由 httpx 自动生成 boundary；若保留 application/json 或裸 multipart/form-data，
+            # 上游通常会因为缺失 boundary 直接 400，因此这里显式移除 Content-Type，交给 httpx 处理。
+            headers.pop("Content-Type", None)
+            forwarded_request_body = json.dumps(
+                {
+                    **(multipart_fields or {}),
+                    "__akm_files__": {
+                        key_name: {
+                            "filename": item[0],
+                            "content_type": item[2],
+                        }
+                        for key_name, item in (multipart_files or {}).items()
+                    },
+                },
+                ensure_ascii=False,
+            )
+        else:
+            forwarded_request_body = json.dumps(upstream_body, ensure_ascii=False)
 
         if supports_stream:
             upstream_body["stream"] = client_wants_stream
@@ -377,7 +399,17 @@ async def forward_request(
         for attempt in range(1 + MAX_RETRIES_PER_KEY):
             t0 = time.time()
             try:
-                req = client.build_request("POST", url, json=upstream_body, headers=headers, timeout=120)
+                if is_multipart_request:
+                    req = client.build_request(
+                        "POST",
+                        url,
+                        data=multipart_fields,
+                        files=multipart_files,
+                        headers=headers,
+                        timeout=120,
+                    )
+                else:
+                    req = client.build_request("POST", url, json=upstream_body, headers=headers, timeout=120)
                 resp = await client.send(req, stream=client_wants_stream)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
