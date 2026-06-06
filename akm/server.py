@@ -152,6 +152,32 @@ def _safe_request_body_for_log(body) -> str:
     return json.dumps(_normalize(body), ensure_ascii=False)
 
 
+def _image_supported_models_from_config(cfg: dict | None = None) -> list[str]:
+    """从全局配置解析图片模型列表。"""
+    config_data = cfg or load_config()
+    raw = str(config_data.get("image_supported_models") or "gpt-image-2").strip()
+    models = [item.strip() for item in raw.split(",") if item.strip()]
+    return models or ["gpt-image-2"]
+
+
+def _default_image_generation_model(cfg: dict | None = None) -> str:
+    """返回图片接口默认回填使用的模型（取配置列表首项）。"""
+    return _image_supported_models_from_config(cfg)[0]
+
+
+def _has_active_key_for_image_model(model: str) -> bool:
+    """判断当前是否存在 active key 支持指定图片模型。"""
+    target = str(model or "").strip()
+    if not target:
+        return False
+    for key in list_keys():
+        if key.get("status") != "active":
+            continue
+        if target in set(key_model_list(key)):
+            return True
+    return False
+
+
 def _normalize_models_input(models: str) -> str:
     """规范模型输入，统一去除空白和多余逗号。"""
     raw = str(models or "").strip()
@@ -1620,6 +1646,10 @@ async def _handle_ai_request(request: Request, api_path: str):
         monitor.request_started()
     content_type = request.headers.get("Content-Type", "")
     try:
+        cfg = load_config()
+        image_models = _image_supported_models_from_config(cfg)
+        default_image_model = image_models[0]
+
         if api_path == "images/edits":
             if "multipart/form-data" not in content_type:
                 return JSONResponse(
@@ -1641,24 +1671,17 @@ async def _handle_ai_request(request: Request, api_path: str):
                 else:
                     fields[key] = str(value)
             if not str(fields.get("model") or "").strip():
-                default_model_available = False
-                for key in list_keys():
-                    if key.get("status") != "active":
-                        continue
-                    if DEFAULT_IMAGE_GENERATION_MODEL in set(key_model_list(key)):
-                        default_model_available = True
-                        break
-                if not default_model_available:
+                if not _has_active_key_for_image_model(default_image_model):
                     return JSONResponse(
                         status_code=400,
                         content={
                             "detail": (
                                 f"未显式提供 model，且当前没有 active key 支持默认图片模型 "
-                                f"'{DEFAULT_IMAGE_GENERATION_MODEL}'。请手动传 model，或为某个 key 同步该模型。"
+                                f"'{default_image_model}'。请手动传 model，或为某个 key 同步以下任一模型：{', '.join(image_models)}。"
                             )
                         },
                     )
-                fields["model"] = DEFAULT_IMAGE_GENERATION_MODEL
+                fields["model"] = default_image_model
             body["model"] = str(fields.get("model") or "")
         else:
             if "application/json" not in content_type:
@@ -1672,29 +1695,21 @@ async def _handle_ai_request(request: Request, api_path: str):
             # 图片生成目前仅接了纯透传链路，这里仅在缺省时回填默认模型。
             # 但默认模型必须先确认“当前确实有 active key 支持它”，否则直接给出可读错误，
             # 避免请求继续下游后变成更难判断的 503/404/上游模型不存在错误。
-            default_model_available = False
-            for key in list_keys():
-                if key.get("status") != "active":
-                    continue
-                if DEFAULT_IMAGE_GENERATION_MODEL in set(key_model_list(key)):
-                    default_model_available = True
-                    break
-            if not default_model_available:
+            if not _has_active_key_for_image_model(default_image_model):
                 return JSONResponse(
                     status_code=400,
                     content={
                         "detail": (
                             f"未显式提供 model，且当前没有 active key 支持默认图片模型 "
-                            f"'{DEFAULT_IMAGE_GENERATION_MODEL}'。请手动传 model，或为某个 key 同步该模型。"
+                            f"'{default_image_model}'。请手动传 model，或为某个 key 同步以下任一模型：{', '.join(image_models)}。"
                         )
                     },
                 )
-            body["model"] = DEFAULT_IMAGE_GENERATION_MODEL
+            body["model"] = default_image_model
         # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
         # starlette 的 headers 是大小写不敏感的 MutableHeaders
         _trace_headers, request_headers_json = _build_trace_headers(request)
         # 读取日志存储配置
-        cfg = load_config()
         save_request_body = cfg.get("log_request_body", False)
         save_response_body = cfg.get("log_response_body", False)
         stream_capture_max_bytes = int(cfg.get("stream_capture_max_bytes", 262144) or 262144)
