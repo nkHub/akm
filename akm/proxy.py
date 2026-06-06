@@ -360,6 +360,8 @@ async def forward_request(
         # ── 上游请求模式跟随客户端：流式接口按需走 SSE，其他接口直接请求 JSON ──
         upstream_body = adapter.convert_request(body) if adapter else dict(body)
 
+        forwarded_request_body = json.dumps(upstream_body, ensure_ascii=False)
+
         if supports_stream:
             upstream_body["stream"] = client_wants_stream
         # 对 OpenAI Chat 流式显式请求 usage，提升 token 统计稳定性。
@@ -466,6 +468,7 @@ async def forward_request(
                     "status_code": 200,
                     "response": resp,
                     "adapter": adapter,  # 非 None 时 server.py 会用转换器包装
+                    "request_body_for_log": forwarded_request_body,
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
@@ -527,6 +530,7 @@ async def forward_request(
                 "status_code": int(response_meta.get("status_code", resp.status_code)) if isinstance(response_meta, dict) else resp.status_code,
                 "body": json_body,
                 "adapter": adapter,
+                "request_body_for_log": forwarded_request_body,
                 "key_alias": key["alias"],
                 "provider": key["provider"],
                 "model": model,

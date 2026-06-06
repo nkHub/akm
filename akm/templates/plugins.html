@@ -67,6 +67,13 @@ function pluginRoute(name) { return '/plugins/' + encodeURIComponent(name || '')
 
 var _plugins = [];
 var _activePluginConfigModal = '';
+var PLUGIN_CATEGORY_LIFECYCLE_ORDER = {
+  filter: 20,
+  converter: 30,
+  post: 40,
+  handler: 50,
+  app: 60
+};
 var DATA_FILTER_GUARD_TEMPLATES = {
   command_risk: {
     enabled: true,
@@ -255,6 +262,65 @@ function renderErrorHandlerStructuredEditor(p) {
   content += '</label>';
   content += '</div>';
   return renderDataFilterSection('错误重试策略', '统一控制上游失败时的重试与 key 切换上限。', content);
+}
+
+function renderRequestRedactorStructuredEditor(p) {
+  var cfg = p.config || {};
+  var name = esc(p.name);
+  var html = '';
+
+  var baseSection = '';
+  baseSection += '<div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">';
+  baseSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  baseSection += '<input data-plugin="' + name + '" data-key="enabled" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.enabled !== false ? 'checked' : '') + '>';
+  baseSection += '<span>启用请求侧单向脱敏</span>';
+  baseSection += '</label>';
+  baseSection += '<label class="flex items-center gap-2 text-xs text-gray-300">';
+  baseSection += '<input data-plugin="' + name + '" data-key="builtin_rules_enabled" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.builtin_rules_enabled !== false ? 'checked' : '') + '>';
+  baseSection += '<span>启用内置规则</span>';
+  baseSection += '</label>';
+  baseSection += '<label class="flex items-center gap-2 text-xs text-gray-300 md:col-span-2">';
+  baseSection += '<input data-plugin="' + name + '" data-key="process_keys_case_insensitive" data-type="boolean" type="checkbox" class="shrink-0" ' + (cfg.process_keys_case_insensitive !== false ? 'checked' : '') + '>';
+  baseSection += '<span>字段名忽略大小写（Authorization / authorization 视为同一字段）</span>';
+  baseSection += '</label>';
+  baseSection += '<label class="block">';
+  baseSection += '<div class="text-xs text-gray-300 mb-1">占位符前缀</div>';
+  baseSection += '<input data-plugin="' + name + '" data-key="placeholder_prefix" data-type="string" type="text" value="' + esc(cfg.placeholder_prefix || '__AKM_') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  baseSection += '</label>';
+  baseSection += '<label class="block">';
+  baseSection += '<div class="text-xs text-gray-300 mb-1">内置规则分组</div>';
+  baseSection += '<input data-plugin="' + name + '" data-key="builtin_rule_groups" data-type="text" type="text" value="' + esc(cfg.builtin_rule_groups || 'llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens,pii,network,system,credential_assignments') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+  baseSection += '</label>';
+  baseSection += '</div>';
+  html += renderDataFilterSection('基础行为', '控制插件启停、稳定占位符前缀和默认内置规则集。', baseSection);
+
+  var requestScopeSection = '';
+  requestScopeSection += '<label class="block mb-3">';
+  requestScopeSection += '<div class="text-xs text-gray-300 mb-1">文本处理路径</div>';
+  requestScopeSection += '<textarea data-plugin="' + name + '" data-key="request_text_paths" data-type="text" rows="3" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.request_text_paths || 'messages[].content,input,instructions,tools[].function.arguments') + '</textarea>';
+  requestScopeSection += '<div class="text-[11px] text-gray-500 mt-1">仅在这些路径下扫描普通文本，默认覆盖 prompt、instructions 和工具参数样例。</div>';
+  requestScopeSection += '</label>';
+  requestScopeSection += '<label class="block mb-1">';
+  requestScopeSection += '<div class="text-xs text-gray-300 mb-1">敏感字段名</div>';
+  requestScopeSection += '<textarea data-plugin="' + name + '" data-key="sensitive_fields" data-type="text" rows="4" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.sensitive_fields || 'api_key,apikey,api-key,x-api-key,authorization,proxy-authorization,password,passwd,pwd,secret,client_secret,private_key,token,access_token,refresh_token,id_token,session_token,cookie,set-cookie') + '</textarea>';
+  requestScopeSection += '<div class="text-[11px] text-gray-500 mt-1">命中这些字段名时，整个字段值会直接替换成稳定占位符，不再尝试局部保留。</div>';
+  requestScopeSection += '</label>';
+  html += renderDataFilterSection('扫描范围', '限定扫描文本路径，并对高敏字段执行整字段替换。', requestScopeSection);
+
+  var customSection = '';
+  customSection += '<label class="block mb-3">';
+  customSection += '<div class="text-xs text-gray-300 mb-1">自定义关键词规则</div>';
+  customSection += '<textarea data-plugin="' + name + '" data-key="custom_keyword_rules" data-type="text" rows="4" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.custom_keyword_rules || '') + '</textarea>';
+  customSection += '<div class="text-[11px] text-gray-500 mt-1">按行填写 keyword=&gt;replacement，适合覆盖少量固定前缀或内部约定标识。</div>';
+  customSection += '</label>';
+  customSection += '<label class="block">';
+  customSection += '<div class="text-xs text-gray-300 mb-1">自定义正则规则</div>';
+  customSection += '<textarea data-plugin="' + name + '" data-key="custom_regex_rules" data-type="text" rows="6" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(cfg.custom_regex_rules || '') + '</textarea>';
+  customSection += '<div class="text-[11px] text-gray-500 mt-1">按行填写 regex=&gt;replacement，会在内置规则之后继续执行，适合补充团队私有秘钥格式。</div>';
+  customSection += '</label>';
+  html += renderDataFilterSection('自定义扩展', '在默认规则之外追加少量团队私有规则。', customSection);
+
+  return html;
 }
 
 function getSettingValue(def, current) {
@@ -611,6 +677,7 @@ function renderPluginConfigModalBody(plugin) {
   if (!plugin) return '';
   if (plugin.name === 'model_matcher') return renderModelMatcherStructuredEditor(plugin);
   if (plugin.name === 'error_handler') return renderErrorHandlerStructuredEditor(plugin);
+  if (plugin.name === 'request_redactor') return renderRequestRedactorStructuredEditor(plugin);
   return '';
 }
 
@@ -640,12 +707,33 @@ function loadPlugins() {
   fetch('/api/plugins').then(function(r){return r.json()}).then(function(data){
     _plugins = data;
     fetchPluginConfigs(data).then(function(merged){
-      _plugins = merged;
+      _plugins = sortPluginsForDisplay(merged);
       document.getElementById('plugin-count').textContent = merged.length;
-      renderPluginList(merged);
+      renderPluginList(_plugins);
     });
   }).catch(function(e){
     document.getElementById('plugin-list').innerHTML = '<div class="text-xs text-red-400">加载失败: ' + esc(e.message) + '</div>';
+  });
+}
+
+function sortPluginsForDisplay(plugins) {
+  return (plugins || []).slice().sort(function(a, b){
+    var aName = String((a && a.name) || '');
+    var bName = String((b && b.name) || '');
+    if (aName === 'model_matcher' && bName !== 'model_matcher') return -1;
+    if (bName === 'model_matcher' && aName !== 'model_matcher') return 1;
+    if (aName === 'error_handler' && bName !== 'error_handler') return 1;
+    if (bName === 'error_handler' && aName !== 'error_handler') return -1;
+
+    var aOrder = PLUGIN_CATEGORY_LIFECYCLE_ORDER[a.category] || 999;
+    var bOrder = PLUGIN_CATEGORY_LIFECYCLE_ORDER[b.category] || 999;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+
+    var aPriority = Number(a.priority != null ? a.priority : 100);
+    var bPriority = Number(b.priority != null ? b.priority : 100);
+    if (aPriority !== bPriority) return aPriority - bPriority;
+
+    return aName.localeCompare(bName);
   });
 }
 
@@ -738,7 +826,7 @@ function renderPluginList(plugins) {
       html += sourceBadge + requiredBadge;
       html += '<span class="text-xs text-gray-500">v' + esc(p.version) + '</span>';
       html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
-      if (p.name === 'model_matcher' || p.name === 'error_handler') {
+      if (p.name === 'model_matcher' || p.name === 'error_handler' || p.name === 'request_redactor') {
         html += '<button type="button" onclick="openPluginConfigModal(\'' + esc(p.name) + '\')" class="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:text-indigo-200 hover:border-indigo-400 cursor-pointer">配置</button>';
         html += '<span id="plugin-config-msg-' + esc(p.name) + '" class="text-xs text-gray-500"></span>';
       }
@@ -772,7 +860,7 @@ function renderPluginList(plugins) {
       html += '</div>';
 
       html += '</div>';
-      if (p.settings && p.settings.length && p.name !== 'model_matcher' && p.name !== 'error_handler') {
+      if (p.settings && p.settings.length && p.name !== 'model_matcher' && p.name !== 'error_handler' && p.name !== 'request_redactor') {
         html += '<div class="mt-3 pt-3 border-t border-border">';
         html += renderPluginSettings(p);
         html += '</div>';

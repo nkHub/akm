@@ -277,6 +277,43 @@ async def test_forward_request_can_be_blocked_by_on_request_plugin(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_request_uses_redacted_payload_returned_by_on_request_plugin(monkeypatch):
+    """on_request 若返回改写后的请求体，转发到上游的 payload 不应再包含原始敏感明文。"""
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "ok", "provider": "openai", "api_key": "sk-xxx",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            if hook == "on_request":
+                req = dict(kwargs["request"])
+                req["messages"] = [{"role": "user", "content": "token=[GITHUB-TOKEN]"}]
+                return {"request": req}
+            return kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(
+        mock_client,
+        [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')],
+    )
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "token=ghp_abcdefghijklmnopqrstuvwxyz123456"}]},
+        client=mock_client,
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    upstream_payload = send_calls[0]["req"].content.decode("utf-8")
+    assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in upstream_payload
+    assert "[GITHUB-TOKEN]" in upstream_payload
+
+
+@pytest.mark.asyncio
 async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
     """responses 在 messages-only provider 下可通过两段转换器链路转发"""
 
