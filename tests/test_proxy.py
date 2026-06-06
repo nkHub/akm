@@ -800,6 +800,51 @@ async def test_test_key_connectivity_anthropic_uses_messages(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_test_key_connectivity_custom_agent_uses_first_supported_format(monkeypatch):
+    """自定义供应商测试时，应优先请求其第一个启用的协议格式。"""
+
+    called = []
+
+    class DummyAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called.append((url, json))
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    AGENT_REGISTRY["vendor-chat-first"] = AGENT_REGISTRY["openai"].__class__(
+        name="vendor-chat-first",
+        default_base_url="https://vendor.example.com",
+        supports_chat=True,
+        supports_responses=True,
+        supports_messages=True,
+    )
+
+    try:
+        result = await test_key_connectivity({
+            "alias": "vendor-chat-first-key",
+            "provider": "vendor-chat-first",
+            "api_key": "__AKM_CREDENTIAL_VALUE_ff9f2df28bc7__",
+            "base_url": "https://vendor.example.com",
+            "models": "vendor-model",
+        })
+    finally:
+        del AGENT_REGISTRY["vendor-chat-first"]
+
+    assert result["ok"] is True
+    assert result["api_path"] == "chat/completions"
+    assert result["attempted_paths"] == ["chat/completions"]
+    assert called[0][0] == "https://vendor.example.com/v1/chat/completions"
+    assert called[0][1]["messages"] == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
 async def test_test_key_connectivity_messages_provider_without_anthropic_switch(monkeypatch):
     """供应商即使原生支持 messages，未开启开关时也不应自动改写到 /anthropic。"""
 

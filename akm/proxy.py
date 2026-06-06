@@ -13,7 +13,7 @@ from akm.key_pool import (
     key_model_list,
 )
 from akm.db import get_connection
-from akm.agent import get_agent
+from akm.agent import BUILTIN_AGENTS, get_agent
 
 
 class _ChainedAdapter:
@@ -635,7 +635,26 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
         }
     model = str(resolved_models[0] or "").strip()
 
-    if agent.supports_responses:
+    is_custom_agent = agent.name not in BUILTIN_AGENTS
+    if is_custom_agent:
+        # 自定义供应商测试时按“第一个启用的协议能力”发起请求，
+        # 与设置页中用户勾选/阅读协议能力的直觉顺序保持一致。
+        if agent.supports_chat:
+            candidate_paths = ["chat/completions"]
+            if allow_fallback:
+                if agent.supports_responses:
+                    candidate_paths.append("responses")
+                if agent.supports_messages:
+                    candidate_paths.append("messages")
+        elif agent.supports_responses:
+            candidate_paths = ["responses"]
+            if allow_fallback and agent.supports_messages:
+                candidate_paths.append("messages")
+        elif agent.supports_messages:
+            candidate_paths = ["messages"]
+        else:
+            candidate_paths = ["chat/completions"]
+    elif agent.supports_responses:
         candidate_paths = ["responses"]
         if allow_fallback:
             if agent.supports_chat:
