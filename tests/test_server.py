@@ -1,6 +1,7 @@
 import asyncio
 import tempfile
 import json
+import io
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -113,6 +114,202 @@ async def test_embeddings_forward_success(monkeypatch):
     data = resp.json()
     assert data["data"][0]["object"] == "embedding"
     assert data["model"] == "text-embedding-3-small"
+
+
+@pytest.mark.asyncio
+async def test_image_generations_forward_success(monkeypatch):
+    """/v1/images/generations 应复用通用转发链路返回普通 JSON。"""
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        assert api_path == "images/generations"
+        return {
+            "status_code": 200,
+            "body": '{"created":123,"data":[{"url":"https://example.com/image.png"}]}',
+            "key_alias": "image-key",
+            "provider": "openai",
+            "model": "gpt-image-1",
+            "error": "",
+            "latency_ms": 90,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-1", "prompt": "a cat"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data"][0]["url"] == "https://example.com/image.png"
+
+
+@pytest.mark.asyncio
+async def test_image_generations_uses_default_model_when_omitted(monkeypatch):
+    """图片生成接口未显式传 model 时，应自动回填 gpt-image-2。"""
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        assert api_path == "images/generations"
+        assert body["model"] == "gpt-image-2"
+        return {
+            "status_code": 200,
+            "body": '{"created":123,"data":[{"url":"https://example.com/default-image.png"}]}',
+            "key_alias": "image-key",
+            "provider": "openai",
+            "model": body["model"],
+            "error": "",
+            "latency_ms": 90,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+    monkeypatch.setattr(
+        "akm.server.list_keys",
+        lambda: [
+            {"alias": "image-key", "provider": "openai", "status": "active", "models": "gpt-image-2"},
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/images/generations",
+            json={"prompt": "a cat"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data"][0]["url"] == "https://example.com/default-image.png"
+
+
+@pytest.mark.asyncio
+async def test_image_generations_returns_clear_error_when_default_model_unavailable(monkeypatch):
+    """未传 model 且当前没有 key 支持 gpt-image-2 时，应直接返回可读错误。"""
+
+    monkeypatch.setattr(
+        "akm.server.list_keys",
+        lambda: [
+            {"alias": "k1", "provider": "openai", "status": "active", "models": "gpt-4.1"},
+        ],
+    )
+    monkeypatch.setattr("akm.server.forward_request", AsyncMock())
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/images/generations",
+            json={"prompt": "a cat"},
+        )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "gpt-image-2" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_image_edits_forward_success(monkeypatch):
+    """/v1/images/edits 应接收 multipart/form-data 并复用通用转发链路。"""
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        assert api_path == "images/edits"
+        assert body["model"] == "gpt-image-2"
+        assert body["__akm_multipart__"] is True
+        assert body["__akm_form_fields__"]["prompt"] == "edit cat"
+        assert body["__akm_form_files__"]["image"][0] == "cat.png"
+        return {
+            "status_code": 200,
+            "body": '{"created":123,"data":[{"url":"https://example.com/edited.png"}]}',
+            "key_alias": "image-key",
+            "provider": "openai",
+            "model": body["model"],
+            "error": "",
+            "latency_ms": 90,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/images/edits",
+            data={"model": "gpt-image-2", "prompt": "edit cat"},
+            files={"image": ("cat.png", io.BytesIO(b"fake-bytes"), "image/png")},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data"][0]["url"] == "https://example.com/edited.png"
+
+
+@pytest.mark.asyncio
+async def test_image_edits_uses_default_model_when_omitted(monkeypatch):
+    """图片编辑接口未显式传 model 时，应在存在可用 key 时自动回填 gpt-image-2。"""
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+        assert api_path == "images/edits"
+        assert body["model"] == "gpt-image-2"
+        assert body["__akm_form_fields__"]["model"] == "gpt-image-2"
+        return {
+            "status_code": 200,
+            "body": '{"created":123,"data":[{"url":"https://example.com/default-edit.png"}]}',
+            "key_alias": "image-key",
+            "provider": "openai",
+            "model": body["model"],
+            "error": "",
+            "latency_ms": 90,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+    monkeypatch.setattr(
+        "akm.server.list_keys",
+        lambda: [
+            {"alias": "image-key", "provider": "openai", "status": "active", "models": "gpt-image-2"},
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/images/edits",
+            data={"prompt": "edit cat"},
+            files={"image": ("cat.png", io.BytesIO(b"fake-bytes"), "image/png")},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["data"][0]["url"] == "https://example.com/default-edit.png"
+
+
+@pytest.mark.asyncio
+async def test_image_edits_returns_clear_error_when_default_model_unavailable(monkeypatch):
+    """图片编辑未传 model 且当前没有 key 支持 gpt-image-2 时，应直接返回可读错误。"""
+
+    monkeypatch.setattr(
+        "akm.server.list_keys",
+        lambda: [
+            {"alias": "k1", "provider": "openai", "status": "active", "models": "gpt-4.1"},
+        ],
+    )
+    monkeypatch.setattr("akm.server.forward_request", AsyncMock())
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/images/edits",
+            data={"prompt": "edit cat"},
+            files={"image": ("cat.png", io.BytesIO(b"fake-bytes"), "image/png")},
+        )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "gpt-image-2" in body["detail"]
 
 
 @pytest.mark.asyncio
