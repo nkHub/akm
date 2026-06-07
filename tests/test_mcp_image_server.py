@@ -41,6 +41,66 @@ def test_dispatch_generate_image_returns_text_content(monkeypatch):
     assert json.loads(result["content"][0]["text"])["data"][0]["url"] == "https://example.com/cat.png"
 
 
+def test_dispatch_generate_image_returns_mcp_image_for_data_url(monkeypatch):
+    async def fake_generate(payload, timeout=120.0):
+        assert payload["prompt"] == "a cat astronaut"
+        return {
+            "created": 123,
+            "data": [
+                {"url": "data:image/png;base64,QUJDRA=="},
+            ],
+        }
+
+    monkeypatch.setattr(mcp_image_server, "_generate_image_via_local_service", fake_generate)
+
+    result = mcp_image_server.asyncio.run(
+        mcp_image_server._dispatch(
+            "tools/call",
+            {
+                "name": "generate_image",
+                "arguments": {"prompt": "a cat astronaut"},
+            },
+        )
+    )
+
+    assert result["content"][0] == {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": "QUJDRA==",
+    }
+    assert json.loads(result["content"][1]["text"]) == {"created": 123, "image_count": 1}
+
+
+def test_dispatch_generate_image_returns_mcp_image_for_b64_json(monkeypatch):
+    async def fake_generate(payload, timeout=120.0):
+        assert payload["prompt"] == "a cat astronaut"
+        return {
+            "created": 456,
+            "data": [
+                {"b64_json": "RUZHSA=="},
+            ],
+        }
+
+    monkeypatch.setattr(mcp_image_server, "_generate_image_via_local_service", fake_generate)
+
+    result = mcp_image_server.asyncio.run(
+        mcp_image_server._dispatch(
+            "tools/call",
+            {
+                "name": "generate_image",
+                "arguments": {"prompt": "a cat astronaut"},
+            },
+        )
+    )
+
+    assert result["content"][0] == {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": "RUZHSA==",
+    }
+    assert json.loads(result["content"][1]["text"]) == {"created": 456, "image_count": 1}
+
+
 def test_dispatch_edit_image_reads_local_files(monkeypatch, tmp_path):
     image_path = tmp_path / "cat.png"
     mask_path = tmp_path / "mask.png"
@@ -59,7 +119,7 @@ def test_dispatch_edit_image_reads_local_files(monkeypatch, tmp_path):
         assert file_specs[1][1][0] == "mask.png"
         assert file_specs[1][1][1] == b"mask"
         assert timeout == 20.0
-        return {"data": [{"url": "https://example.com/edited.png"}]}
+        return {"created": 789, "data": [{"b64_json": "SUlJSQ=="}]}
 
     monkeypatch.setattr(mcp_image_server, "_edit_image_via_local_service", fake_edit)
 
@@ -79,4 +139,9 @@ def test_dispatch_edit_image_reads_local_files(monkeypatch, tmp_path):
         )
     )
 
-    assert json.loads(result["content"][0]["text"])["data"][0]["url"] == "https://example.com/edited.png"
+    assert result["content"][0] == {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": "SUlJSQ==",
+    }
+    assert json.loads(result["content"][1]["text"]) == {"created": 789, "image_count": 1}
