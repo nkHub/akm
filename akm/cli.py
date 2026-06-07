@@ -81,6 +81,98 @@ def _get_service_health(base_url: str) -> tuple[bool, str]:
         return False, f"未运行 ({exc})"
 
 
+def _local_service_base_url() -> str:
+    """统一生成本地代理服务地址，避免 CLI 内各命令各自拼接端口。"""
+    cfg = config_module.load_config()
+    port = int(cfg.get("server_port", config_module.DEFAULTS["server_port"]))
+    return f"http://127.0.0.1:{port}"
+
+
+def _format_non_json_service_error(resp: httpx.Response, action: str) -> str:
+    """把非 JSON 错误响应压缩成一行，便于直接在终端定位上游问题。
+
+    图片命令常见失败场景是上游网关直接返回 HTML 或纯文本错误页。原先 CLI
+    只提示“非 JSON 响应”，实际排查时还需要再翻日志或抓包，信息不够。这里
+    额外带上 content-type 与响应体前几百字符，尽量在不刷屏的前提下给出足够线索。
+    """
+    content_type = (resp.headers.get("content-type") or "").strip() or "unknown"
+    server = (resp.headers.get("server") or "").strip() or "unknown"
+    content_length = (resp.headers.get("content-length") or "").strip() or "unknown"
+    body_preview = (resp.text or "").strip()
+    if not body_preview:
+        body_preview = "<empty>"
+    body_preview = " ".join(body_preview.split())
+    if len(body_preview) > 300:
+        body_preview = body_preview[:300] + "..."
+    return (
+        f"{action}失败：服务返回了非 JSON 响应 "
+        f"(HTTP {resp.status_code}, content-type={content_type}, server={server}, "
+        f"content-length={content_length}, body={body_preview})"
+    )
+
+
+async def _generate_image_via_local_service(payload: dict, timeout: float = 120.0) -> dict:
+    """通过本地代理调用图片生成接口，返回标准 JSON，便于 MCP 直接消费。
+
+    这里显式复用本地 `/v1/images/generations` 路由，而不是在 CLI 内重复实现
+    Key 选择、默认模型回填和审计逻辑，避免形成第二套图片请求链路。
+    """
+    base_url = _local_service_base_url()
+    url = f"{base_url}/v1/images/generations"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload)
+    try:
+        body = resp.json()
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(_format_non_json_service_error(resp, "图片生成")) from exc
+    if resp.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        message = str(detail or body or f"HTTP {resp.status_code}")
+        raise click.ClickException(f"图片生成失败：{message}")
+    return body
+
+
+async def _edit_image_via_local_service(
+    form_data: dict,
+    file_specs: list[tuple[str, tuple[str, bytes, str]]],
+    timeout: float = 120.0,
+) -> dict:
+    """通过本地代理调用图片编辑接口，返回标准 JSON，便于 MCP 直接消费。
+
+    图片编辑必须走 multipart/form-data，这里统一在 CLI 内完成本地文件读取和
+    表单拼装，避免让外部调用方自己处理 http multipart 细节。
+    """
+    base_url = _local_service_base_url()
+    url = f"{base_url}/v1/images/edits"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, data=form_data, files=file_specs)
+    try:
+        body = resp.json()
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(_format_non_json_service_error(resp, "图片编辑")) from exc
+    if resp.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        message = str(detail or body or f"HTTP {resp.status_code}")
+        raise click.ClickException(f"图片编辑失败：{message}")
+    return body
+
+
+def _read_upload_file(path: str) -> tuple[str, bytes, str]:
+    """读取本地上传文件，按扩展名推断 content-type，减少调用方样板代码。"""
+    import mimetypes
+
+    file_path = os.path.expanduser(path)
+    if not os.path.exists(file_path):
+        raise click.ClickException(f"文件不存在: {path}")
+    if not os.path.isfile(file_path):
+        raise click.ClickException(f"不是文件: {path}")
+    filename = os.path.basename(file_path)
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    with open(file_path, "rb") as f:
+        content = f.read()
+    return filename, content, content_type
+
+
 def _load_plugin_manager() -> PluginManager:
     """为 CLI 临时加载插件元数据，用于查询状态和切换启停。"""
     manager = PluginManager()
@@ -344,6 +436,95 @@ def config_set(key, value):
 def plugin():
     """查看和切换插件启停状态"""
     pass
+
+
+@main.group()
+def image():
+    """通过本地代理执行图片生成相关操作，便于脚本或 MCP 直接调用。"""
+    pass
+
+
+@image.command("generate")
+@click.argument("prompt")
+@click.option("--model", default=None, help="图片模型，默认由服务端自动回填 image_supported_models 首项")
+@click.option("--size", default=None, help="图片尺寸，例如 1024x1024")
+@click.option("--quality", default=None, help="图片质量，例如 low/medium/high")
+@click.option("--background", default=None, help="背景模式，例如 transparent")
+@click.option("--output-format", default=None, help="输出格式，例如 png/webp")
+@click.option("--n", default=None, type=int, help="生成张数")
+@click.option("--user", default=None, help="透传给上游的 user 字段")
+@click.option("--timeout", default=120.0, type=float, show_default=True, help="请求超时时间（秒）")
+def image_generate(prompt, model, size, quality, background, output_format, n, user, timeout):
+    """调用本地代理生成图片，并把 JSON 结果直接输出到标准输出。
+
+    该命令设计目标是“机器可消费优先”，因此成功时只输出 JSON，
+    不额外拼接人类说明文字，方便 MCP/脚本直接解析 `data[].url` 或
+    `data[].b64_json` 等字段。
+    """
+    payload = {
+        "prompt": prompt,
+    }
+    if model:
+        payload["model"] = model
+    if size:
+        payload["size"] = size
+    if quality:
+        payload["quality"] = quality
+    if background:
+        payload["background"] = background
+    if output_format:
+        payload["output_format"] = output_format
+    if n is not None:
+        payload["n"] = n
+    if user:
+        payload["user"] = user
+    result = asyncio.run(_generate_image_via_local_service(payload, timeout=timeout))
+    click.echo(json.dumps(result, ensure_ascii=False))
+
+
+@image.command("edit")
+@click.argument("image_path")
+@click.option("--prompt", required=True, help="图片编辑提示词")
+@click.option("--mask", default=None, help="可选 mask 图片路径")
+@click.option("--model", default=None, help="图片模型，默认由服务端自动回填 image_supported_models 首项")
+@click.option("--size", default=None, help="图片尺寸，例如 1024x1024")
+@click.option("--quality", default=None, help="图片质量，例如 low/medium/high")
+@click.option("--background", default=None, help="背景模式，例如 transparent")
+@click.option("--output-format", default=None, help="输出格式，例如 png/webp")
+@click.option("--n", default=None, type=int, help="生成张数")
+@click.option("--user", default=None, help="透传给上游的 user 字段")
+@click.option("--timeout", default=120.0, type=float, show_default=True, help="请求超时时间（秒）")
+def image_edit(image_path, prompt, mask, model, size, quality, background, output_format, n, user, timeout):
+    """调用本地代理编辑图片，并把 JSON 结果直接输出到标准输出。
+
+    与 `image generate` 一样，成功时只输出 JSON，方便 MCP/脚本直接读取。
+    图片文件通过 `image_path` 传入；如需局部重绘，可额外提供 `--mask`。
+    """
+    form_data = {
+        "prompt": prompt,
+    }
+    if model:
+        form_data["model"] = model
+    if size:
+        form_data["size"] = size
+    if quality:
+        form_data["quality"] = quality
+    if background:
+        form_data["background"] = background
+    if output_format:
+        form_data["output_format"] = output_format
+    if n is not None:
+        form_data["n"] = str(n)
+    if user:
+        form_data["user"] = user
+
+    image_file = _read_upload_file(image_path)
+    file_specs = [("image", image_file)]
+    if mask:
+        file_specs.append(("mask", _read_upload_file(mask)))
+
+    result = asyncio.run(_edit_image_via_local_service(form_data, file_specs, timeout=timeout))
+    click.echo(json.dumps(result, ensure_ascii=False))
 
 
 @plugin.command("list")

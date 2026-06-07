@@ -8,6 +8,7 @@ import json
 import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
+from akm import __version__
 
 
 @dataclass
@@ -65,12 +66,14 @@ class Agent:
                 "x-api-key": key["api_key"],
                 "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
+                "User-Agent": f"akm/{__version__}",
             }
 
         template = key.get("auth_header") or self.default_auth_header
         return {
             "Authorization": template.format(api_key=key["api_key"]),
             "Content-Type": "application/json",
+            "User-Agent": f"akm/{__version__}",
         }
 
     def needs_conversion(self, api_path: str) -> Optional[str]:

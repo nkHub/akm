@@ -239,14 +239,7 @@ async def on_request(self, request):
     if self.config.get("enable_cache"):
         ...
 
-# 也可以像 request_redactor 一样，仅对请求侧做“上游不可见”的单向脱敏：
-# 1. 递归扫描 messages/input/instructions 等文本路径；
-# 2. 命中常见 API Key、Token、PII 后替换为稳定占位符（如 __AKM_EMAIL_<hash12>__）；
-# 3. 不维护可逆映射，也不在响应侧做还原；
-# 4. 作为内置插件时，可通过 plugin.json 的 default_enabled=true 让首次启动自动写入 config.json 的 plugin_states。
 ```
-
-当稳定占位符需要尽量避免被外部字典反推时，可以复用本地已有 secret（例如 `~/.akm/secret.key`）参与 HMAC 计算，而不是直接对明文做裸哈希。这样既不需要引入新的 secret 文件，也能让相同明文在当前 AKM 环境中保持稳定映射。
 
 设置页通过 `settings` schema 自动渲染表单，保存后写入 `~/.akm/config.json`：
 

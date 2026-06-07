@@ -246,7 +246,7 @@ python -c 'from akm import __version__; print(__version__)'
 git status
 ```
 
-> 发布时以 `akm/__init__.py` 中的 `__version__` 为唯一版本源；例如本次发布若版本号为 `0.1.5`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.5` 保持一致。
+> 发布时以 `akm/__init__.py` 中的 `__version__` 为唯一版本源；例如本次发布若版本号为 `0.1.6`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.6` 保持一致。
 
 2. **构建分发包（示例为 zip）**
 
