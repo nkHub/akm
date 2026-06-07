@@ -210,7 +210,7 @@ akm serve
 }
 ```
 
-工具成功时会返回文本内容，文本本身就是原始 JSON，可直接继续解析 `data[].url` 或 `data[].b64_json`。
+工具成功时会优先返回 MCP 原生 `image` 内容块，便于 Codex、Claude Desktop 等宿主直接渲染图片；同时会附带一段很小的文本元信息（如 `created`、图片数量）。只有当上游结果里不存在可直接提取的图片数据时，才会回退为原始 JSON 文本。
 
 `stats_include_estimated_usage` 仅作为 `config.json` 隐藏配置项存在，默认 `false`，不会在设置页单独展示；如需让首页统计把 `usage_estimated_light` 这类估算 token 计入总量与请求数，可手动改为 `true`。
 

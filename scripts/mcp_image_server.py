@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -108,6 +110,82 @@ def _write_message(message: dict) -> None:
     sys.stdout.flush()
 
 
+def _build_image_content_blocks(result: dict) -> list[dict]:
+    """把图片接口返回值规范化为 MCP 原生 image 内容块。
+
+    设计目标：
+    1. 若上游返回 `b64_json`，直接转成 `type=image`；
+    2. 若上游返回 `data:image/...;base64,...`，拆出 mimeType 与 base64 数据；
+    3. 若无法识别为原生图片，则回退为 text，避免让调用方拿到空结果；
+    4. 同时附一段简短文本元信息，便于纯文本型 MCP 客户端理解返回内容。
+    """
+    data_items = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(data_items, list):
+        return [
+            {
+                "type": "text",
+                "text": json.dumps(result, ensure_ascii=False),
+            }
+        ]
+
+    content: list[dict] = []
+    image_count = 0
+    data_url_pattern = re.compile(r"^data:(image/[A-Za-z0-9.+-]+);base64,(.+)$", re.DOTALL)
+
+    for item in data_items:
+        if not isinstance(item, dict):
+            continue
+
+        b64_json = item.get("b64_json")
+        if isinstance(b64_json, str) and b64_json.strip():
+            content.append(
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": b64_json.strip(),
+                }
+            )
+            image_count += 1
+            continue
+
+        url = item.get("url")
+        if isinstance(url, str):
+            match = data_url_pattern.match(url.strip())
+            if match:
+                mime_type, encoded_data = match.groups()
+                content.append(
+                    {
+                        "type": "image",
+                        "mimeType": mime_type,
+                        "data": encoded_data.strip(),
+                    }
+                )
+                image_count += 1
+                continue
+
+    if image_count:
+        content.append(
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "created": result.get("created"),
+                        "image_count": image_count,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        )
+        return content
+
+    return [
+        {
+            "type": "text",
+            "text": json.dumps(result, ensure_ascii=False),
+        }
+    ]
+
+
 async def _handle_generate_image(arguments: dict) -> dict:
     payload = {"prompt": arguments["prompt"]}
     for key in ("model", "size", "quality", "background", "output_format", "n", "user"):
@@ -116,14 +194,7 @@ async def _handle_generate_image(arguments: dict) -> dict:
             payload[key] = value
     timeout = float(arguments.get("timeout") or 120.0)
     result = await _generate_image_via_local_service(payload, timeout=timeout)
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(result, ensure_ascii=False),
-            }
-        ]
-    }
+    return {"content": _build_image_content_blocks(result)}
 
 
 async def _handle_edit_image(arguments: dict) -> dict:
@@ -140,14 +211,7 @@ async def _handle_edit_image(arguments: dict) -> dict:
         file_specs.append(("mask", _read_upload_file(arguments["mask"])))
     timeout = float(arguments.get("timeout") or 120.0)
     result = await _edit_image_via_local_service(form_data, file_specs, timeout=timeout)
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(result, ensure_ascii=False),
-            }
-        ]
-    }
+    return {"content": _build_image_content_blocks(result)}
 
 
 async def _dispatch(method: str, params: dict) -> dict:
