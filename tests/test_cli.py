@@ -1,5 +1,7 @@
 import tempfile
 from pathlib import Path
+import json
+from json import JSONDecodeError
 
 from click.testing import CliRunner
 
@@ -319,3 +321,202 @@ def test_key_health(monkeypatch):
     assert "[OK] k1 provider=openai latency=18ms" in result.output
     assert "[FAIL] k2 provider=openai status=500 error=boom" in result.output
     assert "巡检完成：成功 1，失败 1，总计 2" in result.output
+
+
+def test_image_generate_outputs_raw_json(monkeypatch):
+    """image generate 成功时应只输出 JSON，便于脚本或 MCP 直接解析。"""
+    _setup_tmp_env(monkeypatch)
+
+    async def fake_generate_image_via_local_service(payload, timeout=120.0):
+        assert payload == {
+            "prompt": "a cat astronaut",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "high",
+            "n": 2,
+        }
+        assert timeout == 45.0
+        return {
+            "created": 123,
+            "data": [
+                {"url": "https://example.com/cat-1.png"},
+                {"url": "https://example.com/cat-2.png"},
+            ],
+        }
+
+    monkeypatch.setattr("akm.cli._generate_image_via_local_service", fake_generate_image_via_local_service)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "image", "generate", "a cat astronaut",
+            "--model", "gpt-image-2",
+            "--size", "1024x1024",
+            "--quality", "high",
+            "--n", "2",
+            "--timeout", "45",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip() == '{"created": 123, "data": [{"url": "https://example.com/cat-1.png"}, {"url": "https://example.com/cat-2.png"}]}'
+
+
+def test_image_generate_surfaces_service_error(monkeypatch):
+    """image generate 失败时应返回非 0，并保留可读错误，方便外部调用方判断。"""
+    _setup_tmp_env(monkeypatch)
+
+    async def fake_fail(payload, timeout=120.0):
+        from click import ClickException
+        raise ClickException("图片生成失败：服务未启动")
+
+    monkeypatch.setattr("akm.cli._generate_image_via_local_service", fake_fail)
+
+    result = CliRunner().invoke(main, ["image", "generate", "a cat astronaut"])
+
+    assert result.exit_code != 0
+    assert "图片生成失败：服务未启动" in result.output
+
+
+def test_image_generate_includes_non_json_response_preview(monkeypatch):
+    """image generate 遇到非 JSON 错误页时应回显摘要，方便直接定位上游异常。"""
+    _setup_tmp_env(monkeypatch)
+
+    class FakeResponse:
+        status_code = 502
+        headers = {
+            "content-type": "text/html; charset=utf-8",
+            "server": "mock-gateway",
+            "content-length": "51",
+        }
+        text = "<html><body>Bad Gateway from upstream</body></html>"
+
+        def json(self):
+            raise JSONDecodeError("Expecting value", self.text, 0)
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            assert timeout == 120.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            assert url.endswith("/v1/images/generations")
+            return FakeResponse()
+
+    monkeypatch.setattr("akm.cli.httpx.AsyncClient", FakeAsyncClient)
+
+    result = CliRunner().invoke(main, ["image", "generate", "a cat astronaut"])
+
+    assert result.exit_code != 0
+    assert "HTTP 502" in result.output
+    assert "content-type=text/html; charset=utf-8" in result.output
+    assert "server=mock-gateway" in result.output
+    assert "content-length=51" in result.output
+    assert "Bad Gateway from upstream" in result.output
+
+
+def test_image_edit_outputs_raw_json(monkeypatch):
+    """image edit 成功时应透传 JSON，方便外部工具直接消费。"""
+    _setup_tmp_env(monkeypatch)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        Path("cat.png").write_bytes(b"fake-image")
+        Path("mask.png").write_bytes(b"fake-mask")
+
+        async def fake_edit_image_via_local_service(form_data, file_specs, timeout=120.0):
+            assert form_data == {
+                "prompt": "remove background",
+                "model": "gpt-image-2",
+                "size": "1024x1024",
+                "n": "1",
+            }
+            assert timeout == 30.0
+            assert file_specs[0][0] == "image"
+            assert file_specs[0][1][0] == "cat.png"
+            assert file_specs[0][1][1] == b"fake-image"
+            assert file_specs[1][0] == "mask"
+            assert file_specs[1][1][0] == "mask.png"
+            assert file_specs[1][1][1] == b"fake-mask"
+            return {
+                "created": 456,
+                "data": [{"url": "https://example.com/edited-cat.png"}],
+            }
+
+        monkeypatch.setattr("akm.cli._edit_image_via_local_service", fake_edit_image_via_local_service)
+
+        result = runner.invoke(
+            main,
+            [
+                "image", "edit", "cat.png",
+                "--prompt", "remove background",
+                "--mask", "mask.png",
+                "--model", "gpt-image-2",
+                "--size", "1024x1024",
+                "--n", "1",
+                "--timeout", "30",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output.strip())["data"][0]["url"] == "https://example.com/edited-cat.png"
+
+
+def test_image_edit_includes_non_json_response_preview(monkeypatch):
+    """image edit 遇到非 JSON 错误页时也应保留响应摘要，避免只能看到笼统报错。"""
+    _setup_tmp_env(monkeypatch)
+
+    class FakeResponse:
+        status_code = 502
+        headers = {
+            "content-type": "text/plain",
+            "server": "mock-gateway",
+            "content-length": "33",
+        }
+        text = "upstream image edit gateway error"
+
+        def json(self):
+            raise JSONDecodeError("Expecting value", self.text, 0)
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            assert timeout == 120.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, data, files):
+            assert url.endswith("/v1/images/edits")
+            return FakeResponse()
+
+    monkeypatch.setattr("akm.cli.httpx.AsyncClient", FakeAsyncClient)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        Path("cat.png").write_bytes(b"fake-image")
+        result = runner.invoke(main, ["image", "edit", "cat.png", "--prompt", "remove background"])
+
+    assert result.exit_code != 0
+    assert "HTTP 502" in result.output
+    assert "content-type=text/plain" in result.output
+    assert "server=mock-gateway" in result.output
+    assert "content-length=33" in result.output
+    assert "upstream image edit gateway error" in result.output
+
+
+def test_image_edit_reports_missing_file(monkeypatch):
+    """image edit 遇到不存在的输入文件时应直接报错，避免发出空请求。"""
+    _setup_tmp_env(monkeypatch)
+
+    result = CliRunner().invoke(main, ["image", "edit", "missing.png", "--prompt", "remove background"])
+
+    assert result.exit_code != 0
+    assert "文件不存在: missing.png" in result.output

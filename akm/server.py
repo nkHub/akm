@@ -254,7 +254,12 @@ async def _resolve_key_save_payload(body: dict, existing: dict | None = None) ->
         base_url = (existing or {}).get("base_url") or None
     else:
         base_url = str(base_url).strip() or None
-    auth_header = str(body.get("auth_header") or (existing or {}).get("auth_header") or "Bearer {api_key}").strip() or "Bearer {api_key}"
+    default_auth_header = get_agent(provider).default_auth_header if provider else "Bearer {api_key}"
+    auth_header_raw = body.get("auth_header")
+    if auth_header_raw is not None and str(auth_header_raw).strip():
+        auth_header = str(auth_header_raw).strip()
+    else:
+        auth_header = str(default_auth_header or "Bearer {api_key}").strip() or "Bearer {api_key}"
     priority = int(body.get("priority", (existing or {}).get("priority", 0)) or 0)
     models = _normalize_models_input(body.get("models", (existing or {}).get("models", "*")))
 
@@ -1623,6 +1628,11 @@ async def image_generations(request: Request):
     2. 不走流式链路；
     3. 直接把上游 JSON 原样返回给客户端。
     """
+    logger.info(
+        "[images/generations] route hit content-type=%s ua=%s",
+        request.headers.get("content-type", ""),
+        request.headers.get("user-agent", ""),
+    )
     return await _handle_ai_request(request, "images/generations")
 
 
