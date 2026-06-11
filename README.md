@@ -101,7 +101,7 @@ akm doctor                    # 检查配置 / 数据库 / 插件 / 服务状态
 
 ## 自定义 MCP 脚本
 
-仓库内提供 `scripts/translate-mcp.py`，用于启动一个基于 `translators` 与 `langdetect` 的本地翻译 MCP Server。它暴露两个工具：`translate`（文本翻译）与 `detect_language`（语言检测），适合在本地智能体工作流中直接复用，且无需额外 API Key。
+项目内的自定义 MCP 统一放在 `scripts/` 目录中。仓库当前提供 `scripts/translate-mcp.py`，用于启动一个基于 `translators` 与 `langdetect` 的本地翻译 MCP Server。它暴露两个工具：`translate`（文本翻译）与 `detect_language`（语言检测），适合在本地智能体工作流中直接复用，且无需额外 API Key。
 
 ```bash
 uv run scripts/translate-mcp.py
