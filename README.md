@@ -99,6 +99,14 @@ akm plugin config set <名称> <键> <值> # 修改插件配置
 akm doctor                    # 检查配置 / 数据库 / 插件 / 服务状态
 ```
 
+## 自定义 MCP 脚本
+
+仓库内提供 `scripts/translate-mcp.py`，用于启动一个基于 `translators` 与 `langdetect` 的本地翻译 MCP Server。它暴露两个工具：`translate`（文本翻译）与 `detect_language`（语言检测），适合在本地智能体工作流中直接复用，且无需额外 API Key。
+
+```bash
+uv run scripts/translate-mcp.py
+```
+
 ## 菜单栏应用
 
 ```bash
