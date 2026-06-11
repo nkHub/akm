@@ -362,6 +362,22 @@ def test_image_generate_outputs_raw_json(monkeypatch):
     assert result.output.strip() == '{"created": 123, "data": [{"url": "https://example.com/cat-1.png"}, {"url": "https://example.com/cat-2.png"}]}'
 
 
+def test_image_generate_uses_configured_default_timeout(monkeypatch):
+    """未显式传 --timeout 时，图片生成应读取 image_request_timeout_sec。"""
+    _setup_tmp_env(monkeypatch)
+    monkeypatch.setattr("akm.cli.config_module.load_config", lambda: {"image_request_timeout_sec": 300, "server_port": 8800})
+
+    async def fake_generate_image_via_local_service(payload, timeout=120.0):
+        assert timeout == 300.0
+        return {"created": 123, "data": [{"url": "https://example.com/cat-1.png"}]}
+
+    monkeypatch.setattr("akm.cli._generate_image_via_local_service", fake_generate_image_via_local_service)
+
+    result = CliRunner().invoke(main, ["image", "generate", "a cat astronaut"])
+
+    assert result.exit_code == 0
+
+
 def test_image_generate_surfaces_service_error(monkeypatch):
     """image generate 失败时应返回非 0，并保留可读错误，方便外部调用方判断。"""
     _setup_tmp_env(monkeypatch)
@@ -396,7 +412,7 @@ def test_image_generate_includes_non_json_response_preview(monkeypatch):
 
     class FakeAsyncClient:
         def __init__(self, timeout):
-            assert timeout == 120.0
+            assert timeout == 300.0
 
         async def __aenter__(self):
             return self
@@ -467,6 +483,32 @@ def test_image_edit_outputs_raw_json(monkeypatch):
     assert json.loads(result.output.strip())["data"][0]["url"] == "https://example.com/edited-cat.png"
 
 
+def test_image_edit_uses_configured_default_timeout(monkeypatch):
+    """未显式传 --timeout 时，图片编辑应读取 image_request_timeout_sec。"""
+    _setup_tmp_env(monkeypatch)
+    monkeypatch.setattr("akm.cli.config_module.load_config", lambda: {"image_request_timeout_sec": 300, "server_port": 8800})
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        Path("cat.png").write_bytes(b"fake-image")
+
+        async def fake_edit_image_via_local_service(form_data, file_specs, timeout=120.0):
+            assert timeout == 300.0
+            return {"created": 456, "data": [{"url": "https://example.com/edited-cat.png"}]}
+
+        monkeypatch.setattr("akm.cli._edit_image_via_local_service", fake_edit_image_via_local_service)
+
+        result = runner.invoke(
+            main,
+            [
+                "image", "edit", "cat.png",
+                "--prompt", "remove background",
+            ],
+        )
+
+    assert result.exit_code == 0
+
+
 def test_image_edit_includes_non_json_response_preview(monkeypatch):
     """image edit 遇到非 JSON 错误页时也应保留响应摘要，避免只能看到笼统报错。"""
     _setup_tmp_env(monkeypatch)
@@ -485,7 +527,7 @@ def test_image_edit_includes_non_json_response_preview(monkeypatch):
 
     class FakeAsyncClient:
         def __init__(self, timeout):
-            assert timeout == 120.0
+            assert timeout == 300.0
 
         async def __aenter__(self):
             return self

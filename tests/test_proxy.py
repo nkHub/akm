@@ -72,10 +72,13 @@ def _make_send_mock(client_mock, responses):
     """让 client.send 按顺序返回 FakeStreamResponse"""
     calls = []
 
+    def _build_request(method, url, json=None, headers=None, timeout=None, data=None, files=None):
+        req = httpx.Request(method, url, json=json, data=data, files=files, headers=headers)
+        req.extensions["_akm_test_timeout"] = timeout
+        return req
+
     client_mock.build_request = MagicMock(
-        side_effect=lambda method, url, json=None, headers=None, timeout=None, data=None, files=None: httpx.Request(
-            method, url, json=json, data=data, files=files, headers=headers
-        )
+        side_effect=_build_request
     )
 
     async def send_side_effect(req, stream=False):
@@ -456,6 +459,37 @@ async def test_forward_image_generations_request_does_not_inject_stream_or_conve
     payload = send_calls[0]["req"].content.decode("utf-8")
     assert send_calls[0]["req"].headers["User-Agent"] == f"akm/{__version__}"
     assert '"stream":' not in payload
+
+
+@pytest.mark.asyncio
+async def test_forward_image_generations_request_honors_custom_request_timeout(monkeypatch):
+    """图片生成接口应允许调用方覆盖单次上游请求超时。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "image", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            raise AssertionError("images/generations 不应尝试获取协议转换器")
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-image-1", "prompt": "draw a cat"},
+        client=mock_client,
+        api_path="images/generations",
+        plugin_manager=DummyPM(),
+        request_timeout=300,
+    )
+
+    assert result["status_code"] == 200
+    assert send_calls[0]["req"].extensions.get("_akm_test_timeout") == 300
 
 
 @pytest.mark.asyncio

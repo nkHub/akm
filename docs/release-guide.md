@@ -232,6 +232,8 @@ def check_update():
    - 确认返回的 `tag_name`、`html_url` 与刚发布版本一致。
    - 本地启动应用验证菜单栏是否出现更新提示。
 
+> 若本次发布涉及 `config.json` 的隐藏配置项（例如 `stats_include_estimated_usage`、`image_request_timeout_sec`），发布说明里应明确写出默认值、适用链路和“不会在设置页展示”，避免用户误以为功能未生效或界面漏项。
+
 **命令行发布流程（git tag + push + gh release）**：
 
 > 首次使用需安装并登录 GitHub CLI：`brew install gh && gh auth login`

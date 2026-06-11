@@ -16,6 +16,7 @@ DEFAULTS = {
     "stats_include_estimated_usage": False,  # 首页统计是否计入 estimated token，默认关闭更保守
     "json_viewer_max_text_length": 600000,  # JSON 查看器超长文本阈值（超过后仅允许下载原文）
     "image_supported_models": "gpt-image-2",  # 图片生成/编辑支持的模型列表（逗号分隔，首项作为默认值）
+    "image_request_timeout_sec": 300,  # 图片生成/编辑请求超时（秒），默认比聊天接口更宽松
 }
 
 

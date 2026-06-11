@@ -157,6 +157,15 @@ async def _edit_image_via_local_service(
     return body
 
 
+def _default_image_cli_timeout() -> float:
+    """读取图片命令默认超时，和服务端图片请求链路保持一致。"""
+    try:
+        timeout = float(config_module.load_config().get("image_request_timeout_sec", 300) or 300)
+    except (TypeError, ValueError):
+        timeout = 300.0
+    return max(30.0, timeout)
+
+
 def _read_upload_file(path: str) -> tuple[str, bytes, str]:
     """读取本地上传文件，按扩展名推断 content-type，减少调用方样板代码。"""
     import mimetypes
@@ -453,7 +462,7 @@ def image():
 @click.option("--output-format", default=None, help="输出格式，例如 png/webp")
 @click.option("--n", default=None, type=int, help="生成张数")
 @click.option("--user", default=None, help="透传给上游的 user 字段")
-@click.option("--timeout", default=120.0, type=float, show_default=True, help="请求超时时间（秒）")
+@click.option("--timeout", default=None, type=float, help="请求超时时间（秒，默认读取 config.json 的 image_request_timeout_sec）")
 def image_generate(prompt, model, size, quality, background, output_format, n, user, timeout):
     """调用本地代理生成图片，并把 JSON 结果直接输出到标准输出。
 
@@ -478,7 +487,8 @@ def image_generate(prompt, model, size, quality, background, output_format, n, u
         payload["n"] = n
     if user:
         payload["user"] = user
-    result = asyncio.run(_generate_image_via_local_service(payload, timeout=timeout))
+    effective_timeout = float(timeout) if timeout is not None else _default_image_cli_timeout()
+    result = asyncio.run(_generate_image_via_local_service(payload, timeout=effective_timeout))
     click.echo(json.dumps(result, ensure_ascii=False))
 
 
@@ -493,7 +503,7 @@ def image_generate(prompt, model, size, quality, background, output_format, n, u
 @click.option("--output-format", default=None, help="输出格式，例如 png/webp")
 @click.option("--n", default=None, type=int, help="生成张数")
 @click.option("--user", default=None, help="透传给上游的 user 字段")
-@click.option("--timeout", default=120.0, type=float, show_default=True, help="请求超时时间（秒）")
+@click.option("--timeout", default=None, type=float, help="请求超时时间（秒，默认读取 config.json 的 image_request_timeout_sec）")
 def image_edit(image_path, prompt, mask, model, size, quality, background, output_format, n, user, timeout):
     """调用本地代理编辑图片，并把 JSON 结果直接输出到标准输出。
 
@@ -523,7 +533,8 @@ def image_edit(image_path, prompt, mask, model, size, quality, background, outpu
     if mask:
         file_specs.append(("mask", _read_upload_file(mask)))
 
-    result = asyncio.run(_edit_image_via_local_service(form_data, file_specs, timeout=timeout))
+    effective_timeout = float(timeout) if timeout is not None else _default_image_cli_timeout()
+    result = asyncio.run(_edit_image_via_local_service(form_data, file_specs, timeout=effective_timeout))
     click.echo(json.dumps(result, ensure_ascii=False))
 
 
