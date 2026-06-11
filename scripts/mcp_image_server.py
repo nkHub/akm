@@ -32,7 +32,12 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from akm.cli import _edit_image_via_local_service, _generate_image_via_local_service, _read_upload_file
+from akm.cli import (
+    _default_image_cli_timeout,
+    _edit_image_via_local_service,
+    _generate_image_via_local_service,
+    _read_upload_file,
+)
 
 
 SERVER_INFO = {
@@ -192,7 +197,7 @@ async def _handle_generate_image(arguments: dict) -> dict:
         value = arguments.get(key)
         if value is not None and value != "":
             payload[key] = value
-    timeout = float(arguments.get("timeout") or 120.0)
+    timeout = float(arguments.get("timeout") or _default_image_cli_timeout())
     result = await _generate_image_via_local_service(payload, timeout=timeout)
     return {"content": _build_image_content_blocks(result)}
 
@@ -209,7 +214,7 @@ async def _handle_edit_image(arguments: dict) -> dict:
     file_specs = [("image", _read_upload_file(arguments["image_path"]))]
     if arguments.get("mask"):
         file_specs.append(("mask", _read_upload_file(arguments["mask"])))
-    timeout = float(arguments.get("timeout") or 120.0)
+    timeout = float(arguments.get("timeout") or _default_image_cli_timeout())
     result = await _edit_image_via_local_service(form_data, file_specs, timeout=timeout)
     return {"content": _build_image_content_blocks(result)}
 

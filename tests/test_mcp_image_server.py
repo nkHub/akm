@@ -41,6 +41,28 @@ def test_dispatch_generate_image_returns_text_content(monkeypatch):
     assert json.loads(result["content"][0]["text"])["data"][0]["url"] == "https://example.com/cat.png"
 
 
+def test_dispatch_generate_image_uses_configured_default_timeout(monkeypatch):
+    async def fake_generate(payload, timeout=120.0):
+        assert payload == {"prompt": "a cat astronaut"}
+        assert timeout == 300.0
+        return {"data": [{"url": "https://example.com/cat.png"}]}
+
+    monkeypatch.setattr(mcp_image_server, "_generate_image_via_local_service", fake_generate)
+    monkeypatch.setattr(mcp_image_server, "_default_image_cli_timeout", lambda: 300.0)
+
+    result = mcp_image_server.asyncio.run(
+        mcp_image_server._dispatch(
+            "tools/call",
+            {
+                "name": "generate_image",
+                "arguments": {"prompt": "a cat astronaut"},
+            },
+        )
+    )
+
+    assert json.loads(result["content"][0]["text"])["data"][0]["url"] == "https://example.com/cat.png"
+
+
 def test_dispatch_generate_image_returns_mcp_image_for_data_url(monkeypatch):
     async def fake_generate(payload, timeout=120.0):
         assert payload["prompt"] == "a cat astronaut"
@@ -145,3 +167,34 @@ def test_dispatch_edit_image_reads_local_files(monkeypatch, tmp_path):
         "data": "SUlJSQ==",
     }
     assert json.loads(result["content"][1]["text"]) == {"created": 789, "image_count": 1}
+
+
+def test_dispatch_edit_image_uses_configured_default_timeout(monkeypatch, tmp_path):
+    image_path = tmp_path / "cat.png"
+    image_path.write_bytes(b"cat")
+
+    async def fake_edit(form_data, file_specs, timeout=120.0):
+        assert timeout == 300.0
+        return {"created": 789, "data": [{"b64_json": "SUlJSQ=="}]}
+
+    monkeypatch.setattr(mcp_image_server, "_edit_image_via_local_service", fake_edit)
+    monkeypatch.setattr(mcp_image_server, "_default_image_cli_timeout", lambda: 300.0)
+
+    result = mcp_image_server.asyncio.run(
+        mcp_image_server._dispatch(
+            "tools/call",
+            {
+                "name": "edit_image",
+                "arguments": {
+                    "image_path": str(image_path),
+                    "prompt": "remove background",
+                },
+            },
+        )
+    )
+
+    assert result["content"][0] == {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": "SUlJSQ==",
+    }

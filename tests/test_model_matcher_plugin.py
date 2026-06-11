@@ -53,6 +53,56 @@ async def test_model_matcher_keeps_request_when_no_aliases_configured():
 
 
 @pytest.mark.asyncio
+async def test_model_matcher_default_alias_does_not_apply_to_image_request():
+    plugin = Plugin()
+    plugin.config = {"aliases": "default=gpt-5.4"}
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "model": "gpt-image-2",
+        "prompt": "a cat astronaut",
+        "size": "1024x1024",
+    }
+    out = await plugin.on_request(req)
+    assert out is None
+    assert req["model"] == "gpt-image-2"
+
+
+@pytest.mark.asyncio
+async def test_model_matcher_default_alias_applies_to_responses_request():
+    plugin = Plugin()
+    plugin.config = {"aliases": "default=gpt-5.4"}
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "model": "unknown-model",
+        "input": [{"role": "user", "content": [{"type": "text", "text": "hello world"}]}],
+        "max_output_tokens": 128,
+    }
+    out = await plugin.on_request(req)
+    assert out is req
+    assert req["model"] == "gpt-5.4"
+
+
+@pytest.mark.asyncio
+async def test_model_matcher_default_alias_does_not_apply_to_embeddings_request():
+    plugin = Plugin()
+    plugin.config = {"aliases": "default=gpt-5.4"}
+    plugin.logger = type("_L", (), {"info": lambda *args, **kwargs: None})()
+    await plugin.on_load()
+
+    req = {
+        "model": "text-embedding-3-small",
+        "input": "hello world",
+    }
+    out = await plugin.on_request(req)
+    assert out is None
+    assert req["model"] == "text-embedding-3-small"
+
+
+@pytest.mark.asyncio
 async def test_model_matcher_sets_required_tool_choice_for_gpt_when_enabled():
     plugin = Plugin()
     plugin.config = {"force_tool_choice_required_for_gpt": True}
