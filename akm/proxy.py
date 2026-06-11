@@ -193,10 +193,12 @@ async def forward_request(
     log_callback=None,
     api_path: str = "chat/completions",
     plugin_manager=None,
+    request_timeout: float | None = None,
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
     chat/messages/responses 支持流式；embeddings/images/generations/images/edits 始终走普通响应。
+    request_timeout 允许调用方对单次请求超时做链路级覆盖；图片接口会传入更宽松的超时。
     """
     model = body.get("model", "")
     supports_stream = api_path in {"chat/completions", "messages", "responses"}
@@ -406,10 +408,16 @@ async def forward_request(
                         data=multipart_fields,
                         files=multipart_files,
                         headers=headers,
-                        timeout=120,
+                        timeout=request_timeout or 120,
                     )
                 else:
-                    req = client.build_request("POST", url, json=upstream_body, headers=headers, timeout=120)
+                    req = client.build_request(
+                        "POST",
+                        url,
+                        json=upstream_body,
+                        headers=headers,
+                        timeout=request_timeout or 120,
+                    )
                 resp = await client.send(req, stream=client_wants_stream)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"

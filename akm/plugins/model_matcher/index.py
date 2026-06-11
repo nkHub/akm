@@ -6,6 +6,7 @@
 
 配置项：
 - aliases: 逗号分隔的模型别名映射，如 "gpt-4=gpt-4-turbo,claude-3=claude-3-opus"
+- aliases 支持 `default=目标模型` 作为兜底映射：当请求模型未命中显式别名时，回退到该默认模型
 """
 from akm.plugins import PluginBase
 from akm.key_pool import pick_key_async
@@ -22,6 +23,7 @@ class Plugin(PluginBase):
     async def on_load(self):
         """初始化时解析别名映射表"""
         self._aliases: dict[str, str] = {}
+        self._default_alias = ""
         # 记录每个 key 的并发请求数与最早开始时间，用于并发/慢 key 旁路
         self._inflight_counts: dict[str, int] = {}
         self._inflight_oldest_ts: dict[str, float] = {}
@@ -153,6 +155,7 @@ class Plugin(PluginBase):
     def _parse_aliases(self):
         """从配置中解析模型别名映射"""
         self._aliases.clear()
+        self._default_alias = ""
         raw = (self.config or {}).get("aliases", "")
         if not raw or not isinstance(raw, str):
             return
@@ -163,9 +166,13 @@ class Plugin(PluginBase):
                 old = old.strip()
                 new = new.strip()
                 if old and new:
-                    self._aliases[old] = new
-        if self._aliases:
-            self.logger.info(f"[model_matcher] 加载别名表: {self._aliases}")
+                    if old == "default":
+                        self._default_alias = new
+                    else:
+                        self._aliases[old] = new
+        if self._aliases or self._default_alias:
+            extra = {"default": self._default_alias} if self._default_alias else {}
+            self.logger.info(f"[model_matcher] 加载别名表: {self._aliases | extra}")
 
     async def on_request(self, request) -> dict | None:
         """请求预处理：模型别名映射
@@ -179,8 +186,13 @@ class Plugin(PluginBase):
         changed = False
 
         model = request.get("model", "")
+        new_model = ""
         if self._aliases and model in self._aliases:
             new_model = self._aliases[model]
+        elif self._default_alias and model:
+            new_model = self._default_alias
+
+        if new_model:
             request["model"] = new_model
             changed = True
             self.logger.info(f"[model_matcher] 模型别名映射: {model} → {new_model}")

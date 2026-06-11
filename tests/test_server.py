@@ -34,7 +34,7 @@ def setup(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_success(monkeypatch):
     """正常请求返回上游响应"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"hello"}}]}',
@@ -61,7 +61,7 @@ async def test_chat_completions_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_no_keys(monkeypatch):
     """没有可用 key 时返回 503"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         return {
             "status_code": 503,
             "body": "",
@@ -89,7 +89,7 @@ async def test_chat_completions_no_keys(monkeypatch):
 async def test_embeddings_forward_success(monkeypatch):
     """/v1/embeddings 应复用通用转发链路返回普通 JSON。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         assert api_path == "embeddings"
         return {
             "status_code": 200,
@@ -121,8 +121,9 @@ async def test_embeddings_forward_success(monkeypatch):
 async def test_image_generations_forward_success(monkeypatch):
     """/v1/images/generations 应复用通用转发链路返回普通 JSON。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         assert api_path == "images/generations"
+        assert request_timeout == 300
         return {
             "status_code": 200,
             "body": '{"created":123,"data":[{"url":"https://example.com/image.png"}]}',
@@ -152,9 +153,10 @@ async def test_image_generations_forward_success(monkeypatch):
 async def test_image_generations_uses_default_model_when_omitted(monkeypatch):
     """图片生成接口未显式传 model 时，应自动回填 gpt-image-2。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         assert api_path == "images/generations"
         assert body["model"] == "gpt-image-2"
+        assert request_timeout == 300
         return {
             "status_code": 200,
             "body": '{"created":123,"data":[{"url":"https://example.com/default-image.png"}]}',
@@ -233,12 +235,13 @@ async def test_image_generations_returns_clear_error_when_default_model_unavaila
 async def test_image_edits_forward_success(monkeypatch):
     """/v1/images/edits 应接收 multipart/form-data 并复用通用转发链路。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         assert api_path == "images/edits"
         assert body["model"] == "gpt-image-2"
         assert body["__akm_multipart__"] is True
         assert body["__akm_form_fields__"]["prompt"] == "edit cat"
         assert body["__akm_form_files__"]["image"][0] == "cat.png"
+        assert request_timeout == 300
         return {
             "status_code": 200,
             "body": '{"created":123,"data":[{"url":"https://example.com/edited.png"}]}',
@@ -269,10 +272,11 @@ async def test_image_edits_forward_success(monkeypatch):
 async def test_image_edits_uses_default_model_when_omitted(monkeypatch):
     """图片编辑接口未显式传 model 时，应在存在可用 key 时自动回填 gpt-image-2。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         assert api_path == "images/edits"
         assert body["model"] == "gpt-image-2"
         assert body["__akm_form_fields__"]["model"] == "gpt-image-2"
+        assert request_timeout == 300
         return {
             "status_code": 200,
             "body": '{"created":123,"data":[{"url":"https://example.com/default-edit.png"}]}',
@@ -365,7 +369,7 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
 
     captured = {}
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"ok"}}]}',
@@ -410,7 +414,7 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
         async def aclose(self):
             return None
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         return {
             "stream": True,
             "status_code": 200,
@@ -474,7 +478,7 @@ async def test_streaming_response_emits_on_response_only_after_stream_finishes(m
 
     upstream_resp = DummyResp()
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
         return {
             "stream": True,
             "status_code": 200,

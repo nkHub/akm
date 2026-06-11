@@ -165,6 +165,16 @@ def _default_image_generation_model(cfg: dict | None = None) -> str:
     return _image_supported_models_from_config(cfg)[0]
 
 
+def _image_request_timeout_seconds(cfg: dict | None = None) -> float:
+    """返回图片生成/编辑请求使用的超时秒数。"""
+    config_data = cfg or load_config()
+    try:
+        timeout = float(config_data.get("image_request_timeout_sec", 300) or 300)
+    except (TypeError, ValueError):
+        timeout = 300.0
+    return max(30.0, timeout)
+
+
 def _has_active_key_for_image_model(model: str) -> bool:
     """判断当前是否存在 active key 支持指定图片模型。"""
     target = str(model or "").strip()
@@ -1847,7 +1857,14 @@ async def _handle_ai_request(request: Request, api_path: str):
         save_request_body = cfg.get("log_request_body", False)
         save_response_body = cfg.get("log_response_body", False)
         stream_capture_max_bytes = int(cfg.get("stream_capture_max_bytes", 262144) or 262144)
-        result = await forward_request(body, request.app.state.http_client, api_path=api_path, plugin_manager=request.app.state.plugin_manager)
+        request_timeout = _image_request_timeout_seconds(cfg) if api_path in {"images/generations", "images/edits"} else None
+        result = await forward_request(
+            body,
+            request.app.state.http_client,
+            api_path=api_path,
+            plugin_manager=request.app.state.plugin_manager,
+            request_timeout=request_timeout,
+        )
         request_body_for_log = str(result.get("request_body_for_log", "") or "")
 
         # ── 503 无可用 key 时补充来源信息 ──
