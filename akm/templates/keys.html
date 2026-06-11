@@ -25,16 +25,15 @@
       <input type="hidden" id="edit-alias" value="">
       <div><label class="block text-xs text-gray-400 mb-1">别名 *</label><input id="key-alias" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="例如: my-key"></div>
       <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">加载中...</option></select></div>
-      <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
+      <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" required type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
       <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
       <div>
         <label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示自动同步提供商模型列表）</label>
         <input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-        <p class="mt-1 text-[11px] text-gray-500">保存时会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
+        <p class="mt-1 text-[11px] text-gray-500">仅当填写 <code>*</code> 时，保存才会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
       </div>
-      <div><label class="block text-xs text-gray-400 mb-1">认证头模板 ({api_key} 会被替换为实际 key)</label><input id="key-authheader" value="Bearer {api_key}" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500" placeholder="Bearer {api_key}"></div>
       <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
-      <div class="flex gap-2 pt-2"><button type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
+      <div class="flex gap-2 pt-2"><button id="key-submit-btn" type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
     </form>
   </div>
 </div>
@@ -143,15 +142,14 @@ function loadProviders() {
     _agentsMap = {};
     agents.forEach(function(a){ _agentsMap[a.name] = a; });
     var sel = document.getElementById('key-provider');
-    // 保留“自定义”入口，便于手工填写 base_url / 认证头。
-    var html = '<option value="">选择供应商</option><option value="custom">自定义</option>';
+    var html = '<option value="">选择供应商</option>';
     agents.forEach(function(a){
       html += '<option value="' + esc(a.name) + '">' + esc(formatProviderName(a.name)) + '</option>';
     });
     sel.innerHTML = html;
   }).catch(function(){
     var sel = document.getElementById('key-provider');
-    sel.innerHTML = '<option value="">选择供应商</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="custom">自定义</option>';
+    sel.innerHTML = '<option value="">选择供应商</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="anthropic">Anthropic</option>';
   });
 }
 
@@ -249,17 +247,26 @@ function openAddModal() {
   document.getElementById('key-alias').disabled = false;
   document.getElementById('key-alias').classList.remove('opacity-50', 'cursor-not-allowed');
   document.getElementById('key-provider').value = '';
+  document.getElementById('key-apikey').required = true;
   document.getElementById('key-apikey').value = '';
   document.getElementById('key-apikey').type = 'password';
   document.getElementById('key-apikey').placeholder = 'sk-...';
   document.getElementById('key-baseurl').value = '';
-  document.getElementById('key-authheader').value = 'Bearer {api_key}';
   document.getElementById('key-models').value = '*';
   document.getElementById('key-priority').value = '0';
   document.getElementById('key-modal').classList.remove('hidden');
 }
 
 function closeModal() { document.getElementById('key-modal').classList.add('hidden'); }
+
+function setKeySubmitLoading(loading) {
+  var btn = document.getElementById('key-submit-btn');
+  if (!btn) return;
+  btn.disabled = !!loading;
+  btn.textContent = loading ? '保存中...' : '保存';
+  if (loading) btn.classList.add('opacity-60', 'cursor-wait');
+  else btn.classList.remove('opacity-60', 'cursor-wait');
+}
 
 function closeTestResultModal() {
   document.getElementById('test-result-modal').classList.add('hidden');
@@ -298,10 +305,10 @@ function editKey(alias) {
     document.getElementById('key-alias').disabled = true;
     document.getElementById('key-alias').classList.add('opacity-50', 'cursor-not-allowed');
     document.getElementById('key-provider').value = key.provider||'';
+    document.getElementById('key-apikey').required = false;
     document.getElementById('key-apikey').value = '';
     document.getElementById('key-apikey').placeholder = '(不修改则留空)';
     document.getElementById('key-baseurl').value = key.base_url||'';
-    document.getElementById('key-authheader').value = key.auth_header||'Bearer {api_key}';
     document.getElementById('key-models').value = key.models||'*';
     document.getElementById('key-priority').value = key.priority||0;
     document.getElementById('key-modal').classList.remove('hidden');
@@ -311,7 +318,12 @@ function editKey(alias) {
 function submitForm(e) {
   e.preventDefault();
   var editing = document.getElementById('edit-alias').value;
+  var baseUrlValue = (document.getElementById('key-baseurl').value || '').trim();
   var modelsValue = (document.getElementById('key-models').value || '').trim() || '*';
+  if (baseUrlValue && !/^https?:\/\//i.test(baseUrlValue)) {
+    alert('Base URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
   if (modelsValue !== '*') {
     var hasWildcard = modelsValue.split(',').some(function(part){ return part.trim() === '*'; });
     if (hasWildcard) {
@@ -323,8 +335,7 @@ function submitForm(e) {
     alias: document.getElementById('key-alias').value.trim(),
     provider: document.getElementById('key-provider').value,
     api_key: document.getElementById('key-apikey').value.trim(),
-    base_url: document.getElementById('key-baseurl').value.trim()||null,
-    auth_header: document.getElementById('key-authheader').value.trim()||'Bearer {api_key}',
+    base_url: baseUrlValue || null,
     models: modelsValue,
     priority: parseInt(document.getElementById('key-priority').value)||0,
   };
@@ -332,12 +343,14 @@ function submitForm(e) {
 
   var url = editing ? '/api/keys/'+encodeURIComponent(editing) : '/api/keys';
   var method = editing ? 'PUT' : 'POST';
+  setKeySubmitLoading(true);
   fetch(url, { method: method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
     .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,data:d}; }); })
     .then(function(r){
       if (r.ok) { closeModal(); loadKeys(); }
       else alert('操作失败: '+(r.data.detail||'未知错误'));
-    }).catch(function(e){ alert('请求失败: '+e.message); });
+    }).catch(function(e){ alert('请求失败: '+e.message); })
+    .finally(function(){ setKeySubmitLoading(false); });
 }
 
 function toggleStatus(alias, currentStatus) {
@@ -410,14 +423,10 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('key-provider').addEventListener('change', function() {
     var provider = this.value;
     var baseEl = document.getElementById('key-baseurl');
-    var authEl = document.getElementById('key-authheader');
     var agent = _agentsMap[provider];
-    // 仅在用户未填写时自动带入默认值，避免覆盖手工输入。
+    // 仅在用户未填写时自动带入默认地址，认证头模板由后端按供应商默认值决定。
     if (agent) {
       if (!baseEl.value) baseEl.value = agent.default_base_url || '';
-      if (!authEl.value || authEl.value === 'Bearer {api_key}') {
-        authEl.value = agent.default_auth_header || 'Bearer {api_key}';
-      }
     }
   });
   loadProviders();
