@@ -169,3 +169,5 @@ Thumbs.db
 ~/.akm/
 .opencode/
 tempCodeRunnerFile.py
+.codegraph/
+images/
