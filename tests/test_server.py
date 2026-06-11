@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from akm.audit import write_log, list_logs
 from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
 from akm.health import HealthMonitor
+from akm.key_pool import get_key
 from akm.server import app, _default_image_generation_model, _image_supported_models_from_config
 
 
@@ -770,6 +771,79 @@ async def test_api_add_key_rejects_wildcard_with_custom_models(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_add_key_with_explicit_models_skips_provider_model_sync(monkeypatch):
+    """显式自定义模型保存时，不应自动请求提供商 /models。"""
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("explicit models should not fetch provider models")
+
+    monkeypatch.setattr("akm.server._fetch_provider_models", fail_fetch)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": "explicit-key",
+                "provider": "openai",
+                "api_key": "sk-explicit",
+                "base_url": "https://example.com/v1",
+                "models": "gpt-4.1,gpt-4.1-mini",
+            },
+        )
+
+    assert resp.status_code == 200
+    key = get_key("explicit-key")
+    assert key is not None
+    assert key["models"] == "gpt-4.1,gpt-4.1-mini"
+    assert key["provider_models"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_update_key_from_wildcard_to_explicit_models_clears_provider_models(monkeypatch):
+    """从 wildcard 改成显式模型时，应清空旧的 provider_models，避免残留误导。"""
+
+    async def fake_fetch(provider, api_key, base_url, auth_header):
+        return ["gpt-4.1", "gpt-4.1-mini"]
+
+    monkeypatch.setattr("akm.server._fetch_provider_models", fake_fetch)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": "switch-key",
+                "provider": "openai",
+                "api_key": "sk-switch",
+                "base_url": "https://example.com/v1",
+                "models": "*",
+            },
+        )
+        assert create_resp.status_code == 200
+
+        async def fail_fetch(*args, **kwargs):
+            raise AssertionError("explicit models update should not fetch provider models")
+
+        monkeypatch.setattr("akm.server._fetch_provider_models", fail_fetch)
+
+        update_resp = await client.put(
+            "/api/keys/switch-key",
+            json={
+                "alias": "switch-key",
+                "provider": "openai",
+                "models": "gpt-4.1",
+            },
+        )
+
+    assert update_resp.status_code == 200
+    key = get_key("switch-key")
+    assert key is not None
+    assert key["models"] == "gpt-4.1"
+    assert key["provider_models"] == []
+
+
+@pytest.mark.asyncio
 async def test_api_refresh_key_provider_models(monkeypatch):
     """批量刷新 provider 模型列表接口应返回成功/失败统计。"""
 
@@ -869,6 +943,55 @@ async def test_key_change_log_written_without_api_key(monkeypatch):
     assert rows[1]["details"]["before_status"] == "active"
     assert rows[1]["details"]["after_status"] == "disabled"
     assert rows[2]["details"]["before"]["alias"] == "log-key"
+
+
+@pytest.mark.asyncio
+async def test_api_delete_key_supports_alias_with_slash(monkeypatch):
+    """包含斜杠的别名应可通过 URL 编码后正常删除。"""
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "gpt-4.1"}]}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            return DummyResponse()
+
+    monkeypatch.setattr("akm.server.httpx.AsyncClient", DummyAsyncClient)
+
+    alias = "https://vww.bytego.team/pricing"
+    encoded_alias = "https%3A%2F%2Fvww.bytego.team%2Fpricing"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/api/keys",
+            json={
+                "alias": alias,
+                "provider": "openai",
+                "api_key": "sk-delete-me",
+                "base_url": "https://example.com/v1",
+                "models": "*",
+            },
+        )
+        assert create_resp.status_code == 200
+
+        delete_resp = await client.delete(f"/api/keys/{encoded_alias}")
+
+    assert delete_resp.status_code == 200
+    assert delete_resp.json() == {"ok": True, "alias": alias}
+    assert get_key(alias) is None
 
 
 @pytest.mark.asyncio
@@ -1032,6 +1155,37 @@ def test_bounded_stream_capture_keeps_head_and_tail_with_marker():
     assert "stream truncated by akm" in text
     assert text.endswith("uvwxyz1234567890")
     assert cap.truncated is True
+
+
+def test_incremental_sse_usage_tracker_keeps_real_usage_after_truncation():
+    """流式响应即使审计正文被截断，也应保留实时提取到的真实 usage。"""
+    from akm.server import _BoundedStreamCapture, _IncrementalSSEUsageTracker
+
+    tracker = _IncrementalSSEUsageTracker()
+    capture = _BoundedStreamCapture(1024)
+
+    prefix = 'data: {"type":"response.output_text.delta","delta":"' + ('x' * 5000) + '"}\n\n'
+    suffix = (
+        'data: {"type":"response.completed","response":{"usage":'
+        '{"prompt_tokens":1234,"completion_tokens":56,"total_tokens":1290}}}\n\n'
+        + 'data: {"type":"response.output_text.delta","delta":"'
+        + ('y' * 5000)
+        + '"}\n\n'
+    )
+
+    for part in (prefix.encode("utf-8"), suffix.encode("utf-8")):
+        capture.append(part)
+        tracker.append(part)
+
+    truncated_text = capture.build_text()
+    assert capture.truncated is True
+    assert "response.completed" not in truncated_text
+
+    tokens = tracker.build_tokens()
+    assert tokens is not None
+    assert tokens["prompt_tokens"] == 1234
+    assert tokens["completion_tokens"] == 56
+    assert tokens["total_tokens"] == 1290
 
 
 @pytest.mark.asyncio

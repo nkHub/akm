@@ -245,7 +245,11 @@ async def _fetch_provider_models(provider: str, api_key: str, base_url: str | No
 
 
 async def _resolve_key_save_payload(body: dict, existing: dict | None = None) -> dict:
-    """解析并校验 key 保存参数，同时同步 provider 模型列表。"""
+    """解析并校验 key 保存参数。
+
+    仅当 `models='*'` 时才同步 provider 模型列表；
+    显式自定义模型场景直接保存，不再额外请求 `/models`。
+    """
     alias = str(body.get("alias") or (existing or {}).get("alias") or "").strip()
     provider = str(body.get("provider") or (existing or {}).get("provider") or "").strip()
     api_key = str(body.get("api_key") or (existing or {}).get("api_key") or "").strip()
@@ -268,7 +272,12 @@ async def _resolve_key_save_payload(body: dict, existing: dict | None = None) ->
     if models != "*" and any(part.strip() == "*" for part in models.split(",")):
         raise ValueError("星号不能和自定义模型同时使用")
 
-    provider_models = await _fetch_provider_models(provider, api_key, base_url, auth_header)
+    if models == "*":
+        provider_models = await _fetch_provider_models(provider, api_key, base_url, auth_header)
+    else:
+        # 显式模型列表不依赖 provider_models 匹配；这里主动清空，避免沿用旧 wildcard
+        # 同步下来的模型缓存，导致管理台展示和后续排障时出现误导。
+        provider_models = []
     return {
         "alias": alias,
         "provider": provider,
@@ -756,7 +765,7 @@ async def api_add_key(request: Request):
         return JSONResponse(status_code=status_code, content={"detail": message})
 
 
-@app.put("/api/keys/{alias}")
+@app.put("/api/keys/{alias:path}")
 async def api_update_key(alias: str, request: Request):
     """更新 key 的配置（api_key、priority、base_url、models、auth_header）"""
     existing = get_key(alias)
@@ -795,7 +804,7 @@ async def api_update_key(alias: str, request: Request):
     return {"ok": True, "alias": alias, "provider_models_count": len(payload["provider_models"])}
 
 
-@app.patch("/api/keys/{alias}/status")
+@app.patch("/api/keys/{alias:path}/status")
 async def api_toggle_status(alias: str, request: Request):
     """切换 key 状态（active / disabled）"""
     existing = get_key(alias)
@@ -820,7 +829,7 @@ async def api_toggle_status(alias: str, request: Request):
     return {"ok": True, "alias": alias, "status": status}
 
 
-@app.delete("/api/keys/{alias}")
+@app.delete("/api/keys/{alias:path}")
 async def api_delete_key(alias: str):
     """删除指定 key"""
     existing = get_key(alias)
@@ -836,7 +845,7 @@ async def api_delete_key(alias: str):
     return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
 
 
-@app.post("/api/keys/{alias}/test")
+@app.post("/api/keys/{alias:path}/test")
 async def api_test_key(alias: str):
     """测试 key 连通性"""
     key = get_key(alias)
@@ -913,34 +922,7 @@ def _extract_tokens(response_body: str) -> dict | None:
         return None
 
     def _parse_usage(usage: dict) -> dict | None:
-        """从 usage 对象提取 token 数，兼容两种字段名和缓存 token"""
-        total = usage.get("total_tokens", 0)
-        prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
-        completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-        cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
-        # 安全提取缓存 token：先查 Chat 格式的 *_details，再查 Messages 格式的直接 cached_tokens 字段
-        cached = usage.get("cached_tokens", 0) or 0
-        # Anthropic Messages: cache_read_input_tokens 表示缓存命中读取 token
-        if not cached:
-            cached = usage.get("cache_read_input_tokens", 0) or 0
-        if not cached:
-            for key in ("prompt_tokens_details", "input_tokens_details"):
-                details = usage.get(key)
-                if isinstance(details, dict):
-                    cached = details.get("cached_tokens", 0)
-                    if cached:
-                        break
-        if total == 0 and (prompt > 0 or completion > 0):
-            total = prompt + completion
-        if total > 0:
-            return {
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": total,
-                "cached_tokens": cached,
-                "cache_creation_tokens": cache_creation,
-            }
-        return None
+        return _parse_usage_metrics_object(usage)
 
     # 1. 尝试直接解析为 JSON
     try:
@@ -1004,6 +986,147 @@ def _extract_tokens(response_body: str) -> dict | None:
         }
 
     return None
+
+
+def _parse_usage_metrics_object(usage: dict) -> dict | None:
+    """从 usage 对象提取 token 数，统一兼容 chat、responses 与 messages 字段。
+
+    这里抽成独立函数，是为了让“完整响应文本解析”和“流式增量解析”共用同一套口径，
+    避免一个链路判定为真实 usage、另一个链路却退化成 EST。
+    """
+    if not isinstance(usage, dict):
+        return None
+
+    total = usage.get("total_tokens", 0)
+    prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+    completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+    cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
+    # 安全提取缓存 token：先查 Chat 格式的 *_details，再查 Messages 格式的直接 cached_tokens 字段。
+    cached = usage.get("cached_tokens", 0) or 0
+    # Anthropic Messages: cache_read_input_tokens 表示缓存命中读取 token。
+    if not cached:
+        cached = usage.get("cache_read_input_tokens", 0) or 0
+    if not cached:
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(key)
+            if isinstance(details, dict):
+                cached = details.get("cached_tokens", 0)
+                if cached:
+                    break
+    if total == 0 and (prompt > 0 or completion > 0):
+        total = prompt + completion
+    if total > 0:
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+            "cached_tokens": cached,
+            "cache_creation_tokens": cache_creation,
+        }
+    return None
+
+
+def _build_tokens_from_sse_usage_state(state: dict) -> dict | None:
+    """把 SSE 增量解析过程中收集到的 usage 状态整理成统一 token 结构。"""
+    usage = state.get("usage")
+    if usage:
+        parsed = _parse_usage_metrics_object(usage)
+        if parsed:
+            # messages SSE 常见情况：message_delta.usage 只有 output_tokens，
+            # input_tokens 需要从 message_start.message.usage 补齐。
+            msg_input_tokens = int(state.get("msg_input_tokens", 0) or 0)
+            msg_cached_tokens = int(state.get("msg_cached_tokens", 0) or 0)
+            if parsed.get("prompt_tokens", 0) == 0 and msg_input_tokens > 0:
+                parsed["prompt_tokens"] = msg_input_tokens
+                parsed["total_tokens"] = parsed.get("prompt_tokens", 0) + parsed.get("completion_tokens", 0)
+                if msg_cached_tokens > 0:
+                    parsed["cached_tokens"] = msg_cached_tokens
+            return parsed
+
+    msg_input_tokens = int(state.get("msg_input_tokens", 0) or 0)
+    msg_output_tokens = int(state.get("msg_output_tokens", 0) or 0)
+    msg_cached_tokens = int(state.get("msg_cached_tokens", 0) or 0)
+    if msg_input_tokens > 0 or msg_output_tokens > 0:
+        total = msg_input_tokens + msg_output_tokens
+        return {
+            "prompt_tokens": msg_input_tokens,
+            "completion_tokens": msg_output_tokens,
+            "total_tokens": total,
+            "cached_tokens": msg_cached_tokens,
+            "cache_creation_tokens": 0,
+        }
+    return None
+
+
+def _update_sse_usage_state(state: dict, chunk: dict) -> None:
+    """从单个 SSE data 负载里提取 usage 线索。
+
+    之所以按事件实时更新，而不是等流结束后再从截断文本里回看，
+    是因为真正的 usage 往往出现在流尾部；一旦审计捕获上限触发，
+    再依赖最终文本解析就会把“真实 usage”误判成“只能估算”。
+    """
+    if not isinstance(chunk, dict):
+        return
+    if "usage" in chunk and isinstance(chunk.get("usage"), dict):
+        state["usage"] = chunk["usage"]
+    if chunk.get("type") == "response.completed":
+        response_obj = chunk.get("response", {}) if isinstance(chunk.get("response"), dict) else {}
+        if isinstance(response_obj.get("usage"), dict):
+            state["usage"] = response_obj["usage"]
+
+    if chunk.get("type") == "message_start":
+        msg = chunk.get("message", {}) if isinstance(chunk.get("message"), dict) else {}
+        usage = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
+        state["msg_input_tokens"] = usage.get("input_tokens", state.get("msg_input_tokens", 0)) or state.get("msg_input_tokens", 0)
+
+    if chunk.get("type") == "message_delta":
+        usage = chunk.get("usage", {}) if isinstance(chunk.get("usage"), dict) else {}
+        state["msg_output_tokens"] = usage.get("output_tokens", state.get("msg_output_tokens", 0)) or state.get("msg_output_tokens", 0)
+        state["msg_cached_tokens"] = usage.get("cached_tokens", state.get("msg_cached_tokens", 0)) or state.get("msg_cached_tokens", 0)
+
+
+class _IncrementalSSEUsageTracker:
+    """在流式转发过程中增量提取 usage，避免大响应被截断后丢失真实 token。
+
+    这里不试图完整重组整个 SSE 响应，只维护一小段未闭合行缓冲，
+    每当收到完整 `data: ...` 行就立刻解析并更新 usage 状态。
+    这样即使后续审计正文因为体积过大被 head/tail 截断，
+    真实 usage 也已经提前被保存，不会再退化成 `usage_estimated_light`。
+    """
+
+    def __init__(self):
+        self._buffer = ""
+        self._state = {
+            "usage": None,
+            "msg_input_tokens": 0,
+            "msg_output_tokens": 0,
+            "msg_cached_tokens": 0,
+        }
+
+    def append(self, chunk: bytes | str) -> None:
+        text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+        if not text:
+            return
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._consume_line(line.rstrip("\r"))
+
+    def build_tokens(self) -> dict | None:
+        if self._buffer:
+            self._consume_line(self._buffer.rstrip("\r"))
+            self._buffer = ""
+        return _build_tokens_from_sse_usage_state(self._state)
+
+    def _consume_line(self, line: str) -> None:
+        line = line.strip()
+        if not line or not line.startswith("data: ") or line.startswith("data: [DONE]"):
+            return
+        try:
+            payload = json.loads(line[6:])
+        except (json.JSONDecodeError, TypeError):
+            return
+        _update_sse_usage_state(self._state, payload)
 
 
 def _estimate_tokens_light(request_body: dict, response_body: str = "") -> dict:
@@ -1090,10 +1213,11 @@ async def _build_usage_metrics(
     key_alias: str,
     provider: str,
     adapter,
+    precomputed_tokens: dict | None = None,
 ) -> tuple[dict, list[str]]:
     """统一 usage 构建器：标准解析 -> CountTokens -> Adapter -> 轻量估算。"""
     flags: list[str] = []
-    tokens = _extract_tokens(response_body) or {}
+    tokens = dict(precomputed_tokens or _extract_tokens(response_body) or {})
 
     has_tokens = (tokens.get("prompt_tokens", 0) > 0 or tokens.get("completion_tokens", 0) > 0)
     if not has_tokens:
@@ -1767,6 +1891,7 @@ async def _handle_ai_request(request: Request, api_path: str):
 
             async def stream_generator():
                 capture = _BoundedStreamCapture(stream_capture_max_bytes)
+                usage_tracker = _IncrementalSSEUsageTracker()
                 t0 = __import__("time").time()
                 stream_error = ""
                 security_action = ""
@@ -1808,10 +1933,12 @@ async def _handle_ai_request(request: Request, api_path: str):
                         async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
                             chunk = line.encode("utf-8") if isinstance(line, str) else line
                             capture.append(chunk)
+                            usage_tracker.append(chunk)
                             yield chunk
                     else:
                         async for chunk in resp.aiter_bytes():
                             capture.append(chunk)
+                            usage_tracker.append(chunk)
                             yield chunk
                 except Exception as exc:
                     stream_error = f"上游连接中断: {exc}"
@@ -1842,6 +1969,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         key_alias=key_alias,
                         provider=provider,
                         adapter=adapter,
+                        precomputed_tokens=usage_tracker.build_tokens(),
                     )
                     request_headers_for_log = request_headers_json
                     try:
