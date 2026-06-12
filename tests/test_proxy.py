@@ -6,6 +6,7 @@ import httpx
 from akm.proxy import forward_request, test_key_connectivity, _diagnose_no_key
 from akm.agent import AGENT_REGISTRY
 from akm.db import get_connection, init_db
+from akm.http_client_pool import HttpClientPoolManager
 from akm.key_pool import add_key, set_status
 
 
@@ -89,6 +90,60 @@ def _make_send_mock(client_mock, responses):
 
     client_mock.send = AsyncMock(side_effect=send_side_effect)
     return calls
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_manager_lazily_isolates_route_clients():
+    """相同路由复用同一 client，不同 key/model 路由懒创建独立 client。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    try:
+        first = await pool.get_client(provider="deepseek", key_alias="gs", model="deepseek-v4-pro", api_path="chat/completions")
+        second = await pool.get_client(provider="deepseek", key_alias="gs", model="deepseek-v4-pro", api_path="chat/completions")
+        third = await pool.get_client(provider="openai", key_alias="0029-pro", model="gpt-5.4", api_path="responses")
+
+        assert first is second
+        assert first is not third
+        assert pool.stats()["pool_count"] == 2
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_uses_route_scoped_client_after_key_selection(monkeypatch):
+    """forward_request 应在 key 与上游协议确定后，按最终路由取隔离 client。"""
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "gs", "provider": "deepseek", "api_key": "sk-xxx",
+        "base_url": "https://api.deepseek.com",
+    }))
+
+    route_client = AsyncMock()
+    send_calls = _make_send_mock(route_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"hi"}}]}')])
+
+    class Pool:
+        is_route_pool = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def get_client(self, **kwargs):
+            self.calls.append(kwargs)
+            return route_client
+
+    pool = Pool()
+    result = await forward_request(
+        body={"model": "deepseek-v4-pro", "input": "hello", "stream": False},
+        client=pool,
+        api_path="responses",
+    )
+
+    assert result["status_code"] == 200
+    assert pool.calls == [{
+        "provider": "deepseek",
+        "key_alias": "gs",
+        "model": "deepseek-v4-pro",
+        "api_path": "chat/completions",
+    }]
+    assert send_calls[0]["stream"] is False
 
 
 @pytest.mark.asyncio
