@@ -6,7 +6,6 @@
 
 配置项：
 - aliases: 逗号分隔的模型别名映射，如 "gpt-4=gpt-4-turbo,claude-3=claude-3-opus"
-- aliases 支持 `default=目标模型` 作为兜底映射：当请求模型未命中显式别名时，回退到该默认模型
 """
 from akm.plugins import PluginBase
 from akm.key_pool import pick_key_async
@@ -23,7 +22,6 @@ class Plugin(PluginBase):
     async def on_load(self):
         """初始化时解析别名映射表"""
         self._aliases: dict[str, str] = {}
-        self._default_alias = ""
         # 记录每个 key 的并发请求数与最早开始时间，用于并发/慢 key 旁路
         self._inflight_counts: dict[str, int] = {}
         self._inflight_oldest_ts: dict[str, float] = {}
@@ -155,7 +153,6 @@ class Plugin(PluginBase):
     def _parse_aliases(self):
         """从配置中解析模型别名映射"""
         self._aliases.clear()
-        self._default_alias = ""
         raw = (self.config or {}).get("aliases", "")
         if not raw or not isinstance(raw, str):
             return
@@ -166,13 +163,9 @@ class Plugin(PluginBase):
                 old = old.strip()
                 new = new.strip()
                 if old and new:
-                    if old == "default":
-                        self._default_alias = new
-                    else:
-                        self._aliases[old] = new
-        if self._aliases or self._default_alias:
-            extra = {"default": self._default_alias} if self._default_alias else {}
-            self.logger.info(f"[model_matcher] 加载别名表: {self._aliases | extra}")
+                    self._aliases[old] = new
+        if self._aliases:
+            self.logger.info(f"[model_matcher] 加载别名表: {self._aliases}")
 
     async def on_request(self, request) -> dict | None:
         """请求预处理：模型别名映射
@@ -180,11 +173,6 @@ class Plugin(PluginBase):
         将请求 body 中的 model 字段按 aliases 配置替换。
         如用户配置 gpt-4=gpt-4-turbo，则请求 model=gpt-4 时自动改为 gpt-4-turbo。
 
-        `default=...` 仅对聊天协议生效：
-        - chat/completions（典型结构：messages）
-        - responses（典型结构：input）
-        - messages（典型结构：messages + max_tokens）
-        避免把图片、embeddings 一类同样带 `model` 字段的请求误改写成文本模型。
         """
         # 重新解析别名（热更新，无需重启）
         self._parse_aliases()
@@ -192,7 +180,6 @@ class Plugin(PluginBase):
         changed = False
 
         model = request.get("model", "")
-        is_chat_like_request = self._is_chat_like_model_request(request)
         new_model = ""
         if self._aliases and model in self._aliases:
             new_model = self._aliases[model]
@@ -200,16 +187,6 @@ class Plugin(PluginBase):
             request["model"] = new_model
             changed = True
             self.logger.info(f"[model_matcher] 模型别名映射: {model} → {new_model}")
-
-        # default 兜底不再直接改写 model，而是标记到 request 上，
-        # 由 proxy 层在 key 选择全部失败后才作为兜底模型重试。
-        # 这样可以避免 gpt-5.4 等已有可用 key 的有效模型被 default 强制覆盖。
-        if not new_model and self._default_alias and model and is_chat_like_request:
-            request["_akm_fallback_model"] = self._default_alias
-            changed = True
-            self.logger.info(
-                f"[model_matcher] 设置 default 兜底模型: {model} → {self._default_alias}（仅在无可用 key 时生效）"
-            )
 
         # 工具调用策略（可配置）：
         # 对 GPT/Codex 模型且携带 tools 的请求，在未显式传 tool_choice 时默认强制 required。
@@ -231,18 +208,6 @@ class Plugin(PluginBase):
                 self.logger.info("[model_matcher] 自动设置 tool_choice=required (gpt/codex + tools)")
 
         return request if changed else None
-
-    def _is_chat_like_model_request(self, request: dict) -> bool:
-        """判断当前请求是否属于聊天协议，而不是图片/embeddings 这类非文本模型请求。"""
-        if not isinstance(request, dict):
-            return False
-        if isinstance(request.get("messages"), list):
-            return True
-        # Responses API 常见是 input + max_output_tokens；embeddings 虽然也带 input，
-        # 但不会带这些输出控制字段，因此这里显式排除，避免把 embedding 模型误改写。
-        if "input" in request and any(k in request for k in ("max_output_tokens", "text", "tools", "instructions")):
-            return True
-        return False
 
     def _is_tool_task_intent(self, request: dict) -> bool:
         """判断请求是否属于“明确需要工具执行”的任务意图。

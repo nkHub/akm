@@ -17,7 +17,7 @@
       "label": "模型别名映射",
       "type": "text",
       "default": "",
-      "description": "模型名映射规则，格式: old1=new1,old2=new2；支持 default=目标模型 作为未命中显式别名时的兜底映射，如 gpt-4=gpt-4-turbo,default=gpt-5.4"
+      "description": "模型名映射规则，格式: old1=new1,old2=new2；仅在命中显式别名时替换请求模型，如 gpt-4=gpt-4-turbo"
     },
     {
       "key": "force_tool_choice_required_for_gpt",
