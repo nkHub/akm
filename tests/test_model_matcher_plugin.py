@@ -17,7 +17,8 @@ async def test_model_matcher_applies_default_alias_when_no_explicit_match():
     }
     out = await plugin.on_request(req)
     assert out is req
-    assert req["model"] == "gpt-5.4"
+    assert req["model"] == "unknown-model"
+    assert req.get("_akm_fallback_model") == "gpt-5.4"
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,8 @@ async def test_model_matcher_default_alias_applies_to_responses_request():
     }
     out = await plugin.on_request(req)
     assert out is req
-    assert req["model"] == "gpt-5.4"
+    assert req["model"] == "unknown-model"
+    assert req.get("_akm_fallback_model") == "gpt-5.4"
 
 
 @pytest.mark.asyncio

@@ -272,6 +272,13 @@ async def forward_request(
                 # 精确匹配无可用 key，尝试通配符兜底
                 use_fallback = True
                 continue
+            # 精确匹配和通配符兜底均已失败，检查是否有 model_matcher 设置的 fallback 模型
+            fallback_model = body.pop("_akm_fallback_model", "")
+            if fallback_model:
+                model = fallback_model
+                use_fallback = False
+                tried_aliases.clear()
+                continue
             # 兜底也无可用 key
             err_msg = _diagnose_no_key(model, tried_aliases)
             await _emit_on_response_meta({
