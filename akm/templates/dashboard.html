@@ -188,6 +188,15 @@ async function loadDashboard() {
 document.addEventListener('DOMContentLoaded', function() {
   loadDaysFilter();
   switchDays(_currentDays);
+
+  // 当管理台页面曾切到后台、随后再次回到前台时，重新拉取一次统计数据。
+  // 这样可以避免用户长时间停留在其他标签页后返回统计页时仍看到旧数据，
+  // 同时只在页面真正变为可见时触发，避免后台标签页继续发起无意义请求。
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible') {
+      loadDashboard();
+    }
+  });
 });
 </script>
 {% endblock %}
