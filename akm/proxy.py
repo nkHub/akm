@@ -187,6 +187,19 @@ async def _handle_upstream_error(
     return "switch"
 
 
+async def _resolve_route_client(client, key: dict, model: str, upstream_api_path: str):
+    """按最终路由获取隔离后的 HTTP client；测试或旧调用方仍可传普通 client。"""
+    if getattr(client, "is_route_pool", False) is not True:
+        return client
+    get_client = getattr(client, "get_client", None)
+    return await get_client(
+        provider=str(key.get("provider", "") or ""),
+        key_alias=str(key.get("alias", "") or ""),
+        model=str(model or ""),
+        api_path=str(upstream_api_path or ""),
+    )
+
+
 async def forward_request(
     body: dict,
     client: httpx.AsyncClient,
@@ -358,6 +371,7 @@ async def forward_request(
         upstream_api_path = target_api_path or api_path
         url = agent.resolve_url(key, upstream_api_path)
         headers = agent.build_headers(key, upstream_api_path)
+        route_client = await _resolve_route_client(client, key, model, upstream_api_path)
 
         is_multipart_request = bool(body.get("__akm_multipart__"))
         multipart_fields = body.get("__akm_form_fields__") if is_multipart_request else None
@@ -402,7 +416,7 @@ async def forward_request(
             t0 = time.time()
             try:
                 if is_multipart_request:
-                    req = client.build_request(
+                    req = route_client.build_request(
                         "POST",
                         url,
                         data=multipart_fields,
@@ -411,14 +425,14 @@ async def forward_request(
                         timeout=request_timeout or 120,
                     )
                 else:
-                    req = client.build_request(
+                    req = route_client.build_request(
                         "POST",
                         url,
                         json=upstream_body,
                         headers=headers,
                         timeout=request_timeout or 120,
                     )
-                resp = await client.send(req, stream=client_wants_stream)
+                resp = await route_client.send(req, stream=client_wants_stream)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
                 action = await _handle_upstream_error(

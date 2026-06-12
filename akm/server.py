@@ -34,6 +34,7 @@ from akm.audit import (
 )
 from akm.config import load_config, save_config, get as config_get
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
+from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
 from akm.db import get_keys_log_path
 from akm.health import HealthMonitor
@@ -66,7 +67,7 @@ async def lifespan(app: FastAPI):
     await audit_queue.start()
     app.state.audit_log_queue = audit_queue
     app.state.http_client_lock = asyncio.Lock()
-    app.state.http_client = _build_shared_http_client()
+    app.state.http_client = HttpClientPoolManager()
     try:
         yield
     finally:
@@ -494,6 +495,9 @@ def _build_runtime_debug_payload(app: FastAPI) -> dict:
     monitor = _get_health_monitor(app)
     audit_queue = getattr(app.state, "audit_log_queue", None)
     http_client = getattr(app.state, "http_client", None)
+    http_client_stats = http_client.stats() if getattr(http_client, "is_route_pool", False) is True else {}
+    if not isinstance(http_client_stats, dict):
+        http_client_stats = {}
     return {
         "process": {
             "pid": os.getpid(),
@@ -515,6 +519,7 @@ def _build_runtime_debug_payload(app: FastAPI) -> dict:
         "http_client": {
             "configured": http_client is not None,
             "class": http_client.__class__.__name__ if http_client is not None else "",
+            **http_client_stats,
         },
     }
 
@@ -547,17 +552,13 @@ async def _submit_audit_log(app: FastAPI, data: dict) -> bool:
     return accepted
 
 
-def _build_shared_http_client() -> httpx.AsyncClient:
-    """统一构建共享 httpx 客户端，便于后续软重建时复用相同参数。"""
-    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-    return httpx.AsyncClient(
-        limits=limits,
-        timeout=httpx.Timeout(120.0, connect=10.0),
-    )
+def _build_http_client_pool_manager() -> HttpClientPoolManager:
+    """构建按路由隔离的懒加载 HTTP client 池。"""
+    return HttpClientPoolManager()
 
 
-async def _recreate_shared_http_client(app: FastAPI, reason: str) -> bool:
-    """软重建共享 http_client，并通过锁避免并发请求重复执行该操作。"""
+async def _recreate_http_client_pool(app: FastAPI, reason: str) -> bool:
+    """软重建隔离 http_client 池，并通过锁避免并发请求重复执行该操作。"""
     lock = getattr(app.state, "http_client_lock", None)
     monitor = _get_health_monitor(app)
     if lock is None:
@@ -567,7 +568,7 @@ async def _recreate_shared_http_client(app: FastAPI, reason: str) -> bool:
         if monitor is not None and not monitor.should_recreate_http_client():
             return False
         old_client = getattr(app.state, "http_client", None)
-        new_client = _build_shared_http_client()
+        new_client = _build_http_client_pool_manager()
         app.state.http_client = new_client
         if old_client is not None:
             try:
@@ -1197,7 +1198,15 @@ async def _try_count_tokens_fallback(
         count_body["tools"] = request_body.get("tools")
 
     try:
-        resp = await request.app.state.http_client.post(url, json=count_body, headers=headers, timeout=20)
+        http_client = request.app.state.http_client
+        if isinstance(http_client, HttpClientPoolManager):
+            http_client = await http_client.get_client(
+                provider=provider,
+                key_alias=key_alias,
+                model=str(count_body.get("model", "") or ""),
+                api_path="messages/count_tokens",
+            )
+        resp = await http_client.post(url, json=count_body, headers=headers, timeout=20)
         if resp.status_code != 200:
             return None
         data = resp.json() if resp.content else {}
@@ -1890,7 +1899,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             elif int(result.get("status_code", 0) or 0) >= 500 or result.get("error"):
                 monitor.record_upstream_failure(result.get("error", ""))
                 if monitor.should_recreate_http_client():
-                    await _recreate_shared_http_client(
+                    await _recreate_http_client_pool(
                         request.app,
                         reason=result.get("error", "upstream_failures_high"),
                     )

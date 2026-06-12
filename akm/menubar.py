@@ -6,17 +6,55 @@ import time
 import threading
 import webbrowser
 import socket
+import logging
+import asyncio
+import json
+from datetime import datetime
 
 import httpx
 import rumps
 from akm import __version__
 from akm.config import get as config_get
+from akm.key_pool import list_keys
+from akm.proxy import test_key_connectivity
+
+try:
+    from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
+    from Foundation import NSObject
+except ImportError:
+    NSWorkspace = None
+    NSWorkspaceDidWakeNotification = None
+    NSObject = object
 
 
 # GitHub 仓库标识，格式固定为 "owner/repo"，用于拼接 Releases API 地址。
 GITHUB_REPO = "nkHub/akm"
 # 更新检查时间间隔（秒）。这里使用 24 小时，避免每次唤醒都请求 API，降低限流风险。
 CHECK_INTERVAL = 86400
+
+logger = logging.getLogger("akm.menubar")
+DEFAULT_WAKE_RECOVER_DELAY_SEC = 8.0
+
+
+def _wake_recovery_log_path() -> str:
+    """返回唤醒恢复日志路径，并确保目录存在。"""
+    log_dir = os.path.expanduser("~/.akm")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, "wake-recovery.log")
+
+
+class _WakeObserver(NSObject):
+    """监听 macOS 唤醒通知，并把回调转发给 AKMApp。"""
+
+    def initWithApp_(self, app):
+        self = self.init()
+        if self is None:
+            return None
+        self.app = app
+        return self
+
+    def handleWake_(self, _notification):
+        self.app._schedule_wake_recovery()
 
 
 def _round_corners(input_path: str) -> str:
@@ -68,6 +106,12 @@ class AKMApp(rumps.App):
         self.host = "127.0.0.1"
         self._uvicorn_server = None  # uvicorn.Server 实例，用于优雅关闭
         self._first_start = True     # 首次启动标记，仅首次自动打开浏览器
+        self._wake_recovering = False
+        self._last_wake_recover_at = 0.0
+        self._wake_recover_delay_sec = self._read_wake_recover_delay_seconds()
+        self._wake_recover_min_interval_sec = 20.0
+        self._wake_observer = None
+        self._wake_notification_center = None
         # 更新菜单项对象。默认没有更新提示，只有检测到新版本后才动态插入菜单。
         self.update_item: rumps.MenuItem | None = None
 
@@ -85,6 +129,7 @@ class AKMApp(rumps.App):
         self._start_server()
         # 后台启动更新检查线程。该线程与服务启动解耦，即使服务未成功启动也可提示新版本。
         self._start_update_checker()
+        self._install_wake_observer()
 
     def _fetch_update_info(self) -> dict:
         """从 GitHub Releases API 拉取最新版本信息并与本地版本比对。"""
@@ -157,6 +202,230 @@ class AKMApp(rumps.App):
                 self._apply_update_menu(info)
 
         threading.Thread(target=run_checker, daemon=True).start()
+
+    def _install_wake_observer(self):
+        """注册 macOS 唤醒通知；缺少桥接依赖时静默降级，不影响主功能。"""
+        if NSWorkspace is None or NSWorkspaceDidWakeNotification is None:
+            logger.warning("未检测到 AppKit/Foundation，跳过系统唤醒监听")
+            return
+        try:
+            center = NSWorkspace.sharedWorkspace().notificationCenter()
+            observer = _WakeObserver.alloc().initWithApp_(self)
+            center.addObserver_selector_name_object_(
+                observer,
+                "handleWake:",
+                NSWorkspaceDidWakeNotification,
+                None,
+            )
+            self._wake_observer = observer
+            self._wake_notification_center = center
+        except Exception as exc:
+            logger.warning("注册系统唤醒监听失败: %s", exc)
+
+    def _read_wake_recover_delay_seconds(self) -> float:
+        """读取唤醒恢复延迟配置，并对异常值做兜底，避免配置错误把恢复流程搞坏。"""
+        try:
+            delay = float(config_get("wake_recover_delay_sec", DEFAULT_WAKE_RECOVER_DELAY_SEC) or DEFAULT_WAKE_RECOVER_DELAY_SEC)
+        except (TypeError, ValueError):
+            delay = DEFAULT_WAKE_RECOVER_DELAY_SEC
+        return max(0.0, delay)
+
+    def _schedule_wake_recovery(self):
+        """对唤醒恢复做并发保护和去抖，避免短时间重复触发多次恢复。"""
+        now = time.time()
+        if self._wake_recovering:
+            logger.info("唤醒恢复已在进行中，跳过重复触发")
+            return
+        if now - self._last_wake_recover_at < self._wake_recover_min_interval_sec:
+            logger.info("唤醒恢复触发过于频繁，本次跳过")
+            return
+        threading.Thread(target=self._recover_after_wake, daemon=True).start()
+
+    def _update_status_for_recovery(self, title: str):
+        """统一更新唤醒恢复相关状态文案，避免恢复流程散落多处直接改 UI。"""
+        self.status_item.title = title
+
+    def _append_wake_recovery_log(self, event: str, **details):
+        """将唤醒恢复关键节点追加写入独立 JSONL 日志，便于事后排查恢复链路。"""
+        record = {
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "event": str(event or "unknown"),
+            "details": details,
+        }
+        try:
+            with open(_wake_recovery_log_path(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning("写入唤醒恢复日志失败: %s", exc)
+
+    def _probe_local_service_after_wake(self) -> tuple[bool, str]:
+        """唤醒后检查本地服务是否可用。
+
+        第一版只做本地探针：先查端口，再查 `/health/ready`，尽量用最小代价判断
+        AKM 是否需要自愈。这样可以先覆盖“服务线程没了”“端口还在但服务未 ready”
+        这两类最常见问题，而不把上游探活复杂度提前引进来。
+        """
+        if not self._check_port():
+            self._append_wake_recovery_log("probe.local.failed", reason="port_unreachable")
+            return False, "port_unreachable"
+        url = f"http://{self.host}:{self.port}/health/ready"
+        try:
+            resp = httpx.get(url, timeout=3)
+        except Exception as exc:
+            logger.warning("唤醒后就绪探针请求失败: %s", exc)
+            self._append_wake_recovery_log("probe.local.failed", reason="ready_probe_failed", error=str(exc))
+            return False, "ready_probe_failed"
+        if resp.status_code != 200:
+            logger.warning("唤醒后就绪探针返回非 200: %s", resp.status_code)
+            self._append_wake_recovery_log("probe.local.failed", reason="service_not_ready", status_code=resp.status_code)
+            return False, "service_not_ready"
+        try:
+            payload = resp.json()
+        except ValueError:
+            logger.warning("唤醒后就绪探针响应不是合法 JSON")
+            self._append_wake_recovery_log("probe.local.failed", reason="ready_probe_invalid_json")
+            return False, "ready_probe_invalid_json"
+        if payload.get("ready") is not True:
+            logger.warning("唤醒后本地服务未 ready: %s", payload)
+            self._append_wake_recovery_log("probe.local.failed", reason="service_not_ready", payload=payload)
+            return False, "service_not_ready"
+        self._append_wake_recovery_log("probe.local.ok")
+        return True, "ok"
+
+    def _restart_server_internal(self, reason: str) -> bool:
+        """封装服务重启动作，供菜单点击和唤醒自愈统一复用。"""
+        logger.warning("准备重启本地服务，原因: %s", reason)
+        self._append_wake_recovery_log("server.restart.begin", reason=reason)
+        self._stop_server()
+        # 给 uvicorn 一点时间退出旧线程，避免旧端口尚未释放时立刻拉起新实例。
+        time.sleep(1)
+        self._start_server()
+        for _ in range(10):
+            time.sleep(0.5)
+            if self._check_port():
+                logger.info("本地服务重启成功")
+                self._append_wake_recovery_log("server.restart.ok", reason=reason)
+                return True
+        logger.error("本地服务重启后端口仍不可达")
+        self._append_wake_recovery_log("server.restart.failed", reason=reason)
+        return False
+
+    def _pick_probe_key_after_wake(self) -> dict | None:
+        """挑一个最适合做唤醒后真实探活的 key。
+
+        这里故意不引入新的“默认探活 key”配置，而是优先复用当前已启用、且有模型列表的
+        第一个 key。这样能用最小改动把真实上游请求接进恢复流程，同时避免把探活逻辑绑死
+        在某个供应商或固定模型上。
+        """
+        for key in list_keys():
+            if str(key.get("status") or "") != "active":
+                continue
+            if not key.get("model_list"):
+                continue
+            self._append_wake_recovery_log(
+                "probe.upstream.key_selected",
+                alias=key.get("alias", ""),
+                provider=key.get("provider", ""),
+            )
+            return key
+        return None
+
+    def _probe_upstream_after_wake(self) -> tuple[bool, str]:
+        """唤醒后做一次真实上游轻探活，避免“本地 ready 但上游链路仍未恢复”的漏检。"""
+        key = self._pick_probe_key_after_wake()
+        if key is None:
+            logger.info("唤醒后未找到可用 key，跳过真实上游探活")
+            self._append_wake_recovery_log("probe.upstream.skipped", reason="no_probe_key")
+            return True, "no_probe_key"
+        try:
+            result = asyncio.run(test_key_connectivity(key, allow_fallback=True))
+        except Exception as exc:
+            logger.warning("唤醒后真实上游探活执行失败: %s", exc)
+            self._append_wake_recovery_log(
+                "probe.upstream.failed",
+                alias=key.get("alias", ""),
+                provider=key.get("provider", ""),
+                reason="upstream_probe_failed",
+                error=str(exc),
+            )
+            return False, "upstream_probe_failed"
+        if result.get("ok") is True:
+            logger.info(
+                "唤醒后真实上游探活成功: alias=%s provider=%s api_path=%s",
+                key.get("alias", ""),
+                key.get("provider", ""),
+                result.get("api_path", ""),
+            )
+            self._append_wake_recovery_log(
+                "probe.upstream.ok",
+                alias=key.get("alias", ""),
+                provider=key.get("provider", ""),
+                api_path=result.get("api_path", ""),
+                latency_ms=result.get("latency_ms", 0),
+            )
+            return True, "ok"
+        logger.warning(
+            "唤醒后真实上游探活失败: alias=%s provider=%s status=%s error=%s",
+            key.get("alias", ""),
+            key.get("provider", ""),
+            result.get("status_code", 0),
+            result.get("error", ""),
+        )
+        self._append_wake_recovery_log(
+            "probe.upstream.failed",
+            alias=key.get("alias", ""),
+            provider=key.get("provider", ""),
+            reason="upstream_probe_failed",
+            status_code=result.get("status_code", 0),
+            error=result.get("error", ""),
+            api_path=result.get("api_path", ""),
+        )
+        return False, "upstream_probe_failed"
+
+    def _recover_after_wake(self):
+        """系统唤醒后执行分级自愈：先保本地服务 ready，再用真实上游探活决定是否重启。"""
+        self._wake_recovering = True
+        self._last_wake_recover_at = time.time()
+        self._wake_recover_delay_sec = self._read_wake_recover_delay_seconds()
+        previous_title = self.status_item.title
+        logger.info("检测到系统唤醒，开始执行恢复流程")
+        self._append_wake_recovery_log(
+            "wake.recovery.begin",
+            delay_sec=self._wake_recover_delay_sec,
+            previous_status=previous_title,
+        )
+        try:
+            self._update_status_for_recovery("🟡 唤醒恢复中...")
+            # 唤醒后的前几秒通常还在恢复 Wi-Fi、VPN、DNS 或代理路由，过早探针容易误判。
+            time.sleep(self._wake_recover_delay_sec)
+            self._append_wake_recovery_log("wake.recovery.after_delay", delay_sec=self._wake_recover_delay_sec)
+            ok, reason = self._probe_local_service_after_wake()
+            if not ok:
+                logger.warning("唤醒后本地服务探针失败，准备自愈: %s", reason)
+                if self._restart_server_internal(f"wake_recovery:{reason}"):
+                    self._append_wake_recovery_log("wake.recovery.ok", reason=reason, action="restart_local_server")
+                    self._update_status_for_recovery("🟢 运行中")
+                    return
+                self._append_wake_recovery_log("wake.recovery.failed", reason=reason, action="restart_local_server")
+                self._update_status_for_recovery("🔴 唤醒恢复失败")
+                return
+            logger.info("唤醒后本地服务探针通过，继续执行真实上游探活")
+            upstream_ok, upstream_reason = self._probe_upstream_after_wake()
+            if upstream_ok:
+                self._append_wake_recovery_log("wake.recovery.ok", reason=upstream_reason, action="none")
+                self._update_status_for_recovery("🟢 运行中")
+                return
+            logger.warning("唤醒后真实上游探活失败，准备通过重启本地服务做进一步自愈: %s", upstream_reason)
+            if self._restart_server_internal(f"wake_recovery:{upstream_reason}"):
+                self._append_wake_recovery_log("wake.recovery.ok", reason=upstream_reason, action="restart_local_server")
+                self._update_status_for_recovery("🟢 运行中")
+                return
+            self._append_wake_recovery_log("wake.recovery.failed", reason=upstream_reason, action="restart_local_server")
+            self._update_status_for_recovery("🔴 唤醒恢复失败")
+        finally:
+            if self.status_item.title == previous_title and previous_title:
+                self._update_status_for_recovery(previous_title)
+            self._wake_recovering = False
 
     def _get_icon(self) -> str | None:
         """获取菜单栏图标，支持圆角处理"""
@@ -253,10 +522,7 @@ class AKMApp(rumps.App):
 
     def restart_server(self, _):
         """重启 FastAPI 服务"""
-        self._stop_server()
-        # 等待旧服务完全停止
-        time.sleep(1)
-        self._start_server()
+        self._restart_server_internal("manual_restart")
 
     # ── 回调 ────────────────────────────────────────────
 

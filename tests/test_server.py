@@ -670,11 +670,11 @@ async def test_recreate_shared_http_client_closes_old_client_and_resets_monitor(
     monitor.consecutive_upstream_failures = monitor.UPSTREAM_FAILS_RECREATE
     app.state.health_monitor = monitor
 
-    monkeypatch.setattr("akm.server._build_shared_http_client", lambda: new_client)
+    monkeypatch.setattr("akm.server._build_http_client_pool_manager", lambda: new_client)
 
-    from akm.server import _recreate_shared_http_client
+    from akm.server import _recreate_http_client_pool
 
-    changed = await _recreate_shared_http_client(app, "too many upstream failures")
+    changed = await _recreate_http_client_pool(app, "too many upstream failures")
 
     assert changed is True
     assert app.state.http_client is new_client
@@ -1222,7 +1222,15 @@ async def test_api_list_agents_returns_messages_anthropic_switch():
 
 
 @pytest.mark.asyncio
-async def test_api_stats_ignores_estimated_usage_tokens_by_default():
+async def test_api_stats_ignores_estimated_usage_tokens_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
     write_log({
         "provider": "openai",
         "key_alias": "real-key",
