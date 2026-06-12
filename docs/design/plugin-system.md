@@ -619,7 +619,7 @@ fetch('/api/plugin-metas')
 
 ### 10.1 有菜单插件：模型映射（操作数据库）
 
-补充说明：当前内置 `model_matcher` 采用配置项 `aliases` 做轻量映射，格式为 `old=new` 的逗号分隔串；另外支持 `default=目标模型` 作为兜底规则，用于“聊天协议请求未命中任何显式别名时统一回退到某个默认模型”。实现时应保持显式映射优先于默认映射，并显式排除图片、embeddings 等非聊天请求，避免 `default` 覆盖图片模型或向量模型。
+补充说明：当前内置 `model_matcher` 采用配置项 `aliases` 做轻量映射，格式为 `old=new` 的逗号分隔串；另外支持 `default=目标模型` 作为兜底规则，用于“聊天协议请求未命中任何显式别名 **且该模型在 key 池中无可用 key 时** 回退到某个默认模型”。实现时应保持显式映射优先于默认映射，并显式排除图片、embeddings 等非聊天请求，避免 `default` 覆盖图片模型或向量模型。`default` 不会在请求预处理阶段直接改写 model，而是在 key 选择全部失败后作为兜底重试。
 
 **plugins/model_mapper/plugin.json**
 ```json

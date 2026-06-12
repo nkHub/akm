@@ -196,13 +196,20 @@ class Plugin(PluginBase):
         new_model = ""
         if self._aliases and model in self._aliases:
             new_model = self._aliases[model]
-        elif self._default_alias and model and is_chat_like_request:
-            new_model = self._default_alias
-
         if new_model:
             request["model"] = new_model
             changed = True
             self.logger.info(f"[model_matcher] 模型别名映射: {model} → {new_model}")
+
+        # default 兜底不再直接改写 model，而是标记到 request 上，
+        # 由 proxy 层在 key 选择全部失败后才作为兜底模型重试。
+        # 这样可以避免 gpt-5.4 等已有可用 key 的有效模型被 default 强制覆盖。
+        if not new_model and self._default_alias and model and is_chat_like_request:
+            request["_akm_fallback_model"] = self._default_alias
+            changed = True
+            self.logger.info(
+                f"[model_matcher] 设置 default 兜底模型: {model} → {self._default_alias}（仅在无可用 key 时生效）"
+            )
 
         # 工具调用策略（可配置）：
         # 对 GPT/Codex 模型且携带 tools 的请求，在未显式传 tool_choice 时默认强制 required。
