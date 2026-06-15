@@ -1573,6 +1573,11 @@ async def api_add_agent(request: Request):
             supports_chat=body.get("supports_chat", True),
             supports_messages=body.get("supports_messages", False),
             messages_use_anthropic_path=body.get("messages_use_anthropic_path", False),
+            inject_max_completion_tokens=body.get("inject_max_completion_tokens", False),
+            inject_reasoning_effort=body.get("inject_reasoning_effort", False),
+            map_metadata_user_id_to_user=body.get("map_metadata_user_id_to_user", True),
+            responses_force_thinking_enabled=body.get("responses_force_thinking_enabled", False),
+            responses_default_reasoning_effort=body.get("responses_default_reasoning_effort"),
         )
         return {"ok": True, "name": name}
     except ValueError as e:

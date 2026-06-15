@@ -2,10 +2,10 @@
 import json
 from pathlib import Path
 import pytest
+from akm.agent import get_agent_profile
 from akm.plugins.protocol_converter._responses import ResponsesAdapter
 from akm.plugins.protocol_converter._messages import MessagesAdapter
 from akm.plugins.protocol_converter._chat import ChatAdapter
-from akm.plugins.protocol_converter._provider_profile import get_provider_profile
 from akm.plugins.protocol_converter.index import Plugin
 from akm.plugins.protocol_converter._warnings import (
     RESPONSES_INCLUDE_NOT_FULLY_MAPPED,
@@ -1053,24 +1053,24 @@ class TestMessagesAdapterRequest:
         assert result["user"] == "explicit-user"
 
 
-class TestProviderProfile:
+class TestAgentProtocolProfile:
 
     def test_openai_profile_enables_openai_specific_mappings(self):
-        """验证 openai profile 会集中开启 OpenAI 相关兼容能力。"""
-        profile = get_provider_profile("openai")
+        """验证 openai Agent 会集中声明 OpenAI 相关兼容能力。"""
+        profile = get_agent_profile("openai")
         assert profile.inject_max_completion_tokens is True
         assert profile.inject_reasoning_effort is True
         assert profile.map_metadata_user_id_to_user is True
 
     def test_unknown_provider_profile_is_conservative(self):
-        """验证未知供应商默认使用保守 profile，不主动注入 OpenAI 特有字段。"""
-        profile = get_provider_profile("vendor-x")
+        """验证未知供应商默认使用保守 Agent 能力画像，不主动注入 OpenAI 特有字段。"""
+        profile = get_agent_profile("vendor-x")
         assert profile.inject_max_completion_tokens is False
         assert profile.inject_reasoning_effort is False
 
     def test_deepseek_profile_enables_responses_defaults(self):
-        """验证 deepseek profile 会集中声明 Responses -> Chat 兼容默认值。"""
-        profile = get_provider_profile("deepseek")
+        """验证 deepseek Agent 会集中声明 Responses -> Chat 兼容默认值。"""
+        profile = get_agent_profile("deepseek")
         assert profile.responses_force_thinking_enabled is True
         assert profile.responses_default_reasoning_effort == "high"
 

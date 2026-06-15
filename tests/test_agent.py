@@ -2,7 +2,7 @@
 
 import pytest
 from akm.agent import (
-    Agent, AGENT_REGISTRY, get_agent,
+    Agent, AGENT_REGISTRY, get_agent, get_agent_profile,
     register_agent, unregister_agent, list_agents, load_custom_agents,
 )
 
@@ -216,6 +216,8 @@ def test_registry_openai():
     assert agent.default_base_url == "https://api.openai.com"
     assert agent.supports_responses is True
     assert agent.supports_chat is True
+    assert agent.inject_max_completion_tokens is True
+    assert agent.inject_reasoning_effort is True
 
 
 def test_registry_deepseek():
@@ -225,6 +227,8 @@ def test_registry_deepseek():
     assert agent.supports_responses is False
     assert agent.supports_chat is True
     assert agent.messages_use_anthropic_path is True
+    assert agent.responses_force_thinking_enabled is True
+    assert agent.responses_default_reasoning_effort == "high"
 
 
 def test_registry_anthropic():
@@ -244,6 +248,14 @@ def test_get_agent_unknown():
     """未知 provider 返回 openai 兜底"""
     agent = get_agent("non-existent-provider")
     assert agent.name == "openai"
+
+
+def test_get_agent_profile_unknown_is_conservative():
+    """未知 provider 的协议画像应保守，避免误注入 OpenAI/DeepSeek 特有字段。"""
+    agent = get_agent_profile("vendor-x")
+    assert agent.inject_max_completion_tokens is False
+    assert agent.inject_reasoning_effort is False
+    assert agent.responses_force_thinking_enabled is False
 
 
 # ───────────────────────────────────────────────
