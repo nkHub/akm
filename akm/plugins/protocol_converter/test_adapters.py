@@ -1,9 +1,12 @@
 """ResponsesAdapter 和 MessagesAdapter 单元测试"""
 import json
+from pathlib import Path
 import pytest
 from akm.plugins.protocol_converter._responses import ResponsesAdapter
 from akm.plugins.protocol_converter._messages import MessagesAdapter
 from akm.plugins.protocol_converter._chat import ChatAdapter
+from akm.plugins.protocol_converter._provider_profile import get_provider_profile
+from akm.plugins.protocol_converter.index import Plugin
 from akm.plugins.protocol_converter._warnings import (
     RESPONSES_INCLUDE_NOT_FULLY_MAPPED,
     RESPONSES_STORE_NOT_MAPPED,
@@ -160,6 +163,20 @@ class TestResponsesAdapterRequest:
         assert result["messages"][0]["role"] == "tool"
         assert result["messages"][0]["content"] == "Sunny"
 
+    def test_convert_function_call_output_object_is_serialized(self):
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": {"weather": "Sunny", "temp": 26},
+            }],
+        }
+        result = adapter.convert_request(body)
+        assert result["messages"][0]["role"] == "tool"
+        assert result["messages"][0]["content"] == '{"weather": "Sunny", "temp": 26}'
+
     def test_convert_input_text_type(self):
         adapter = ResponsesAdapter()
         body = {"model": "test", "input": [{"type": "input_text", "text": "hello"}]}
@@ -172,6 +189,38 @@ class TestResponsesAdapterRequest:
         result = adapter.convert_request(body)
         assert result["max_tokens"] == 4096
 
+    def test_convert_request_deepseek_profile_injects_thinking_defaults(self):
+        """验证 deepseek profile 会为 Responses -> Chat 补 thinking/reasoning 默认值。"""
+        adapter = ResponsesAdapter()
+        adapter._request_provider = "deepseek"
+        body = {"model": "deepseek-v4", "input": "hi"}
+        result = adapter.convert_request(body)
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["reasoning_effort"] == "high"
+
+    def test_convert_request_openai_profile_does_not_inject_deepseek_defaults(self):
+        """验证 openai profile 不会在 Responses -> Chat 链路强塞 DeepSeek 默认 thinking。"""
+        adapter = ResponsesAdapter()
+        adapter._request_provider = "openai"
+        body = {"model": "gpt-5", "input": "hi"}
+        result = adapter.convert_request(body)
+        assert "thinking" not in result
+        assert "reasoning_effort" not in result
+
+    def test_convert_request_explicit_thinking_and_effort_override_profile_defaults(self):
+        """验证显式传入的 thinking / reasoning_effort 优先于 provider profile 默认值。"""
+        adapter = ResponsesAdapter()
+        adapter._request_provider = "deepseek"
+        body = {
+            "model": "deepseek-v4",
+            "input": "hi",
+            "thinking": {"type": "disabled"},
+            "reasoning_effort": "max",
+        }
+        result = adapter.convert_request(body)
+        assert result["thinking"] == {"type": "disabled"}
+        assert result["reasoning_effort"] == "max"
+
     def test_convert_tools_passthrough(self):
         adapter = ResponsesAdapter()
         tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
@@ -179,7 +228,7 @@ class TestResponsesAdapterRequest:
         result = adapter.convert_request(body)
         assert result["tools"] == tools
 
-    def test_convert_request_response_format_passthrough(self):
+    def test_convert_request_response_format_cleans_schema(self):
         adapter = ResponsesAdapter()
         body = {
             "model": "test",
@@ -192,6 +241,8 @@ class TestResponsesAdapterRequest:
                         "type": "object",
                         "properties": {"name": {"type": "string"}},
                         "required": ["name"],
+                        "additionalProperties": False,
+                        "strict": True,
                     },
                 },
             },
@@ -199,8 +250,11 @@ class TestResponsesAdapterRequest:
         result = adapter.convert_request(body)
         assert result["response_format"]["type"] == "json_schema"
         assert result["response_format"]["json_schema"]["name"] == "person"
+        schema = result["response_format"]["json_schema"]["schema"]
+        assert "additionalProperties" not in schema
+        assert "strict" not in schema
 
-    def test_convert_request_text_format_to_response_format(self):
+    def test_convert_request_text_format_to_response_format_cleans_schema(self):
         adapter = ResponsesAdapter()
         body = {
             "model": "test",
@@ -210,7 +264,12 @@ class TestResponsesAdapterRequest:
                     "type": "json_schema",
                     "json_schema": {
                         "name": "obj",
-                        "schema": {"type": "object", "properties": {}},
+                        "schema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": True,
+                            "strict": True,
+                        },
                     },
                 }
             },
@@ -218,6 +277,9 @@ class TestResponsesAdapterRequest:
         result = adapter.convert_request(body)
         assert result["response_format"]["type"] == "json_schema"
         assert result["response_format"]["json_schema"]["name"] == "obj"
+        schema = result["response_format"]["json_schema"]["schema"]
+        assert "additionalProperties" not in schema
+        assert "strict" not in schema
 
     def test_convert_request_metadata_and_previous_response_id_passthrough(self):
         adapter = ResponsesAdapter()
@@ -230,6 +292,22 @@ class TestResponsesAdapterRequest:
         result = adapter.convert_request(body)
         assert result["metadata"]["trace_id"] == "t-1"
         assert result["previous_response_id"] == "resp_prev_123"
+
+    def test_convert_modern_tool_message_continuation(self):
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": [{
+                "type": "message",
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [{"type": "output", "body": {"ok": True}}],
+            }],
+        }
+        result = adapter.convert_request(body)
+        assert result["messages"][0]["role"] == "tool"
+        assert result["messages"][0]["tool_call_id"] == "call_1"
+        assert result["messages"][0]["content"] == '{"ok": true}'
 
     def test_convert_request_sets_conversion_warnings_for_unmapped_fields(self):
         adapter = ResponsesAdapter()
@@ -599,7 +677,7 @@ class TestResponsesAdapterSSE:
         assert "response.output_text.done" in done_names
 
         # 最后的 completed 事件包含 usage
-        completed = events[-1]
+        completed = [e for e in events if e[0] == "response.completed"][0]
         assert completed[0] == "response.completed"
         assert completed[1]["response"]["usage"]["input_tokens"] == 10
 
@@ -755,15 +833,27 @@ class TestResponsesAdapterSSE:
         arg_deltas = [e[1]["delta"] for e in events if e[0] == "response.function_call_arguments.delta"]
         assert len(arg_deltas) == 3
 
+        modern_begin = [e for e in events if e[0] == "response.output_tool_call.begin"]
+        assert len(modern_begin) == 1
+        assert modern_begin[0][1]["name"] == "bash"
+
+        modern_deltas = [e[1]["delta"] for e in events if e[0] == "response.output_tool_call.delta"]
+        assert len(modern_deltas) == 3
+
         done_items = [e for e in events if e[0] == "response.output_item.done"]
         assert len(done_items) == 2  # message + function_call
         fc_done = done_items[1][1]
         assert fc_done["item"]["arguments"] == '{"cmd":"ls"}'
 
+        modern_end = [e for e in events if e[0] == "response.output_tool_call.end"]
+        assert len(modern_end) == 1
+        assert modern_end[0][1]["arguments"] == '{"cmd":"ls"}'
+
         completed = [e for e in events if e[0] == "response.completed"][0]
         resp_output = completed[1]["response"]["output"]
         assert len(resp_output) == 2  # message + function_call
         assert resp_output[1]["name"] == "bash"
+        assert any(e[0] == "response.done" for e in events)
 
     @pytest.mark.asyncio
     async def test_convert_sse_tool_calls_only_no_text(self):
@@ -882,8 +972,107 @@ class TestMessagesAdapterRequest:
         body = {"model": "claude", "messages": [], "max_tokens": 1000, "temperature": 0.7, "top_p": 0.9}
         result = adapter.convert_request(body)
         assert result["max_tokens"] == 1000
+        assert "max_completion_tokens" not in result
         assert result["temperature"] == 0.7
         assert result["top_p"] == 0.9
+
+    def test_convert_gpt_reasoning_params(self):
+        """验证 openai 供应商请求会补 max_completion_tokens 与 reasoning_effort。"""
+        adapter = MessagesAdapter()
+        adapter._request_provider = "openai"
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 2048,
+            "reasoning": {"effort": "max"},
+        }
+        result = adapter.convert_request(body)
+        assert result["max_tokens"] == 2048
+        assert result["max_completion_tokens"] == 2048
+        assert result["reasoning_effort"] == "high"
+
+    def test_convert_max_completion_tokens_depends_on_provider_not_model_name(self):
+        """验证 max_completion_tokens 是否补齐取决于供应商，而不是模型名。"""
+        adapter = MessagesAdapter()
+        adapter._request_provider = "deepseek"
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 2048,
+        }
+        result = adapter.convert_request(body)
+        assert result["max_tokens"] == 2048
+        assert "max_completion_tokens" not in result
+
+    def test_convert_reasoning_effort_depends_on_provider_not_model_name(self):
+        """验证 reasoning_effort 是否注入取决于供应商，而不是模型名。"""
+        adapter = MessagesAdapter()
+        adapter._request_provider = "deepseek"
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "reasoning": {"effort": "high"},
+        }
+        result = adapter.convert_request(body)
+        assert "reasoning_effort" not in result
+
+    def test_convert_reasoning_effort_skipped_when_thinking_disabled(self):
+        """验证调用方显式关闭 thinking 时不再额外注入 reasoning_effort。"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "reasoning_effort": "high",
+            "thinking": {"type": "disabled"},
+        }
+        result = adapter.convert_request(body)
+        assert "reasoning_effort" not in result
+
+    def test_convert_metadata_user_id_to_user(self):
+        """验证 metadata.user_id 会在未显式提供 user 时映射到 Chat user 字段。"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "metadata": {"user_id": "trace-user", "scene": "cli"},
+        }
+        result = adapter.convert_request(body)
+        assert result["metadata"] == {"user_id": "trace-user", "scene": "cli"}
+        assert result["user"] == "trace-user"
+
+    def test_convert_explicit_user_overrides_metadata_user_id(self):
+        """验证显式 user 优先于 metadata.user_id，避免覆盖调用方已有标识。"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "user": "explicit-user",
+            "metadata": {"user_id": "trace-user"},
+        }
+        result = adapter.convert_request(body)
+        assert result["user"] == "explicit-user"
+
+
+class TestProviderProfile:
+
+    def test_openai_profile_enables_openai_specific_mappings(self):
+        """验证 openai profile 会集中开启 OpenAI 相关兼容能力。"""
+        profile = get_provider_profile("openai")
+        assert profile.inject_max_completion_tokens is True
+        assert profile.inject_reasoning_effort is True
+        assert profile.map_metadata_user_id_to_user is True
+
+    def test_unknown_provider_profile_is_conservative(self):
+        """验证未知供应商默认使用保守 profile，不主动注入 OpenAI 特有字段。"""
+        profile = get_provider_profile("vendor-x")
+        assert profile.inject_max_completion_tokens is False
+        assert profile.inject_reasoning_effort is False
+
+    def test_deepseek_profile_enables_responses_defaults(self):
+        """验证 deepseek profile 会集中声明 Responses -> Chat 兼容默认值。"""
+        profile = get_provider_profile("deepseek")
+        assert profile.responses_force_thinking_enabled is True
+        assert profile.responses_default_reasoning_effort == "high"
 
     def test_convert_tools_without_explicit_tool_choice_keeps_protocol_neutral(self):
         """验证协议层不注入模型策略：未显式传 tool_choice 时保持中立"""
@@ -1062,6 +1251,43 @@ class TestMessagesAdapterRequestTools:
         assert assistant_msg["tool_calls"][0]["function"]["name"] == "read_file"
         assert json.loads(assistant_msg["tool_calls"][0]["function"]["arguments"]) == {"path": "/tmp/x"}
 
+    def test_convert_response_invalid_bash_tool_call_is_dropped_instead_of_inventing_command(self):
+        """验证缺少 command 的 bash tool_call 不会被协议层伪造成真实命令。"""
+        adapter = MessagesAdapter()
+        adapter._tool_schemas_by_name = {
+            "bash": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "description": {"type": "string"},
+                    "timeout": {"type": "integer"},
+                },
+                "required": ["command"],
+            }
+        }
+        chat_resp = json.dumps({
+            "id": "chatcmpl-invalid-bash",
+            "model": "gpt-5.4",
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_bad",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {},
+        })
+
+        result = json.loads(adapter.convert_response(chat_resp))
+        assert result["stop_reason"] == "end_turn"
+        assert result["content"] == [{"type": "text", "text": "当前请求未产生可用响应，请重试一次。"}]
+
     def test_convert_tool_result(self):
         """验证 user 消息中 tool_result → role=tool"""
         adapter = MessagesAdapter()
@@ -1085,6 +1311,50 @@ class TestMessagesAdapterRequestTools:
         assert tool_msg["role"] == "tool"
         assert tool_msg["tool_call_id"] == "tool_001"
         assert tool_msg["content"] == "file contents here"
+
+    def test_convert_tool_result_preserves_structured_content(self):
+        """验证 tool_result 含非 text 结构时会保留完整 JSON，而不是静默丢块。"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "claude",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tool_002", "name": "read_file", "input": {"path": "/tmp/x"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tool_002", "content": [
+                        {"type": "text", "text": "summary"},
+                        {"type": "output", "body": {"lines": [1, 2, 3], "ok": True}},
+                    ]},
+                ]},
+            ],
+        }
+        result = adapter.convert_request(body)
+        tool_msg = result["messages"][1]
+        assert tool_msg["role"] == "tool"
+        assert tool_msg["tool_call_id"] == "tool_002"
+        assert json.loads(tool_msg["content"]) == [
+            {"type": "text", "text": "summary"},
+            {"type": "output", "body": {"lines": [1, 2, 3], "ok": True}},
+        ]
+
+    def test_convert_tool_result_object_is_serialized(self):
+        """验证 tool_result 为对象时会序列化为 JSON 字符串。"""
+        adapter = MessagesAdapter()
+        body = {
+            "model": "claude",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tool_003", "name": "run", "input": {}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tool_003", "content": {"ok": True, "count": 2}},
+                ]},
+            ],
+        }
+        result = adapter.convert_request(body)
+        tool_msg = result["messages"][1]
+        assert tool_msg["content"] == '{"ok": true, "count": 2}'
 
 
 class TestMessagesAdapterSSETools:
@@ -1125,9 +1395,38 @@ class TestMessagesAdapterSSETools:
         thinking_deltas = [e for e in events if e[0] == "content_block_delta" and e[1]["delta"].get("type") == "thinking_delta"]
         assert len(thinking_deltas) == 1
 
+        text_deltas = [e for e in events if e[0] == "content_block_delta" and e[1]["delta"].get("type") == "text_delta"]
+        assert len(text_deltas) == 1
+        assert text_deltas[0][1]["delta"]["text"] == "Answer"
+
         # content_block_stop 应有 text + thinking（可能还有 tool）
         stops = [e for e in events if e[0] == "content_block_stop"]
         assert len(stops) >= 2
+
+    @pytest.mark.asyncio
+    async def test_convert_sse_pure_reasoning_keeps_thinking_only(self):
+        """验证只有 reasoning 时仅输出 thinking block，不再镜像为正文。"""
+        adapter = MessagesAdapter()
+        chat_sse = [
+            b'data: {"id":"chatcmpl-think-only","model":"deepseek","choices":[{"delta":{"role":"assistant"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-think-only","choices":[{"delta":{"reasoning_content":"step-1 "},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-think-only","choices":[{"delta":{"reasoning_content":"step-2"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-think-only","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n',
+        ]
+
+        lines = []
+        async for line in adapter.convert_sse_stream(_async_bytes_iter(chat_sse)):
+            lines.append(line)
+
+        events = _parse_sse_helper(lines)
+        thinking_deltas = [e for e in events if e[0] == "content_block_delta" and e[1]["delta"].get("type") == "thinking_delta"]
+        text_deltas = [e for e in events if e[0] == "content_block_delta" and e[1]["delta"].get("type") == "text_delta"]
+        starts = [e for e in events if e[0] == "content_block_start"]
+
+        assert len(thinking_deltas) == 2
+        assert text_deltas == []
+        assert len(starts) == 1
+        assert starts[0][1]["content_block"]["type"] == "thinking"
 
     @pytest.mark.asyncio
     async def test_convert_sse_with_single_tool_call(self):
@@ -1279,6 +1578,93 @@ class TestChatAdapter:
         assert result["choices"][0]["message"]["content"] == "Hello"
         assert result["usage"]["prompt_tokens"] == 7
         assert result["usage"]["completion_tokens"] == 3
+
+
+class TestProtocolConverterPluginSessions:
+
+    async def _load_plugin(self):
+        plugin = Plugin()
+        plugin._static_dir = Path(__file__).resolve().parent / "views"
+        await plugin.on_load()
+        return plugin
+
+    @pytest.mark.asyncio
+    async def test_previous_response_id_restores_non_stream_history(self):
+        plugin = await self._load_plugin()
+
+        first_request = {
+            "model": "deepseek-v4",
+            "input": "Need weather",
+            "stream": False,
+        }
+        first_chat = plugin.convert_request(first_request)
+        assert "previous_response_id" not in first_chat
+
+        chat_resp = json.dumps({
+            "id": "chatcmpl-prev1",
+            "model": "deepseek-v4",
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning_content": "I should call weather.",
+                    "tool_calls": [{
+                        "id": "call_weather",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city":"杭州"}'},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+        })
+        plugin.convert_response(chat_resp)
+
+        follow_up = plugin.convert_request({
+            "model": "deepseek-v4",
+            "previous_response_id": "resp_prev1",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_weather",
+                "output": {"forecast": "cloudy"},
+            }],
+        })
+        messages = follow_up["messages"]
+        assert "previous_response_id" not in follow_up
+        assert messages[0]["role"] == "user"
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["reasoning_content"] == "I should call weather."
+        assert messages[1]["tool_calls"][0]["id"] == "call_weather"
+        assert messages[2] == {
+            "role": "tool",
+            "tool_call_id": "call_weather",
+            "content": '{"forecast": "cloudy"}',
+        }
+
+    @pytest.mark.asyncio
+    async def test_previous_response_id_restores_stream_history(self):
+        plugin = await self._load_plugin()
+        plugin.convert_request({"model": "deepseek-v4", "input": "Need tool", "stream": True})
+
+        chat_sse = [
+            b'data: {"id":"chatcmpl-stream1","model":"deepseek-v4","choices":[{"delta":{"role":"assistant","reasoning_content":""},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-stream1","choices":[{"delta":{"reasoning_content":"Thinking"},"index":0}]}\n\n',
+            b'data: {"id":"chatcmpl-stream1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}\n\n',
+            b'data: {"id":"chatcmpl-stream1","choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}\n\n',
+        ]
+        lines = []
+        async for line in plugin.convert_sse_stream(_async_bytes_iter(chat_sse)):
+            lines.append(line)
+        assert any(e[0] == "response.done" for e in _parse_sse_helper(lines))
+        response_id = next(iter(plugin._response_sessions.keys()))
+
+        follow_up = plugin.convert_request({
+            "model": "deepseek-v4",
+            "previous_response_id": response_id,
+            "input": [{"type": "function_call_output", "call_id": "call_x", "output": "ok"}],
+        })
+        assert follow_up["messages"][1]["role"] == "assistant"
+        assert follow_up["messages"][1]["reasoning_content"] == "Thinking"
+        assert follow_up["messages"][1]["tool_calls"][0]["id"] == "call_x"
 
 
 # ── 工具函数 ──

@@ -162,22 +162,6 @@ def finalize_messages_sse(adapter, state: dict) -> list[str]:
             "index": thinking_block_index,
         }))
 
-    if thinking_text and not text_block_sent:
-        adapter._fallback_thinking_to_text = True
-        if not text_block_emitted:
-            text_block_emitted = True
-            lines.append(messages_sse_event("content_block_start", {
-                "type": "content_block_start",
-                "index": text_block_index,
-                "content_block": {"type": "text", "text": ""},
-            }))
-        lines.append(messages_sse_event("content_block_delta", {
-            "type": "content_block_delta",
-            "index": text_block_index,
-            "delta": {"type": "text_delta", "text": thinking_text},
-        }))
-        text_block_sent = True
-
     has_any_tool_block = any(tc.get("started") and tc.get("valid") for tc in current_tool_calls.values())
     if (not text_block_sent) and (not thinking_block_sent) and (not has_any_tool_block):
         if not text_block_emitted:
@@ -407,27 +391,11 @@ def handle_thinking_delta(
         "delta": {"type": "thinking_delta", "thinking": reasoning_delta},
     }))
 
+    # Claude Code 对 thinking block 有原生展示能力。
+    # 这里保持协议语义纯净：仅输出 thinking_delta，不再镜像成正文预览，
+    # 也不因为长时间只有 thinking 就提前伪造 end_turn。
     thinking_mirrored_to_text = False
-    if (not text_block_sent) and (not has_any_tool_started) and len(thinking_text) >= 120:
-        if not text_block_emitted:
-            text_block_emitted = True
-            lines.append(messages_sse_event("content_block_start", {
-                "type": "content_block_start",
-                "index": text_block_index,
-                "content_block": {"type": "text", "text": ""},
-            }))
-        preview = thinking_text[:200]
-        lines.append(messages_sse_event("content_block_delta", {
-            "type": "content_block_delta",
-            "index": text_block_index,
-            "delta": {"type": "text_delta", "text": preview},
-        }))
-        text_block_sent = True
-        thinking_mirrored_to_text = True
-
-    import time as _t
-    elapsed = _t.monotonic() - (first_thinking_at or stream_started_at)
-    force_early_end_turn = (not text_block_sent) and (not has_any_tool_started) and elapsed >= 8.0
+    force_early_end_turn = False
 
     state = {
         "thinking_text": thinking_text,

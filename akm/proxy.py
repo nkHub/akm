@@ -207,6 +207,7 @@ async def forward_request(
     api_path: str = "chat/completions",
     plugin_manager=None,
     request_timeout: float | None = None,
+    original_user_agent: str = "",
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
@@ -370,8 +371,11 @@ async def forward_request(
         # 构建上游 URL：转换后走目标路径
         upstream_api_path = target_api_path or api_path
         url = agent.resolve_url(key, upstream_api_path)
-        headers = agent.build_headers(key, upstream_api_path)
+        headers = agent.build_headers(key, upstream_api_path, original_user_agent=original_user_agent)
         route_client = await _resolve_route_client(client, key, model, upstream_api_path)
+
+        if adapter and hasattr(adapter, "set_request_context"):
+            adapter.set_request_context(provider=key.get("provider", ""))
 
         is_multipart_request = bool(body.get("__akm_multipart__"))
         multipart_fields = body.get("__akm_form_fields__") if is_multipart_request else None

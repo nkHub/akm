@@ -435,6 +435,61 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_messages_converter_receives_provider_context(monkeypatch):
+    """messages 转 chat 转换时，应把选中 key 的 provider 传入协议转换器上下文。"""
+
+    class DummyMessagesToChat:
+        _source_format = "messages"
+
+        def __init__(self):
+            self.provider = ""
+
+        def set_request_context(self, **kwargs):
+            self.provider = str(kwargs.get("provider") or "")
+
+        def convert_request(self, body):
+            out = dict(body)
+            out["provider_seen"] = self.provider
+            return out
+
+        def convert_response(self, body):
+            return body
+
+    class DummyPM:
+        def __init__(self):
+            self.adapter = DummyMessagesToChat()
+
+        def get_converter(self, from_fmt, to_fmt):
+            if (from_fmt, to_fmt) == ("messages", "chat"):
+                return self.adapter
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1",
+        "provider": "openai",
+        "api_key": "sk-openai",
+        "base_url": "https://api.openai.com",
+    }))
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-5", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 1024},
+        client=mock_client,
+        api_path="messages",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    payload = send_calls[0]["req"].content.decode("utf-8")
+    assert '"provider_seen":"openai"' in payload
+
+
+@pytest.mark.asyncio
 async def test_forward_streaming_request_still_forces_upstream_sse(monkeypatch):
     """客户端要求流式时，仍应继续向上游发起 SSE 请求。"""
 
@@ -514,6 +569,30 @@ async def test_forward_image_generations_request_does_not_inject_stream_or_conve
     payload = send_calls[0]["req"].content.decode("utf-8")
     assert send_calls[0]["req"].headers["User-Agent"] == f"akm/{__version__}"
     assert '"stream":' not in payload
+
+
+@pytest.mark.asyncio
+async def test_forward_image_generations_request_can_use_native_user_agent(monkeypatch):
+    """开启 use_native_user_agent 后，图片请求也应透传原始 User-Agent。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "image", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-image-1", "prompt": "draw a cat"},
+        client=mock_client,
+        api_path="images/generations",
+        original_user_agent="OpenCode/9.9.9",
+    )
+
+    assert result["status_code"] == 200
+    assert send_calls[0]["req"].headers["User-Agent"] == "OpenCode/9.9.9"
 
 
 @pytest.mark.asyncio

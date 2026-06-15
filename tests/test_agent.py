@@ -107,6 +107,24 @@ def test_build_headers_default():
     assert headers["Content-Type"] == "application/json"
 
 
+def test_build_headers_uses_native_user_agent_when_enabled(monkeypatch):
+    """开启 use_native_user_agent 后，应优先透传原始 User-Agent。"""
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+    agent = Agent(name="openai", default_base_url="https://api.openai.com")
+    key = {"api_key": "sk-test123"}
+    headers = agent.build_headers(key, original_user_agent="Claude-Code/1.2.3")
+    assert headers["User-Agent"] == "Claude-Code/1.2.3"
+
+
+def test_build_headers_falls_back_to_akm_user_agent_without_native_value(monkeypatch):
+    """即使开启 use_native_user_agent，没有原始值时也应回退到 akm 版本标识。"""
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+    agent = Agent(name="openai", default_base_url="https://api.openai.com")
+    key = {"api_key": "sk-test123"}
+    headers = agent.build_headers(key, original_user_agent="")
+    assert headers["User-Agent"].startswith("akm/")
+
+
 def test_build_headers_custom_auth():
     """Key 有自定义 auth_header 时使用 key 的模板"""
     agent = Agent(name="openai", default_base_url="https://api.openai.com")
