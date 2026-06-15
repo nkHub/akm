@@ -15,6 +15,7 @@ from uuid import uuid4
 from typing import AsyncIterator
 from akm.adapter import BaseAdapter
 from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_messages_content
+from akm.plugins.protocol_converter._provider_profile import get_provider_profile
 from akm.plugins.protocol_converter._messages_codec import (
     sse_chat_to_json,
     messages_sse_event as _messages_sse_event,
@@ -70,12 +71,39 @@ class MessagesAdapter(BaseAdapter):
 
         if "max_tokens" in body:
             chat_body["max_tokens"] = body["max_tokens"]
+            profile = self._provider_profile()
+            # 通过 provider profile 控制是否额外补齐 max_completion_tokens，
+            # 避免和具体模型名或散落的 provider 分支耦合。
+            if profile.inject_max_completion_tokens:
+                chat_body["max_completion_tokens"] = body["max_tokens"]
         if "temperature" in body:
             chat_body["temperature"] = body["temperature"]
         if "top_p" in body:
             chat_body["top_p"] = body["top_p"]
         if "stop_sequences" in body:
             chat_body["stop"] = body["stop_sequences"]
+
+        # metadata/user 的映射也通过 provider profile 控制，便于后续细分到不同上游。
+        metadata = body.get("metadata")
+        if isinstance(metadata, dict):
+            chat_body["metadata"] = metadata
+            if self._provider_profile().map_metadata_user_id_to_user and "user" not in body:
+                user_id = metadata.get("user_id")
+                if isinstance(user_id, str) and user_id.strip():
+                    chat_body["user"] = user_id.strip()
+
+        if "user" in body and body.get("user") is not None:
+            chat_body["user"] = body.get("user")
+
+        # Anthropic 的 thinking / reasoning 配置在 OpenAI 兼容上游中没有统一标准，
+        # 这里只做最保守的映射：
+        # 1. 若调用方显式关闭 thinking，则不注入 reasoning_effort
+        # 2. 若当前 provider profile 允许，则尝试补 reasoning_effort
+        thinking = body.get("thinking")
+        if not self._thinking_disabled(thinking):
+            effort = self._extract_reasoning_effort(body)
+            if effort and self._provider_profile().inject_reasoning_effort:
+                chat_body["reasoning_effort"] = effort
 
         # ── 工具定义转换 ──
         tools = body.get("tools")
@@ -93,6 +121,39 @@ class MessagesAdapter(BaseAdapter):
             self._tool_schemas_by_name = {}
 
         return chat_body
+
+    def _extract_reasoning_effort(self, body: dict) -> str | None:
+        """从多种兼容字段中提取并规范化 reasoning effort。"""
+        effort_raw = body.get("reasoning_effort")
+        reasoning = body.get("reasoning")
+        if effort_raw is None and isinstance(reasoning, dict):
+            effort_raw = reasoning.get("effort")
+        return self._normalize_effort(effort_raw)
+
+    def _normalize_effort(self, effort) -> str | None:
+        """将不同来源的 effort 规范为 OpenAI 常见可接受值。"""
+        if effort is None:
+            return None
+        value = str(effort).strip().lower()
+        if not value:
+            return None
+        if value in ("minimal", "low", "medium", "high"):
+            return value
+        if value in ("max", "very_high", "very-high", "xhigh"):
+            return "high"
+        return None
+
+    def _thinking_disabled(self, thinking) -> bool:
+        """判断调用方是否显式关闭了 thinking。"""
+        if isinstance(thinking, dict):
+            thinking_type = str(thinking.get("type") or "").strip().lower()
+            return thinking_type == "disabled"
+        return False
+
+    def _provider_profile(self):
+        """读取当前请求命中的 provider profile。"""
+        provider = getattr(self, "_request_provider", "")
+        return get_provider_profile(provider)
 
     def _validate_tool_input(self, tool_name: str, tool_input: dict) -> bool:
         """按请求侧工具 schema 做最小校验（required + 基础类型）。
@@ -177,13 +238,10 @@ class MessagesAdapter(BaseAdapter):
             elif t == "array":
                 fixed[k] = []
 
-        # Bash 专项：description 缺失时自动生成
+        # Bash 专项：仅对已存在的有效 command 补 description。
+        # 不再为缺失 command 的场景伪造默认命令，避免把上游协议问题转成真实执行。
         if tool_name.lower() == "bash":
             cmd = fixed.get("command")
-            # command 缺失/为空时给安全默认值，避免触发 CLI Invalid tool parameters
-            if not isinstance(cmd, str) or not cmd.strip():
-                fixed["command"] = "find . -maxdepth 3 -mindepth 1"
-                cmd = fixed["command"]
             if isinstance(cmd, str) and cmd.strip() and not fixed.get("description"):
                 fixed["description"] = f"Run command: {cmd[:80]}"
             # timeout 缺失或非法时使用安全默认值
@@ -380,23 +438,42 @@ class MessagesAdapter(BaseAdapter):
     def _convert_tool_result_block(self, block: dict) -> dict:
         """Anthropic tool_result content block → OpenAI tool 消息"""
         tool_use_id = block.get("tool_use_id", "")
-        result_content = block.get("content", "")
-
-        # 展平 tool_result 的 content（可能是字符串或 content block 数组）
-        if isinstance(result_content, list):
-            parts = []
-            for item in result_content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(item.get("text", ""))
-                elif isinstance(item, str):
-                    parts.append(item)
-            result_content = "\n".join(parts)
+        result_content = self._normalize_tool_result_content(block.get("content", ""))
 
         return {
             "role": "tool",
             "tool_call_id": tool_use_id,
             "content": str(result_content),
         }
+
+    def _normalize_tool_result_content(self, result_content) -> str:
+        """尽量保留 tool_result 语义，避免多轮工具调用时结构化结果被静默丢失。"""
+        if isinstance(result_content, str):
+            return result_content
+
+        if isinstance(result_content, list):
+            text_parts: list[str] = []
+            only_textual = True
+            for item in result_content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                    continue
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(str(item.get("text", "")))
+                    continue
+                only_textual = False
+                break
+
+            if only_textual:
+                return "\n".join(text_parts)
+
+            # 一旦存在非 text 内容块，就保留整份原始结构，避免只留下残缺文本。
+            return json.dumps(result_content, ensure_ascii=False)
+
+        if isinstance(result_content, (dict, int, float, bool)) or result_content is None:
+            return json.dumps(result_content, ensure_ascii=False)
+
+        return str(result_content)
 
     # ── assistant 消息转换 ──
 

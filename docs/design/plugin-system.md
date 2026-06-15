@@ -155,6 +155,15 @@ akm/
 
 > `converts` 字段声明源格式和目标格式，PluginManager 通过 `get_converter(from, to)` 查找匹配的转换插件。
 
+当前内置 `protocol_converter` 已合并 Responses / Messages / Chat 三类转换能力，而不是按旧设计拆成多个 converter 插件。它在 Responses → Chat 链路中还维护一层轻量内存会话缓存，用于 Codex 通过 `previous_response_id` 续接 Chat-only 上游时恢复上一轮 Chat 历史；缓存内容包含 `assistant` 文本、`reasoning_content`、`tool_calls` 与后续 `tool` 结果所需的 `tool_call_id`，默认最多保留 256 条、24 小时，进程重启后清空。
+
+`protocol_converter` 针对 Codex + DeepSeek thinking/tool-call 场景做了以下兼容处理：
+
+- `function_call_output.output` 会统一序列化为字符串，避免生成非法 Chat `role=tool` 消息。
+- structured output 的 `response_format.json_schema.schema` 与 `text.format.json_schema.schema` 会复用 schema 清洗逻辑，移除 `strict` / `additionalProperties`。
+- 流式工具调用同时发 legacy 事件（`response.output_item.*`、`response.function_call_arguments.*`）和现代事件（`response.output_tool_call.begin/delta/end`、`response.done`），兼容不同 Codex 版本。
+- 现代 continuation 形态（`role="tool"`、`tool_call_id`、typed output content）会转换为 Chat `tool` 消息。
+
 ### 5.3 字段说明
 
 | 字段 | 类型 | 必需 | 说明 |

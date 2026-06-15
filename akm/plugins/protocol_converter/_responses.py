@@ -16,6 +16,7 @@ from uuid import uuid4
 from typing import AsyncIterator
 from akm.adapter import BaseAdapter
 from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_responses_output
+from akm.plugins.protocol_converter._provider_profile import get_provider_profile
 from akm.plugins.protocol_converter._warnings import (
     RESPONSES_INCLUDE_NOT_FULLY_MAPPED,
     RESPONSES_STORE_NOT_MAPPED,
@@ -41,6 +42,7 @@ class ResponsesAdapter(BaseAdapter):
         """Responses API 请求 → Chat Completions 请求"""
         self._conversion_warnings = []
         chat_body = {}
+        profile = self._provider_profile()
 
         if "model" in body:
             chat_body["model"] = body["model"]
@@ -60,7 +62,8 @@ class ResponsesAdapter(BaseAdapter):
         if "stream" in body:
             chat_body["stream"] = body["stream"]
 
-        # Thinking / Effort 适配（DeepSeek Chat API）
+        # Thinking / Effort 适配通过 provider profile 控制，避免把 DeepSeek 语义硬编码到
+        # 所有 Responses -> Chat 转换链路上。
         thinking = body.get("thinking")
         if isinstance(thinking, dict):
             t = thinking.get("type")
@@ -81,9 +84,9 @@ class ResponsesAdapter(BaseAdapter):
         if effort:
             chat_body["reasoning_effort"] = effort
 
-        if "reasoning_effort" not in chat_body:
-            chat_body["reasoning_effort"] = "high"
-        if "thinking" not in chat_body:
+        if "reasoning_effort" not in chat_body and profile.responses_default_reasoning_effort:
+            chat_body["reasoning_effort"] = profile.responses_default_reasoning_effort
+        if "thinking" not in chat_body and profile.responses_force_thinking_enabled:
             chat_body["thinking"] = {"type": "enabled"}
 
         logger.info(
@@ -112,13 +115,13 @@ class ResponsesAdapter(BaseAdapter):
         # 目标：尽量映射到 Chat Completions 兼容字段 response_format。
         response_format = body.get("response_format")
         if isinstance(response_format, dict):
-            chat_body["response_format"] = response_format
+            chat_body["response_format"] = self._clean_response_format(response_format)
         else:
             text_cfg = body.get("text")
             if isinstance(text_cfg, dict):
                 fmt = text_cfg.get("format")
                 if isinstance(fmt, dict):
-                    chat_body["response_format"] = fmt
+                    chat_body["response_format"] = self._clean_response_format(fmt)
 
         # ── metadata 透传（用于审计/追踪）──
         # 多数 OpenAI 兼容后端会忽略未知字段；透传比静默丢弃更安全。
@@ -158,6 +161,11 @@ class ResponsesAdapter(BaseAdapter):
         if v in ("xhigh", "very_high", "very-high"):
             return "max"
         return None
+
+    def _provider_profile(self):
+        """读取当前请求命中的 provider profile。"""
+        provider = getattr(self, "_request_provider", "")
+        return get_provider_profile(provider)
 
     def _input_to_messages(
         self,
@@ -221,7 +229,7 @@ class ResponsesAdapter(BaseAdapter):
                 messages.append({
                     "role": "tool",
                     "tool_call_id": item.get("call_id", ""),
-                    "content": item.get("output", ""),
+                    "content": self._normalize_tool_output_content(item.get("output", "")),
                 })
 
             elif item_type == "input_text":
@@ -244,6 +252,24 @@ class ResponsesAdapter(BaseAdapter):
                 role = item.get("role", "user")
                 role = ROLE_MAP.get(role, role)
                 content = item.get("content", "")
+
+                if role == "tool":
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": item.get("tool_call_id") or item.get("call_id", ""),
+                        "content": self._extract_text_content(content),
+                    })
+                    continue
+                if role == "assistant" and isinstance(item.get("tool_calls"), list) and item.get("tool_calls"):
+                    msg = {
+                        "role": "assistant",
+                        "content": self._extract_text_content(content),
+                        "tool_calls": item["tool_calls"],
+                    }
+                    if item.get("reasoning_content"):
+                        msg["reasoning_content"] = item["reasoning_content"]
+                    messages.append(msg)
+                    continue
 
                 if isinstance(content, list):
                     texts = []
@@ -286,7 +312,22 @@ class ResponsesAdapter(BaseAdapter):
                 _flush_tool_calls()
                 role = item["role"]
                 role = ROLE_MAP.get(role, role)
-                if role in ("user", "assistant", "system"):
+                if role == "tool":
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": item.get("tool_call_id") or item.get("call_id", ""),
+                        "content": self._extract_text_content(item.get("content", "")),
+                    })
+                elif role == "assistant" and isinstance(item.get("tool_calls"), list) and item.get("tool_calls"):
+                    msg = {
+                        "role": "assistant",
+                        "content": self._extract_text_content(item.get("content", "")),
+                        "tool_calls": item["tool_calls"],
+                    }
+                    if item.get("reasoning_content"):
+                        msg["reasoning_content"] = item["reasoning_content"]
+                    messages.append(msg)
+                elif role in ("user", "assistant", "system"):
                     content = item.get("content", "")
                     if isinstance(content, list):
                         content = self._flatten_content(content)
@@ -353,6 +394,83 @@ class ResponsesAdapter(BaseAdapter):
             else:
                 cleaned[k] = v
         return cleaned
+
+    def _clean_response_format(self, response_format: dict) -> dict:
+        """清理 response_format 里的 JSON Schema，避免上游因不兼容字段拒绝请求。
+
+        外层 `response_format` 自身仍按 OpenAI 兼容格式保留；这里只对真正的
+        schema 本体做最小清洗，和 tools 的处理保持一致，避免 structured output
+        与 tools 在同一上游上表现不一致。
+        """
+        cleaned = dict(response_format)
+        if cleaned.get("type") != "json_schema":
+            return cleaned
+        json_schema = cleaned.get("json_schema")
+        if not isinstance(json_schema, dict):
+            return cleaned
+        cleaned_json_schema = dict(json_schema)
+        schema = cleaned_json_schema.get("schema")
+        if isinstance(schema, dict):
+            cleaned_json_schema["schema"] = self._clean_schema(schema)
+        cleaned["json_schema"] = cleaned_json_schema
+        return cleaned
+
+    def _normalize_tool_output_content(self, output) -> str:
+        """把 function_call_output 统一转成 Chat tool 消息可接受的字符串。
+
+        Codex 工具结果常常是对象或数组；如果这里直接把结构化值塞进
+        `role=tool` 的 `content`，上游通常会把它当成非法消息内容。这里优先
+        做 JSON 序列化，最大程度保留原始语义。
+        """
+        if isinstance(output, str):
+            return output
+        if output is None or isinstance(output, (dict, list, bool, int, float)):
+            try:
+                return json.dumps(output, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return str(output)
+        return str(output)
+
+    def _extract_text_content(self, content) -> str:
+        """从现代 Responses content 结构中尽量提取可回放的纯文本。"""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        texts = []
+        for block in content:
+            if isinstance(block, str):
+                texts.append(block)
+                continue
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type in ("text", "input_text", "output_text"):
+                text = block.get("text", "")
+                if isinstance(text, str) and text:
+                    texts.append(text)
+            elif block_type == "output":
+                body = block.get("body", "")
+                texts.append(self._normalize_tool_output_content(body))
+        return "\n".join(part for part in texts if part)
+
+    def _build_session_assistant_message(self, message: dict | None) -> dict | None:
+        """提取可供 `previous_response_id` 续接复用的 assistant 消息快照。"""
+        if not isinstance(message, dict):
+            return None
+        session_message = {
+            "role": "assistant",
+            "content": message.get("content", "") or "",
+        }
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            session_message["tool_calls"] = tool_calls
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            session_message["reasoning_content"] = reasoning_content
+        if not session_message.get("content") and not session_message.get("tool_calls") and not session_message.get("reasoning_content"):
+            return None
+        return session_message
 
     def _convert_tools(self, tools: list) -> list:
         """Responses API tools → Chat Completions tools（自动清理不兼容字段）
@@ -473,6 +591,8 @@ class ResponsesAdapter(BaseAdapter):
             resp["usage"]["input_tokens_details"] = {"cached_tokens": cached_tokens}
 
         resp["output"] = ir_to_responses_output(ir)
+        self._session_response_id = resp["id"]
+        self._session_assistant_message = self._build_session_assistant_message(message)
 
         # 兜底：当只有工具调用或推理时，仍补一条 message，避免部分客户端空输出误判
         if not ir.get("text") and (ir.get("reasoning") or ir.get("tool_calls")):
@@ -751,6 +871,7 @@ class ResponsesAdapter(BaseAdapter):
                             tc_name = fn.get("name", "")
                             tc_args = fn.get("arguments", "")
                             tool_calls_state[idx] = {"id": tc_id, "name": tc_name, "arguments": tc_args}
+                            # 同时发 legacy + modern 两套工具事件，兼容新旧 Codex 客户端。
                             yield _sse_event("response.output_item.added", {
                                 "type": "response.output_item.added",
                                 "output_index": idx + (2 if reasoning else 1),
@@ -763,6 +884,14 @@ class ResponsesAdapter(BaseAdapter):
                                     "arguments": tc_args,
                                 },
                             })
+                            yield _sse_event("response.output_tool_call.begin", {
+                                "type": "response.output_tool_call.begin",
+                                "output_index": idx + (2 if reasoning else 1),
+                                "item_id": tc_id,
+                                "call_id": tc_id,
+                                "name": tc_name,
+                                "arguments": tc_args,
+                            })
                         else:
                             arg_delta = fn.get("arguments", "")
                             if arg_delta:
@@ -770,6 +899,12 @@ class ResponsesAdapter(BaseAdapter):
                                 yield _sse_event("response.function_call_arguments.delta", {
                                     "type": "response.function_call_arguments.delta",
                                     "output_index": idx + (2 if reasoning else 1),
+                                    "delta": arg_delta,
+                                })
+                                yield _sse_event("response.output_tool_call.delta", {
+                                    "type": "response.output_tool_call.delta",
+                                    "output_index": idx + (2 if reasoning else 1),
+                                    "item_id": tool_calls_state[idx]["id"],
                                     "delta": arg_delta,
                                 })
 
@@ -886,6 +1021,14 @@ class ResponsesAdapter(BaseAdapter):
                 "name": tc["name"],
                 "arguments": tc["arguments"],
             })
+            yield _sse_event("response.output_tool_call.end", {
+                "type": "response.output_tool_call.end",
+                "output_index": tc_output_index,
+                "item_id": tc["id"],
+                "call_id": tc["id"],
+                "name": tc["name"],
+                "arguments": tc["arguments"],
+            })
             yield _sse_event("response.output_item.done", {
                 "type": "response.output_item.done",
                 "output_index": tc_output_index,
@@ -941,6 +1084,35 @@ class ResponsesAdapter(BaseAdapter):
                 "model": model,
                 "output": resp_output,
                 "usage": completed_usage,
+            },
+        })
+        session_assistant_message = {
+            "role": "assistant",
+            "content": final_text,
+        }
+        if reasoning:
+            session_assistant_message["reasoning_content"] = reasoning
+        if tool_calls_state:
+            session_assistant_message["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                    },
+                }
+                for _, tc in sorted(tool_calls_state.items())
+            ]
+        self._session_response_id = resp_id
+        self._session_assistant_message = self._build_session_assistant_message(session_assistant_message)
+        yield _sse_event("response.done", {
+            "type": "response.done",
+            "response": {
+                "id": resp_id,
+                "object": "response",
+                "status": "completed",
+                "model": model,
             },
         })
         self._last_usage_tokens = {

@@ -9,6 +9,9 @@
 import importlib.util
 import sys
 import contextvars
+import time
+from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 from typing import AsyncIterator
 from akm.plugins import PluginBase
@@ -50,6 +53,61 @@ class Plugin(PluginBase):
         # 请求级上下文，避免并发请求互相覆盖 source_format/adapter 状态
         self._ctx_source_format = contextvars.ContextVar("protocol_converter_source_format", default="chat")
         self._ctx_active_adapter = contextvars.ContextVar("protocol_converter_active_adapter", default=None)
+        self._ctx_request_messages = contextvars.ContextVar("protocol_converter_request_messages", default=[])
+        self._ctx_request_provider = contextvars.ContextVar("protocol_converter_request_provider", default="")
+        self._response_sessions = OrderedDict()
+        self._session_ttl_sec = 60 * 60 * 24
+        self._max_sessions = 256
+
+    def _trim_response_sessions(self):
+        """清理过期和超量的 Responses 会话缓存，避免长期运行时无限增长。"""
+        now = time.time()
+        stale_ids = [
+            response_id
+            for response_id, entry in self._response_sessions.items()
+            if now - float(entry.get("updated_at", 0) or 0) > self._session_ttl_sec
+        ]
+        for response_id in stale_ids:
+            self._response_sessions.pop(response_id, None)
+        while len(self._response_sessions) > self._max_sessions:
+            self._response_sessions.popitem(last=False)
+
+    def _restore_response_history(self, body: dict) -> dict:
+        """按 previous_response_id 恢复 Chat 历史，再交给 ResponsesAdapter 转换。"""
+        previous_response_id = body.get("previous_response_id")
+        if not previous_response_id:
+            return body
+        self._trim_response_sessions()
+        entry = self._response_sessions.get(str(previous_response_id))
+        if not entry:
+            return body
+        restored = dict(body)
+        current_input = restored.get("input", [])
+        if current_input is None:
+            current_items = []
+        elif isinstance(current_input, list):
+            current_items = list(current_input)
+        else:
+            current_items = [current_input]
+        restored["input"] = deepcopy(entry.get("messages", [])) + current_items
+        self._response_sessions.move_to_end(str(previous_response_id))
+        return restored
+
+    def _store_response_session(self, adapter, response_body: str = ""):
+        """记录 response_id 对应的 Chat 历史，用于后续 previous_response_id 续接。"""
+        response_id = getattr(adapter, "_session_response_id", "") or ""
+        assistant_message = getattr(adapter, "_session_assistant_message", None)
+        if not response_id or not isinstance(assistant_message, dict):
+            return
+        request_messages = self._ctx_request_messages.get() or []
+        messages = deepcopy(request_messages)
+        messages.append(deepcopy(assistant_message))
+        self._response_sessions[str(response_id)] = {
+            "updated_at": time.time(),
+            "messages": messages,
+        }
+        self._response_sessions.move_to_end(str(response_id))
+        self._trim_response_sessions()
 
     def _new_adapter(self, source_format: str):
         """按源格式创建请求级 adapter 实例（隔离可变状态）"""
@@ -60,6 +118,16 @@ class Plugin(PluginBase):
         if hasattr(self, "_chat"):
             return self._chat.ChatAdapter()
         return None
+
+    def set_request_context(self, **kwargs):
+        """设置一次请求的额外上下文，供 adapter 做供应商相关兼容判断。"""
+        provider = kwargs.get("provider")
+        if provider is not None:
+            self._ctx_request_provider.set(str(provider or ""))
+
+        adapter = self._ctx_active_adapter.get()
+        if adapter is not None and provider is not None:
+            setattr(adapter, "_request_provider", str(provider or ""))
 
     # ── 请求转换 ──
 
@@ -79,7 +147,12 @@ class Plugin(PluginBase):
             self._conversion_warnings = []
             self._ctx_source_format.set("responses")
             self._ctx_active_adapter.set(adapter)
-            return adapter.convert_request(body)
+            setattr(adapter, "_request_provider", self._ctx_request_provider.get() or "")
+            restored_body = self._restore_response_history(body)
+            converted = adapter.convert_request(restored_body)
+            converted.pop("previous_response_id", None)
+            self._ctx_request_messages.set(deepcopy(converted.get("messages", [])))
+            return converted
         elif "messages" in body and isinstance(body.get("messages"), list):
             self._source_format = "messages"
             adapter = self._new_adapter("messages") or self._messages_adapter
@@ -88,6 +161,8 @@ class Plugin(PluginBase):
             self._conversion_warnings = []
             self._ctx_source_format.set("messages")
             self._ctx_active_adapter.set(adapter)
+            setattr(adapter, "_request_provider", self._ctx_request_provider.get() or "")
+            self._ctx_request_messages.set([])
             return adapter.convert_request(body)
         else:
             self._source_format = "chat"
@@ -97,6 +172,8 @@ class Plugin(PluginBase):
             self._conversion_warnings = []
             self._ctx_source_format.set("chat")
             self._ctx_active_adapter.set(adapter)
+            setattr(adapter, "_request_provider", self._ctx_request_provider.get() or "")
+            self._ctx_request_messages.set([])
             return adapter.convert_request(body)
 
     # ── 非流式响应转换 ──
@@ -107,8 +184,10 @@ class Plugin(PluginBase):
         adapter = self._ctx_active_adapter.get()
         if source_format == "responses":
             a = adapter or self._responses_adapter
+            result = a.convert_response(body)
             self._conversion_warnings = getattr(a, "_conversion_warnings", [])
-            return a.convert_response(body)
+            self._store_response_session(a, result)
+            return result
         elif source_format == "messages":
             a = adapter or self._messages_adapter
             self._conversion_warnings = getattr(a, "_conversion_warnings", [])
@@ -132,6 +211,7 @@ class Plugin(PluginBase):
                 self._tool_trace_events = getattr(a, "_tool_trace_events", [])
                 self._conversion_warnings = getattr(a, "_conversion_warnings", [])
                 yield line
+            self._store_response_session(a)
         elif source_format == "messages":
             a = adapter or self._messages_adapter
             async for line in a.convert_sse_stream(upstream_stream):

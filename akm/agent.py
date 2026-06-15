@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from akm import __version__
+from akm.config import get as config_get
 
 
 @dataclass
@@ -55,26 +56,35 @@ class Agent:
             return f"{base}/{api_path}"
         return f"{base}/v1/{api_path}"
 
-    def build_headers(self, key: dict, api_path: str = "") -> dict:
+    def build_headers(self, key: dict, api_path: str = "", original_user_agent: str = "") -> dict:
         """构建请求头（含 Authorization）
 
         auth_header 模板中的 {api_key} 会被替换为解密后的 Key
         """
+        user_agent = self._resolve_user_agent(original_user_agent)
         # 走 /anthropic/v1/messages 的供应商需要使用 Anthropic 风格请求头。
         if self.messages_use_anthropic_path and api_path == "messages":
             return {
                 "x-api-key": key["api_key"],
                 "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
-                "User-Agent": f"akm/{__version__}",
+                "User-Agent": user_agent,
             }
 
         template = key.get("auth_header") or self.default_auth_header
         return {
             "Authorization": template.format(api_key=key["api_key"]),
             "Content-Type": "application/json",
-            "User-Agent": f"akm/{__version__}",
+            "User-Agent": user_agent,
         }
+
+    def _resolve_user_agent(self, original_user_agent: str = "") -> str:
+        """根据全局配置决定上游请求使用的 User-Agent。"""
+        if bool(config_get("use_native_user_agent", False)):
+            native = str(original_user_agent or "").strip()
+            if native:
+                return native
+        return f"akm/{__version__}"
 
     def needs_conversion(self, api_path: str) -> Optional[str]:
         """判断是否需要协议转换，返回目标 api_path 或 None
