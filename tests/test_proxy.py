@@ -435,6 +435,82 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_chained_adapter_receives_provider_context(monkeypatch):
+    """两段式转换链路也应把选中 key 的 provider 透传给每一段适配器。"""
+
+    class DummyRespToChat:
+        _source_format = "responses"
+
+        def __init__(self):
+            self.provider = ""
+
+        def set_request_context(self, **kwargs):
+            self.provider = str(kwargs.get("provider") or "")
+
+        def convert_request(self, body):
+            out = dict(body)
+            out["first_provider_seen"] = self.provider
+            return out
+
+        def convert_response(self, body):
+            return body
+
+    class DummyChatToMsg:
+        _source_format = "chat"
+
+        def __init__(self):
+            self.provider = ""
+
+        def set_request_context(self, **kwargs):
+            self.provider = str(kwargs.get("provider") or "")
+
+        def convert_request(self, body):
+            out = dict(body)
+            out["second_provider_seen"] = self.provider
+            return out
+
+        def convert_response(self, body):
+            return body
+
+    class DummyPM:
+        def __init__(self):
+            self.first = DummyRespToChat()
+            self.second = DummyChatToMsg()
+
+        def get_converter(self, from_fmt, to_fmt):
+            if (from_fmt, to_fmt) == ("responses", "chat"):
+                return self.first
+            if (from_fmt, to_fmt) == ("chat", "messages"):
+                return self.second
+            return None
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1",
+        "provider": "anthropic",
+        "api_key": "sk-ant",
+        "base_url": "https://api.anthropic.com",
+    }))
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, "hello")])
+
+    result = await forward_request(
+        body={"model": "claude-3", "input": "hi", "stream": False},
+        client=mock_client,
+        api_path="responses",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    payload = send_calls[0]["req"].content.decode("utf-8")
+    assert '"first_provider_seen":"anthropic"' in payload
+    assert '"second_provider_seen":"anthropic"' in payload
+
+
+@pytest.mark.asyncio
 async def test_forward_messages_converter_receives_provider_context(monkeypatch):
     """messages 转 chat 转换时，应把选中 key 的 provider 传入协议转换器上下文。"""
 

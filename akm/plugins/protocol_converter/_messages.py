@@ -14,8 +14,8 @@ import time
 from uuid import uuid4
 from typing import AsyncIterator
 from akm.adapter import BaseAdapter
+from akm.agent import get_agent_profile
 from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_messages_content
-from akm.plugins.protocol_converter._provider_profile import get_provider_profile
 from akm.plugins.protocol_converter._messages_codec import (
     sse_chat_to_json,
     messages_sse_event as _messages_sse_event,
@@ -63,6 +63,7 @@ class MessagesAdapter(BaseAdapter):
         - 工具定义 tools schema 转换
         - 通用参数：max_tokens, temperature, top_p, stop_sequences
         """
+        profile = self._provider_profile()
         chat_body = {
             "model": body.get("model", ""),
             "messages": self._messages_to_openai(body),
@@ -71,7 +72,6 @@ class MessagesAdapter(BaseAdapter):
 
         if "max_tokens" in body:
             chat_body["max_tokens"] = body["max_tokens"]
-            profile = self._provider_profile()
             # 通过 provider profile 控制是否额外补齐 max_completion_tokens，
             # 避免和具体模型名或散落的 provider 分支耦合。
             if profile.inject_max_completion_tokens:
@@ -87,7 +87,7 @@ class MessagesAdapter(BaseAdapter):
         metadata = body.get("metadata")
         if isinstance(metadata, dict):
             chat_body["metadata"] = metadata
-            if self._provider_profile().map_metadata_user_id_to_user and "user" not in body:
+            if profile.map_metadata_user_id_to_user and "user" not in body:
                 user_id = metadata.get("user_id")
                 if isinstance(user_id, str) and user_id.strip():
                     chat_body["user"] = user_id.strip()
@@ -102,7 +102,7 @@ class MessagesAdapter(BaseAdapter):
         thinking = body.get("thinking")
         if not self._thinking_disabled(thinking):
             effort = self._extract_reasoning_effort(body)
-            if effort and self._provider_profile().inject_reasoning_effort:
+            if effort and profile.inject_reasoning_effort:
                 chat_body["reasoning_effort"] = effort
 
         # ── 工具定义转换 ──
@@ -153,7 +153,7 @@ class MessagesAdapter(BaseAdapter):
     def _provider_profile(self):
         """读取当前请求命中的 provider profile。"""
         provider = getattr(self, "_request_provider", "")
-        return get_provider_profile(provider)
+        return get_agent_profile(provider)
 
     def _validate_tool_input(self, tool_name: str, tool_input: dict) -> bool:
         """按请求侧工具 schema 做最小校验（required + 基础类型）。

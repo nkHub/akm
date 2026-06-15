@@ -34,7 +34,7 @@ def setup(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_success(monkeypatch):
     """正常请求返回上游响应"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"hello"}}]}',
@@ -61,7 +61,7 @@ async def test_chat_completions_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_no_keys(monkeypatch):
     """没有可用 key 时返回 503"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         return {
             "status_code": 503,
             "body": "",
@@ -89,7 +89,7 @@ async def test_chat_completions_no_keys(monkeypatch):
 async def test_embeddings_forward_success(monkeypatch):
     """/v1/embeddings 应复用通用转发链路返回普通 JSON。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "embeddings"
         return {
             "status_code": 200,
@@ -121,7 +121,7 @@ async def test_embeddings_forward_success(monkeypatch):
 async def test_image_generations_forward_success(monkeypatch):
     """/v1/images/generations 应复用通用转发链路返回普通 JSON。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "images/generations"
         assert request_timeout == 300
         return {
@@ -153,7 +153,7 @@ async def test_image_generations_forward_success(monkeypatch):
 async def test_image_generations_uses_default_model_when_omitted(monkeypatch):
     """图片生成接口未显式传 model 时，应自动回填 gpt-image-2。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "images/generations"
         assert body["model"] == "gpt-image-2"
         assert request_timeout == 300
@@ -235,7 +235,7 @@ async def test_image_generations_returns_clear_error_when_default_model_unavaila
 async def test_image_edits_forward_success(monkeypatch):
     """/v1/images/edits 应接收 multipart/form-data 并复用通用转发链路。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "images/edits"
         assert body["model"] == "gpt-image-2"
         assert body["__akm_multipart__"] is True
@@ -272,7 +272,7 @@ async def test_image_edits_forward_success(monkeypatch):
 async def test_image_edits_uses_default_model_when_omitted(monkeypatch):
     """图片编辑接口未显式传 model 时，应在存在可用 key 时自动回填 gpt-image-2。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "images/edits"
         assert body["model"] == "gpt-image-2"
         assert body["__akm_form_fields__"]["model"] == "gpt-image-2"
@@ -369,7 +369,7 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
 
     captured = {}
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"ok"}}]}',
@@ -414,7 +414,7 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
         async def aclose(self):
             return None
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         return {
             "stream": True,
             "status_code": 200,
@@ -478,7 +478,7 @@ async def test_streaming_response_emits_on_response_only_after_stream_finishes(m
 
     upstream_resp = DummyResp()
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         return {
             "stream": True,
             "status_code": 200,
@@ -1219,6 +1219,38 @@ async def test_api_list_agents_returns_messages_anthropic_switch():
     agents = {item["name"]: item for item in resp.json()["data"]}
     assert agents["deepseek"]["messages_use_anthropic_path"] is True
     assert agents["openai"]["messages_use_anthropic_path"] is False
+
+
+@pytest.mark.asyncio
+async def test_api_add_agent_persists_protocol_capability_fields(tmp_path, monkeypatch):
+    """/api/agents 应允许保存下沉到 Agent 层的协议兼容能力字段。"""
+    monkeypatch.setattr("akm.agent._get_config_path", lambda: str(tmp_path / "config.json"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post("/api/agents", json={
+            "name": "vendorx",
+            "default_base_url": "https://vendor.example.com/v1",
+            "default_auth_header": "Bearer {api_key}",
+            "supports_responses": True,
+            "supports_chat": True,
+            "supports_messages": False,
+            "messages_use_anthropic_path": False,
+            "inject_max_completion_tokens": True,
+            "inject_reasoning_effort": True,
+            "map_metadata_user_id_to_user": False,
+            "responses_force_thinking_enabled": True,
+            "responses_default_reasoning_effort": "high",
+        })
+        list_resp = await client.get("/api/agents")
+
+    assert create_resp.status_code == 200
+    agents = {item["name"]: item for item in list_resp.json()["data"]}
+    assert agents["vendorx"]["inject_max_completion_tokens"] is True
+    assert agents["vendorx"]["inject_reasoning_effort"] is True
+    assert agents["vendorx"]["map_metadata_user_id_to_user"] is False
+    assert agents["vendorx"]["responses_force_thinking_enabled"] is True
+    assert agents["vendorx"]["responses_default_reasoning_effort"] == "high"
 
 
 @pytest.mark.asyncio

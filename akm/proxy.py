@@ -24,6 +24,13 @@ class _ChainedAdapter:
         self.second = second
         self._source_format = getattr(first, "_source_format", "")
 
+    def set_request_context(self, **kwargs):
+        """把请求上下文透传给链式转换中的每一段适配器。"""
+        if hasattr(self.first, "set_request_context"):
+            self.first.set_request_context(**kwargs)
+        if hasattr(self.second, "set_request_context"):
+            self.second.set_request_context(**kwargs)
+
     def convert_request(self, body: dict) -> dict:
         return self.second.convert_request(self.first.convert_request(body))
 

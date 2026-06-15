@@ -15,8 +15,8 @@ import logging
 from uuid import uuid4
 from typing import AsyncIterator
 from akm.adapter import BaseAdapter
+from akm.agent import get_agent_profile
 from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_responses_output
-from akm.plugins.protocol_converter._provider_profile import get_provider_profile
 from akm.plugins.protocol_converter._warnings import (
     RESPONSES_INCLUDE_NOT_FULLY_MAPPED,
     RESPONSES_STORE_NOT_MAPPED,
@@ -165,7 +165,7 @@ class ResponsesAdapter(BaseAdapter):
     def _provider_profile(self):
         """读取当前请求命中的 provider profile。"""
         provider = getattr(self, "_request_provider", "")
-        return get_provider_profile(provider)
+        return get_agent_profile(provider)
 
     def _input_to_messages(
         self,
