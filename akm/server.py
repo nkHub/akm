@@ -1766,6 +1766,19 @@ async def embeddings(request: Request):
     return await _handle_ai_request(request, "embeddings")
 
 
+@app.post("/v1/rerank")
+@app.post("/rerank")
+async def rerank(request: Request):
+    """Rerank API 端点。
+
+    参考 embeddings 按普通 JSON 透传处理：
+    1. 不参与协议转换；
+    2. 不走流式链路；
+    3. 直接把上游 JSON 原样返回给客户端。
+    """
+    return await _handle_ai_request(request, "rerank")
+
+
 @app.post("/v1/images/generations")
 @app.post("/images/generations")
 async def image_generations(request: Request):
@@ -1798,7 +1811,7 @@ async def image_edits(request: Request):
 
 
 async def _handle_ai_request(request: Request, api_path: str):
-    """通用 AI API 请求处理：chat/completions / messages / responses / embeddings / images/generations / images/edits 复用"""
+    """通用 AI API 请求处理：chat/completions / messages / responses / embeddings / rerank / images/generations / images/edits 复用"""
     monitor = _get_health_monitor(request.app)
     if monitor is not None:
         monitor.request_started()

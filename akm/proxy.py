@@ -218,7 +218,7 @@ async def forward_request(
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
-    chat/messages/responses 支持流式；embeddings/images/generations/images/edits 始终走普通响应。
+    chat/messages/responses 支持流式；embeddings/rerank/images/generations/images/edits 始终走普通响应。
     request_timeout 允许调用方对单次请求超时做链路级覆盖；图片接口会传入更宽松的超时。
     """
     model = body.get("model", "")
@@ -334,10 +334,10 @@ async def forward_request(
 
         agent = get_agent(key.get("provider", "openai"))
 
-        # ── 协议转换检测（embeddings / images/generations / images/edits 不参与协议转换）──
+        # ── 协议转换检测（embeddings / rerank / images/generations / images/edits 不参与协议转换）──
         target_api_path = agent.needs_conversion(api_path)
         adapter = None
-        if api_path not in {"embeddings", "images/generations", "images/edits"} and target_api_path and plugin_manager:
+        if api_path not in {"embeddings", "rerank", "images/generations", "images/edits"} and target_api_path and plugin_manager:
             # 从插件系统查找转换器：api_path 格式 → target_api_path 格式
             from_fmt = api_path.replace("/completions", "")
             to_fmt = target_api_path.replace("/completions", "")
