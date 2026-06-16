@@ -1,3 +1,17 @@
+function initializeComponentWhenParsed(element, init) {
+  function run() {
+    init.call(element);
+    element.setAttribute('data-ready', 'true');
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() {
+      run();
+    }, { once: true });
+    return;
+  }
+  setTimeout(run, 0);
+}
+
 if (!customElements.get('akm-switch')) {
   customElements.define('akm-switch', class extends HTMLElement {
     connectedCallback() {
@@ -193,7 +207,8 @@ if (!customElements.get('akm-settings-card')) {
     connectedCallback() {
       if (this.__mounted) return;
       this.__mounted = true;
-      this.render();
+      var self = this;
+      initializeComponentWhenParsed(this, function() { self.render(); });
     }
 
     render() {
@@ -212,6 +227,7 @@ if (!customElements.get('akm-settings-card')) {
       var actionsEl = this.querySelector('[data-actions]');
       bodyNodes.forEach(function(node) { bodyEl.appendChild(node); });
       actionNodes.forEach(function(node) { actionsEl.appendChild(node); });
+      this.style.display = 'block';
     }
   });
 }
@@ -221,9 +237,12 @@ if (!customElements.get('akm-modal')) {
     connectedCallback() {
       if (this.__mounted) return;
       this.__mounted = true;
-      this.render();
-      this.bindEvents();
-      this.close();
+      var self = this;
+      initializeComponentWhenParsed(this, function() {
+        self.render();
+        self.bindEvents();
+        self.close();
+      });
     }
 
     render() {
@@ -260,10 +279,11 @@ if (!customElements.get('akm-modal')) {
       this.footerEl = this.querySelector('[data-footer]');
       this.setTitle(title);
       this.setSubtitle(subtitle);
+      this.style.display = 'contents';
       var self = this;
       bodyNodes.forEach(function(node) { self.bodyEl.appendChild(node); });
       if (footerNodes.length) {
-        this.footerEl.className = 'flex items-center justify-between gap-3 px-4 py-4 border-t border-border shrink-0 bg-surface-light rounded-b-lg';
+        this.footerEl.className = 'px-4 py-4 border-t border-border shrink-0 bg-surface-light rounded-b-lg';
         footerNodes.forEach(function(node) { self.footerEl.appendChild(node); });
       }
     }
@@ -301,9 +321,12 @@ if (!customElements.get('akm-drawer')) {
     connectedCallback() {
       if (this.__mounted) return;
       this.__mounted = true;
-      this.render();
-      this.bindEvents();
-      this.close(true);
+      var self = this;
+      initializeComponentWhenParsed(this, function() {
+        self.render();
+        self.bindEvents();
+        self.close(true);
+      });
     }
 
     render() {
@@ -319,13 +342,14 @@ if (!customElements.get('akm-drawer')) {
               '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>' +
             '</button>' +
           '</div>' +
-          '<div data-body class="flex-1 min-h-0"></div>' +
+          '<div data-body class="flex flex-col flex-1 min-h-0"></div>' +
         '</div>';
       this.overlay = this.querySelector('[data-overlay]');
       this.panel = this.querySelector('[data-panel]');
       this.titleEl = this.querySelector('[data-title]');
       this.bodyEl = this.querySelector('[data-body]');
       this.setTitle(title);
+      this.style.display = 'contents';
       var self = this;
       bodyNodes.forEach(function(node) { self.bodyEl.appendChild(node); });
     }

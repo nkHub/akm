@@ -17,7 +17,9 @@ if (!customElements.get('agent-form-modal')) {
                   '<h4 class="text-base font-semibold text-white">添加供应商代理</h4>' +
                   '<p class="mt-1 text-xs text-gray-500">配置默认 base_url、认证头模板和协议能力，保存后 Key 管理页会自动可选。</p>' +
                 '</div>' +
-                '<button type="button" data-close class="text-sm text-gray-500 hover:text-gray-300 cursor-pointer">关闭</button>' +
+                '<button type="button" data-close class="text-gray-400 hover:text-white transition-colors cursor-pointer">' +
+                  '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>' +
+                '</button>' +
               '</div>' +
               '<div class="px-5 py-4">' +
                 '<div class="grid grid-cols-1 gap-3 md:grid-cols-2">' +
