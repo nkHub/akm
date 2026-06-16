@@ -212,23 +212,35 @@ function renderKeyPagination() {
 }
 
 function openAddModal() {
-  document.getElementById('key-modal').setTitle('添加 Key');
-  document.getElementById('edit-alias').value = '';
-  document.getElementById('key-alias').value = '';
-  document.getElementById('key-alias').disabled = false;
-  document.getElementById('key-alias').classList.remove('opacity-50', 'cursor-not-allowed');
-  document.getElementById('key-provider').value = '';
-  document.getElementById('key-apikey').required = true;
-  document.getElementById('key-apikey').value = '';
-  document.getElementById('key-apikey').type = 'password';
-  document.getElementById('key-apikey').placeholder = 'sk-...';
-  document.getElementById('key-baseurl').value = '';
-  document.getElementById('key-models').value = '*';
-  document.getElementById('key-priority').value = '0';
-  document.getElementById('key-modal').open();
+  var modal = document.getElementById('key-modal');
+  var editAliasEl = document.getElementById('edit-alias');
+  var aliasEl = document.getElementById('key-alias');
+  var providerEl = document.getElementById('key-provider');
+  var apiKeyEl = document.getElementById('key-apikey');
+  var baseUrlEl = document.getElementById('key-baseurl');
+  var modelsEl = document.getElementById('key-models');
+  var priorityEl = document.getElementById('key-priority');
+  if (!modal || !editAliasEl || !aliasEl || !providerEl || !apiKeyEl || !baseUrlEl || !modelsEl || !priorityEl) return;
+  modal.setTitle('添加 Key');
+  editAliasEl.value = '';
+  aliasEl.value = '';
+  aliasEl.disabled = false;
+  aliasEl.classList.remove('opacity-50', 'cursor-not-allowed');
+  providerEl.value = '';
+  apiKeyEl.required = true;
+  apiKeyEl.value = '';
+  apiKeyEl.type = 'password';
+  apiKeyEl.placeholder = 'sk-...';
+  baseUrlEl.value = '';
+  modelsEl.value = '*';
+  priorityEl.value = '0';
+  modal.open();
 }
 
-function closeModal() { document.getElementById('key-modal').close(); }
+function closeModal() {
+  var modal = document.getElementById('key-modal');
+  if (modal) modal.close();
+}
 
 function setKeySubmitLoading(loading) {
   var btn = document.getElementById('key-submit-btn');
@@ -240,7 +252,8 @@ function setKeySubmitLoading(loading) {
 }
 
 function closeTestResultModal() {
-  document.getElementById('test-result-modal').close();
+  var modal = document.getElementById('test-result-modal');
+  if (modal) modal.close();
 }
 
 function showTestResultModal(alias, data) {
@@ -391,12 +404,13 @@ function refreshProviderModels() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
-  document.getElementById('key-provider').addEventListener('change', function() {
+  var providerEl = document.getElementById('key-provider');
+  if (providerEl) providerEl.addEventListener('change', function() {
     var provider = this.value;
     var baseEl = document.getElementById('key-baseurl');
     var agent = _agentsMap[provider];
     // 仅在用户未填写时自动带入默认地址，认证头模板由后端按供应商默认值决定。
-    if (agent) {
+    if (agent && baseEl) {
       if (!baseEl.value) baseEl.value = agent.default_base_url || '';
     }
   });
