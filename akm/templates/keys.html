@@ -25,11 +25,10 @@
       <p class="mt-1 text-[11px] text-gray-500">仅当填写 <code>*</code> 时，保存才会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
     </div>
     <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
-    <div data-modal-footer>
-      <span></span>
-      <div class="flex gap-2 w-full"><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button><button id="key-submit-btn" type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button></div>
-    </div>
   </form>
+  <div data-modal-footer>
+    <div class="flex gap-2 w-full"><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button><button id="key-submit-btn" type="submit" form="key-form" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button></div>
+  </div>
 </akm-modal>
 
 <akm-modal id="test-result-modal" title="Key 测试结果" max-width="max-w-2xl" body-class="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
