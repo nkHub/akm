@@ -6,21 +6,19 @@
   <section>
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">服务</h3>
     <div class="grid grid-cols-2 gap-4">
-      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">
+      <akm-settings-card>
         <div>
           <h4 class="text-sm font-semibold text-white">启动时打开管理台</h4>
           <p class="text-xs text-gray-500 mt-0.5">菜单栏应用启动后自动在浏览器打开管理页面</p>
         </div>
-        <label id="cfg-auto-open" class="flex items-center cursor-pointer select-none switch-off">
-          <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
-        </label>
-      </div>
-      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+        <akm-switch id="cfg-auto-open" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
+      <akm-settings-card align="start">
         <div>
           <h4 class="text-sm font-semibold text-white">服务端口</h4>
           <p class="text-xs text-gray-500 mt-0.5">修改后需在菜单栏「重启服务」生效</p>
         </div>
-        <div class="flex flex-col items-end shrink-0">
+        <div slot="actions" class="flex flex-col items-end shrink-0">
           <div class="flex items-center gap-3">
             <input id="server-port" type="number" value="8800" min="1024" max="65535"
                    class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
@@ -28,7 +26,7 @@
           </div>
           <p id="port-msg" class="text-xs text-emerald-400 mt-1 hidden"></p>
         </div>
-      </div>
+      </akm-settings-card>
     </div>
   </section>
 
@@ -36,12 +34,12 @@
   <section>
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">日志</h3>
     <div class="grid grid-cols-2 gap-4">
-      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+      <akm-settings-card align="start">
         <div>
           <h4 class="text-sm font-semibold text-white">日志保留天数</h4>
           <p class="text-xs text-gray-500 mt-0.5">超过天数的审计日志将被自动清理</p>
         </div>
-        <div class="flex flex-col items-end shrink-0">
+        <div slot="actions" class="flex flex-col items-end shrink-0">
           <div class="flex items-center gap-3">
             <input id="retention-days" type="number" value="30" min="1" max="365"
                    class="w-24 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
@@ -50,45 +48,39 @@
           </div>
           <p id="retention-msg" class="text-xs text-emerald-400 mt-1 hidden"></p>
         </div>
-      </div>
-      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-center justify-between">
+      </akm-settings-card>
+      <akm-settings-card>
         <div>
           <h4 class="text-sm font-semibold text-white">日志体积控制</h4>
           <p class="text-xs text-gray-500 mt-0.5">关闭后不存储请求/响应原文，token 统计不受影响</p>
         </div>
-        <div class="flex items-center gap-4 shrink-0">
-          <label id="cfg-log-req" class="flex items-center gap-2 cursor-pointer select-none switch-off">
-            <span class="text-xs text-gray-400">记录请求体</span>
-            <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
-          </label>
-          <label id="cfg-log-resp" class="flex items-center gap-2 cursor-pointer select-none switch-off">
-            <span class="text-xs text-gray-400">记录响应体</span>
-            <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
-          </label>
+        <div slot="actions" class="flex items-center gap-4 shrink-0">
+          <akm-switch id="cfg-log-req" label="记录请求体"></akm-switch>
+          <akm-switch id="cfg-log-resp" label="记录响应体"></akm-switch>
         </div>
-      </div>
-      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+      </akm-settings-card>
+      <akm-settings-card align="start">
         <div>
-          <div class="flex items-center gap-2 flex-wrap">
-            <h4 class="text-sm font-semibold text-white">清空日志</h4>
-            <span id="log-stats" class="text-xs text-gray-500">加载中...</span>
-          </div>
-          <p class="text-xs text-gray-400 mt-1"><span id="log-size" class="text-gray-500"></span></p>
+          <h4 class="text-sm font-semibold text-white">清空日志</h4>
+          <p class="text-xs text-gray-500 mt-0.5">
+            <span id="log-stats">加载中...</span>
+            <span id="log-size"></span>
+          </p>
         </div>
-        <div class="flex flex-col items-end shrink-0">
+        <div slot="actions" class="flex flex-col items-end shrink-0">
           <div class="flex items-center gap-2">
             <button onclick="cleanLogs()" class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空全部日志</button>
             <button onclick="cleanLogBodies()" class="bg-amber-600 hover:bg-amber-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">清空请求/响应体</button>
           </div>
           <p id="clean-msg" class="text-xs mt-1 hidden"></p>
         </div>
-      </div>
-      <div class="bg-surface-light border border-border rounded-lg p-4 flex items-start justify-between">
+      </akm-settings-card>
+      <akm-settings-card align="start">
         <div>
           <h4 class="text-sm font-semibold text-white">JSON 渲染阈值</h4>
           <p class="text-xs text-gray-500 mt-0.5">超过阈值时停止渲染并提示下载原始数据（单位：字符）</p>
         </div>
-        <div class="flex flex-col items-end shrink-0">
+        <div slot="actions" class="flex flex-col items-end shrink-0">
           <div class="flex items-center gap-3">
             <input id="json-max-len" type="number" value="600000" min="10000" step="10000"
                    class="w-32 bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
@@ -96,7 +88,7 @@
           </div>
           <p id="json-max-len-msg" class="text-xs mt-1 hidden"></p>
         </div>
-      </div>
+      </akm-settings-card>
     </div>
   </section>
 
@@ -109,44 +101,7 @@
           <h4 class="text-sm font-semibold text-white">供应商代理管理</h4>
           <p class="text-xs text-gray-500 mt-0.5">自定义供应商的默认 base_url、认证头和协议能力</p>
         </div>
-        <button onclick="toggleAgentForm()" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer font-medium">+ 添加</button>
-      </div>
-      <!-- 添加表单 -->
-      <div id="agent-form" class="hidden bg-surface border border-border rounded-lg p-4 mb-3">
-        <div class="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <label class="text-xs text-gray-400">名称</label>
-            <input id="agent-name" class="w-full bg-surface-light border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 mt-1" placeholder="dmxapi">
-          </div>
-          <div>
-            <label class="text-xs text-gray-400">Base URL</label>
-            <input id="agent-url" class="w-full bg-surface-light border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 mt-1" placeholder="https://www.dmxapi.cn/v1">
-          </div>
-          <div>
-            <label class="text-xs text-gray-400">认证头模板</label>
-            <input id="agent-auth" value="Bearer {api_key}" class="w-full bg-surface-light border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 mt-1">
-          </div>
-          <div>
-            <label class="text-xs text-gray-400">协议能力</label>
-            <div class="flex gap-3 mt-1.5">
-              <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-chat" checked> Chat</label>
-              <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-responses"> Responses</label>
-              <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-messages"> Messages</label>
-            </div>
-          </div>
-          <div>
-            <label class="text-xs text-gray-400">Messages 路径开关</label>
-            <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer mt-1.5">
-              <input type="checkbox" id="agent-messages-anthropic-path">
-              <span>将 `/v1/messages` 自动转到 `/anthropic/v1/messages`</span>
-            </label>
-          </div>
-        </div>
-        <div class="flex gap-2">
-          <button onclick="addAgent()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded cursor-pointer">保存</button>
-          <button onclick="toggleAgentForm()" class="text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 cursor-pointer">取消</button>
-        </div>
-        <p id="agent-msg" class="text-xs mt-2 hidden"></p>
+        <button onclick="openAgentModal()" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer font-medium">+ 添加</button>
       </div>
       <!-- Agent 列表 -->
       <div id="agent-list" class="text-xs text-gray-400">加载中...</div>
@@ -157,7 +112,12 @@
 </div>
 {% endblock %}
 
+{% block extra_html %}
+<agent-form-modal id="agent-form-modal"></agent-form-modal>
+{% endblock %}
+
 {% block extra_js %}
+<script src="/static/agent-form-modal.js"></script>
 <script>
 var _autoOpen = true;
 var _logReqBody = false;
@@ -223,22 +183,16 @@ function updateLogReqToggle() { _updateSwitch('cfg-log-req', _logReqBody); }
 function updateLogRespToggle() { _updateSwitch('cfg-log-resp', _logRespBody); }
 function _updateSwitch(id, on) {
   var el = document.getElementById(id);
-  var track = el.querySelector('.switch-track');
-  if (on) {
-    el.classList.add('switch-on'); el.classList.remove('switch-off');
-    track.classList.remove('bg-gray-600'); track.classList.add('bg-indigo-600');
-  } else {
-    el.classList.remove('switch-on'); el.classList.add('switch-off');
-    track.classList.add('bg-gray-600'); track.classList.remove('bg-indigo-600');
-  }
+  if (!el) return;
+  if (typeof el.setChecked === 'function') el.setChecked(!!on);
 }
 
 function loadLogStats() {
   fetch('/api/logs?limit=1&offset=0').then(function(r){return r.json()}).then(function(json){
-    document.getElementById('log-stats').textContent = '共 ' + json.total.toLocaleString() + ' 条审计日志';
+    document.getElementById('log-stats').textContent = '审计日志共 ' + json.total.toLocaleString() + ' 条';
   }).catch(function(){ document.getElementById('log-stats').textContent = '加载失败'; });
   fetch('/api/logs/size').then(function(r){return r.json()}).then(function(data){
-    document.getElementById('log-size').textContent = '缓存 ' + formatSize(data.cache_size || data.size || 0) + '：数据库 ' + formatSize(data.db_size || 0) + '，日志 ' + formatSize(data.log_size || 0);
+    document.getElementById('log-size').textContent = '，占用 ' + formatSizeCompact(data.log_size || 0);
   }).catch(function(){});
 }
 
@@ -247,6 +201,13 @@ function formatSize(bytes) {
   if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
   if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
   return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function formatSizeCompact(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' K';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' M';
+  return (bytes / 1073741824).toFixed(2) + ' G';
 }
 
 function saveRetention() {
@@ -369,53 +330,41 @@ function cleanLogBodies() {
 }
 
 // ── Agent 管理 ──
-function toggleAgentForm() {
-  var form = document.getElementById('agent-form');
-  form.classList.toggle('hidden');
-  if (!form.classList.contains('hidden')) {
-    document.getElementById('agent-name').value = '';
-    document.getElementById('agent-url').value = '';
-    document.getElementById('agent-auth').value = 'Bearer {api_key}';
-    document.getElementById('agent-chat').checked = true;
-    document.getElementById('agent-responses').checked = false;
-    document.getElementById('agent-messages').checked = false;
-    document.getElementById('agent-messages-anthropic-path').checked = false;
-    document.getElementById('agent-msg').classList.add('hidden');
-  }
+function openAgentModal() {
+  var modal = document.getElementById('agent-form-modal');
+  if (modal && typeof modal.open === 'function') modal.open();
 }
 
-function addAgent() {
-  var name = document.getElementById('agent-name').value.trim();
-  var url = document.getElementById('agent-url').value.trim();
-  var auth = document.getElementById('agent-auth').value.trim() || 'Bearer {api_key}';
-  var msg = document.getElementById('agent-msg');
-  if (!name) { msg.textContent = '名称不能为空'; msg.className = 'text-xs text-red-400 mt-2'; msg.classList.remove('hidden'); return; }
-  if (!url) { msg.textContent = 'Base URL 不能为空'; msg.className = 'text-xs text-red-400 mt-2'; msg.classList.remove('hidden'); return; }
+function setAgentModalMessage(msg, text, ok) {
+  msg.textContent = text;
+  msg.className = 'text-xs mt-3 ' + (ok ? 'text-emerald-400' : 'text-red-400');
+  msg.classList.remove('hidden');
+}
+
+function addAgent(payload, msg, onSuccess) {
+  if (!payload.name) {
+    setAgentModalMessage(msg, '名称不能为空', false);
+    return;
+  }
+  if (!payload.default_base_url) {
+    setAgentModalMessage(msg, 'Base URL 不能为空', false);
+    return;
+  }
   fetch('/api/agents', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      name: name, default_base_url: url, default_auth_header: auth,
-      supports_responses: document.getElementById('agent-responses').checked,
-      supports_chat: document.getElementById('agent-chat').checked,
-      supports_messages: document.getElementById('agent-messages').checked,
-      messages_use_anthropic_path: document.getElementById('agent-messages-anthropic-path').checked
-    })
+    body: JSON.stringify(payload)
   }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, body: d}; }); })
   .then(function(r){
     if (r.ok) {
-      msg.textContent = '已添加 ' + name;
-      msg.className = 'text-xs text-emerald-400 mt-2';
-      msg.classList.remove('hidden');
-      toggleAgentForm();
+      setAgentModalMessage(msg, '已添加 ' + payload.name, true);
+      if (typeof onSuccess === 'function') onSuccess();
       loadAgents();
     } else {
-      msg.textContent = '错误: ' + (r.body.detail || '');
-      msg.className = 'text-xs text-red-400 mt-2';
-      msg.classList.remove('hidden');
+      setAgentModalMessage(msg, '错误: ' + (r.body.detail || ''), false);
     }
   }).catch(function(){
-    msg.textContent = '网络错误'; msg.className = 'text-xs text-red-400 mt-2'; msg.classList.remove('hidden');
+    setAgentModalMessage(msg, '网络错误', false);
   });
 }
 

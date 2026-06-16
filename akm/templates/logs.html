@@ -24,18 +24,12 @@
     <span id="log-count" class="text-xs text-gray-500"></span>
   </div>
   <div class="flex items-center gap-3">
-    <label id="hide-empty-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off" onclick="toggleHideEmpty()">
-      <span class="text-xs text-gray-400">仅对话</span>
-      <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
-    </label>
+    <akm-switch id="hide-empty-switch" label="仅对话"></akm-switch>
     <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↓ 倒序</button>
     <button onclick="toggleStatusFilter()" id="btn-status" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">成功</button>
-    <button onclick="switchLogDays(1)" id="btn-log-1d" class="bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">1天</button>
-    <button onclick="switchLogDays(7)" id="btn-log-7d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">7天</button>
-    <button onclick="switchLogDays(30)" id="btn-log-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">30天</button>
-    <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none switch-off">
-      <span class="text-xs text-gray-400">自动刷新</span>
-      <div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>
+    <akm-range-tabs id="log-days"></akm-range-tabs>
+    <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none">
+      <akm-switch id="auto-refresh-switch" label="自动刷新"></akm-switch>
       <span class="text-xs text-gray-500">5s</span>
     </label>
     <button onclick="refreshLogs(1)" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">刷新</button>
@@ -60,23 +54,10 @@ try {
     orderButton.textContent = savedOrderAsc ? '↑ 正序' : '↓ 倒序';
   }
 
-  var hideEmptyToggle = document.getElementById('hide-empty-toggle');
-  if (hideEmptyToggle && savedLogFilters.hideEmpty === true) {
-    hideEmptyToggle.classList.add('switch-on');
-    hideEmptyToggle.classList.remove('switch-off');
-    hideEmptyToggle.querySelector('.switch-track').classList.replace('bg-gray-600', 'bg-indigo-600');
+  var hideEmptySwitch = document.getElementById('hide-empty-switch');
+  if (hideEmptySwitch && savedLogFilters.hideEmpty === true && typeof hideEmptySwitch.setChecked === 'function') {
+    hideEmptySwitch.setChecked(true);
   }
-
-  var savedDays = savedLogFilters.days;
-  [1, 7, 30].forEach(function(day) {
-    var dayButton = document.getElementById('btn-log-' + day + 'd');
-    if (!dayButton) return;
-    if (day === savedDays) {
-      dayButton.className = 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-    } else {
-      dayButton.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-    }
-  });
 
   if (savedLogFilters.alias) {
     var providerLabel = document.getElementById('provider-label');
@@ -87,8 +68,8 @@ try {
 } catch (e) {}
 </script>
 <div id="log-table-container" class="rounded-lg border border-border overflow-x-auto"></div>
-<div id="log-empty" class="hidden text-center py-16 text-gray-500">暂无日志</div>
-<div id="log-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></div>
+<akm-empty-state id="log-empty" class="hidden text-center py-16 text-gray-500" message="暂无日志"></akm-empty-state>
+<akm-pagination id="log-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></akm-pagination>
 {% endblock %}
 
 {% block extra_html %}
@@ -351,9 +332,10 @@ function loadFilters() {
 
 function toggleAutoRefresh() {
   autoRefresh = !autoRefresh;
-  var t = document.getElementById('auto-refresh-toggle');
-  if (autoRefresh) { t.classList.add('switch-on'); t.classList.remove('switch-off'); t.querySelector('.switch-track').classList.replace('bg-gray-600','bg-indigo-600'); refreshTimer = setInterval(function(){refreshLogs(_currentPage);}, 5000); }
-  else { t.classList.remove('switch-on'); t.classList.add('switch-off'); t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600'); clearInterval(refreshTimer); refreshTimer = null; }
+  var t = document.getElementById('auto-refresh-switch');
+  if (t && typeof t.setChecked === 'function') t.setChecked(autoRefresh);
+  if (autoRefresh) refreshTimer = setInterval(function(){refreshLogs(_currentPage);}, 5000);
+  else { clearInterval(refreshTimer); refreshTimer = null; }
 }
 
 async function refreshLogs(page) {
@@ -439,24 +421,13 @@ function renderLogTable() {
 function renderPagination() {
   var totalPages = Math.ceil(_totalLogs / _pageSize);
   var pg = document.getElementById('log-pagination');
-  if (totalPages <= 1) { pg.classList.add('hidden'); return; }
-  pg.classList.remove('hidden');
-
-  var html = '';
-  html += '<button onclick="refreshLogs(1)" class="px-2 py-1 text-xs rounded ' + (_currentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===1?'disabled':'') + '>首页</button>';
-  html += '<button onclick="refreshLogs(' + (_currentPage-1) + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===1?'disabled':'') + '>上一页</button>';
-
-  // 页码下拉
-  html += '<select onchange="refreshLogs(parseInt(this.value))" class="bg-surface-light border border-border rounded px-2 py-1 text-xs text-gray-300 cursor-pointer focus:outline-none focus:border-indigo-500">';
-  for (var p = 1; p <= totalPages; p++) {
-    html += '<option value="' + p + '"' + (p === _currentPage ? ' selected' : '') + '>第 ' + p + ' 页</option>';
-  }
-  html += '</select>';
-
-  html += '<button onclick="refreshLogs(' + (_currentPage+1) + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===totalPages?'disabled':'') + '>下一页</button>';
-  html += '<button onclick="refreshLogs(' + totalPages + ')" class="px-2 py-1 text-xs rounded ' + (_currentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_currentPage===totalPages?'disabled':'') + '>末页</button>';
-  html += '<span class="text-xs text-gray-500 ml-2">共 ' + totalPages + ' 页</span>';
-  pg.innerHTML = html;
+  if (!pg || typeof pg.renderPagination !== 'function') return;
+  pg.renderPagination({
+    totalPages: totalPages,
+    currentPage: _currentPage,
+    onSelectName: 'refreshLogs',
+    summary: '共 ' + totalPages + ' 页'
+  });
 }
 
 var _drawerLog = null;
@@ -469,7 +440,7 @@ function openDrawer(idx) {
   var chatEl = document.getElementById('drawer-chat');
   var reqEl = document.getElementById('drawer-request');
   var respEl = document.getElementById('drawer-response');
-  document.getElementById('drawer-title').textContent = '['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-');
+  document.getElementById('log-drawer').setTitle('['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-'));
   // 聊天视图改为延迟渲染：避免大请求体时阻塞主线程，导致 tab 切换看起来失效。
   currentLog.__chatRendered = false;
   currentLog.__reqRendered = false;
@@ -485,14 +456,10 @@ function openDrawer(idx) {
   if (typeof respEl.setLoading === 'function') respEl.setLoading(); else respEl.textContent = '加载中...';
   switchDrawerTab('chat');
   document.getElementById('drawer-content').scrollTop = 0;
-  document.getElementById('log-drawer-overlay').classList.remove('hidden');
-  var drawer = document.getElementById('log-drawer');
-  drawer.classList.remove('hidden');
-  drawer.style.transform = 'translateX(100%)';
   _drawerOpening = true;
+  document.getElementById('log-drawer').open();
   requestAnimationFrame(function(){
     requestAnimationFrame(function(){
-      drawer.style.transform = 'translateX(0)';
       _drawerOpening = false;
     });
   });
@@ -502,10 +469,8 @@ function openDrawer(idx) {
 function closeDrawer() {
   _drawerOpening = false;
   var drawer = document.getElementById('log-drawer');
-  drawer.style.transform = 'translateX(100%)';
+  drawer.close();
   setTimeout(function(){
-    drawer.classList.add('hidden');
-    document.getElementById('log-drawer-overlay').classList.add('hidden');
     var chatEl = document.getElementById('drawer-chat');
     if (chatEl && typeof chatEl.clear === 'function') chatEl.clear(); else if (chatEl) chatEl.innerHTML = '';
     var reqEl = document.getElementById('drawer-request');
@@ -831,28 +796,22 @@ function toggleOrder() {
 
 function toggleHideEmpty() {
   _hideEmpty = !_hideEmpty;
-  var t = document.getElementById('hide-empty-toggle');
-  if (_hideEmpty) {
-    t.classList.add('switch-on'); t.classList.remove('switch-off');
-    t.querySelector('.switch-track').classList.replace('bg-gray-600','bg-indigo-600');
-  } else {
-    t.classList.remove('switch-on'); t.classList.add('switch-off');
-    t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
-  }
+  var t = document.getElementById('hide-empty-switch');
+  if (t && typeof t.setChecked === 'function') t.setChecked(_hideEmpty);
   saveFilters();
   refreshLogs(1);
 }
 
 function switchLogDays(d) {
   _currentDays = _currentDays === d ? 0 : d;
-  [1,7,30].forEach(function(k){
-    var btn = document.getElementById('btn-log-'+k+'d');
-    if (k === _currentDays) {
-      btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-    } else {
-      btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-    }
-  });
+  var tabs = document.getElementById('log-days');
+  if (tabs && typeof tabs.setOptions === 'function') {
+    tabs.setOptions([
+      { value: 1, label: '1天' },
+      { value: 7, label: '7天' },
+      { value: 30, label: '30天' }
+    ], _currentDays, 'switchLogDays');
+  }
   saveFilters();
   refreshLogs(1);
 }
@@ -881,31 +840,26 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('btn-order').textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
 
   // 同步仅对话开关（无论 true/false 都显式同步，避免刷新后样式与状态不一致）
-  var t = document.getElementById('hide-empty-toggle');
-  if (_hideEmpty) {
-    t.classList.add('switch-on'); t.classList.remove('switch-off');
-    t.querySelector('.switch-track').classList.replace('bg-gray-600','bg-indigo-600');
-  } else {
-    t.classList.remove('switch-on'); t.classList.add('switch-off');
-    t.querySelector('.switch-track').classList.replace('bg-indigo-600','bg-gray-600');
-  }
+  var t = document.getElementById('hide-empty-switch');
+  if (t && typeof t.setChecked === 'function') t.setChecked(_hideEmpty);
 
   // 同步时间范围按钮
-  [1,7,30].forEach(function(k){
-    var btn = document.getElementById('btn-log-'+k+'d');
-    if (k === _currentDays) {
-      btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-    } else {
-      btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-    }
-  });
+  var logDays = document.getElementById('log-days');
+  if (logDays && typeof logDays.setOptions === 'function') {
+    logDays.setOptions([
+      { value: 1, label: '1天' },
+      { value: 7, label: '7天' },
+      { value: 30, label: '30天' }
+    ], _currentDays, 'switchLogDays');
+  }
 
   // 恢复 Key 筛选标签
   if (_currentAlias) {
     document.getElementById('provider-label').textContent = _currentAlias;
   }
 
-  document.getElementById('auto-refresh-toggle').addEventListener('click', toggleAutoRefresh);
+  document.getElementById('auto-refresh-switch').addEventListener('change', toggleAutoRefresh);
+  document.getElementById('hide-empty-switch').addEventListener('change', function(){ toggleHideEmpty(); });
   document.addEventListener('keydown', function(e) { if (e.key==='Escape') closeDrawer(); });
   // 调试：确认 JS 加载
   var cnt = document.getElementById('log-count');
