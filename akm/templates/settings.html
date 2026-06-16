@@ -113,11 +113,50 @@
 {% endblock %}
 
 {% block extra_html %}
-<agent-form-modal id="agent-form-modal"></agent-form-modal>
+<akm-modal id="agent-modal" title="添加供应商代理" max-width="max-w-2xl" body-class="px-5 py-4">
+  <div>
+    <p class="mt-1 text-xs text-gray-500">配置默认 base_url、认证头模板和协议能力，保存后 Key 管理页会自动可选。</p>
+    <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div>
+        <label class="text-xs text-gray-400">名称</label>
+        <input id="agent-name" class="mt-1 w-full rounded border border-border bg-surface-light px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500" placeholder="dmxapi">
+      </div>
+      <div>
+        <label class="text-xs text-gray-400">Base URL</label>
+        <input id="agent-url" class="mt-1 w-full rounded border border-border bg-surface-light px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500" placeholder="https://www.dmxapi.cn/v1">
+      </div>
+      <div>
+        <label class="text-xs text-gray-400">认证头模板</label>
+        <input id="agent-auth" class="mt-1 w-full rounded border border-border bg-surface-light px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+      </div>
+      <div>
+        <label class="text-xs text-gray-400">协议能力</label>
+        <div class="mt-1.5 flex flex-wrap gap-3">
+          <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-chat"> Chat</label>
+          <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-responses"> Responses</label>
+          <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer"><input type="checkbox" id="agent-messages"> Messages</label>
+        </div>
+      </div>
+      <div class="md:col-span-2">
+        <label class="text-xs text-gray-400">Messages 路径开关</label>
+        <label class="mt-1.5 flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+          <input type="checkbox" id="agent-messages-anthropic-path">
+          <span>将 `/v1/messages` 自动转到 `/anthropic/v1/messages`</span>
+        </label>
+      </div>
+    </div>
+    <p id="agent-msg" class="hidden text-xs mt-3"></p>
+  </div>
+  <div data-modal-footer>
+    <div class="flex w-full justify-end gap-2">
+      <button type="button" onclick="closeAgentModal()" class="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 cursor-pointer">取消</button>
+      <button type="button" onclick="submitAgentModal()" class="rounded bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-500 cursor-pointer">保存</button>
+    </div>
+  </div>
+</akm-modal>
 {% endblock %}
 
 {% block extra_js %}
-<script src="/static/agent-form-modal.js"></script>
 <script>
 var _autoOpen = true;
 var _logReqBody = false;
@@ -331,8 +370,28 @@ function cleanLogBodies() {
 
 // ── Agent 管理 ──
 function openAgentModal() {
-  var modal = document.getElementById('agent-form-modal');
-  if (modal && typeof modal.open === 'function') modal.open();
+  var modal = document.getElementById('agent-modal');
+  if (!modal || typeof modal.open !== 'function') return;
+  resetAgentModal();
+  modal.open();
+}
+
+function closeAgentModal() {
+  var modal = document.getElementById('agent-modal');
+  if (modal && typeof modal.close === 'function') modal.close();
+}
+
+function resetAgentModal() {
+  document.getElementById('agent-name').value = '';
+  document.getElementById('agent-url').value = '';
+  document.getElementById('agent-auth').value = 'Bearer {api_key}';
+  document.getElementById('agent-chat').checked = true;
+  document.getElementById('agent-responses').checked = false;
+  document.getElementById('agent-messages').checked = false;
+  document.getElementById('agent-messages-anthropic-path').checked = false;
+  var msg = document.getElementById('agent-msg');
+  msg.classList.add('hidden');
+  msg.textContent = '';
 }
 
 function setAgentModalMessage(msg, text, ok) {
@@ -365,6 +424,22 @@ function addAgent(payload, msg, onSuccess) {
     }
   }).catch(function(){
     setAgentModalMessage(msg, '网络错误', false);
+  });
+}
+
+function submitAgentModal() {
+  var msg = document.getElementById('agent-msg');
+  var payload = {
+    name: document.getElementById('agent-name').value.trim(),
+    default_base_url: document.getElementById('agent-url').value.trim(),
+    default_auth_header: document.getElementById('agent-auth').value.trim() || 'Bearer {api_key}',
+    supports_chat: document.getElementById('agent-chat').checked,
+    supports_responses: document.getElementById('agent-responses').checked,
+    supports_messages: document.getElementById('agent-messages').checked,
+    messages_use_anthropic_path: document.getElementById('agent-messages-anthropic-path').checked
+  };
+  addAgent(payload, msg, function(){
+    setTimeout(function(){ closeAgentModal(); }, 300);
   });
 }
 

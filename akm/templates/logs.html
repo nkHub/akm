@@ -68,7 +68,7 @@ try {
 } catch (e) {}
 </script>
 <div id="log-table-container" class="rounded-lg border border-border overflow-x-auto"></div>
-<akm-empty-state id="log-empty" class="hidden text-center py-16 text-gray-500" message="暂无日志"></akm-empty-state>
+<akm-empty-state id="log-empty" class="hidden min-h-[320px] flex items-center justify-center text-gray-500 text-center" message="暂无日志"></akm-empty-state>
 <akm-pagination id="log-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></akm-pagination>
 {% endblock %}
 
@@ -396,7 +396,7 @@ function renderLogTable() {
     var lat = log.latency_ms||0;
     var ds = lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms';
     var dc = lat>5000?'text-red-400':lat>2000?'text-yellow-400':'text-gray-400';
-    var hasBody = log.request_body||log.response_body;
+    var hasBody = log.request_body || log.response_body || log.error;
     var pt = log.prompt_tokens || 0;
     var ct = log.completion_tokens || 0;
     var cached = log.cached_tokens || 0;
@@ -657,7 +657,7 @@ function renderChatView(log) {
   // 渲染回复
   if (reply) {
     html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+marked.parse(String(reply))+'</div></div>';
-  } else if (!reasoning && (respBody || log.response_body)) {
+  } else if (!reasoning && (respBody || log.response_body || log.error)) {
     var errCode = log.status_code || 0;
     var errMsg = esc(log.error||'');
     html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';
