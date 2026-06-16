@@ -105,6 +105,14 @@ var _jsonViewerMaxTextLength = 600000;
 var _chatLazyThreshold = 600000;
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
+function renderMarkdownSafe(text) {
+  if (!text) return '<span class="text-gray-500">(空)</span>';
+  // 先转义原始 HTML，再交给 marked 做 Markdown 解析。
+  // 这样可以保留 Markdown 语法（标题、列表、代码块等），
+  // 但不会把上游返回的 <table>/<div>/<img> 之类原始 HTML 当成真实 DOM 渲染，
+  // 避免内容被意外扩展成复杂布局并把抽屉宽度撑爆。
+  return marked.parse(esc(String(text)));
+}
 
 function mapConvWarningLabel(code) {
   var m = {
@@ -239,7 +247,7 @@ function buildChatItems(log) {
   msgs.forEach(function(m){
     var content = m.content || '';
     if (Array.isArray(content)) content = content.map(function(c){ return c.text || c.content || ''; }).join('');
-    items.push({ role: (m.role === 'system' || m.role === 'developer') ? 'system' : (m.role === 'user' || m.role === 'human' ? 'user' : 'assistant'), html: content ? marked.parse(String(content)) : '<span class="text-gray-500">(空)</span>' });
+    items.push({ role: (m.role === 'system' || m.role === 'developer') ? 'system' : (m.role === 'user' || m.role === 'human' ? 'user' : 'assistant'), html: renderMarkdownSafe(content) });
   });
 
   var respBody = null;
@@ -285,7 +293,7 @@ function buildChatItems(log) {
     reasoning = sseReason;
   }
   if (reasoning) items.push({ role:'system', html: '<span class="text-amber-300">思考过程</span><br>' + esc(reasoning) });
-  if (reply) items.push({ role:'assistant', html: marked.parse(String(reply)) });
+  if (reply) items.push({ role:'assistant', html: renderMarkdownSafe(reply) });
 
   return items;
 }
@@ -574,7 +582,7 @@ function renderChatView(log) {
     if (Array.isArray(content)) {
       content = content.map(function(c){ return c.text || c.content || ''; }).join('');
     }
-    var mdHtml = content ? marked.parse(String(content)) : '<span class="text-gray-500">(空)</span>';
+    var mdHtml = renderMarkdownSafe(content);
     if (role === 'system' || role === 'developer') {
       html += '<div class="flex justify-center"><div class="bg-amber-950/30 border border-amber-800/50 rounded-lg px-3 py-2 text-xs text-amber-300/80 max-w-lg text-center italic chat-md">'+mdHtml+'</div></div>';
     } else if (role === 'user' || role === 'human') {
@@ -656,7 +664,7 @@ function renderChatView(log) {
 
   // 渲染回复
   if (reply) {
-    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+marked.parse(String(reply))+'</div></div>';
+    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+renderMarkdownSafe(reply)+'</div></div>';
   } else if (!reasoning && (respBody || log.response_body || log.error)) {
     var errCode = log.status_code || 0;
     var errMsg = esc(log.error||'');

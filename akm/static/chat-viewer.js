@@ -33,7 +33,7 @@
         '.row-assistant{display:flex;justify-content:flex-start;}.row-assistant .bubble{background:rgba(31,41,55,.65);border:1px solid rgba(99,102,241,.25);color:#d1d5db;}',
         '.row-system{display:flex;justify-content:center;}.row-system .bubble{max-width:90%;background:rgba(120,53,15,.25);border:1px solid rgba(180,83,9,.35);color:#fcd34d;font-style:italic;font-size:12px;text-align:center;}',
         '.meta{text-align:center;color:#6b7280;font-size:12px;padding-top:8px;}',
-        '.md p{margin:0 0 6px 0;}.md p:last-child{margin-bottom:0;}.md pre{white-space:pre-wrap;word-break:break-word;}',
+        '.md p{margin:0 0 6px 0;word-break:break-all;}.md p:last-child{margin-bottom:0;}.md pre{white-space:pre-wrap;word-break:break-all;}.md *{word-break:break-all;}',
         '</style>',
         '<div id="viewport" class="viewport"></div>'
       ].join('');

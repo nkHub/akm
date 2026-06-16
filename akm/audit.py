@@ -5,6 +5,18 @@ from datetime import datetime
 from akm.db import get_connection
 
 
+def _compact_audit_db(conn) -> None:
+    """压缩审计数据库并尽量截断 WAL/SHM。
+
+    项目默认启用 SQLite WAL 模式。仅执行 DELETE/UPDATE 即使配合 VACUUM，
+    `akm.db-wal` 也可能还保留较大体积，导致设置页里看到的“占用”在清空后仍明显偏大。
+    这里在数据变更后串行执行 VACUUM 与 wal checkpoint truncate，
+    让数据库主文件和 WAL 文件都尽量回收到接近真实占用。
+    """
+    conn.execute("VACUUM")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
 def write_log(data: dict) -> None:
     """写入一条审计日志（同步版本）"""
     _do_write(data)
@@ -277,8 +289,8 @@ def clean_logs(before: str) -> int:
     )
     conn.commit()
     count = cursor.rowcount
-    # 回收被删除数据占用的磁盘空间
-    conn.execute("VACUUM")
+    # 回收被删除数据占用的磁盘空间，并截断 WAL，避免设置页里看到的占用长期虚高。
+    _compact_audit_db(conn)
     conn.close()
     return count
 
@@ -298,8 +310,8 @@ def clean_log_bodies() -> int:
     )
     conn.commit()
     count = cursor.rowcount
-    # 释放清空文本后仍占用的磁盘空间
-    conn.execute("VACUUM")
+    # 释放清空文本后仍占用的磁盘空间，并截断 WAL，避免“清空 body 后占用不变”。
+    _compact_audit_db(conn)
     conn.close()
     return count
 
