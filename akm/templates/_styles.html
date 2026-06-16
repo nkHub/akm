@@ -23,6 +23,19 @@
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   .token-number { font-variant-numeric: tabular-nums; }
+  /* 避免自定义元素在升级前把原始子节点直接闪到页面上 */
+  akm-modal,
+  akm-drawer {
+    display: contents;
+  }
+  akm-settings-card {
+    display: block;
+  }
+  akm-modal:not([data-ready]),
+  akm-drawer:not([data-ready]),
+  akm-settings-card:not([data-ready]) {
+    display: none;
+  }
   /* 聊天 Markdown 渲染 */
   .chat-md p { margin: 0.25em 0; }
   .chat-md p:first-child { margin-top: 0; }

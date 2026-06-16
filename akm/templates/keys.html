@@ -27,7 +27,7 @@
     <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
     <div data-modal-footer>
       <span></span>
-      <div class="flex gap-2 ml-auto"><button id="key-submit-btn" type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
+      <div class="flex gap-2 w-full"><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button><button id="key-submit-btn" type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button></div>
     </div>
   </form>
 </akm-modal>
@@ -65,8 +65,7 @@
         <pre id="test-result-response" class="bg-surface border border-border rounded-lg p-3 text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-words min-h-[96px]">-</pre>
       </div>
   <div data-modal-footer>
-    <span></span>
-    <button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button>
+    <div class="flex w-full justify-end"><button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button></div>
   </div>
 </akm-modal>
 {% endblock %}

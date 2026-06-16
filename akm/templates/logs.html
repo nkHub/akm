@@ -73,14 +73,7 @@ try {
 {% endblock %}
 
 {% block extra_html %}
-<div id="log-drawer-overlay" class="hidden fixed inset-0 z-40 bg-black/50" onclick="closeDrawer()"></div>
-<div id="log-drawer" class="hidden fixed top-0 right-0 z-50 h-full w-full max-w-3xl bg-surface-light border-l border-border shadow-2xl flex flex-col" style="transform:translateX(100%); transition: transform 0.25s ease" style="transform:translateX(100%)">
-  <div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
-    <h3 id="drawer-title" class="text-sm font-semibold text-white"></h3>
-    <button onclick="closeDrawer()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
-      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-    </button>
-  </div>
+<akm-drawer id="log-drawer" max-width="max-w-3xl">
   <div class="flex border-b border-border shrink-0">
     <button onclick="switchDrawerTab('chat')" id="dtab-chat" class="flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50">对话视图</button>
     <button onclick="switchDrawerTab('request')" id="dtab-request" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">请求体</button>
@@ -91,7 +84,7 @@ try {
     <akm-json-viewer id="drawer-request" class="hidden block"></akm-json-viewer>
     <akm-json-viewer id="drawer-response" class="hidden block"></akm-json-viewer>
   </div>
-</div>
+</akm-drawer>
 {% endblock %}
 
 {% block extra_js %}
@@ -454,12 +447,17 @@ function openDrawer(idx) {
   // 抽屉打开时先清空滚动与内容，避免看到上一次日志残留。
   if (typeof reqEl.setLoading === 'function') reqEl.setLoading(); else reqEl.textContent = '加载中...';
   if (typeof respEl.setLoading === 'function') respEl.setLoading(); else respEl.textContent = '加载中...';
+  // 先切换到聊天 tab 的基础样式，但把真正的大块内容渲染延后到抽屉滑出后，
+  // 避免主线程先被 Markdown/JSON 处理占满，造成遮罩先出现、抽屉晚几秒才进场。
+  currentLog.__chatRendered = true;
   switchDrawerTab('chat');
+  currentLog.__chatRendered = false;
   document.getElementById('drawer-content').scrollTop = 0;
   _drawerOpening = true;
   document.getElementById('log-drawer').open();
   requestAnimationFrame(function(){
     requestAnimationFrame(function(){
+      renderChatAsync(currentLog, false);
       _drawerOpening = false;
     });
   });
