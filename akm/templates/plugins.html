@@ -611,20 +611,25 @@ function renderPluginConfigModalBody(plugin) {
 
 function openPluginConfigModal(name) {
   var plugin = (_plugins || []).find(function(item){ return item.name === name; });
-  if (!plugin) return;
+  var modal = document.getElementById('plugin-config-modal');
+  var body = document.getElementById('plugin-config-modal-body');
+  var msg = document.getElementById('plugin-config-modal-msg');
+  if (!plugin || !modal || !body || !msg) return;
   _activePluginConfigModal = name;
-  document.getElementById('plugin-config-modal').setTitle(plugin.name + ' 配置');
-  document.getElementById('plugin-config-modal').setSubtitle(plugin.description || '调整插件运行参数，保存后立即写入当前配置。');
-  document.getElementById('plugin-config-modal-body').innerHTML = renderPluginConfigModalBody(plugin);
-  document.getElementById('plugin-config-modal-msg').textContent = '';
-  document.getElementById('plugin-config-modal-msg').className = 'text-xs text-gray-500';
-  document.getElementById('plugin-config-modal').open();
+  modal.setTitle(plugin.name + ' 配置');
+  modal.setSubtitle(plugin.description || '调整插件运行参数，保存后立即写入当前配置。');
+  body.innerHTML = renderPluginConfigModalBody(plugin);
+  msg.textContent = '';
+  msg.className = 'text-xs text-gray-500';
+  modal.open();
 }
 
 function closePluginConfigModal() {
+  var modal = document.getElementById('plugin-config-modal');
+  var body = document.getElementById('plugin-config-modal-body');
   _activePluginConfigModal = '';
-  document.getElementById('plugin-config-modal').close();
-  document.getElementById('plugin-config-modal-body').innerHTML = '';
+  if (modal) modal.close();
+  if (body) body.innerHTML = '';
 }
 
 function saveActivePluginConfig() {
@@ -636,11 +641,13 @@ function loadPlugins() {
     _plugins = data;
     fetchPluginConfigs(data).then(function(merged){
       _plugins = sortPluginsForDisplay(merged);
-      document.getElementById('plugin-count').textContent = merged.length;
+      var countEl = document.getElementById('plugin-count');
+      if (countEl) countEl.textContent = merged.length;
       renderPluginList(_plugins);
     });
   }).catch(function(e){
-    document.getElementById('plugin-list').innerHTML = '<div class="text-xs text-red-400">加载失败: ' + esc(e.message) + '</div>';
+    var listEl = document.getElementById('plugin-list');
+    if (listEl) listEl.innerHTML = '<div class="text-xs text-red-400">加载失败: ' + esc(e.message) + '</div>';
   });
 }
 

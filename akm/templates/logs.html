@@ -840,10 +840,12 @@ document.addEventListener('DOMContentLoaded', function() {
   loadFilters();
 
   // 同步状态筛选按钮
-  document.getElementById('btn-status').textContent = _statusFilter === 'success' ? '成功' : '失败';
+  var statusBtn = document.getElementById('btn-status');
+  if (statusBtn) statusBtn.textContent = _statusFilter === 'success' ? '成功' : '失败';
 
   // 同步排序按钮
-  document.getElementById('btn-order').textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
+  var orderBtn = document.getElementById('btn-order');
+  if (orderBtn) orderBtn.textContent = _orderAsc ? '↑ 正序' : '↓ 倒序';
 
   // 同步仅对话开关（无论 true/false 都显式同步，避免刷新后样式与状态不一致）
   var t = document.getElementById('hide-empty-switch');
@@ -861,11 +863,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 恢复 Key 筛选标签
   if (_currentAlias) {
-    document.getElementById('provider-label').textContent = _currentAlias;
+    var providerLabel = document.getElementById('provider-label');
+    if (providerLabel) providerLabel.textContent = _currentAlias;
   }
 
-  document.getElementById('auto-refresh-switch').addEventListener('change', toggleAutoRefresh);
-  document.getElementById('hide-empty-switch').addEventListener('change', function(){ toggleHideEmpty(); });
+  var autoRefreshSwitch = document.getElementById('auto-refresh-switch');
+  var hideEmptySwitch = document.getElementById('hide-empty-switch');
+  if (autoRefreshSwitch) autoRefreshSwitch.addEventListener('change', toggleAutoRefresh);
+  if (hideEmptySwitch) hideEmptySwitch.addEventListener('change', function(){ toggleHideEmpty(); });
   document.addEventListener('keydown', function(e) { if (e.key==='Escape') closeDrawer(); });
   // 调试：确认 JS 加载
   var cnt = document.getElementById('log-count');
