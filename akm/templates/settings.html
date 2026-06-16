@@ -64,7 +64,6 @@
           <h4 class="text-sm font-semibold text-white">清空日志</h4>
           <p class="text-xs text-gray-500 mt-0.5">
             <span id="log-stats">加载中...</span>
-            <span id="log-size"></span>
           </p>
         </div>
         <div slot="actions" class="flex flex-col items-end shrink-0">
@@ -228,11 +227,14 @@ function _updateSwitch(id, on) {
 
 function loadLogStats() {
   fetch('/api/logs?limit=1&offset=0').then(function(r){return r.json()}).then(function(json){
-    document.getElementById('log-stats').textContent = '审计日志共 ' + json.total.toLocaleString() + ' 条';
+    var statsEl = document.getElementById('log-stats');
+    var total = json.total || 0;
+    fetch('/api/logs/size').then(function(r){return r.json()}).then(function(data){
+      statsEl.textContent = '数据库 ' + formatSizeCompact(data.db_size || 0) + '，审计日志 ' + total.toLocaleString() + '条';
+    }).catch(function(){
+      statsEl.textContent = '审计日志 ' + total.toLocaleString() + '条';
+    });
   }).catch(function(){ document.getElementById('log-stats').textContent = '加载失败'; });
-  fetch('/api/logs/size').then(function(r){return r.json()}).then(function(data){
-    document.getElementById('log-size').textContent = '，占用 ' + formatSizeCompact(data.log_size || 0);
-  }).catch(function(){});
 }
 
 function formatSize(bytes) {
