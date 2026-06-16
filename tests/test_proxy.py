@@ -615,6 +615,38 @@ async def test_forward_embeddings_request_does_not_inject_stream(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_rerank_request_does_not_inject_stream_or_conversion(monkeypatch):
+    """rerank 转发应参考 embeddings 走普通 JSON 透传，不注入 stream，也不走协议转换。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "rerank", "provider": "openai", "api_key": "sk-rerank",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            raise AssertionError("rerank 不应尝试获取协议转换器")
+
+        async def run_hook(self, hook, **kwargs):
+            return kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"results":[{"index":0,"relevance_score":0.8}],"model":"rerank-v1"}')])
+
+    result = await forward_request(
+        body={"model": "rerank-v1", "query": "hello", "documents": ["a"]},
+        client=mock_client,
+        api_path="rerank",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    assert send_calls[0]["stream"] is False
+    payload = send_calls[0]["req"].content.decode("utf-8")
+    assert '"stream":' not in payload
+
+
+@pytest.mark.asyncio
 async def test_forward_image_generations_request_does_not_inject_stream_or_conversion(monkeypatch):
     """图片生成转发应按普通 JSON 透传，不注入 stream，也不走协议转换。"""
 

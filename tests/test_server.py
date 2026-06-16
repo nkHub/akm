@@ -118,6 +118,38 @@ async def test_embeddings_forward_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rerank_forward_success(monkeypatch):
+    """/v1/rerank 应参考 embeddings 走普通 JSON 透传链路。"""
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
+        assert api_path == "rerank"
+        return {
+            "status_code": 200,
+            "body": '{"results":[{"index":1,"relevance_score":0.98},{"index":0,"relevance_score":0.42}],"model":"rerank-v1","usage":{"total_tokens":12}}',
+            "key_alias": "rerank-key",
+            "provider": "openai",
+            "model": "rerank-v1",
+            "error": "",
+            "latency_ms": 70,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/rerank",
+            json={"model": "rerank-v1", "query": "hello", "documents": ["a", "b"]},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["results"][0]["index"] == 1
+    assert data["model"] == "rerank-v1"
+
+
+@pytest.mark.asyncio
 async def test_image_generations_forward_success(monkeypatch):
     """/v1/images/generations 应复用通用转发链路返回普通 JSON。"""
 
