@@ -335,14 +335,14 @@ if (!customElements.get('akm-drawer')) {
       var bodyNodes = this.collectNodes(false).bodyNodes;
       this.innerHTML = '' +
         '<div data-overlay class="hidden fixed inset-0 z-40 bg-black/50"></div>' +
-        '<div data-panel class="hidden fixed top-0 right-0 z-50 h-full w-full ' + width + ' bg-surface-light border-l border-border shadow-2xl flex flex-col" style="transform:translateX(100%); transition: transform 0.25s ease">' +
+        '<div data-panel class="hidden fixed top-0 right-0 z-50 h-full w-full ' + width + ' bg-surface-light border-l border-border shadow-2xl flex flex-col overflow-hidden" style="transform:translateX(100%); transition: transform 0.25s ease">' +
           '<div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">' +
             '<h3 data-title class="text-sm font-semibold text-white"></h3>' +
             '<button type="button" data-close class="text-gray-400 hover:text-white transition-colors cursor-pointer">' +
               '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>' +
             '</button>' +
           '</div>' +
-          '<div data-body class="flex flex-col flex-1 min-h-0"></div>' +
+          '<div data-body class="flex flex-col flex-1 min-h-0 min-w-0 overflow-auto"></div>' +
         '</div>';
       this.overlay = this.querySelector('[data-overlay]');
       this.panel = this.querySelector('[data-panel]');
