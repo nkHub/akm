@@ -3,28 +3,9 @@
 <!-- 时间范围切换 -->
 <div class="flex items-center gap-2 mb-4">
   <span class="text-xs text-gray-500 mr-1">时间范围</span>
-  <button onclick="switchDays(1)" id="btn-1d" class="bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer">1d</button>
-  <button onclick="switchDays(7)" id="btn-7d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">7d</button>
-  <button onclick="switchDays(30)" id="btn-30d" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer">30d</button>
+  <akm-range-tabs id="dashboard-days"></akm-range-tabs>
   <span id="stat-cached-at" class="text-xs text-gray-600 ml-auto">—</span>
 </div>
-<script>
-try {
-  var savedDashboardDays = parseInt(localStorage.getItem('akm_dashboard_days') || '1', 10);
-  if (savedDashboardDays === 1 || savedDashboardDays === 7 || savedDashboardDays === 30) {
-    window.__akmDashboardInitialDays = savedDashboardDays;
-    [1, 7, 30].forEach(function(day) {
-      var btn = document.getElementById('btn-' + day + 'd');
-      if (!btn) return;
-      if (day === savedDashboardDays) {
-        btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer';
-      } else {
-        btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer';
-      }
-    });
-  }
-} catch (e) {}
-</script>
 <!-- 统计概览 -->
 <!-- 骨架屏 -->
 <div id="dashboard-skeleton">
@@ -132,14 +113,14 @@ function saveDaysFilter() {
 function switchDays(d) {
   _currentDays = d;
   saveDaysFilter();
-  ['1d','7d','30d'].forEach(function(k){
-    var btn = document.getElementById('btn-'+k);
-    if (parseInt(k) === d) {
-      btn.className = 'bg-indigo-600 text-white text-xs px-3 py-1 rounded transition-colors cursor-pointer';
-    } else {
-      btn.className = 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1 rounded transition-colors cursor-pointer';
-    }
-  });
+  var tabs = document.getElementById('dashboard-days');
+  if (tabs && typeof tabs.setOptions === 'function') {
+    tabs.setOptions([
+      { value: 1, label: '1d' },
+      { value: 7, label: '7d' },
+      { value: 30, label: '30d' }
+    ], _currentDays, 'switchDays');
+  }
   loadDashboard();
 }
 
@@ -187,6 +168,14 @@ async function loadDashboard() {
 
 document.addEventListener('DOMContentLoaded', function() {
   loadDaysFilter();
+  var tabs = document.getElementById('dashboard-days');
+  if (tabs && typeof tabs.setOptions === 'function') {
+    tabs.setOptions([
+      { value: 1, label: '1d' },
+      { value: 7, label: '7d' },
+      { value: 30, label: '30d' }
+    ], _currentDays, 'switchDays');
+  }
   switchDays(_currentDays);
 
   // 当管理台页面曾切到后台、随后再次回到前台时，重新拉取一次统计数据。

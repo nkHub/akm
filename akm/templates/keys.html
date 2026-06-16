@@ -6,51 +6,33 @@
   <button onclick="openAddModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">添加 Key</button>
 </div>
 <div id="key-list-container"></div>
-<div id="key-empty" class="hidden text-center py-16 text-gray-500">暂无 Key</div>
-<div id="key-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></div>
+<akm-empty-state id="key-empty" class="hidden text-center py-16 text-gray-500" message="暂无 Key"></akm-empty-state>
+<akm-pagination id="key-pagination" class="flex items-center justify-center gap-2 mt-4 hidden"></akm-pagination>
 <div id="copy-toast" class="hidden fixed right-6 bottom-6 z-50 rounded-lg border border-indigo-500/30 bg-surface-light px-3 py-2 text-xs text-indigo-200 shadow-lg">模型名已复制</div>
 {% endblock %}
 
 {% block extra_html %}
-<div id="key-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 fade-in">
-  <div class="absolute inset-0 bg-black/60" onclick="closeModal()"></div>
-  <div class="relative bg-surface-light border border-border rounded-lg w-full max-w-lg shadow-2xl" style="animation: slideUp 0.2s ease">
-    <div class="flex items-center justify-between px-4 py-3 border-b border-border">
-      <h3 id="modal-title" class="text-sm font-semibold text-white">添加 Key</h3>
-      <button onclick="closeModal()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-      </button>
+<akm-modal id="key-modal" title="添加 Key" max-width="max-w-lg">
+  <form id="key-form" onsubmit="submitForm(event)" class="space-y-3">
+    <input type="hidden" id="edit-alias" value="">
+    <div><label class="block text-xs text-gray-400 mb-1">别名 *</label><input id="key-alias" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="例如: my-key"></div>
+    <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">加载中...</option></select></div>
+    <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" required type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
+    <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
+    <div>
+      <label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示自动同步提供商模型列表）</label>
+      <input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+      <p class="mt-1 text-[11px] text-gray-500">仅当填写 <code>*</code> 时，保存才会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
     </div>
-    <form id="key-form" onsubmit="submitForm(event)" class="p-4 space-y-3">
-      <input type="hidden" id="edit-alias" value="">
-      <div><label class="block text-xs text-gray-400 mb-1">别名 *</label><input id="key-alias" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="例如: my-key"></div>
-      <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">加载中...</option></select></div>
-      <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" required type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
-      <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
-      <div>
-        <label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示自动同步提供商模型列表）</label>
-        <input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-        <p class="mt-1 text-[11px] text-gray-500">仅当填写 <code>*</code> 时，保存才会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
-      </div>
-      <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
-      <div class="flex gap-2 pt-2"><button id="key-submit-btn" type="submit" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
-    </form>
-  </div>
-</div>
+    <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
+    <div data-modal-footer>
+      <span></span>
+      <div class="flex gap-2 ml-auto"><button id="key-submit-btn" type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button><button type="button" onclick="closeModal()" class="bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button></div>
+    </div>
+  </form>
+</akm-modal>
 
-<div id="test-result-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 fade-in">
-  <div class="absolute inset-0 bg-black/60" onclick="closeTestResultModal()"></div>
-  <div class="relative bg-surface-light border border-border rounded-lg w-full max-w-2xl shadow-2xl" style="animation: slideUp 0.2s ease">
-    <div class="flex items-center justify-between px-4 py-3 border-b border-border">
-      <div class="min-w-0">
-        <h3 class="text-sm font-semibold text-white">Key 测试结果</h3>
-        <p id="test-result-subtitle" class="text-xs text-gray-500 mt-1"></p>
-      </div>
-      <button onclick="closeTestResultModal()" class="text-gray-400 hover:text-white transition-colors cursor-pointer">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div class="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
+<akm-modal id="test-result-modal" title="Key 测试结果" max-width="max-w-2xl" body-class="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
       <div id="test-result-banner" class="rounded-lg border px-3 py-2 text-sm"></div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
         <div class="bg-surface border border-border rounded-lg p-3">
@@ -82,12 +64,11 @@
         <div class="text-xs text-gray-500 mb-1">响应体</div>
         <pre id="test-result-response" class="bg-surface border border-border rounded-lg p-3 text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-words min-h-[96px]">-</pre>
       </div>
-      <div class="flex justify-end pt-1">
-        <button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button>
-      </div>
-    </div>
+  <div data-modal-footer>
+    <span></span>
+    <button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button>
   </div>
-</div>
+</akm-modal>
 {% endblock %}
 
 {% block extra_js %}
@@ -223,25 +204,17 @@ function goToKeyPage(page) {
 function renderKeyPagination() {
   var pg = document.getElementById('key-pagination');
   var totalPages = Math.ceil(_keysData.length / _keyPageSize);
-  if (totalPages <= 1) { pg.classList.add('hidden'); return; }
-  pg.classList.remove('hidden');
-
-  var html = '';
-  html += '<button onclick="goToKeyPage(1)" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===1?'disabled':'') + '>首页</button>';
-  html += '<button onclick="goToKeyPage(' + (_keyCurrentPage-1) + ')" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===1?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===1?'disabled':'') + '>上一页</button>';
-  html += '<select onchange="goToKeyPage(parseInt(this.value))" class="bg-surface-light border border-border rounded px-2 py-1 text-xs text-gray-300 cursor-pointer focus:outline-none focus:border-indigo-500">';
-  for (var p = 1; p <= totalPages; p++) {
-    html += '<option value="' + p + '"' + (p === _keyCurrentPage ? ' selected' : '') + '>第 ' + p + ' 页</option>';
-  }
-  html += '</select>';
-  html += '<button onclick="goToKeyPage(' + (_keyCurrentPage+1) + ')" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===totalPages?'disabled':'') + '>下一页</button>';
-  html += '<button onclick="goToKeyPage(' + totalPages + ')" class="px-2 py-1 text-xs rounded ' + (_keyCurrentPage===totalPages?'text-gray-600 cursor-default':'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer') + '" ' + (_keyCurrentPage===totalPages?'disabled':'') + '>末页</button>';
-  html += '<span class="text-xs text-gray-500 ml-2">共 ' + _keysData.length + ' 条 / ' + totalPages + ' 页</span>';
-  pg.innerHTML = html;
+  if (!pg || typeof pg.renderPagination !== 'function') return;
+  pg.renderPagination({
+    totalPages: totalPages,
+    currentPage: _keyCurrentPage,
+    onSelectName: 'goToKeyPage',
+    summary: '共 ' + _keysData.length + ' 条 / ' + totalPages + ' 页'
+  });
 }
 
 function openAddModal() {
-  document.getElementById('modal-title').textContent = '添加 Key';
+  document.getElementById('key-modal').setTitle('添加 Key');
   document.getElementById('edit-alias').value = '';
   document.getElementById('key-alias').value = '';
   document.getElementById('key-alias').disabled = false;
@@ -254,10 +227,10 @@ function openAddModal() {
   document.getElementById('key-baseurl').value = '';
   document.getElementById('key-models').value = '*';
   document.getElementById('key-priority').value = '0';
-  document.getElementById('key-modal').classList.remove('hidden');
+  document.getElementById('key-modal').open();
 }
 
-function closeModal() { document.getElementById('key-modal').classList.add('hidden'); }
+function closeModal() { document.getElementById('key-modal').close(); }
 
 function setKeySubmitLoading(loading) {
   var btn = document.getElementById('key-submit-btn');
@@ -269,12 +242,12 @@ function setKeySubmitLoading(loading) {
 }
 
 function closeTestResultModal() {
-  document.getElementById('test-result-modal').classList.add('hidden');
+  document.getElementById('test-result-modal').close();
 }
 
 function showTestResultModal(alias, data) {
   var ok = !!data.ok;
-  document.getElementById('test-result-subtitle').textContent = alias ? ('别名: ' + alias) : '';
+  document.getElementById('test-result-modal').setSubtitle(alias ? ('别名: ' + alias) : '');
   document.getElementById('test-result-api-path').textContent = data.api_path || '-';
   document.getElementById('test-result-model').textContent = data.model || '-';
   document.getElementById('test-result-url').textContent = data.url || '-';
@@ -292,14 +265,14 @@ function showTestResultModal(alias, data) {
     banner.textContent = '连接失败，请根据状态码、错误信息和响应体继续排查。';
   }
 
-  document.getElementById('test-result-modal').classList.remove('hidden');
+  document.getElementById('test-result-modal').open();
 }
 
 function editKey(alias) {
   fetch('/api/keys').then(function(r){ return r.json(); }).then(function(json){
     var key = (json.data||[]).find(function(k){ return k.alias===alias; });
     if (!key) return;
-    document.getElementById('modal-title').textContent = '编辑 Key - '+alias;
+    document.getElementById('key-modal').setTitle('编辑 Key - ' + alias);
     document.getElementById('edit-alias').value = alias;
     document.getElementById('key-alias').value = alias;
     document.getElementById('key-alias').disabled = true;
@@ -311,7 +284,7 @@ function editKey(alias) {
     document.getElementById('key-baseurl').value = key.base_url||'';
     document.getElementById('key-models').value = key.models||'*';
     document.getElementById('key-priority').value = key.priority||0;
-    document.getElementById('key-modal').classList.remove('hidden');
+    document.getElementById('key-modal').open();
   }).catch(function(e){ console.error(e); });
 }
 
