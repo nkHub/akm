@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "has_menu": true,
   "category": "app",
+  "builtin": true,
+  "default_enabled": false,
   "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
   "menu": {
     "title": "知识库",

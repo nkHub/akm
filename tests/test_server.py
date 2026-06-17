@@ -1522,8 +1522,8 @@ async def test_plugin_config_api_roundtrip():
 
 
 @pytest.mark.asyncio
-async def test_markdown_kb_project_plugin_loads_and_exposes_menu(monkeypatch):
-    """项目级 markdown_kb 插件应能被加载，并出现在启用菜单中。"""
+async def test_markdown_kb_builtin_plugin_loads_disabled_by_default(monkeypatch):
+    """内置 markdown_kb 插件应能被加载，且首次默认关闭。"""
     from fastapi import FastAPI
     from akm.plugins.plugin_manager import PluginManager
 
@@ -1539,18 +1539,13 @@ async def test_markdown_kb_project_plugin_loads_and_exposes_menu(monkeypatch):
 
     plugin = pm.plugins.get("markdown_kb")
     assert plugin is not None
-    assert plugin.enabled is True
+    assert plugin.builtin is True
+    assert plugin.enabled is False
     assert plugin.meta.category == "app"
 
     menu = pm.get_menu()
     kb_menu = next((item for item in menu if item["name"] == "markdown_kb"), None)
-    assert kb_menu is not None
-    assert kb_menu["route"] == "/plugins/markdown_kb"
-
-    status = plugin.get_status()
-    assert status["ready"] is True
-    assert status["doc_count"] == 0
-    assert status["data_dir"].endswith(".akm/markdown_kb")
+    assert kb_menu is None
 
 
 @pytest.mark.asyncio
@@ -1569,6 +1564,9 @@ async def test_markdown_kb_status_and_upload_api(monkeypatch):
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
+    pm.plugins["markdown_kb"].enabled = True
+    pm.plugins["markdown_kb"].config = pm.get_config("markdown_kb") or {}
+    await pm.plugins["markdown_kb"].on_load()
 
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -1621,6 +1619,9 @@ async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
+    pm.plugins["markdown_kb"].enabled = True
+    pm.plugins["markdown_kb"].config = pm.get_config("markdown_kb") or {}
+    await pm.plugins["markdown_kb"].on_load()
     fastapi_app.state.plugin_manager = pm
 
     transport = ASGITransport(app=app)
@@ -1717,6 +1718,9 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
     pm = PluginManager()
     await pm.load_all(fastapi_app)
     plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
     plugin.config["reranker_model"] = "rerank-v1"
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
