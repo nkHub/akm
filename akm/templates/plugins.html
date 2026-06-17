@@ -606,7 +606,80 @@ function renderPluginConfigModalBody(plugin) {
   if (!plugin) return '';
   if (plugin.name === 'model_matcher') return renderModelMatcherStructuredEditor(plugin);
   if (plugin.name === 'error_handler') return renderErrorHandlerStructuredEditor(plugin);
-  return '';
+  return renderPluginSettingsFormBody(plugin);
+}
+
+var _modalModelOptionsCache = [];
+
+function buildModelSelectOptions(models, selectedValue, allowEmpty, emptyLabel) {
+  var html = '';
+  var value = String(selectedValue || '').trim();
+  if (allowEmpty) html += '<option value="">' + esc(emptyLabel || '未设置') + '</option>';
+  if (value && models.indexOf(value) < 0) {
+    html += '<option value="' + esc(value) + '">' + esc(value) + '（当前配置）</option>';
+  }
+  models.forEach(function(model){
+    html += '<option value="' + esc(model) + '">' + esc(model) + '</option>';
+  });
+  return html;
+}
+
+function fetchAvailableModelsForModal() {
+  return fetch('/v1/models')
+    .then(function(r){ return r.ok ? r.json() : {data: []}; })
+    .then(function(data){
+      _modalModelOptionsCache = (data.data || []).map(function(item){ return String(item.id || '').trim(); }).filter(Boolean);
+      return _modalModelOptionsCache;
+    })
+    .catch(function(){
+      _modalModelOptionsCache = [];
+      return _modalModelOptionsCache;
+    });
+}
+
+function hydrateDynamicSelectOptions(plugin) {
+  if (!plugin) return;
+  var models = _modalModelOptionsCache || [];
+  document.querySelectorAll('#plugin-config-modal-body [data-plugin="' + plugin.name + '"][data-options-source="/v1/models"]').forEach(function(node){
+    var currentValue = String(node.getAttribute('data-current-value') || '').trim();
+    var allowEmpty = node.getAttribute('data-allow-empty') === '1';
+    var emptyLabel = node.getAttribute('data-empty-label') || '未设置';
+    node.innerHTML = buildModelSelectOptions(models, currentValue, allowEmpty, emptyLabel);
+    node.value = currentValue;
+  });
+}
+
+function renderPluginSettingsFormBody(p) {
+  if (!p || !p.settings || !p.settings.length) {
+    return '<div class="text-xs text-gray-500">该插件当前没有可配置项。</div>';
+  }
+  var html = '<div class="space-y-3">';
+  p.settings.forEach(function(def){
+    var value = getSettingValue(def, p.config ? p.config[def.key] : undefined);
+    html += '<label class="block mb-2">';
+    if (def.type === 'boolean') {
+      html += '<div class="flex items-center justify-between gap-3">';
+      html += '<span class="text-xs text-gray-300 leading-5">' + esc(def.label || def.key) + '</span>';
+      html += '<input data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="boolean" type="checkbox" class="shrink-0" ' + (value ? 'checked' : '') + '>';
+      html += '</div>';
+    } else if (def.type === 'select') {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<select data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="string" data-options-source="' + esc(def.options_source || '') + '" data-allow-empty="' + (def.allow_empty_option ? '1' : '0') + '" data-empty-label="' + esc(def.empty_option_label || '') + '" data-current-value="' + esc(value || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500"></select>';
+    } else if (def.type === 'text') {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<textarea data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="text" rows="3" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(value || '') + '</textarea>';
+    } else if (def.type === 'number') {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<input data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="number" type="number" value="' + esc(value) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+    } else {
+      html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+      html += '<input data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="string" type="text" value="' + esc(value || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+    }
+    if (def.description) html += '<div class="text-[11px] text-gray-500 mt-1">' + esc(def.description) + '</div>';
+    html += '</label>';
+  });
+  html += '</div>';
+  return html;
 }
 
 function openPluginConfigModal(name) {
@@ -621,6 +694,13 @@ function openPluginConfigModal(name) {
   body.innerHTML = renderPluginConfigModalBody(plugin);
   msg.textContent = '';
   msg.className = 'text-xs text-gray-500';
+  if (plugin.settings && plugin.settings.some(function(def){ return def && def.options_source === '/v1/models'; })) {
+    fetchAvailableModelsForModal().then(function(){
+      hydrateDynamicSelectOptions(plugin);
+      modal.open();
+    });
+    return;
+  }
   modal.open();
 }
 
@@ -761,10 +841,10 @@ function renderPluginList(plugins) {
       html += sourceBadge + requiredBadge;
       html += '<span class="text-xs text-gray-500">v' + esc(p.version) + '</span>';
       html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
-      if (p.name === 'model_matcher' || p.name === 'error_handler') {
+      if (p.settings && p.settings.length) {
         html += '<button type="button" onclick="openPluginConfigModal(\'' + esc(p.name) + '\')" class="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:text-indigo-200 hover:border-indigo-400 cursor-pointer">配置</button>';
-        html += '<span id="plugin-config-msg-' + esc(p.name) + '" class="text-xs text-gray-500"></span>';
       }
+      html += '<span id="plugin-config-msg-' + esc(p.name) + '" class="text-xs text-gray-500"></span>';
       html += convertsInfo;
       html += '</div>';
       if (p.description) {
@@ -781,7 +861,7 @@ function renderPluginList(plugins) {
       }
       html += '</div>';
 
-      html += '<div class="flex items-center self-center gap-3 shrink-0 ml-4">';
+      html += '<div class="flex flex-col items-end justify-center gap-2 shrink-0 ml-4">';
       if (p.required) {
         html += '<span class="text-xs text-gray-500">系统必需</span>';
       } else {
@@ -795,11 +875,6 @@ function renderPluginList(plugins) {
       html += '</div>';
 
       html += '</div>';
-      if (p.settings && p.settings.length && p.name !== 'model_matcher' && p.name !== 'error_handler') {
-        html += '<div class="mt-3 pt-3 border-t border-border">';
-        html += renderPluginSettings(p);
-        html += '</div>';
-      }
       html += '</div>';
     });
   }

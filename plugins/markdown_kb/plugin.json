@@ -1,0 +1,62 @@
+{
+  "name": "markdown_kb",
+  "version": "0.1.0",
+  "has_menu": true,
+  "category": "app",
+  "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
+  "menu": {
+    "title": "知识库",
+    "icon": "book",
+    "order": 60
+  },
+  "routes_prefix": "/api/markdown-kb",
+  "settings": [
+    {
+      "key": "embedding_model",
+      "label": "嵌入模型",
+      "type": "select",
+      "default": "text-embedding-3-small",
+      "description": "必填。重建索引和检索时调用 AKM /v1/embeddings 使用的模型名。",
+      "options_source": "/v1/models"
+    },
+    {
+      "key": "reranker_model",
+      "label": "重排模型",
+      "type": "select",
+      "default": "",
+      "description": "可选。为空时只使用向量召回；非空时会在向量召回结果上追加一次 AKM /v1/rerank 重排。",
+      "options_source": "/v1/models",
+      "allow_empty_option": true,
+      "empty_option_label": "不启用 rerank"
+    },
+    {
+      "key": "chat_model",
+      "label": "问答模型",
+      "type": "select",
+      "default": "gpt-4o-mini",
+      "description": "执行 ask 问答时调用 AKM /v1/chat/completions 使用的模型名。",
+      "options_source": "/v1/models"
+    },
+    {
+      "key": "chunk_size",
+      "label": "切片大小",
+      "type": "number",
+      "default": 800,
+      "description": "单个 chunk 的目标最大字符数。"
+    },
+    {
+      "key": "chunk_overlap",
+      "label": "切片重叠",
+      "type": "number",
+      "default": 120,
+      "description": "相邻 chunk 之间保留的重叠字符数。"
+    },
+    {
+      "key": "top_k",
+      "label": "默认召回数",
+      "type": "number",
+      "default": 4,
+      "description": "query / ask 在未显式传 top_k 时默认召回的片段数量。"
+    }
+  ]
+}

@@ -145,6 +145,8 @@ akm-menubar
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉和设置卡片等基础壳组件，供后续页面复用。
 
+仓库当前还提供一个项目级 `app` 插件样例 `plugins/markdown_kb/`。它会在启动时被自动加载到插件系统中，并提供一个最小但真实可用的 Markdown 知识库页面：支持查看状态、上传/列出/删除 `.md` 文件、按“标题优先”策略切片、全量重建索引、单文件重建、增量同步预览/执行、清空索引，以及通过本地 AKM `/v1/embeddings`、可选 `/v1/rerank` 与 `/v1/chat/completions` 完成 `query / ask` 闭环。这里的 `embedding_model` 是必填项，`reranker_model` 是可选项。页面侧已经接通状态总览、文件管理、索引重建、单文件重建、同步预览/执行、检索测试、问答测试、清空索引和健康状态展示；并且 health / sync 结果已经从摘要数字升级成具体文件列表展示。知识库页面内部不再自带配置入口，配置统一回到插件列表页弹窗。`embedding_model / reranker_model / chat_model` 在插件配置弹窗里已经改成当前 `/v1/models` 驱动的模型列表下拉，而且这套动态下拉能力是通用 schema 能力，不再把 `markdown_kb` 的模型选择逻辑写死在公共模板里。插件列表页中的所有带配置项插件也统一通过弹窗修改配置，不再渲染旧的内联展开配置；`data_dir / index_backend` 这类当前阶段无实际价值的伪配置也已经从 schema 中收掉。当前版本已经按“方案一”把默认索引持久化切到插件私有 `~/.akm/markdown_kb/index_store/kb.db`：保留 `docs/` 原文目录、忽略旧 `index.json`、通过全量 `rebuild` 重新写入 SQLite，并支持只清空索引或连同原始文档一起删除。当前默认实现是 `SqliteKbIndexStore`，向量仍先存 SQLite；检索阶段会优先使用内存预加载 + NumPy 矩阵化相似度计算，并补上 query embedding 缓存与 query 结果缓存；若当前环境尚未安装 `numpy` 则自动回退到 Python 循环计算。插件页面本身会先进入 AKM 后台宿主页，因此左侧菜单和顶部栏会保留；真正的插件原始 HTML 则通过 `/plugins/<name>/raw` 供宿主页 iframe 加载。
+
 ## 配置
 
 配置文件位于 `~/.akm/config.json`，可通过 Web 设置页面修改：
