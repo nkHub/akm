@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import shutil
+from pathlib import Path
 from httpx import ASGITransport, AsyncClient
 
 from akm.audit import write_log, list_logs
@@ -1517,6 +1519,304 @@ async def test_plugin_config_api_roundtrip():
     assert get_resp.json()["enabled"] is True
     assert post_resp.status_code == 200
     assert app.state.plugin_manager.saved == ("protocol_converter", {"enabled": False})
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_project_plugin_loads_and_exposes_menu(monkeypatch):
+    """项目级 markdown_kb 插件应能被加载，并出现在启用菜单中。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-load")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    pm = PluginManager()
+    fastapi_app = FastAPI()
+    await pm.load_all(fastapi_app)
+
+    plugin = pm.plugins.get("markdown_kb")
+    assert plugin is not None
+    assert plugin.enabled is True
+    assert plugin.meta.category == "app"
+
+    menu = pm.get_menu()
+    kb_menu = next((item for item in menu if item["name"] == "markdown_kb"), None)
+    assert kb_menu is not None
+    assert kb_menu["route"] == "/plugins/markdown_kb"
+
+    status = plugin.get_status()
+    assert status["ready"] is True
+    assert status["doc_count"] == 0
+    assert status["data_dir"].endswith(".akm/markdown_kb")
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_status_and_upload_api(monkeypatch):
+    """markdown_kb 插件最小 API 应支持状态查询与 .md 上传保存。"""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-api")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        status_before = await client.get("/api/markdown-kb/status")
+        upload_resp = await client.post(
+            "/api/markdown-kb/files/upload",
+            files={"file": ("notes.md", b"# Title\n\nhello plugin\n", "text/markdown")},
+        )
+        status_after = await client.get("/api/markdown-kb/status")
+        bad_upload = await client.post(
+            "/api/markdown-kb/files/upload",
+            files={"file": ("notes.txt", b"not markdown\n", "text/plain")},
+        )
+
+    assert status_before.status_code == 200
+    assert status_before.json()["doc_count"] == 0
+
+    assert upload_resp.status_code == 200
+    upload_data = upload_resp.json()
+    assert upload_data["ok"] is True
+    assert upload_data["file_name"] == "notes.md"
+    assert upload_data["size_bytes"] > 0
+
+    assert status_after.status_code == 200
+    status_after_data = status_after.json()
+    assert status_after_data["doc_count"] == 1
+    assert status_after_data["docs_dir"].endswith(".akm/markdown_kb/docs")
+
+    saved_file = test_home / ".akm" / "markdown_kb" / "docs" / "notes.md"
+    assert saved_file.exists()
+    assert saved_file.read_text("utf-8") == "# Title\n\nhello plugin\n"
+
+    assert bad_upload.status_code == 400
+    assert bad_upload.json()["detail"] == "仅支持 .md 文件"
+
+
+@pytest.mark.asyncio
+async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
+    """插件页面应通过后台宿主页加载，保留左侧菜单而不是直接返回裸 HTML。"""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-plugin-host-layout")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    fastapi_app.state.plugin_manager = pm
+
+    transport = ASGITransport(app=app)
+    app.state.plugin_manager = pm
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        host_resp = await client.get("/plugins/markdown_kb")
+        raw_resp = await client.get("/plugins/markdown_kb/raw")
+
+    assert host_resp.status_code == 200
+    assert "AKM 后台" in host_resp.text
+    assert 'iframe' in host_resp.text
+    assert '/plugins/markdown_kb/raw' in host_resp.text
+
+    assert raw_resp.status_code == 200
+    assert "Markdown 知识库" in raw_resp.text
+    assert "AKM 后台" not in raw_resp.text
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
+    """markdown_kb 应支持重建、检索、问答和删除后同步清理索引。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-flow")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+
+            def vectorize(text):
+                raw = str(text or "")
+                length = float(len(raw))
+                markdown_score = 10.0 if "Markdown" in raw else 0.0
+                release_score = 8.0 if "Release" in raw else 0.0
+                plugin_score = 6.0 if "plugin" in raw.lower() else 0.0
+                return [length, markdown_score, release_score, plugin_score]
+
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "index": idx, "embedding": vectorize(item)}
+                        for idx, item in enumerate(inputs)
+                    ],
+                    "model": json.get("model", "text-embedding-3-small"),
+                },
+            )
+
+        if url.endswith("/v1/rerank"):
+            docs = json.get("documents", [])
+            results = []
+            for idx, text in enumerate(docs):
+                raw = str(text or "")
+                score = 0.2
+                if "Rebuild" in raw or "rebuild" in raw:
+                    score = 0.99
+                elif "Markdown" in raw:
+                    score = 0.75
+                results.append({"index": idx, "relevance_score": score})
+            results.sort(key=lambda item: item["relevance_score"], reverse=True)
+            return httpx.Response(
+                200,
+                json={
+                    "results": results,
+                    "model": json.get("model", "rerank-v1"),
+                },
+            )
+
+        if url.endswith("/v1/chat/completions"):
+            messages = json.get("messages", [])
+            prompt = messages[-1]["content"] if messages else ""
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": f"基于资料的回答: {prompt[:48]}"}}
+                    ]
+                },
+            )
+
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.config["reranker_model"] = "rerank-v1"
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "guide.md").write_text(
+        "# Markdown Guide\n\nMarkdown plugin keeps docs local.\n\n## Query\n\nUse query to inspect chunks.\n\n## Ask\n\nUse ask to answer with citations.\n",
+        "utf-8",
+    )
+    (docs_dir / "release.md").write_text(
+        "# Release Notes\n\nRelease plugin updates carefully.\n\n## Rebuild\n\nRun rebuild after changing docs.\n",
+        "utf-8",
+    )
+
+    rebuild = await plugin.rebuild_index()
+    assert rebuild["ok"] is True
+    assert rebuild["doc_count"] == 2
+    assert rebuild["chunk_count"] >= 2
+
+    preview_before = plugin.preview_sync()
+    assert preview_before["summary"]["unchanged"] == 2
+    assert preview_before["summary"]["added"] == 0
+
+    files = plugin.list_files()
+    assert files["count"] == 2
+    assert all(item["indexed"] for item in files["files"])
+
+    status = plugin.get_status()
+    assert status["chunk_count"] == rebuild["chunk_count"]
+    assert status["last_rebuilt_at"] is not None
+    assert status["health"]["in_sync"] is True
+
+    query_result = await plugin.query({"question": "How does Markdown plugin query work?", "top_k": 2})
+    assert query_result["ok"] is True
+    assert len(query_result["hits"]) == 2
+    assert query_result["reranker_model"] == "rerank-v1"
+    assert query_result["hits"][0]["file_name"] in {"guide.md", "release.md"}
+    assert all("chunk_text" in item for item in query_result["hits"])
+    assert query_result["hits"][0]["rerank_score"] is not None
+
+    ask_result = await plugin.ask({"question": "When should I run rebuild?", "top_k": 2})
+    assert ask_result["ok"] is True
+    assert ask_result["answer"].startswith("基于资料的回答:")
+    assert len(ask_result["citations"]) == 2
+    assert ask_result["reranker_model"] == "rerank-v1"
+
+    (docs_dir / "guide.md").write_text(
+        "# Markdown Guide\n\nMarkdown plugin keeps docs local.\n\n## Query\n\nUse query to inspect chunks.\n\n## Ask\n\nUse ask to answer with citations.\n\n## Sync\n\nSync only changed files.\n",
+        "utf-8",
+    )
+
+    single_rebuild = await plugin.rebuild_file("guide.md")
+    assert single_rebuild["ok"] is True
+    assert single_rebuild["file_name"] == "guide.md"
+
+    preview_after_change = plugin.preview_sync()
+    assert preview_after_change["summary"]["unchanged"] == 2
+    assert preview_after_change["summary"]["changed"] == 0
+
+    (docs_dir / "new.md").write_text("# New File\n\nFresh notes.\n", "utf-8")
+    preview_added = plugin.preview_sync()
+    assert preview_added["summary"]["added"] == 1
+    health_after_add = plugin.health_check()
+    assert health_after_add["in_sync"] is False
+    assert health_after_add["summary"]["added"] == 1
+
+    sync_result = await plugin.sync_index(apply_changes=True)
+    assert sync_result["applied"] is True
+    assert "new.md" in (sync_result["applied_changes"]["added"] or [])
+
+    files_after_sync = plugin.list_files()
+    file_names = {item["file_name"] for item in files_after_sync["files"]}
+    assert "new.md" in file_names
+    assert plugin.health_check()["in_sync"] is True
+
+    delete_result = plugin.delete_file("release.md")
+    assert delete_result["ok"] is True
+    assert delete_result["removed_chunks"] >= 1
+
+    files_after_delete = plugin.list_files()
+    assert files_after_delete["count"] == 2
+    assert {item["file_name"] for item in files_after_delete["files"]} == {"guide.md", "new.md"}
+
+    query_after_delete = await plugin.query({"question": "Markdown plugin", "top_k": 5})
+    assert all(item["file_name"] in {"guide.md", "new.md"} for item in query_after_delete["hits"])
+
+    clear_result = plugin.clear_index(delete_docs=False)
+    assert clear_result["ok"] is True
+    assert clear_result["removed_docs"] == 0
+
+    status_after_clear = plugin.get_status()
+    assert status_after_clear["chunk_count"] == 0
+    assert status_after_clear["doc_count"] == 2
+
+    clear_with_docs = plugin.clear_index(delete_docs=True)
+    assert clear_with_docs["ok"] is True
+    assert clear_with_docs["removed_docs"] == 2
+
+    final_status = plugin.get_status()
+    assert final_status["doc_count"] == 0
+    assert final_status["chunk_count"] == 0
 
 
 @pytest.mark.asyncio

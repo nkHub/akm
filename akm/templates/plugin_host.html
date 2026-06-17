@@ -1,0 +1,15 @@
+{% extends "_layout.html" %}
+
+{% block content %}
+<div class="h-full min-h-0">
+  <div class="h-full min-h-[72vh] rounded-lg border border-border overflow-hidden bg-surface-light shadow-sm">
+    <iframe
+      src="{{ plugin_iframe_src }}"
+      title="{{ plugin_title }}"
+      class="w-full h-full border-0 bg-transparent"
+      loading="eager"
+      referrerpolicy="same-origin"
+    ></iframe>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,981 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Markdown 知识库</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1020;
+      --panel: #121931;
+      --panel-soft: #192241;
+      --panel-soft-2: #0f1730;
+      --text: #e5ecff;
+      --muted: #9ba7c7;
+      --line: #2b3558;
+      --accent: #6d7cff;
+      --accent-soft: rgba(109, 124, 255, 0.16);
+      --danger: #ff7b7b;
+      --success: #58d39b;
+      --warning: #f6c76f;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #0b1020 0%, #0f1530 100%);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 18px 14px 36px;
+    }
+
+    .section-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 13px;
+      min-width: 0;
+    }
+
+    .span-12 { grid-column: span 12; }
+    .span-8 { grid-column: span 8; }
+    .span-6 { grid-column: span 6; }
+    .span-4 { grid-column: span 4; }
+
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      line-height: 1.35;
+    }
+
+    .card p.lead {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .metric {
+      padding: 8px 9px;
+      border-radius: 10px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      word-break: break-all;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .button {
+      appearance: none;
+      border: 0;
+      border-radius: 10px;
+      padding: 7px 10px;
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      font-size: 12px;
+      line-height: 1.2;
+      cursor: pointer;
+    }
+
+    .button.secondary {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--text);
+    }
+
+    .button.danger {
+      background: transparent;
+      border: 1px solid rgba(255, 123, 123, 0.45);
+      color: #ffc0c0;
+    }
+
+    .button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .status {
+      min-height: 20px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+      line-height: 1.5;
+    }
+
+    .status.ok { color: var(--success); }
+    .status.error { color: var(--danger); }
+    .status.warn { color: var(--warning); }
+
+    input[type="file"] { display: none; }
+
+    input[type="text"],
+    input[type="number"],
+    textarea {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel-soft-2);
+      color: var(--text);
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 13px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 104px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+
+    input:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    .field {
+      margin-bottom: 10px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .toolbar-spacer {
+      flex: 1 1 auto;
+    }
+
+    .files-list,
+    .result-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .health-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .file-item,
+    .result-item {
+      border: 1px solid var(--line);
+      background: var(--panel-soft);
+      border-radius: 12px;
+      padding: 11px;
+    }
+
+    .file-head,
+    .result-head {
+      display: flex;
+      gap: 8px;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 6px;
+    }
+
+    .file-title,
+    .result-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .tag-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .tag {
+      border-radius: 999px;
+      padding: 3px 6px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .tag.ok {
+      color: var(--success);
+      border-color: rgba(88, 211, 155, 0.35);
+    }
+
+    .tag.warn {
+      color: var(--warning);
+      border-color: rgba(246, 199, 111, 0.35);
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .health-group {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      padding: 10px;
+    }
+
+    .health-group-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .health-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .health-item {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .answer-box {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel-soft);
+      padding: 10px;
+      line-height: 1.55;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .small {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .select {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel-soft-2);
+      color: var(--text);
+      padding: 8px 10px;
+      font: inherit;
+      font-size: 13px;
+      outline: none;
+    }
+
+    .select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+
+    @media (max-width: 980px) {
+      .span-8, .span-6, .span-4 { grid-column: span 12; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 640px) {
+      .page { padding: 14px 10px 28px; }
+      .metrics { grid-template-columns: 1fr; }
+      .file-head, .result-head { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="section-grid">
+      <div class="card span-12">
+        <h2>状态总览</h2>
+        <p class="lead">这里展示知识库当前规模和最近一次重建状态，便于先确认数据目录、文档数量和索引是否正常。</p>
+        <div class="metrics">
+          <div class="metric">
+            <div class="metric-label">文档数量</div>
+            <div class="metric-value" id="doc-count">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Chunk 数量</div>
+            <div class="metric-value" id="chunk-count">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">最近文件更新时间</div>
+            <div class="metric-value small" id="last-updated">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">最近重建时间</div>
+            <div class="metric-value small" id="last-rebuilt">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">索引状态</div>
+            <div class="metric-value small" id="index-health">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">向量计算</div>
+            <div class="metric-value small" id="vector-backend">-</div>
+          </div>
+        </div>
+        <div class="meta" id="status-meta">加载中...</div>
+        <div id="health-details" class="health-list"></div>
+        <div class="actions">
+          <button class="button secondary" id="refresh-btn" type="button">刷新状态</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-grid">
+      <div class="card span-4">
+        <h2>上传文档</h2>
+        <p class="lead">上传单个 `.md` 文件到本地知识库目录。上传只负责保存文件，不会自动重建索引。</p>
+        <div class="actions">
+          <label class="button" for="upload-input">选择 .md 文件</label>
+          <input id="upload-input" type="file" accept=".md,text/markdown">
+          <button class="button secondary" id="upload-btn" type="button" disabled>开始上传</button>
+        </div>
+        <div class="meta" id="selected-file">尚未选择文件</div>
+        <div class="status" id="upload-status"></div>
+      </div>
+
+      <div class="card span-8">
+        <h2>文件管理</h2>
+        <p class="lead">这里显示知识库当前已保存的 Markdown 文件、是否已进入索引，以及每个文件对应的 chunk 数量。</p>
+        <div class="toolbar">
+          <button class="button secondary" id="refresh-files-btn" type="button">刷新文件列表</button>
+          <button class="button secondary" id="preview-sync-btn" type="button">预览同步</button>
+          <button class="button" id="apply-sync-btn" type="button">执行同步</button>
+        </div>
+        <div id="files-list" class="files-list">
+          <div class="empty">正在加载文件列表...</div>
+        </div>
+        <div class="status" id="sync-status"></div>
+        <div id="sync-details" class="health-list"></div>
+      </div>
+    </section>
+
+    <section class="section-grid">
+      <div class="card span-4">
+        <h2>索引管理</h2>
+        <p class="lead">当前采用“标题优先切片 + 本地向量索引”的最小闭环。文档有变更后，需要执行重建才能让 `query / ask` 使用到新内容。</p>
+        <div class="actions">
+          <button class="button" id="rebuild-btn" type="button">全量重建索引</button>
+          <button class="button danger" id="clear-index-btn" type="button">清空索引</button>
+        </div>
+        <div class="status" id="rebuild-status"></div>
+      </div>
+
+      <div class="card span-8">
+        <h2>检索测试</h2>
+        <p class="lead">这里直接调用 `POST /api/markdown-kb/query`。`embedding_model` 是必填项；`reranker_model` 是可选项。建议先看命中的 chunk 是否合理，再决定是否继续调优切片规则或 `top_k`。</p>
+        <div class="field">
+          <label for="query-question">问题</label>
+          <textarea id="query-question" placeholder="例如：这个插件的重建索引应该在什么时候执行？"></textarea>
+        </div>
+        <div class="section-grid" style="margin-bottom:0;">
+          <div class="field span-6">
+            <label for="query-top-k">top_k</label>
+            <input id="query-top-k" type="number" min="1" value="4">
+          </div>
+          <div class="field span-6">
+            <label for="query-embedding-model">Embedding 模型</label>
+            <select id="query-embedding-model" class="select"></select>
+          </div>
+          <div class="field span-6">
+            <label for="query-reranker-model">Reranker 模型</label>
+            <select id="query-reranker-model" class="select"></select>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="button" id="query-btn" type="button">执行检索</button>
+        </div>
+        <div class="status" id="query-status"></div>
+        <div id="query-results" class="result-list"></div>
+      </div>
+    </section>
+
+    <section class="section-grid">
+      <div class="card span-12">
+        <h2>问答测试</h2>
+        <p class="lead">这里直接调用 `POST /api/markdown-kb/ask`，会先检索知识库片段，再通过 AKM 本地代理生成最终答案，并把引用结果一起返回。`embedding_model` 是必填项，`reranker_model` 是可选项；默认显示 `gpt-4o-mini`，是因为插件配置里的 `chat_model` 默认值就是它；现在这里已经支持直接从当前模型列表中选择覆盖。</p>
+        <div class="field">
+          <label for="ask-question">问题</label>
+          <textarea id="ask-question" placeholder="例如：这个知识库后期动态维护最推荐先做什么？"></textarea>
+        </div>
+        <div class="section-grid" style="margin-bottom:0;">
+          <div class="field span-4">
+            <label for="ask-top-k">top_k</label>
+            <input id="ask-top-k" type="number" min="1" value="4">
+          </div>
+          <div class="field span-4">
+            <label for="ask-embedding-model">Embedding 模型</label>
+            <select id="ask-embedding-model" class="select"></select>
+          </div>
+          <div class="field span-4">
+            <label for="ask-chat-model">问答模型</label>
+            <select id="ask-chat-model" class="select"></select>
+          </div>
+          <div class="field span-4">
+            <label for="ask-reranker-model">Reranker 模型</label>
+            <select id="ask-reranker-model" class="select"></select>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="button" id="ask-btn" type="button">执行问答</button>
+        </div>
+        <div class="status" id="ask-status"></div>
+        <div id="ask-answer-wrap" style="display:none; margin-top: 14px;">
+          <div class="small" style="margin-bottom:8px;">最终回答</div>
+          <div id="ask-answer" class="answer-box"></div>
+        </div>
+        <div id="ask-citations" class="result-list" style="margin-top: 14px;"></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const docCount = document.getElementById('doc-count');
+    const chunkCount = document.getElementById('chunk-count');
+    const lastUpdated = document.getElementById('last-updated');
+    const lastRebuilt = document.getElementById('last-rebuilt');
+    const indexHealth = document.getElementById('index-health');
+    const vectorBackend = document.getElementById('vector-backend');
+    const statusMeta = document.getElementById('status-meta');
+    const healthDetails = document.getElementById('health-details');
+    const refreshBtn = document.getElementById('refresh-btn');
+
+    const uploadInput = document.getElementById('upload-input');
+    const uploadBtn = document.getElementById('upload-btn');
+    const selectedFile = document.getElementById('selected-file');
+    const uploadStatus = document.getElementById('upload-status');
+
+    const refreshFilesBtn = document.getElementById('refresh-files-btn');
+    const previewSyncBtn = document.getElementById('preview-sync-btn');
+    const applySyncBtn = document.getElementById('apply-sync-btn');
+    const filesList = document.getElementById('files-list');
+    const syncStatus = document.getElementById('sync-status');
+    const syncDetails = document.getElementById('sync-details');
+
+    const rebuildBtn = document.getElementById('rebuild-btn');
+    const clearIndexBtn = document.getElementById('clear-index-btn');
+    const rebuildStatus = document.getElementById('rebuild-status');
+
+    const queryQuestion = document.getElementById('query-question');
+    const queryTopK = document.getElementById('query-top-k');
+    const queryEmbeddingModel = document.getElementById('query-embedding-model');
+    const queryRerankerModel = document.getElementById('query-reranker-model');
+    const queryBtn = document.getElementById('query-btn');
+    const queryStatus = document.getElementById('query-status');
+    const queryResults = document.getElementById('query-results');
+
+    const askQuestion = document.getElementById('ask-question');
+    const askTopK = document.getElementById('ask-top-k');
+    const askEmbeddingModel = document.getElementById('ask-embedding-model');
+    const askChatModel = document.getElementById('ask-chat-model');
+    const askRerankerModel = document.getElementById('ask-reranker-model');
+    const askBtn = document.getElementById('ask-btn');
+    const askStatus = document.getElementById('ask-status');
+    const askAnswerWrap = document.getElementById('ask-answer-wrap');
+    const askAnswer = document.getElementById('ask-answer');
+    const askCitations = document.getElementById('ask-citations');
+
+    let currentFile = null;
+    let availableModels = [];
+    let pluginConfig = null;
+
+    function renderHealthList(container, title, items) {
+      const safeItems = (items || []).map(function (item) {
+        return escapeHtml(item.file_name || item.file_path || item.doc_id || '-');
+      });
+      if (!safeItems.length) return '';
+      return '' +
+        '<div class="health-group">' +
+          '<div class="health-group-title">' + escapeHtml(title) + '</div>' +
+          '<div class="health-items">' + safeItems.map(function (value) {
+            return '<span class="health-item">' + value + '</span>';
+          }).join('') + '</div>' +
+        '</div>';
+    }
+
+    function renderHealthDetails(health) {
+      const html = [
+        renderHealthList(healthDetails, '新增文件', health.added || []),
+        renderHealthList(healthDetails, '变化文件', health.changed || []),
+        renderHealthList(healthDetails, '待删除索引', health.removed || [])
+      ].filter(Boolean).join('');
+      if (!html) {
+        healthDetails.innerHTML = '<div class="empty">当前 docs 目录和索引已同步，没有需要处理的文件。</div>';
+        return;
+      }
+      healthDetails.innerHTML = html;
+    }
+
+    function renderSyncDetails(data, appliedMode) {
+      const html = [];
+      if (appliedMode) {
+        const applied = data.applied_changes || {};
+        html.push(renderHealthList(syncDetails, '本次新增', (applied.added || []).map(function (name) { return { file_name: name }; })));
+        html.push(renderHealthList(syncDetails, '本次更新', (applied.changed || []).map(function (name) { return { file_name: name }; })));
+        html.push(renderHealthList(syncDetails, '本次删除', (applied.removed || []).map(function (name) { return { file_name: name }; })));
+      } else {
+        html.push(renderHealthList(syncDetails, '预览新增', data.added || []));
+        html.push(renderHealthList(syncDetails, '预览变化', data.changed || []));
+        html.push(renderHealthList(syncDetails, '预览删除', data.removed || []));
+      }
+      const content = html.filter(Boolean).join('');
+      syncDetails.innerHTML = content || '<div class="empty">当前没有待同步的文件变化。</div>';
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function setStatus(node, message, type) {
+      node.textContent = message || '';
+      node.className = 'status' + (type ? ' ' + type : '');
+    }
+
+    function renderModelOptions(selectNode, preferredValue, fallbackLabel) {
+      const options = [];
+      const value = String(preferredValue || '').trim();
+      if (value && !availableModels.includes(value)) {
+        options.push('<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '（当前配置）</option>');
+      }
+      if (fallbackLabel) {
+        options.push('<option value="">' + escapeHtml(fallbackLabel) + '</option>');
+      }
+      availableModels.forEach(function (model) {
+        options.push('<option value="' + escapeHtml(model) + '">' + escapeHtml(model) + '</option>');
+      });
+      selectNode.innerHTML = options.join('');
+      selectNode.value = value;
+      if (selectNode.value !== value && fallbackLabel) {
+        selectNode.value = '';
+      }
+    }
+
+    async function loadModels() {
+      try {
+        const data = await requestJson('/v1/models');
+        availableModels = (data.data || []).map(function (item) {
+          return String(item.id || '').trim();
+        }).filter(Boolean);
+      } catch (error) {
+        availableModels = [];
+      }
+    }
+
+    async function loadPluginConfig() {
+      pluginConfig = await requestJson('/api/plugin-config/markdown_kb');
+      renderModelOptions(queryEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
+      renderModelOptions(queryRerankerModel, pluginConfig.reranker_model || '', '跟随插件默认 reranker 模型');
+      renderModelOptions(askEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
+      renderModelOptions(askChatModel, pluginConfig.chat_model || '', '跟随插件默认问答模型');
+      renderModelOptions(askRerankerModel, pluginConfig.reranker_model || '', '跟随插件默认 reranker 模型');
+    }
+
+    async function bootstrapConfigAndModels() {
+      await loadModels();
+      await loadPluginConfig();
+    }
+
+    async function requestJson(url, options) {
+      const resp = await fetch(url, options || {});
+      const data = await resp.json().catch(function () {
+        return { detail: '响应不是合法 JSON' };
+      });
+      if (!resp.ok) {
+        throw new Error(data.detail || data.error || '请求失败');
+      }
+      return data;
+    }
+
+    async function loadStatus() {
+      statusMeta.textContent = '正在读取状态...';
+      try {
+        const data = await requestJson('/api/markdown-kb/status');
+        docCount.textContent = String(data.doc_count ?? '-');
+        chunkCount.textContent = String(data.chunk_count ?? '-');
+        lastUpdated.textContent = data.last_updated_at || '暂无';
+        lastRebuilt.textContent = data.last_rebuilt_at || '暂无';
+        const health = data.health || {};
+        const summary = health.summary || {};
+        indexHealth.textContent = health.in_sync
+          ? '已同步'
+          : '待同步';
+        vectorBackend.textContent = data.vector_compute_backend || '-';
+        statusMeta.innerHTML = [
+          '数据目录：' + escapeHtml(data.data_dir || '-'),
+          '文档目录：' + escapeHtml(data.docs_dir || '-'),
+          '索引目录：' + escapeHtml(data.index_store_dir || '-'),
+          '索引后端：' + escapeHtml(data.index_backend || '-'),
+          '待处理：新增 ' + escapeHtml(summary.added || 0) + ' / 变化 ' + escapeHtml(summary.changed || 0) + ' / 删除 ' + escapeHtml(summary.removed || 0)
+        ].join('<br>');
+        renderHealthDetails(health);
+      } catch (error) {
+        statusMeta.textContent = '状态读取失败：' + String(error.message || error);
+        healthDetails.innerHTML = '';
+      }
+    }
+
+    function renderFiles(files) {
+      if (!files || !files.length) {
+        filesList.innerHTML = '<div class="empty">当前还没有 Markdown 文件。你可以先上传一个 `.md` 文件，然后执行索引重建。</div>';
+        return;
+      }
+
+      filesList.innerHTML = files.map(function (item) {
+        return '' +
+          '<div class="file-item">' +
+            '<div class="file-head">' +
+              '<div>' +
+                '<div class="file-title">' + escapeHtml(item.file_name) + '</div>' +
+                '<div class="tag-row">' +
+                  '<span class="tag ' + (item.indexed ? 'ok' : 'warn') + '">' + (item.indexed ? '已入索引' : '未入索引') + '</span>' +
+                  '<span class="tag">' + escapeHtml(item.size_bytes) + ' bytes</span>' +
+                  '<span class="tag">' + escapeHtml(item.chunk_count) + ' chunks</span>' +
+                '</div>' +
+              '</div>' +
+              '<div class="actions" style="margin-top:0;">' +
+                '<button class="button secondary" type="button" data-rebuild-file="' + escapeHtml(item.file_name) + '">重建此文件</button>' +
+                '<button class="button danger" type="button" data-delete-file="' + escapeHtml(item.file_name) + '">删除</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="meta">更新时间：' + escapeHtml(item.updated_at || '暂无') + '<br>SHA256：<span class="mono">' + escapeHtml(item.sha256 || '-') + '</span></div>' +
+          '</div>';
+      }).join('');
+
+      filesList.querySelectorAll('[data-delete-file]').forEach(function (button) {
+        button.addEventListener('click', async function () {
+          const fileName = button.getAttribute('data-delete-file') || '';
+          const ok = window.confirm('确定删除文件 ' + fileName + ' 吗？这会同步清理它对应的索引片段。');
+          if (!ok) return;
+          button.disabled = true;
+          try {
+            await requestJson('/api/markdown-kb/files/' + encodeURIComponent(fileName), { method: 'DELETE' });
+            await Promise.all([loadFiles(), loadStatus()]);
+          } catch (error) {
+            window.alert('删除失败：' + String(error.message || error));
+          } finally {
+            button.disabled = false;
+          }
+        });
+      });
+
+      filesList.querySelectorAll('[data-rebuild-file]').forEach(function (button) {
+        button.addEventListener('click', async function () {
+          const fileName = button.getAttribute('data-rebuild-file') || '';
+          button.disabled = true;
+          setStatus(rebuildStatus, '正在重建文件 ' + fileName + ' ...', 'warn');
+          try {
+            const data = await requestJson('/api/markdown-kb/rebuild-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ file_name: fileName })
+            });
+            setStatus(rebuildStatus, '单文件重建完成：' + data.file_name + '，共 ' + data.chunk_count + ' 个 chunks。', 'ok');
+            await Promise.all([loadFiles(), loadStatus(), loadPluginConfig()]);
+          } catch (error) {
+            setStatus(rebuildStatus, '单文件重建失败：' + String(error.message || error), 'error');
+          } finally {
+            button.disabled = false;
+          }
+        });
+      });
+    }
+
+    async function loadFiles() {
+      filesList.innerHTML = '<div class="empty">正在加载文件列表...</div>';
+      try {
+        const data = await requestJson('/api/markdown-kb/files');
+        renderFiles(data.files || []);
+      } catch (error) {
+        filesList.innerHTML = '<div class="empty">文件列表读取失败：' + escapeHtml(String(error.message || error)) + '</div>';
+      }
+    }
+
+    function renderHits(node, hits) {
+      if (!hits || !hits.length) {
+        node.innerHTML = '<div class="empty">没有命中任何片段。你可以先确认知识库是否已重建，或者调整问题与 top_k。</div>';
+        return;
+      }
+
+      node.innerHTML = hits.map(function (item, index) {
+        return '' +
+          '<div class="result-item">' +
+            '<div class="result-head">' +
+              '<div>' +
+                '<div class="result-title">命中 #' + (index + 1) + ' · ' + escapeHtml(item.file_name || '-') + '</div>' +
+                '<div class="tag-row">' +
+                  '<span class="tag">标题：' + escapeHtml(item.title || '-') + '</span>' +
+                  '<span class="tag">chunk：' + escapeHtml(item.chunk_index) + '</span>' +
+                  '<span class="tag">score：' + escapeHtml((item.score || 0).toFixed ? item.score.toFixed(4) : item.score) + '</span>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="answer-box">' + escapeHtml(item.chunk_text || '') + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    uploadInput.addEventListener('change', function () {
+      currentFile = uploadInput.files && uploadInput.files[0] ? uploadInput.files[0] : null;
+      uploadBtn.disabled = !currentFile;
+      selectedFile.textContent = currentFile
+        ? '已选择：' + currentFile.name + '（' + currentFile.size + ' bytes）'
+        : '尚未选择文件';
+      setStatus(uploadStatus, '', '');
+    });
+
+    uploadBtn.addEventListener('click', async function () {
+      if (!currentFile) return;
+      uploadBtn.disabled = true;
+      setStatus(uploadStatus, '正在上传...', '');
+      try {
+        const formData = new FormData();
+        formData.append('file', currentFile);
+        const data = await requestJson('/api/markdown-kb/files/upload', {
+          method: 'POST',
+          body: formData
+        });
+        setStatus(uploadStatus, '上传成功：' + data.file_name + '。当前文件已保存，但如果要参与检索和问答，记得执行一次重建。', 'ok');
+        await Promise.all([loadStatus(), loadFiles()]);
+      } catch (error) {
+        setStatus(uploadStatus, '上传失败：' + String(error.message || error), 'error');
+      } finally {
+        uploadBtn.disabled = !currentFile;
+      }
+    });
+
+    rebuildBtn.addEventListener('click', async function () {
+      rebuildBtn.disabled = true;
+      setStatus(rebuildStatus, '正在全量重建索引，这一步会重新切片并重新生成 embedding，请稍等...', 'warn');
+      try {
+        const data = await requestJson('/api/markdown-kb/rebuild', { method: 'POST' });
+        setStatus(rebuildStatus, '重建完成：' + data.doc_count + ' 个文档，' + data.chunk_count + ' 个 chunks。', 'ok');
+        await Promise.all([loadStatus(), loadFiles(), loadPluginConfig()]);
+      } catch (error) {
+        setStatus(rebuildStatus, '重建失败：' + String(error.message || error), 'error');
+      } finally {
+        rebuildBtn.disabled = false;
+      }
+    });
+
+    previewSyncBtn.addEventListener('click', async function () {
+      previewSyncBtn.disabled = true;
+      setStatus(syncStatus, '正在预览同步...', 'warn');
+      try {
+        const data = await requestJson('/api/markdown-kb/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apply: false })
+        });
+        const summary = data.summary || {};
+        setStatus(syncStatus, '预览完成：新增 ' + (summary.added || 0) + '，变化 ' + (summary.changed || 0) + '，删除 ' + (summary.removed || 0) + '，未变化 ' + (summary.unchanged || 0) + '。', 'ok');
+        renderSyncDetails(data, false);
+      } catch (error) {
+        setStatus(syncStatus, '预览同步失败：' + String(error.message || error), 'error');
+        syncDetails.innerHTML = '';
+      } finally {
+        previewSyncBtn.disabled = false;
+      }
+    });
+
+    applySyncBtn.addEventListener('click', async function () {
+      applySyncBtn.disabled = true;
+      setStatus(syncStatus, '正在执行增量同步...', 'warn');
+      try {
+        const data = await requestJson('/api/markdown-kb/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apply: true })
+        });
+        const applied = data.applied_changes || {};
+        setStatus(syncStatus, '同步完成：新增 ' + (applied.added || []).length + '，变化 ' + (applied.changed || []).length + '，删除 ' + (applied.removed || []).length + '。', 'ok');
+        renderSyncDetails(data, true);
+        await Promise.all([loadFiles(), loadStatus(), loadPluginConfig()]);
+      } catch (error) {
+        setStatus(syncStatus, '执行同步失败：' + String(error.message || error), 'error');
+        syncDetails.innerHTML = '';
+      } finally {
+        applySyncBtn.disabled = false;
+      }
+    });
+
+    clearIndexBtn.addEventListener('click', async function () {
+      const deleteDocs = window.confirm('是否连同原始 Markdown 文件一起删除？\n选择“确定”会删除索引和 docs/ 里的原文；选择“取消”则只清空索引。');
+      const confirmClear = window.confirm(deleteDocs
+        ? '确认清空索引并删除原始文档吗？此操作不可恢复。'
+        : '确认只清空索引吗？原始文档会保留，可以之后重新重建。');
+      if (!confirmClear) return;
+
+      clearIndexBtn.disabled = true;
+      setStatus(rebuildStatus, '正在清空索引...', 'warn');
+      try {
+        const data = await requestJson('/api/markdown-kb/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ delete_docs: deleteDocs })
+        });
+        setStatus(rebuildStatus, '清空完成：移除了 ' + (data.removed_chunks || 0) + ' 个 chunks，删除了 ' + (data.removed_docs || 0) + ' 个原始文档。', 'ok');
+        await Promise.all([loadStatus(), loadFiles(), loadPluginConfig()]);
+      } catch (error) {
+        setStatus(rebuildStatus, '清空失败：' + String(error.message || error), 'error');
+      } finally {
+        clearIndexBtn.disabled = false;
+      }
+    });
+
+    queryBtn.addEventListener('click', async function () {
+      const question = String(queryQuestion.value || '').trim();
+      const topK = Number(queryTopK.value || 4);
+      if (!question) {
+        setStatus(queryStatus, '请先输入问题。', 'error');
+        return;
+      }
+      queryBtn.disabled = true;
+      setStatus(queryStatus, '正在执行检索...', '');
+      queryResults.innerHTML = '';
+      try {
+        const data = await requestJson('/api/markdown-kb/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: question,
+            top_k: topK,
+            embedding_model: queryEmbeddingModel.value || undefined,
+            reranker_model: queryRerankerModel.value || undefined
+          })
+        });
+        setStatus(queryStatus, '检索完成：返回 ' + (data.hits || []).length + ' 个命中片段，embedding 模型：' + (data.embedding_model || pluginConfig.embedding_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
+        renderHits(queryResults, data.hits || []);
+      } catch (error) {
+        setStatus(queryStatus, '检索失败：' + String(error.message || error), 'error');
+        queryResults.innerHTML = '';
+      } finally {
+        queryBtn.disabled = false;
+      }
+    });
+
+    askBtn.addEventListener('click', async function () {
+      const question = String(askQuestion.value || '').trim();
+      const topK = Number(askTopK.value || 4);
+      if (!question) {
+        setStatus(askStatus, '请先输入问题。', 'error');
+        return;
+      }
+      askBtn.disabled = true;
+      setStatus(askStatus, '正在执行问答...', '');
+      askAnswerWrap.style.display = 'none';
+      askCitations.innerHTML = '';
+      try {
+        const data = await requestJson('/api/markdown-kb/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: question,
+            top_k: topK,
+            embedding_model: askEmbeddingModel.value || undefined,
+            chat_model: askChatModel.value || undefined,
+            reranker_model: askRerankerModel.value || undefined
+          })
+        });
+        setStatus(askStatus, '问答完成：已使用 ' + (data.citations || []).length + ' 个引用片段，问答模型：' + (data.chat_model || pluginConfig.chat_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
+        askAnswer.textContent = data.answer || '';
+        askAnswerWrap.style.display = 'block';
+        renderHits(askCitations, data.citations || []);
+      } catch (error) {
+        setStatus(askStatus, '问答失败：' + String(error.message || error), 'error');
+      } finally {
+        askBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', loadStatus);
+    refreshFilesBtn.addEventListener('click', loadFiles);
+    Promise.all([loadStatus(), loadFiles(), bootstrapConfigAndModels()]).catch(function () {
+      // 页面初始化阶段如果模型列表读取失败，仍允许用户继续使用默认配置。
+    });
+  </script>
+</body>
+</html>

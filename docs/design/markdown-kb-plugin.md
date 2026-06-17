@@ -777,17 +777,202 @@ AKM 当前的 `Messages -> Chat` 转换规则会把 `system` 映射为首条 sys
 - 先做检索和问答测试
 - 验证效果后，再考虑自动注入主链路
 
+## 后期动态维护方案
+
+如果这个知识库后续要长期维护，核心问题就不再是“能不能查”，而是“文档更新后能不能稳定、低成本地同步到索引”。从实现复杂度、成本和收益的平衡来看，最推荐的演进路线不是一上来就做目录监听或任务队列，而是分阶段推进。
+
+### 方案一：手动全量重建
+
+最简单的方式仍然是保留全量 `rebuild`：
+
+1. 扫描全部 Markdown 文件
+2. 全量切片
+3. 全量生成 embedding
+4. 全量重建索引
+
+优点：
+
+- 逻辑最简单
+- 最容易排障
+- 不容易出现局部索引残留
+
+缺点：
+
+- 文档变多后会明显变慢
+- embedding 成本高
+- 只改一个文件也需要全量重建
+
+这适合 PoC 阶段和小规模文档场景，但不适合作为长期维护的唯一策略。
+
+### 方案二：文件级增量更新
+
+这是最推荐的下一阶段方案。
+
+核心思路：
+
+1. 为每个文件记录 `file_path / file_name / content_hash / updated_at / chunk_ids`
+2. 每次同步时识别三类变化：新增、修改、删除
+3. 只对发生变化的文件重新切片、重新生成 embedding、重新写入索引
+
+优点：
+
+- 更新速度快很多
+- embedding 成本显著下降
+- 实现复杂度仍然可控
+- 非常适合单机 Markdown 知识库
+
+推荐作为长期默认维护方式。
+
+### 方案三：目录同步
+
+如果用户的知识库本来就是一个本地目录，而不是只通过页面上传文件，那么应补充“目录同步”能力。
+
+可以支持：
+
+- 手动点击“同步目录”
+- 定时扫描指定目录
+
+目录同步本质上仍然应复用“文件级增量更新”的判断逻辑，而不是重新走全量重建。
+
+### 方案四：文件系统监听
+
+这是更动态的方案：监听某个目录下 `.md` 文件的新增、修改、删除事件，并自动触发单文件更新。
+
+优点：
+
+- 最接近实时维护
+- 用户改完文件后可以很快反映到知识库
+
+缺点：
+
+- 实现复杂度高
+- 要处理重复事件、抖动事件、半写入状态
+- 跨平台兼容性和后台常驻任务管理更麻烦
+
+因此不建议太早做。更合理的顺序是：先做增量更新，再做目录同步，最后视需要再做目录监听。
+
+### 方案五：上传即索引
+
+对于“通过页面上传文件”的交互，建议长期演进到“上传即索引”：
+
+- 上传单个 Markdown 文件后，立即只处理该文件
+- 删除文件时，立即删除其索引条目
+
+这样用户不需要每次都重新全量 `rebuild`，体验会更自然。
+
+### 推荐的维护判断方式
+
+建议后期采用双层判断：
+
+1. 先用 `mtime + size` 做快速筛选
+2. 命中疑似变更后，再计算 `sha256 / content_hash`
+3. 最终以 `content_hash` 作为是否真的需要重建的依据
+
+这样既能减少无意义 hash 计算，又能避免只看时间戳带来的误判。
+
+### 推荐的索引元数据
+
+为了支持动态维护，索引层最好至少记录：
+
+- `doc_id`
+- `file_name`
+- `file_path`
+- `content_hash`
+- `updated_at`
+- `embedding_model`
+- `chunk_strategy_version`
+- `chunk_size`
+- `chunk_overlap`
+- `indexed_at`
+
+这样后续才能判断：
+
+- 文件内容是否变化
+- 切片策略是否变化
+- embedding 模型是否变化
+- 是否需要重建单文件或整库
+
+### 推荐演进路线
+
+综合来看，推荐按以下顺序演进：
+
+1. 保留当前手动 `rebuild`
+2. 增加文件级增量更新
+3. 增加目录同步
+4. 增加单文件重建 / 清空索引 / 健康检查等运维能力
+5. 最后再视需要增加目录监听
+
+如果后续确认要引入真正的向量库存储，也建议在“增量维护机制”已经稳定之后再替换底层，而不是一开始就把“向量库接入”和“动态同步机制”两个复杂问题绑在一起做。
+
+## kb.db 方案与方案一迁移路径
+
+基于 SQLite Vector 路线，`markdown_kb` 更适合让插件自己单独维护一个 `kb.db`，而不是继续长期依赖 `index.json`，也不是一开始就把知识库数据塞进 AKM 主库 `akm.db`。
+
+推荐目录结构：
+
+```text
+~/.akm/markdown_kb/
+├── docs/
+└── index_store/
+    └── kb.db
+```
+
+设计约定：
+
+1. `docs/` 是原始 Markdown 文件的 source of truth。
+2. `kb.db` 是知识库索引、副本 metadata 和向量数据的持久化载体。
+3. 任意时候都可以保留 `docs/`、删除 `kb.db` 并重新 `rebuild`。
+
+### 推荐表结构
+
+至少拆 4 类数据：
+
+1. `kb_documents`
+   - 文件级元数据：`doc_id / file_name / file_path / content_hash / file_size_bytes / title / chunk_count / updated_at / indexed_at / created_at`
+2. `kb_chunks`
+   - chunk 元数据与文本：`chunk_id / doc_id / file_name / file_path / title / heading_level / chunk_index / chunk_text / content_hash / created_at / updated_at / indexed_at`
+3. `kb_vectors`
+   - 向量数据：`chunk_id -> embedding`
+4. `kb_index_meta`
+   - 索引级元信息：`embedding_model / reranker_model / chunk_size / chunk_overlap / schema_version / last_rebuilt_at`
+
+### 方案一：最稳妥迁移
+
+当前项目采用的就是这条路线：
+
+1. 保留 `docs/` 原文目录
+2. 忽略旧的 `index.json`
+3. 初始化新的 `kb.db`
+4. 扫描全部 Markdown 文件
+5. 重新切片、重新 embedding
+6. 全量写入 SQLite 表
+
+这样做的优点：
+
+- 逻辑最简单
+- 不需要写 `index.json -> kb.db` 的一次性迁移脚本
+- 最不容易带入旧脏数据
+- 后续如果接 SQLite Vector 扩展或别的后端，也可以继续复用这套 schema 和插件 API
+
+当前阶段即使尚未真实接入 SQLite Vector 扩展，也可以先把：
+
+- metadata
+- chunk_text
+- embedding 向量
+
+先统一落到 `kb.db` 中，检索阶段仍由 Python 层计算相似度。这样可以先把持久化从 JSON 文件迁移到 SQLite，而不把本地扩展安装风险和数据迁移风险绑在一起。
+
 ## 推荐实施顺序
 
 建议按以下顺序开发：
 
 1. 搭建 `app` 插件骨架
 2. 完成 Markdown 上传与保存
-3. 完成切片与 Chroma 索引构建
-4. 完成检索 API
-5. 完成问答 API
-6. 完成插件页面
-7. 最后再评估是否需要 `on_request` 自动注入
+3. 完成标题优先切片与最小检索闭环
+4. 完成 `query / ask / delete / clear` 等基础 API
+5. 完成插件页面与配置弹窗
+6. 把默认索引从 `index.json` 迁到 `kb.db`
+7. 最后再评估是否需要接入 SQLite Vector 扩展或自动注入聊天链路
 
 ## 结论
 
@@ -795,8 +980,60 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 
 - 做一个 `markdown_kb` 第三方 `app` 插件
 - 通过 AKM 的 embedding/chat 接口调用模型
-- 插件内部维护 Markdown 文档、切片逻辑与 Chroma 索引
+- 插件内部维护 Markdown 文档、切片逻辑与插件私有 `kb.db` 索引
 - 先提供显式的检索 / 问答页面与 API
 - 暂不默认拦截全部聊天请求
 
 这样既能快速验证功能价值，也能最大程度保持 AKM 主体的稳定性与职责边界。
+
+## 当前落地状态
+
+截至当前仓库版本，项目里已经落了一个最小项目级样例插件骨架：`plugins/markdown_kb/`。它的目标不是完成整套知识库能力，而是先验证插件接入面是否顺畅。
+
+当前已实现：
+
+- `plugin.json`、`index.py`、`views/index.html` 三件套
+- 管理台菜单入口 `/plugins/markdown_kb`
+- 宿主页保留 AKM 左侧菜单，原插件页面通过 `/plugins/markdown_kb/raw` 加载
+- `GET /api/markdown-kb/status`
+- `GET /api/markdown-kb/files`
+- `POST /api/markdown-kb/files/upload`
+- `DELETE /api/markdown-kb/files/{name}`
+- `POST /api/markdown-kb/rebuild`
+- `POST /api/markdown-kb/rebuild-file`
+- `POST /api/markdown-kb/sync`
+- `POST /api/markdown-kb/query`
+- `POST /api/markdown-kb/ask`
+- `POST /api/markdown-kb/clear`
+- `GET /api/markdown-kb/health`
+- 标题优先切片
+- 本地数据目录默认落到 `~/.akm/markdown_kb/`
+- embedding / 可选 rerank / chat 请求统一走本地 AKM 代理
+- `embedding_model` 为必填配置；`reranker_model` 为可选配置
+- 知识库页面不再内置独立配置弹窗，配置统一收口到插件列表页弹窗
+- 插件列表页中的统一插件配置弹窗支持修改 `markdown_kb` 配置；当前规则是所有带配置项插件统一通过弹窗配置
+- `markdown_kb` 的模型配置在插件列表页弹窗里改成当前 `/v1/models` 驱动的模型列表下拉
+- 模型列表下拉通过通用 setting schema 能力实现，不再在公共模板里写死 `markdown_kb` 特判
+- `data_dir / index_backend` 这类当前阶段无实际价值的伪配置已经从配置 schema 中收掉，状态页改为展示真实的健康/漂移信息
+
+当前明确未实现：
+
+- 真正的 SQLite Vector 扩展接入
+- 目录同步 / 目录监听
+- 自动注入聊天链路
+
+当前实现说明：
+
+- 对外仍然沿用知识库设计的 API 形态；
+- 底层索引默认落在 `~/.akm/markdown_kb/index_store/kb.db`；
+- 当前持久化已经收口到更完整的 `IndexStore` 接口 + `SqliteKbIndexStore` 默认实现，当前方法边界已覆盖 `replace_all / list_documents / delete_by_file / stats / clear` 这类真实 backend 常见能力；
+- 当前检索阶段会优先使用内存预加载 + NumPy 矩阵化相似度计算，并补上 query embedding 缓存与 query 结果缓存；若运行环境暂时还没安装 `numpy`，则自动回退到 Python 循环计算；
+- 这样做不是为了长期替代向量库，而是因为当前仓库还没有确认可用的 SQLite Vector 扩展接入方式，先把“上传 -> 切片 -> embedding -> 检索 -> 问答”闭环做通；
+- 如果后续接入 SQLite Vector 扩展，优先在现有 `SqliteKbIndexStore` 路线上继续演进，而不是重新引入独立向量后端。
+
+因此，下一阶段最合理的工作重心不再是“插件能不能挂进去”，而是沿着这个骨架继续补：
+
+1. 更完整的目录同步与目录监听
+2. 更细粒度的单文件维护与后台任务化
+3. 底层索引从 `SqliteKbIndexStore` 继续推进到 SQLite Vector 扩展
+4. 自动注入聊天链路

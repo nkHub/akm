@@ -10,6 +10,9 @@ class SettingDef(BaseModel):
     default: str | int | bool = ""
     description: str = ""
     options: list[str] = []      # select 类型时的选项列表
+    options_source: str = ""     # select 动态数据源，例如 /v1/models
+    allow_empty_option: bool = False
+    empty_option_label: str = ""
     min: int | None = None
     max: int | None = None
 

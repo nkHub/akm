@@ -1705,7 +1705,32 @@ async def plugins_page(request: Request):
 
 @app.get("/plugins/{name}")
 async def plugin_view(name: str, request: Request):
-    """插件前端页面 — 返回插件的 views/index.html"""
+    """插件宿主页。
+
+    这里不再直接返回插件自己的裸 HTML，而是复用 AKM 后台统一布局，
+    让左侧菜单、顶部栏和整体交互壳保持一致。插件原始页面通过 iframe
+    嵌入，尽量减少对现有插件前端的侵入。
+    """
+    pm = request.app.state.plugin_manager
+    plugin = pm.plugins.get(name)
+    if not plugin or not plugin.enabled:
+        return JSONResponse({"error": "插件不存在或未启用"}, status_code=404)
+    index_path = plugin._static_dir / "index.html"
+    if not index_path.exists():
+        return JSONResponse({"error": "该插件无前端界面"}, status_code=404)
+    return HTMLResponse(_render_template(
+        "plugin_host.html",
+        title=plugin.meta.menu.get("title", plugin.meta.name),
+        active="plugins",
+        plugin_title=plugin.meta.menu.get("title", plugin.meta.name),
+        plugin_description=plugin.meta.description or "",
+        plugin_iframe_src=f"/plugins/{name}/raw",
+    ))
+
+
+@app.get("/plugins/{name}/raw")
+async def plugin_view_raw(name: str, request: Request):
+    """返回插件原始前端文件，供宿主页 iframe 加载。"""
     pm = request.app.state.plugin_manager
     plugin = pm.plugins.get(name)
     if not plugin or not plugin.enabled:
