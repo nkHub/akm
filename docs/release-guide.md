@@ -248,7 +248,7 @@ python -c 'from akm import __version__; print(__version__)'
 git status
 ```
 
-> 发布时以 `akm/__init__.py` 中的 `__version__` 为主版本源；若同时维护 `pyproject.toml` 的包元数据版本，两者也应保持一致。例如本次发布若版本号为 `0.1.13`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.13` 保持一致。
+> 发布时以 `akm/__init__.py` 中的 `__version__` 为主版本源；若同时维护 `pyproject.toml` 的包元数据版本，两者也应保持一致。例如本次发布若版本号为 `0.1.14`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.14` 保持一致。
 
 2. **构建分发包（示例为 zip）**
 
