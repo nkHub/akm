@@ -405,12 +405,14 @@ function renderLogTable() {
     var ds = lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms';
     var dc = lat>5000?'text-red-400':lat>2000?'text-yellow-400':'text-gray-400';
     var hasBody = log.request_body || log.response_body || log.error;
-    var pt = log.prompt_tokens || 0;
-    var ct = log.completion_tokens || 0;
-    var cached = log.cached_tokens || 0;
+    var pt = Number(log.prompt_tokens != null ? log.prompt_tokens : 0);
+    var ct = Number(log.completion_tokens != null ? log.completion_tokens : 0);
+    var cached = Number(log.cached_tokens != null ? log.cached_tokens : 0);
     var effectivePrompt = pt - cached;
-    var promptHtml = pt > 0 ? '<span class="text-gray-300">'+effectivePrompt.toLocaleString()+'</span>' + (cached > 0 ? ' <span class="text-teal-400">(R'+cached.toLocaleString()+')</span>' : '') : '<span class="text-gray-600">-</span>';
-    var completionHtml = ct > 0 ? '<span class="text-gray-300">'+ct.toLocaleString()+'</span>' : '<span class="text-gray-600">-</span>';
+    var hasPromptValue = log.prompt_tokens != null;
+    var hasCompletionValue = log.completion_tokens != null;
+    var promptHtml = hasPromptValue ? '<span class="text-gray-300">'+effectivePrompt.toLocaleString()+'</span>' + (cached > 0 ? ' <span class="text-teal-400">(R'+cached.toLocaleString()+')</span>' : '') : '<span class="text-gray-600">-</span>';
+    var completionHtml = hasCompletionValue ? '<span class="text-gray-300">'+ct.toLocaleString()+'</span>' : '<span class="text-gray-600">-</span>';
 
     html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 whitespace-nowrap text-xs">'+esc(log.timestamp||'-')+'</td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs"><span class="inline-block max-w-[80px] truncate align-bottom">'+esc(log.key_alias||'-')+'</span></td><td class="px-4 py-2.5 text-gray-300 text-xs"><span class="inline-block max-w-[80px] truncate align-bottom">'+esc(log.provider||'-')+'</span></td><td class="px-4 py-2.5 text-gray-400 text-xs"><span class="inline-block max-w-[224px] truncate align-bottom">'+esc(log.model||'-')+'</span>'+convWarnBadge+securityWarnBadge+countTokensBadge+adapterFallbackBadge+estimateFallbackBadge+'</td><td class="px-4 py-2.5 text-xs '+sourceClass+'">'+esc(sourceLabel)+'</td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td><td class="px-4 py-2.5 text-center"><span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-4 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-4 py-2.5 text-center">'+(hasBody?'<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>':'<span class="text-gray-600">-</span>')+'</td></tr>';
     if (log.error) html += '<tr class="border-t border-border bg-red-950/20"><td colspan="9" class="px-4 py-1.5 text-xs text-red-400">'+esc(log.error)+'</td></tr>';

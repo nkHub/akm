@@ -6,6 +6,7 @@
   "builtin": true,
   "default_enabled": false,
   "priority": 200,
+  "settings_columns": 2,
   "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
   "menu": {
     "title": "知识库",
@@ -62,7 +63,32 @@
       "label": "默认召回数",
       "type": "number",
       "default": 4,
-      "description": "query / ask 在未显式传 top_k 时默认召回的片段数量。"
+      "min": 1,
+      "max": 10,
+      "description": "query / ask 在未显式传 top_k 时默认返回的片段数量。启用 rerank 后也仍然生效，但只控制最终保留条数。"
+    },
+    {
+      "key": "semantic_weight",
+      "label": "语义权重",
+      "type": "number",
+      "default": 1,
+      "description": "仅在未启用 rerank 时生效。用于控制向量语义分在第一阶段排序中的占比；会和关键词权重按比例归一化。"
+    },
+    {
+      "key": "keyword_weight",
+      "label": "关键词权重",
+      "type": "number",
+      "default": 0,
+      "description": "仅在未启用 rerank 时生效。用于补强标题词、英文术语或精确短语匹配。"
+    },
+    {
+      "key": "score_threshold",
+      "label": "Score 阈值",
+      "type": "number",
+      "default": 0.7,
+      "min": 0,
+      "max": 1,
+      "description": "0~1。最终命中分低于该阈值时直接过滤；未启用 rerank 时使用混合分，启用 rerank 后使用 rerank 分。"
     }
   ]
 }

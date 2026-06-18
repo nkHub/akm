@@ -61,7 +61,7 @@
 
 对于插件配置交互，当前实现也已经统一成一条默认规则：只要插件声明了 `settings`，插件列表页就默认通过“配置”按钮打开弹窗编辑，不再在列表卡片里额外展开内联表单。这样可以避免同一个插件同时出现“弹窗配置”和“展开配置”两套入口。
 
-另外，setting schema 现在支持通过 `type="select" + options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉；`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `markdown_kb` 这类需要选择 embedding / rerank / chat 模型的插件，就不需要再把模型列表逻辑硬编码在公共模板里。
+另外，setting schema 现在支持通过 `type="select" + options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉；`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `markdown_kb` 这类需要选择 embedding / rerank / chat 模型的插件，就不需要再把模型列表逻辑硬编码在公共模板里。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及仅在未启用 rerank 时生效的 `semantic_weight / keyword_weight`。
 
 ## 四、目录结构
 
@@ -193,6 +193,7 @@ akm/
 | `menu.icon` | string | | 菜单图标，默认 `"plugin"` |
 | `menu.order` | int | | 菜单位置排序，默认 `100` |
 | `routes_prefix` | string | | API 路由前缀，默认 `/{name}` |
+| `settings_columns` | int | | 配置表单列数，当前支持 `1` 或 `2`，默认 `1` |
 | `hooks.on_request` | bool | | 是否接收请求对象（可改写请求体） |
 | `hooks.on_key_selected` | bool | | 是否接收 key 选择事件 |
 | `hooks.on_upstream_error` | bool | | 是否接收上游错误事件 |
@@ -205,7 +206,7 @@ akm/
 
 ### 5.4 插件配置
 
-插件可声明 `settings` 字段，定义自己的配置项。配置统一存储在 `~/.akm/config.json` 的 `plugin_configs` 字段中，格式为 `{ "插件名": { "key": "value" } }`。
+插件可声明 `settings` 字段，定义自己的配置项。配置统一存储在 `~/.akm/config.json` 的 `plugin_configs` 字段中，格式为 `{ "插件名": { "key": "value" } }`。另外可选声明 `settings_columns` 控制插件配置弹窗布局：默认单列，声明 `2` 时会按双列渲染，适合 `markdown_kb` 这类短数值项较多的插件。
 
 #### 配置项定义
 
