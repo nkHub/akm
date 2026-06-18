@@ -1008,6 +1008,24 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
     if not isinstance(usage, dict):
         return None
 
+    has_explicit_usage = any(
+        key in usage
+        for key in (
+            "total_tokens",
+            "prompt_tokens",
+            "completion_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cached_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "prompt_tokens_details",
+            "input_tokens_details",
+        )
+    )
+    if not has_explicit_usage:
+        return None
+
     total = usage.get("total_tokens", 0)
     prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
     completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
@@ -1026,15 +1044,13 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
                     break
     if total == 0 and (prompt > 0 or completion > 0):
         total = prompt + completion
-    if total > 0:
-        return {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "total_tokens": total,
-            "cached_tokens": cached,
-            "cache_creation_tokens": cache_creation,
-        }
-    return None
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cached_tokens": cached,
+        "cache_creation_tokens": cache_creation,
+    }
 
 
 def _build_tokens_from_sse_usage_state(state: dict) -> dict | None:
@@ -1238,7 +1254,7 @@ async def _build_usage_metrics(
     flags: list[str] = []
     tokens = dict(precomputed_tokens or _extract_tokens(response_body) or {})
 
-    has_tokens = (tokens.get("prompt_tokens", 0) > 0 or tokens.get("completion_tokens", 0) > 0)
+    has_tokens = bool(tokens)
     if not has_tokens:
         ct = await _try_count_tokens_fallback(request, request_body, api_path, key_alias, provider)
         if ct:
@@ -1253,7 +1269,16 @@ async def _build_usage_metrics(
             c = int(last_usage.get("completion_tokens", 0) or 0)
             t = int(last_usage.get("total_tokens", 0) or (p + c))
             cached = int(last_usage.get("cached_tokens", 0) or 0)
-            if p > 0 or c > 0:
+            if any(
+                key in last_usage
+                for key in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "cached_tokens",
+                    "cache_creation_tokens",
+                )
+            ):
                 tokens = {
                     "prompt_tokens": p,
                     "completion_tokens": c,
@@ -1343,10 +1368,14 @@ def _get_stats(days: int) -> dict:
         if not ignore_estimated_tokens and not t and r.get("response_body"):
             tokens = _extract_tokens(r["response_body"])
             if tokens:
-                p = tokens.get("prompt_tokens", 0) or p
-                c = tokens.get("completion_tokens", 0) or c
-                t = tokens.get("total_tokens", 0) or t
-                cached = tokens.get("cached_tokens", 0) or cached
+                if "prompt_tokens" in tokens:
+                    p = tokens.get("prompt_tokens", 0)
+                if "completion_tokens" in tokens:
+                    c = tokens.get("completion_tokens", 0)
+                if "total_tokens" in tokens:
+                    t = tokens.get("total_tokens", 0)
+                if "cached_tokens" in tokens:
+                    cached = tokens.get("cached_tokens", 0)
         if ignore_estimated_tokens:
             p = 0
             c = 0
@@ -1449,11 +1478,16 @@ async def api_logs(
         if not t and log.get("response_body"):
             tokens = _extract_tokens(log["response_body"])
             if tokens:
-                p = tokens.get("prompt_tokens", 0) or p
-                c = tokens.get("completion_tokens", 0) or c
-                t = tokens.get("total_tokens", 0) or t
-                cached = tokens.get("cached_tokens", 0) or cached
-                cache_creation = tokens.get("cache_creation_tokens", 0) or cache_creation
+                if "prompt_tokens" in tokens:
+                    p = tokens.get("prompt_tokens", 0)
+                if "completion_tokens" in tokens:
+                    c = tokens.get("completion_tokens", 0)
+                if "total_tokens" in tokens:
+                    t = tokens.get("total_tokens", 0)
+                if "cached_tokens" in tokens:
+                    cached = tokens.get("cached_tokens", 0)
+                if "cache_creation_tokens" in tokens:
+                    cache_creation = tokens.get("cache_creation_tokens", 0)
         log["prompt_tokens"] = p
         log["completion_tokens"] = c
         log["total_tokens"] = t

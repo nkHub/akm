@@ -70,6 +70,22 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _normalize_weight_pair(primary: float, secondary: float) -> tuple[float, float]:
+    """把两路权重归一化到 0~1，总和为 1。
+
+    说明：
+    1. 配置面板里允许用户填任意非负数，因此这里统一做一次归一化；
+    2. 如果两项都 <= 0，则自动回退为纯主路权重，避免出现全 0 导致所有命中分都被压成 0；
+    3. 当前 markdown_kb 中 primary 对应语义分，secondary 对应关键词分。
+    """
+    primary = max(0.0, float(primary or 0.0))
+    secondary = max(0.0, float(secondary or 0.0))
+    total = primary + secondary
+    if total <= 0:
+        return 1.0, 0.0
+    return primary / total, secondary / total
+
+
 class IndexStore(ABC):
     """索引存储接口。
 
@@ -476,8 +492,8 @@ async def plugin_status():
 
 
 @router.post("/files/upload")
-async def upload_markdown(file: UploadFile = File(...)):
-    """接收并保存单个 Markdown 文件。
+async def upload_markdown(files: list[UploadFile] = File(...)):
+    """接收并保存多个 Markdown 文件。
 
     约束保持极简：
     1. 只接受 `.md` 扩展名；
@@ -485,7 +501,7 @@ async def upload_markdown(file: UploadFile = File(...)):
     3. 若同名文件重复上传，则覆盖旧文件，降低骨架阶段的交互复杂度。
     """
     plugin = _get_plugin()
-    return await plugin.save_markdown_file(file)
+    return await plugin.save_markdown_files(files)
 
 
 @router.get("/files")
@@ -882,7 +898,7 @@ class Plugin(PluginBase):
         return latest
 
     async def save_markdown_file(self, file: UploadFile) -> dict:
-        """保存上传的 Markdown 文件并返回最小元信息。"""
+        """保存单个上传的 Markdown 文件并返回最小元信息。"""
         filename = (file.filename or "").strip()
         if not filename:
             raise HTTPException(status_code=400, detail="文件名不能为空")
@@ -908,6 +924,27 @@ class Plugin(PluginBase):
             "size_bytes": len(payload),
             "sha256": sha256,
             "uploaded_at": _utc_now_iso(),
+        }
+
+    async def save_markdown_files(self, files: list[UploadFile]) -> dict:
+        """批量保存 Markdown 文件。
+
+        设计说明：
+        1. 只要请求里带了一个非法文件，就直接返回 400，避免出现“半成功半失败”后用户不清楚哪些文件已落盘；
+        2. 同名文件仍保持覆盖语义，和单文件上传保持一致；
+        3. 返回统一摘要，前端可以直接展示“共上传 N 个”的结果。
+        """
+        if not files:
+            raise HTTPException(status_code=400, detail="至少上传一个文件")
+
+        results = []
+        for file in files:
+            results.append(await self.save_markdown_file(file))
+
+        return {
+            "ok": True,
+            "count": len(results),
+            "files": results,
         }
 
     async def rebuild_index(self) -> dict:
@@ -1013,7 +1050,11 @@ class Plugin(PluginBase):
         cfg = self.config or {}
         chunk_size = max(200, _safe_int(cfg.get("chunk_size"), 800))
         chunk_overlap = max(0, min(chunk_size // 2, _safe_int(cfg.get("chunk_overlap"), 120)))
-        top_k = max(1, _safe_int(cfg.get("top_k"), 4))
+        top_k = max(1, min(10, _safe_int(cfg.get("top_k"), 4)))
+        semantic_weight, keyword_weight = _normalize_weight_pair(
+            _safe_float(cfg.get("semantic_weight"), 1.0),
+            _safe_float(cfg.get("keyword_weight"), 0.0),
+        )
         return {
             "embedding_model": str(cfg.get("embedding_model") or "text-embedding-3-small").strip() or "text-embedding-3-small",
             "reranker_model": str(cfg.get("reranker_model") or "").strip(),
@@ -1021,6 +1062,9 @@ class Plugin(PluginBase):
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "top_k": top_k,
+            "semantic_weight": semantic_weight,
+            "keyword_weight": keyword_weight,
+            "score_threshold": min(1.0, max(0.0, _safe_float(cfg.get("score_threshold"), 0.7))),
         }
 
     def _resolve_top_k(self, requested: Any) -> int:
@@ -1028,7 +1072,7 @@ class Plugin(PluginBase):
         default_top_k = self._settings()["top_k"]
         if requested in (None, ""):
             return default_top_k
-        return max(1, _safe_int(requested, default_top_k))
+        return max(1, min(10, _safe_int(requested, default_top_k)))
 
     def _load_index_data(self) -> dict:
         """读取索引文件。
@@ -1172,24 +1216,54 @@ class Plugin(PluginBase):
         return [item for item in parts if item]
 
     async def _retrieve(self, question: str, top_k: int, embedding_model: str, reranker_model: str) -> list[dict]:
-        """执行向量检索。"""
+        """执行检索。
+
+        当前采用“两阶段、尽量保守”的策略：
+        1. 第一阶段默认做语义分 + 关键词分的混合召回；
+        2. 但如果配置了 reranker_model，则第一阶段退回纯语义召回，把最终排序权完全交给 rerank；
+        3. 最终统一按 score_threshold 过滤，避免把明显不相关的低分片段继续暴露给 query / ask / 自动注入链路。
+        """
         documents = self._load_documents_for_retrieval()
         if not documents:
             raise HTTPException(status_code=400, detail="当前知识库为空，请先上传文档并执行重建")
 
-        query_cache_key = self._query_cache_key(question, top_k, embedding_model, reranker_model)
+        settings = self._settings()
+
+        query_cache_key = self._query_cache_key(
+            question,
+            top_k,
+            embedding_model,
+            reranker_model,
+            settings["semantic_weight"],
+            settings["keyword_weight"],
+            settings["score_threshold"],
+        )
         cached_hits = self._cache_get(self._query_result_cache, query_cache_key)
         if cached_hits is not None:
             return list(cached_hits)
 
         query_vector = await self._get_query_embedding(question, embedding_model)
-        scored = self._score_documents(query_vector, documents)
+        semantic_weight = settings["semantic_weight"]
+        keyword_weight = settings["keyword_weight"]
+        if reranker_model:
+            semantic_weight = 1.0
+            keyword_weight = 0.0
+
+        scored = self._score_documents(
+            question,
+            query_vector,
+            documents,
+            semantic_weight,
+            keyword_weight,
+        )
 
         scored.sort(key=lambda item: item["score"], reverse=True)
         candidates = scored[:max(top_k, min(12, len(scored)))]
         if reranker_model and candidates:
             candidates = await self._rerank_hits(question, candidates, reranker_model)
-        final_hits = candidates[:top_k]
+        score_threshold = settings["score_threshold"]
+        filtered = [item for item in candidates if _safe_float(item.get("score"), 0.0) >= score_threshold]
+        final_hits = filtered[:top_k]
         self._cache_set(self._query_result_cache, query_cache_key, list(final_hits), max_items=64)
         return final_hits
 
@@ -1211,13 +1285,25 @@ class Plugin(PluginBase):
         stats = self._store.stats()
         return (stats.get("last_rebuilt_at"), stats.get("document_count"))
 
-    def _query_cache_key(self, question: str, top_k: int, embedding_model: str, reranker_model: str) -> tuple:
+    def _query_cache_key(
+        self,
+        question: str,
+        top_k: int,
+        embedding_model: str,
+        reranker_model: str,
+        semantic_weight: float,
+        keyword_weight: float,
+        score_threshold: float,
+    ) -> tuple:
         """构造 query 结果缓存 key。"""
         return (
             question,
             int(top_k),
             embedding_model,
             reranker_model,
+            round(float(semantic_weight), 6),
+            round(float(keyword_weight), 6),
+            round(float(score_threshold), 6),
             self._current_embedding_cache_revision(),
         )
 
@@ -1271,7 +1357,29 @@ class Plugin(PluginBase):
             self._embedding_cache_norms = None
             return
 
-        matrix = np.asarray([item.get("embedding") or [] for item in documents], dtype=np.float32)
+        embeddings = [item.get("embedding") or [] for item in documents]
+        if not embeddings:
+            self._embedding_cache_matrix = None
+            self._embedding_cache_norms = None
+            return
+
+        dims = {len(vector) for vector in embeddings if isinstance(vector, list)}
+        if len(dims) != 1 or 0 in dims:
+            # 说明索引里混入了不同 embedding 维度的数据，常见于：
+            # 1. 历史上换过 embedding 模型；
+            # 2. 没有做一次完整 rebuild，旧 chunk 仍保留旧向量。
+            # 这时不能再走矩阵化路径，否则 NumPy 会因为 ragged array 直接抛异常。
+            # 这里选择温和回退到逐条余弦计算，让 query 至少可用；
+            # 用户后续执行一次全量重建后，会自动恢复 NumPy 快路径。
+            self.logger.warning(
+                "[markdown_kb] 检测到索引中 embedding 维度不一致，已回退到逐条计算；建议执行一次全量重建。dims=%s",
+                sorted(dims),
+            )
+            self._embedding_cache_matrix = None
+            self._embedding_cache_norms = None
+            return
+
+        matrix = np.asarray(embeddings, dtype=np.float32)
         if matrix.ndim != 2 or matrix.size == 0:
             self._embedding_cache_matrix = None
             self._embedding_cache_norms = None
@@ -1282,13 +1390,26 @@ class Plugin(PluginBase):
         self._embedding_cache_matrix = matrix
         self._embedding_cache_norms = norms
 
-    def _score_documents(self, query_vector: list[float], documents: list[dict]) -> list[dict]:
-        """根据 query 向量为当前文档集合打分。
+    def _score_documents(
+        self,
+        question: str,
+        query_vector: list[float],
+        documents: list[dict],
+        semantic_weight: float,
+        keyword_weight: float,
+    ) -> list[dict]:
+        """根据 query 为当前文档集合计算混合分。
 
-        优先使用 NumPy 矩阵化计算；若当前环境尚未安装 `numpy`，则回退到
-        原来的 Python 循环余弦计算，保证功能不受阻。
+        打分策略：
+        1. `vector_score`：向量余弦相似度，负责语义召回；
+        2. `keyword_score`：问题词在标题 / chunk 文本中的覆盖度与短语命中分，负责精确词补强；
+        3. `hybrid_score`：两者按配置权重归一化后的线性组合；
+        4. `score`：第一阶段默认等于 `hybrid_score`；若后续启用 rerank，则会在 `_rerank_hits()` 中被重写为 rerank 分。
+
+        这样 query / ask 的结果里会同时保留各阶段分数，便于后续观察为什么某个 chunk 被召回。
         """
         np = self._import_numpy_optional()
+        keyword_scores = self._score_keywords(question, documents)
         if np is not None and self._embedding_cache_matrix is not None and self._embedding_cache_norms is not None:
             query = np.asarray(query_vector, dtype=np.float32)
             if query.ndim == 1 and query.size == self._embedding_cache_matrix.shape[1]:
@@ -1297,31 +1418,148 @@ class Plugin(PluginBase):
                     query_norm = 1.0
                 scores = self._embedding_cache_matrix.dot(query) / (self._embedding_cache_norms * query_norm)
                 return [
-                    {
-                        "score": float(scores[idx]),
-                        "id": item.get("id"),
-                        "file_name": item.get("file_name"),
-                        "title": item.get("title"),
-                        "chunk_index": item.get("chunk_index"),
-                        "chunk_text": item.get("chunk_text"),
-                        "content_hash": item.get("content_hash"),
-                    }
+                    self._build_scored_hit(
+                        item,
+                        float(scores[idx]),
+                        keyword_scores[idx],
+                        semantic_weight,
+                        keyword_weight,
+                    )
                     for idx, item in enumerate(documents)
                 ]
 
         scored = []
-        for item in documents:
+        for idx, item in enumerate(documents):
             embedding = item.get("embedding") or []
-            scored.append({
-                "score": self._cosine_similarity(query_vector, embedding),
-                "id": item.get("id"),
-                "file_name": item.get("file_name"),
-                "title": item.get("title"),
-                "chunk_index": item.get("chunk_index"),
-                "chunk_text": item.get("chunk_text"),
-                "content_hash": item.get("content_hash"),
-            })
+            scored.append(
+                self._build_scored_hit(
+                    item,
+                    self._cosine_similarity(query_vector, embedding),
+                    keyword_scores[idx],
+                    semantic_weight,
+                    keyword_weight,
+                )
+            )
         return scored
+
+    def _build_scored_hit(
+        self,
+        item: dict,
+        vector_score: float,
+        keyword_score: float,
+        semantic_weight: float,
+        keyword_weight: float,
+    ) -> dict:
+        """把单条文档命中组装为带多路分数的统一结构。"""
+        hybrid_score = (vector_score * semantic_weight) + (keyword_score * keyword_weight)
+        return {
+            "score": hybrid_score,
+            "hybrid_score": hybrid_score,
+            "vector_score": vector_score,
+            "keyword_score": keyword_score,
+            "id": item.get("id"),
+            "file_name": item.get("file_name"),
+            "title": item.get("title"),
+            "chunk_index": item.get("chunk_index"),
+            "chunk_text": item.get("chunk_text"),
+            "content_hash": item.get("content_hash"),
+        }
+
+    def _score_keywords(self, question: str, documents: list[dict]) -> list[float]:
+        """为候选文档计算轻量关键词分。
+
+        目标不是替代全文检索，而是在不引入额外依赖的前提下补一层“字面命中”信号：
+        - 标题命中应比正文命中更值钱；
+        - 不再依赖“整句原样匹配”拿高分，而是统一回到词块 / 短窗口覆盖率；
+        - 分值最终压到 0~1，方便和向量分做线性混合。
+        """
+        normalized_question = self._normalize_keyword_text(question)
+        tokens = self._tokenize_keywords(normalized_question)
+        if not normalized_question or not tokens:
+            return [0.0 for _ in documents]
+
+        scores = []
+        unique_tokens = list(dict.fromkeys(tokens))
+        token_weights = self._build_keyword_token_weights(unique_tokens)
+        total_weight = max(1e-6, sum(token_weights.values()))
+        for item in documents:
+            title_text = self._normalize_keyword_text(item.get("title") or "")
+            chunk_text = self._normalize_keyword_text(item.get("chunk_text") or "")
+            title_compact = title_text.replace(" ", "")
+            chunk_compact = chunk_text.replace(" ", "")
+
+            title_hit_weight = 0.0
+            body_hit_weight = 0.0
+            for token in unique_tokens:
+                if not token:
+                    continue
+                weight = token_weights.get(token, 1.0)
+                if token in title_text or token in title_compact:
+                    title_hit_weight += weight
+                if token in chunk_text or token in chunk_compact:
+                    body_hit_weight += weight
+
+            coverage_score = (title_hit_weight * 1.4 + body_hit_weight * 1.0) / (total_weight * 2.4)
+            scores.append(min(1.0, coverage_score))
+        return scores
+
+    def _normalize_keyword_text(self, text: Any) -> str:
+        """把文本规整成适合关键词匹配的形式。"""
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        return normalized
+
+    def _tokenize_keywords(self, text: str) -> list[str]:
+        """从问题中提取关键词 token。
+
+        这里同时兼顾中英文：
+        - 英文 / 数字 / 连字符词使用正则拆词；
+        - 中文不再只保留整段，而是把连续中文片段进一步切成 2~4 字滑窗，避免
+          “参考考试大纲生成复习计划” 这类长句只有整句完全命中时才有分。
+        """
+        if not text:
+            return []
+        latin_tokens = re.findall(r"[a-z0-9][a-z0-9_\-\.]{1,}", text)
+        cjk_tokens = []
+        for segment in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            cjk_tokens.append(segment)
+            cjk_tokens.extend(self._expand_cjk_segment_tokens(segment))
+        return latin_tokens + cjk_tokens
+
+    def _expand_cjk_segment_tokens(self, segment: str) -> list[str]:
+        """把连续中文片段展开成 2~4 字滑窗 token。
+
+        设计目标：
+        1. 不再把整段本身作为高权重 token，只补充更短窗口；
+        2. 让“考试大纲 / 复习计划”这类局部短语能被正常识别；
+        3. 不引入额外中文分词依赖，保持当前插件最小闭环特性。
+        """
+        segment = str(segment or "").strip()
+        if len(segment) < 2:
+            return []
+        tokens = []
+        max_window = min(4, len(segment))
+        for window in range(2, max_window + 1):
+            for start in range(0, len(segment) - window + 1):
+                tokens.append(segment[start:start + window])
+        return tokens
+
+    def _build_keyword_token_weights(self, tokens: list[str]) -> dict[str, float]:
+        """为关键词 token 分配轻量权重。
+
+        权重规则保持简单：
+        - 更长的中文窗口给予更高权重，避免 2 字片段把所有分值稀释得过于平均；
+        - 英文 token 统一按长度做温和加权；
+        - 结果只用于相对覆盖率计算，不追求 BM25 级复杂度。
+        """
+        weights = {}
+        for token in tokens:
+            if not token:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]+", token):
+                weights[token] = float(min(4, len(token)))
+            else:
+                weights[token] = 1.0 + min(1.5, len(token) / 10.0)
+        return weights
 
     def _import_numpy_optional(self):
         """按需导入 NumPy。
@@ -1523,7 +1761,9 @@ class Plugin(PluginBase):
             if idx < 0 or idx not in index_map:
                 continue
             base = dict(index_map[idx])
-            base["vector_score"] = base.get("score", 0.0)
+            base.setdefault("vector_score", base.get("score", 0.0))
+            base.setdefault("keyword_score", 0.0)
+            base.setdefault("hybrid_score", base.get("score", 0.0))
             base["rerank_score"] = _safe_float(row.get("relevance_score"), 0.0)
             base["score"] = base["rerank_score"]
             reranked.append(base)
@@ -1533,7 +1773,9 @@ class Plugin(PluginBase):
             if idx in used_indices:
                 continue
             base = dict(item)
-            base["vector_score"] = base.get("score", 0.0)
+            base.setdefault("vector_score", base.get("score", 0.0))
+            base.setdefault("keyword_score", 0.0)
+            base.setdefault("hybrid_score", base.get("score", 0.0))
             base["rerank_score"] = None
             reranked.append(base)
         return reranked

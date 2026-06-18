@@ -1326,6 +1326,16 @@ def test_extract_tokens_prefers_anthropic_cache_read_input_tokens():
     assert out["cache_creation_tokens"] == 300
 
 
+def test_extract_tokens_keeps_explicit_zero_usage_metrics():
+    from akm.server import _extract_tokens
+    body = '{"results":[{"index":0,"relevance_score":0.88}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}'
+    out = _extract_tokens(body)
+    assert out is not None
+    assert out["prompt_tokens"] == 0
+    assert out["completion_tokens"] == 0
+    assert out["total_tokens"] == 0
+
+
 def test_estimate_tokens_light_when_usage_missing():
     from akm.server import _estimate_tokens_light
     req = {"model": "x", "messages": [{"role": "user", "content": "你好，帮我总结一下这段文本"}]}
@@ -1379,6 +1389,44 @@ def test_incremental_sse_usage_tracker_keeps_real_usage_after_truncation():
     assert tokens["prompt_tokens"] == 1234
     assert tokens["completion_tokens"] == 56
     assert tokens["total_tokens"] == 1290
+
+
+@pytest.mark.asyncio
+async def test_build_usage_metrics_does_not_estimate_when_upstream_explicitly_returns_zero_usage(monkeypatch):
+    from starlette.requests import Request
+    from akm.server import _build_usage_metrics, FLAG_USAGE_ESTIMATED_LIGHT
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/rerank",
+        "headers": [],
+        "query_string": b"",
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+        "scheme": "http",
+        "app": app,
+    }
+    request = Request(scope, receive)
+
+    body = '{"results":[{"index":1,"relevance_score":0.98}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}'
+    tokens, flags = await _build_usage_metrics(
+        request=request,
+        request_body={"model": "bge-reranker-v2-m3-free", "query": "hi", "documents": ["a"]},
+        response_body=body,
+        api_path="rerank",
+        key_alias="rerank-key",
+        provider="openai",
+        adapter=None,
+    )
+
+    assert tokens["prompt_tokens"] == 0
+    assert tokens["completion_tokens"] == 0
+    assert tokens["total_tokens"] == 0
+    assert FLAG_USAGE_ESTIMATED_LIGHT not in flags
 
 
 @pytest.mark.asyncio
@@ -1705,7 +1753,7 @@ async def test_markdown_kb_builtin_plugin_loads_disabled_by_default(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_markdown_kb_status_and_upload_api(monkeypatch):
-    """markdown_kb 插件最小 API 应支持状态查询与 .md 上传保存。"""
+    """markdown_kb 插件最小 API 应支持状态查询与批量 .md 上传保存。"""
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from akm.plugins.plugin_manager import PluginManager
@@ -1728,12 +1776,15 @@ async def test_markdown_kb_status_and_upload_api(monkeypatch):
         status_before = await client.get("/api/markdown-kb/status")
         upload_resp = await client.post(
             "/api/markdown-kb/files/upload",
-            files={"file": ("notes.md", b"# Title\n\nhello plugin\n", "text/markdown")},
+            files=[
+                ("files", ("notes.md", b"# Title\n\nhello plugin\n", "text/markdown")),
+                ("files", ("guide.md", b"# Guide\n\nbatch upload\n", "text/markdown")),
+            ],
         )
         status_after = await client.get("/api/markdown-kb/status")
         bad_upload = await client.post(
             "/api/markdown-kb/files/upload",
-            files={"file": ("notes.txt", b"not markdown\n", "text/plain")},
+            files=[("files", ("notes.txt", b"not markdown\n", "text/plain"))],
         )
 
     assert status_before.status_code == 200
@@ -1742,17 +1793,22 @@ async def test_markdown_kb_status_and_upload_api(monkeypatch):
     assert upload_resp.status_code == 200
     upload_data = upload_resp.json()
     assert upload_data["ok"] is True
-    assert upload_data["file_name"] == "notes.md"
-    assert upload_data["size_bytes"] > 0
+    assert upload_data["count"] == 2
+    assert {item["file_name"] for item in upload_data["files"]} == {"notes.md", "guide.md"}
+    assert all(item["size_bytes"] > 0 for item in upload_data["files"])
 
     assert status_after.status_code == 200
     status_after_data = status_after.json()
-    assert status_after_data["doc_count"] == 1
+    assert status_after_data["doc_count"] == 2
     assert status_after_data["docs_dir"].endswith(".akm/markdown_kb/docs")
 
     saved_file = test_home / ".akm" / "markdown_kb" / "docs" / "notes.md"
     assert saved_file.exists()
     assert saved_file.read_text("utf-8") == "# Title\n\nhello plugin\n"
+
+    saved_file_2 = test_home / ".akm" / "markdown_kb" / "docs" / "guide.md"
+    assert saved_file_2.exists()
+    assert saved_file_2.read_text("utf-8") == "# Guide\n\nbatch upload\n"
 
     assert bad_upload.status_code == 400
     assert bad_upload.json()["detail"] == "仅支持 .md 文件"
@@ -1948,6 +2004,7 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
     files_after_sync = plugin.list_files()
     file_names = {item["file_name"] for item in files_after_sync["files"]}
     assert "new.md" in file_names
+
     assert plugin.health_check()["in_sync"] is True
 
     delete_result = plugin.delete_file("release.md")
@@ -1976,6 +2033,337 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
     final_status = plugin.get_status()
     assert final_status["doc_count"] == 0
     assert final_status["chunk_count"] == 0
+    assert "new.md" in file_names
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_keyword_weight_only_affects_non_rerank_order(monkeypatch):
+    """未启用 rerank 时，语义/关键词权重应参与最终排序。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-keyword-weight")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+
+            def vectorize(text):
+                raw = str(text or "")
+                if raw.strip().lower() == "exactterm":
+                    return [1.0, 0.0]
+                if "semantically close" in raw.lower():
+                    return [1.0, 0.0]
+                return [0.0, 1.0]
+
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"embedding": vectorize(item), "index": idx}
+                        for idx, item in enumerate(inputs)
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "semantic.md").write_text("# Broad Topic\n\nThis document is semantically close but misses the exact token.", "utf-8")
+    (docs_dir / "keyword.md").write_text("# exactterm\n\nThis chunk contains exactterm for literal matching.", "utf-8")
+
+    await plugin.rebuild_index()
+
+    plugin.config["reranker_model"] = ""
+    plugin.config["semantic_weight"] = 1
+    plugin.config["keyword_weight"] = 0
+    plugin.config["score_threshold"] = 0
+    semantic_only = await plugin.query({"question": "exactterm", "top_k": 2})
+    assert semantic_only["hits"][0]["file_name"] == "semantic.md"
+
+    plugin.config["semantic_weight"] = 0
+    plugin.config["keyword_weight"] = 1
+    keyword_first = await plugin.query({"question": "exactterm", "top_k": 2})
+    assert keyword_first["hits"][0]["file_name"] == "keyword.md"
+    assert keyword_first["hits"][0]["keyword_score"] > keyword_first["hits"][1]["keyword_score"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_weight(monkeypatch):
+    """启用 rerank 后，最终排序看 rerank，但 top_k 和阈值仍然生效。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-rerank-threshold")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"embedding": [1.0, float(idx + 1)], "index": idx}
+                        for idx, item in enumerate(inputs)
+                    ]
+                },
+            )
+
+        if url.endswith("/v1/rerank"):
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"index": 1, "relevance_score": 0.95},
+                        {"index": 0, "relevance_score": 0.72},
+                        {"index": 2, "relevance_score": 0.31},
+                    ]
+                },
+            )
+
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "a.md").write_text("# Alpha\n\nexactterm alpha", "utf-8")
+    (docs_dir / "b.md").write_text("# Beta\n\nexactterm beta", "utf-8")
+    (docs_dir / "c.md").write_text("# Gamma\n\nexactterm gamma", "utf-8")
+
+    await plugin.rebuild_index()
+
+    plugin.config["reranker_model"] = "rerank-v1"
+    plugin.config["semantic_weight"] = 0
+    plugin.config["keyword_weight"] = 1
+    plugin.config["score_threshold"] = 0.7
+
+    result = await plugin.query({"question": "exactterm", "top_k": 2})
+    assert len(result["hits"]) == 2
+    assert [item["file_name"] for item in result["hits"]] == ["b.md", "a.md"]
+    assert all(item["rerank_score"] is not None for item in result["hits"])
+    assert all(item["score"] >= 0.7 for item in result["hits"])
+
+    result_top1 = await plugin.query({"question": "exactterm", "top_k": 1})
+    assert len(result_top1["hits"]) == 1
+    assert result_top1["hits"][0]["file_name"] == "b.md"
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_chinese_query_can_hit_partial_phrases_without_full_sentence_match(monkeypatch):
+    """中文长句查询应能命中局部短语，而不要求整句逐字出现。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-chinese-query")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+
+            def vectorize(text):
+                raw = str(text or "")
+                if raw == "参考考试大纲生成复习计划":
+                    return [1.0, 0.0]
+                if "考试大纲" in raw or "复习计划" in raw:
+                    return [0.92, 0.08]
+                return [0.0, 1.0]
+
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"embedding": vectorize(item), "index": idx}
+                        for idx, item in enumerate(inputs)
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "plan.md").write_text("# 复习计划\n\n可以参考考试大纲制定阶段性复习计划。", "utf-8")
+    (docs_dir / "other.md").write_text("# 其他主题\n\n这是一个不相关的说明。", "utf-8")
+
+    await plugin.rebuild_index()
+
+    plugin.config["reranker_model"] = ""
+    plugin.config["semantic_weight"] = 0.3
+    plugin.config["keyword_weight"] = 0.7
+    plugin.config["score_threshold"] = 0
+
+    result = await plugin.query({"question": "参考考试大纲生成复习计划", "top_k": 2})
+    assert result["hits"]
+    assert result["hits"][0]["file_name"] == "plan.md"
+    assert result["hits"][0]["keyword_score"] > result["hits"][1]["keyword_score"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_english_query_does_not_depend_on_full_sentence_phrase_match(monkeypatch):
+    """英文长句查询也应主要依赖 token 覆盖，而不是整句原样出现。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-english-query")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+
+            def vectorize(text):
+                raw = str(text or "").lower()
+                if raw == "generate a study plan from the exam outline":
+                    return [1.0, 0.0]
+                if "exam outline" in raw or "study plan" in raw:
+                    return [0.92, 0.08]
+                return [0.0, 1.0]
+
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"embedding": vectorize(item), "index": idx}
+                        for idx, item in enumerate(inputs)
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "plan.md").write_text("# Study Plan\n\nUse the exam outline to prepare a phased study plan.", "utf-8")
+    (docs_dir / "other.md").write_text("# Other Topic\n\nThis document is unrelated.", "utf-8")
+
+    await plugin.rebuild_index()
+
+    plugin.config["reranker_model"] = ""
+    plugin.config["semantic_weight"] = 0.3
+    plugin.config["keyword_weight"] = 0.7
+    plugin.config["score_threshold"] = 0
+
+    result = await plugin.query({"question": "generate a study plan from the exam outline", "top_k": 2})
+    assert result["hits"]
+    assert result["hits"][0]["file_name"] == "plan.md"
+    assert result["hits"][0]["keyword_score"] > result["hits"][1]["keyword_score"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_query_falls_back_when_index_contains_mixed_embedding_dimensions(monkeypatch):
+    """索引里混有不同维度 embedding 时，query 不应直接 500。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-mixed-embeddings")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"embedding": [1.0, 0.0], "index": idx}
+                        for idx, item in enumerate(inputs)
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "a.md").write_text("# Alpha\n\nalpha topic", "utf-8")
+    (docs_dir / "b.md").write_text("# Beta\n\nbeta topic", "utf-8")
+
+    await plugin.rebuild_index()
+
+    snapshot = plugin._load_index_data()
+    snapshot["documents"][0]["embedding"] = [1.0, 0.0, 0.0]
+    plugin._save_index_data(snapshot)
+    plugin._invalidate_embedding_cache()
+
+    plugin.config["reranker_model"] = ""
+    plugin.config["score_threshold"] = 0
+    result = await plugin.query({"question": "alpha", "top_k": 2})
+    assert result["ok"] is True
+    assert len(result["hits"]) >= 1
 
 
 @pytest.mark.asyncio

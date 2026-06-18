@@ -653,10 +653,20 @@ function renderPluginSettingsFormBody(p) {
   if (!p || !p.settings || !p.settings.length) {
     return '<div class="text-xs text-gray-500">该插件当前没有可配置项。</div>';
   }
-  var html = '<div class="space-y-3">';
+  var columns = Number(p.settings_columns || 1) === 2 ? 2 : 1;
+  var gridClass = columns === 2
+    ? 'grid grid-cols-1 md:grid-cols-2 gap-3'
+    : 'grid grid-cols-1 gap-3';
+  var fullSpanClass = columns === 2 ? 'md:col-span-2' : 'md:col-span-1';
+  var defaultSpanClass = 'md:col-span-1';
+  var html = '<div class="' + gridClass + '">';
   p.settings.forEach(function(def){
     var value = getSettingValue(def, p.config ? p.config[def.key] : undefined);
-    html += '<label class="block mb-2">';
+    var spanClass = defaultSpanClass;
+    if (def.type === 'boolean' || def.type === 'text') {
+      spanClass = fullSpanClass;
+    }
+    html += '<label class="block ' + spanClass + '">';
     if (def.type === 'boolean') {
       html += '<div class="flex items-center justify-between gap-3">';
       html += '<span class="text-xs text-gray-300 leading-5">' + esc(def.label || def.key) + '</span>';

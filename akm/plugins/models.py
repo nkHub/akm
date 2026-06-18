@@ -7,14 +7,14 @@ class SettingDef(BaseModel):
     key: str
     label: str
     type: str = "text"          # number / boolean / select / text
-    default: str | int | bool = ""
+    default: str | int | float | bool = ""
     description: str = ""
     options: list[str] = []      # select 类型时的选项列表
     options_source: str = ""     # select 动态数据源，例如 /v1/models
     allow_empty_option: bool = False
     empty_option_label: str = ""
-    min: int | None = None
-    max: int | None = None
+    min: int | float | None = None
+    max: int | float | None = None
 
 
 class PluginMeta(BaseModel):
@@ -30,6 +30,7 @@ class PluginMeta(BaseModel):
     priority: int = 100          # 同 hook 执行优先级，越小越先，0-999
     menu: dict = {}
     routes_prefix: str = ""
+    settings_columns: int = 1   # 配置表单列数，默认单列；当前约定仅支持 1 或 2
     hooks: dict = {
         "on_request": False,
         "on_key_selected": False,

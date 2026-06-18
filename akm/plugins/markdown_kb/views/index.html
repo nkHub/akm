@@ -402,12 +402,54 @@
     </section>
 
     <section class="section-grid">
+      <div class="card span-12">
+        <h2>检索配置</h2>
+        <p class="lead">这里直接修改 `markdown_kb` 插件配置。`semantic / keyword` 权重只在未启用 rerank 时参与第一阶段排序；`top_k` 与 `score_threshold` 在 query / ask 和 `kb:` 自动注入链路里都会生效。</p>
+        <div class="section-grid" style="margin-bottom:0;">
+          <div class="field span-4">
+            <label for="config-embedding-model">Embedding 模型</label>
+            <select id="config-embedding-model" class="select"></select>
+          </div>
+          <div class="field span-4">
+            <label for="config-reranker-model">Reranker 模型</label>
+            <select id="config-reranker-model" class="select"></select>
+          </div>
+          <div class="field span-4">
+            <label for="config-chat-model">问答模型</label>
+            <select id="config-chat-model" class="select"></select>
+          </div>
+          <div class="field span-3">
+            <label for="config-top-k">默认 top_k</label>
+            <input id="config-top-k" type="number" min="1" max="10" value="4">
+          </div>
+          <div class="field span-3">
+            <label for="config-score-threshold">Score 阈值</label>
+            <input id="config-score-threshold" type="number" min="0" max="1" step="0.01" value="0.7">
+          </div>
+          <div class="field span-3">
+            <label for="config-semantic-weight">语义权重</label>
+            <input id="config-semantic-weight" type="number" min="0" step="0.1" value="1">
+          </div>
+          <div class="field span-3">
+            <label for="config-keyword-weight">关键词权重</label>
+            <input id="config-keyword-weight" type="number" min="0" step="0.1" value="0">
+          </div>
+        </div>
+        <div class="actions">
+          <button class="button" id="save-config-btn" type="button">保存配置</button>
+          <button class="button secondary" id="reset-config-btn" type="button">重新读取</button>
+        </div>
+        <div class="status" id="config-status"></div>
+      </div>
+    </section>
+
+    <section class="section-grid">
       <div class="card span-4">
         <h2>上传文档</h2>
-        <p class="lead">上传单个 `.md` 文件到本地知识库目录。上传只负责保存文件，不会自动重建索引。</p>
+        <p class="lead">支持一次选择多个 `.md` 文件并批量上传到本地知识库目录。上传只负责保存文件，不会自动重建索引。</p>
         <div class="actions">
           <label class="button" for="upload-input">选择 .md 文件</label>
-          <input id="upload-input" type="file" accept=".md,text/markdown">
+          <input id="upload-input" type="file" accept=".md,text/markdown" multiple>
           <button class="button secondary" id="upload-btn" type="button" disabled>开始上传</button>
         </div>
         <div class="meta" id="selected-file">尚未选择文件</div>
@@ -451,7 +493,7 @@
         <div class="section-grid" style="margin-bottom:0;">
           <div class="field span-6">
             <label for="query-top-k">top_k</label>
-            <input id="query-top-k" type="number" min="1" value="4">
+            <input id="query-top-k" type="number" min="1" max="10" value="4">
           </div>
           <div class="field span-6">
             <label for="query-embedding-model">Embedding 模型</label>
@@ -481,7 +523,7 @@
         <div class="section-grid" style="margin-bottom:0;">
           <div class="field span-4">
             <label for="ask-top-k">top_k</label>
-            <input id="ask-top-k" type="number" min="1" value="4">
+            <input id="ask-top-k" type="number" min="1" max="10" value="4">
           </div>
           <div class="field span-4">
             <label for="ask-embedding-model">Embedding 模型</label>
@@ -520,6 +562,17 @@
     const healthDetails = document.getElementById('health-details');
     const refreshBtn = document.getElementById('refresh-btn');
 
+    const configEmbeddingModel = document.getElementById('config-embedding-model');
+    const configRerankerModel = document.getElementById('config-reranker-model');
+    const configChatModel = document.getElementById('config-chat-model');
+    const configTopK = document.getElementById('config-top-k');
+    const configScoreThreshold = document.getElementById('config-score-threshold');
+    const configSemanticWeight = document.getElementById('config-semantic-weight');
+    const configKeywordWeight = document.getElementById('config-keyword-weight');
+    const saveConfigBtn = document.getElementById('save-config-btn');
+    const resetConfigBtn = document.getElementById('reset-config-btn');
+    const configStatus = document.getElementById('config-status');
+
     const uploadInput = document.getElementById('upload-input');
     const uploadBtn = document.getElementById('upload-btn');
     const selectedFile = document.getElementById('selected-file');
@@ -555,7 +608,7 @@
     const askAnswer = document.getElementById('ask-answer');
     const askCitations = document.getElementById('ask-citations');
 
-    let currentFile = null;
+    let currentFiles = [];
     let availableModels = [];
     let pluginConfig = null;
 
@@ -647,11 +700,32 @@
 
     async function loadPluginConfig() {
       pluginConfig = await requestJson('/api/plugin-config/markdown_kb');
+      renderModelOptions(configEmbeddingModel, pluginConfig.embedding_model || '', '请选择 embedding 模型');
+      renderModelOptions(configRerankerModel, pluginConfig.reranker_model || '', '不启用 rerank');
+      renderModelOptions(configChatModel, pluginConfig.chat_model || '', '请选择问答模型');
+
+      configTopK.value = String(pluginConfig.top_k == null ? 4 : pluginConfig.top_k);
+      configScoreThreshold.value = String(pluginConfig.score_threshold == null ? 0.7 : pluginConfig.score_threshold);
+      configSemanticWeight.value = String(pluginConfig.semantic_weight == null ? 1 : pluginConfig.semantic_weight);
+      configKeywordWeight.value = String(pluginConfig.keyword_weight == null ? 0 : pluginConfig.keyword_weight);
+
       renderModelOptions(queryEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
-      renderModelOptions(queryRerankerModel, pluginConfig.reranker_model || '', '跟随插件默认 reranker 模型');
+      renderModelOptions(queryRerankerModel, '', '不启用 rerank');
       renderModelOptions(askEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
       renderModelOptions(askChatModel, pluginConfig.chat_model || '', '跟随插件默认问答模型');
-      renderModelOptions(askRerankerModel, pluginConfig.reranker_model || '', '跟随插件默认 reranker 模型');
+      renderModelOptions(askRerankerModel, '', '不启用 rerank');
+    }
+
+    function buildPluginConfigPayload() {
+      return {
+        embedding_model: String(configEmbeddingModel.value || '').trim(),
+        reranker_model: String(configRerankerModel.value || '').trim(),
+        chat_model: String(configChatModel.value || '').trim(),
+        top_k: Number(configTopK.value || 4),
+        score_threshold: Number(configScoreThreshold.value || 0.7),
+        semantic_weight: Number(configSemanticWeight.value || 1),
+        keyword_weight: Number(configKeywordWeight.value || 0)
+      };
     }
 
     async function bootstrapConfigAndModels() {
@@ -790,6 +864,10 @@
                   '<span class="tag">标题：' + escapeHtml(item.title || '-') + '</span>' +
                   '<span class="tag">chunk：' + escapeHtml(item.chunk_index) + '</span>' +
                   '<span class="tag">score：' + escapeHtml((item.score || 0).toFixed ? item.score.toFixed(4) : item.score) + '</span>' +
+                  (item.rerank_score != null ? '<span class="tag">rerank：' + escapeHtml(item.rerank_score.toFixed ? item.rerank_score.toFixed(4) : item.rerank_score) + '</span>' : '') +
+                  (item.hybrid_score != null ? '<span class="tag">hybrid：' + escapeHtml(item.hybrid_score.toFixed ? item.hybrid_score.toFixed(4) : item.hybrid_score) + '</span>' : '') +
+                  (item.vector_score != null ? '<span class="tag">semantic：' + escapeHtml(item.vector_score.toFixed ? item.vector_score.toFixed(4) : item.vector_score) + '</span>' : '') +
+                  (item.keyword_score != null ? '<span class="tag">keyword：' + escapeHtml(item.keyword_score.toFixed ? item.keyword_score.toFixed(4) : item.keyword_score) + '</span>' : '') +
                 '</div>' +
               '</div>' +
             '</div>' +
@@ -799,31 +877,41 @@
     }
 
     uploadInput.addEventListener('change', function () {
-      currentFile = uploadInput.files && uploadInput.files[0] ? uploadInput.files[0] : null;
-      uploadBtn.disabled = !currentFile;
-      selectedFile.textContent = currentFile
-        ? '已选择：' + currentFile.name + '（' + currentFile.size + ' bytes）'
-        : '尚未选择文件';
+      currentFiles = uploadInput.files ? Array.from(uploadInput.files) : [];
+      uploadBtn.disabled = !currentFiles.length;
+      if (!currentFiles.length) {
+        selectedFile.textContent = '尚未选择文件';
+      } else if (currentFiles.length === 1) {
+        selectedFile.textContent = '已选择：' + currentFiles[0].name + '（' + currentFiles[0].size + ' bytes）';
+      } else {
+        selectedFile.textContent = '已选择 ' + currentFiles.length + ' 个文件：' + currentFiles.map(function(file){ return file.name; }).join('，');
+      }
       setStatus(uploadStatus, '', '');
     });
 
     uploadBtn.addEventListener('click', async function () {
-      if (!currentFile) return;
+      if (!currentFiles.length) return;
       uploadBtn.disabled = true;
       setStatus(uploadStatus, '正在上传...', '');
       try {
         const formData = new FormData();
-        formData.append('file', currentFile);
+        currentFiles.forEach(function(file){
+          formData.append('files', file);
+        });
         const data = await requestJson('/api/markdown-kb/files/upload', {
           method: 'POST',
           body: formData
         });
-        setStatus(uploadStatus, '上传成功：' + data.file_name + '。当前文件已保存，但如果要参与检索和问答，记得执行一次重建。', 'ok');
+        if ((data.files || []).length === 1) {
+          setStatus(uploadStatus, '上传成功：' + data.files[0].file_name + '。当前文件已保存，但如果要参与检索和问答，记得执行一次重建。', 'ok');
+        } else {
+          setStatus(uploadStatus, '批量上传成功：共保存 ' + (data.count || 0) + ' 个文件。当前文件已保存，但如果要参与检索和问答，记得执行一次重建。', 'ok');
+        }
         await Promise.all([loadStatus(), loadFiles()]);
       } catch (error) {
         setStatus(uploadStatus, '上传失败：' + String(error.message || error), 'error');
       } finally {
-        uploadBtn.disabled = !currentFile;
+        uploadBtn.disabled = !currentFiles.length;
       }
     });
 
@@ -903,6 +991,37 @@
         setStatus(rebuildStatus, '清空失败：' + String(error.message || error), 'error');
       } finally {
         clearIndexBtn.disabled = false;
+      }
+    });
+
+    saveConfigBtn.addEventListener('click', async function () {
+      saveConfigBtn.disabled = true;
+      setStatus(configStatus, '正在保存配置...', 'warn');
+      try {
+        await requestJson('/api/plugin-config/markdown_kb', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildPluginConfigPayload())
+        });
+        setStatus(configStatus, '配置已保存。新的检索默认参数会立即用于 query / ask 与 kb: 自动注入。', 'ok');
+        await Promise.all([loadPluginConfig(), loadStatus()]);
+      } catch (error) {
+        setStatus(configStatus, '保存失败：' + String(error.message || error), 'error');
+      } finally {
+        saveConfigBtn.disabled = false;
+      }
+    });
+
+    resetConfigBtn.addEventListener('click', async function () {
+      resetConfigBtn.disabled = true;
+      setStatus(configStatus, '正在重新读取配置...', 'warn');
+      try {
+        await loadPluginConfig();
+        setStatus(configStatus, '已从插件配置重新载入当前值。', 'ok');
+      } catch (error) {
+        setStatus(configStatus, '读取失败：' + String(error.message || error), 'error');
+      } finally {
+        resetConfigBtn.disabled = false;
       }
     });
 
