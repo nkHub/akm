@@ -1006,6 +1006,7 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - `POST /api/markdown-kb/ask`
 - `POST /api/markdown-kb/clear`
 - `GET /api/markdown-kb/health`
+- `on_request` 最小自动注入：只支持 `kb:` 模型前缀，且只有命中非空时才注入
 - 标题优先切片
 - 本地数据目录默认落到 `~/.akm/markdown_kb/`
 - embedding / 可选 rerank / chat 请求统一走本地 AKM 代理

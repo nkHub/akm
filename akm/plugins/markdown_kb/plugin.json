@@ -5,6 +5,7 @@
   "category": "app",
   "builtin": true,
   "default_enabled": false,
+  "priority": 200,
   "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
   "menu": {
     "title": "知识库",
@@ -12,6 +13,9 @@
     "order": 60
   },
   "routes_prefix": "/api/markdown-kb",
+  "hooks": {
+    "on_request": true
+  },
   "settings": [
     {
       "key": "embedding_model",

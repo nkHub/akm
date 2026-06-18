@@ -18,6 +18,161 @@ from akm.key_pool import get_key
 from akm.server import app, _default_image_generation_model, _image_supported_models_from_config
 
 
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_injects_hits_for_kb_model(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 2,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+        assert question == "请根据知识库回答"
+        assert top_k == 2
+        assert embedding_model == "text-embedding-3-small"
+        assert reranker_model == ""
+        return [{
+            "file_name": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "chunk_text": "Knowledge base content",
+        }]
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "kb:gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": "请根据知识库回答"}
+        ],
+    }
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert out["model"] == "gpt-4o-mini"
+    assert out["messages"][0]["role"] == "system"
+    assert "Knowledge base content" in out["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 2,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+        return []
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "kb:gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": "请根据知识库回答"}
+        ],
+    }
+    out = await plugin.on_request(request)
+    assert out is request
+    assert out["model"] == "gpt-4o-mini"
+    assert out["messages"][0]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 1,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+        return [{
+            "file_name": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "chunk_text": "Knowledge base content",
+        }]
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "kb:gpt-4.1",
+        "input": "给我答案",
+        "instructions": "你是一个助手。",
+    }
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert out["model"] == "gpt-4.1"
+    assert "Knowledge base content" in out["instructions"]
+    assert "原始系统要求" in out["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_runs_after_model_matcher_for_kb_aliases(monkeypatch):
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-priority")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    cfg_path = test_home / ".akm" / "config.json"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({
+        "plugin_states": {
+            "model_matcher": True,
+            "markdown_kb": True,
+        },
+        "plugin_configs": {
+            "model_matcher": {"aliases": "kb-default=kb:gpt-4o-mini"},
+            "markdown_kb": {
+                "embedding_model": "text-embedding-3-small",
+                "reranker_model": "",
+                "chat_model": "gpt-4o-mini",
+                "chunk_size": 800,
+                "chunk_overlap": 120,
+                "top_k": 2,
+            },
+        },
+    }, ensure_ascii=False), "utf-8")
+
+    pm = PluginManager()
+    await pm.load_all(FastAPI())
+    markdown_plugin = pm.plugins["markdown_kb"]
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+        return [{
+            "file_name": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "chunk_text": "Injected docs",
+        }]
+
+    monkeypatch.setattr(markdown_plugin, "_retrieve", fake_retrieve)
+
+    body = {
+        "model": "kb-default",
+        "messages": [{"role": "user", "content": "根据知识库回答"}],
+    }
+    out = await pm.run_hook("on_request", request=body)
+    request_out = out["request"]
+    assert request_out["model"] == "gpt-4o-mini"
+    assert request_out["messages"][0]["role"] == "system"
+    assert "Injected docs" in request_out["messages"][0]["content"]
+
+
 @pytest.fixture(autouse=True)
 def setup(monkeypatch):
     tmpdir = tempfile.mkdtemp()
