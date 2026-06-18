@@ -89,6 +89,13 @@
       "min": 0,
       "max": 1,
       "description": "0~1。最终命中分低于该阈值时直接过滤；未启用 rerank 时使用混合分，启用 rerank 后使用 rerank 分。"
+    },
+    {
+      "key": "document_workspace_root",
+      "label": "文档工作目录",
+      "type": "string",
+      "default": "",
+      "description": "可选。为当前知识库文档声明所属工作目录。启用 kb: 自动注入时，会优先匹配与当前请求工作目录一致的文档；为空时不做工作目录隔离。"
     }
   ]
 }

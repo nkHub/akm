@@ -832,34 +832,44 @@
       }
 
       filesList.innerHTML = files.map(function (item) {
+        const fileName = escapeHtml(item.file_name || '-');
+        const docId = escapeHtml(item.doc_id || '');
+        const workspaceRoot = escapeHtml(item.workspace_root || '');
         return '' +
           '<div class="file-item">' +
             '<div class="file-head">' +
               '<div>' +
-                '<div class="file-title">' + escapeHtml(item.file_name) + '</div>' +
+                '<div class="file-title">' + fileName + '</div>' +
                 '<div class="tag-row">' +
                   '<span class="tag ' + (item.indexed ? 'ok' : 'warn') + '">' + (item.indexed ? '已入索引' : '未入索引') + '</span>' +
                   '<span class="tag">' + escapeHtml(item.size_bytes) + ' bytes</span>' +
                   '<span class="tag">' + escapeHtml(item.chunk_count) + ' chunks</span>' +
+                  '<span class="tag">workspace：' + (workspaceRoot || '公共文档') + '</span>' +
                 '</div>' +
               '</div>' +
               '<div class="actions" style="margin-top:0;">' +
-                '<button class="button secondary" type="button" data-rebuild-file="' + escapeHtml(item.file_name) + '">重建此文件</button>' +
-                '<button class="button danger" type="button" data-delete-file="' + escapeHtml(item.file_name) + '">删除</button>' +
+                '<button class="button secondary" type="button" data-rebuild-doc-id="' + docId + '" data-file-name="' + fileName + '" data-workspace-root="' + workspaceRoot + '">重建此文件</button>' +
+                '<button class="button danger" type="button" data-delete-doc-id="' + docId + '" data-file-name="' + fileName + '" data-workspace-root="' + workspaceRoot + '">删除</button>' +
               '</div>' +
             '</div>' +
             '<div class="meta">更新时间：' + escapeHtml(item.updated_at || '暂无') + '<br>SHA256：<span class="mono">' + escapeHtml(item.sha256 || '-') + '</span></div>' +
           '</div>';
       }).join('');
 
-      filesList.querySelectorAll('[data-delete-file]').forEach(function (button) {
+      filesList.querySelectorAll('[data-delete-doc-id]').forEach(function (button) {
         button.addEventListener('click', async function () {
-          const fileName = button.getAttribute('data-delete-file') || '';
+          const fileName = button.getAttribute('data-file-name') || '';
+          const docId = button.getAttribute('data-delete-doc-id') || '';
+          const workspaceRoot = button.getAttribute('data-workspace-root') || '';
           const ok = window.confirm('确定删除文件 ' + fileName + ' 吗？这会同步清理它对应的索引片段。');
           if (!ok) return;
           button.disabled = true;
           try {
-            await requestJson('/api/markdown-kb/files/' + encodeURIComponent(fileName), { method: 'DELETE' });
+            await requestJson('/api/markdown-kb/files/delete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ doc_id: docId, file_name: fileName, workspace_root: workspaceRoot })
+            });
             await Promise.all([loadFiles(), loadStatus()]);
           } catch (error) {
             window.alert('删除失败：' + String(error.message || error));
@@ -869,16 +879,18 @@
         });
       });
 
-      filesList.querySelectorAll('[data-rebuild-file]').forEach(function (button) {
+      filesList.querySelectorAll('[data-rebuild-doc-id]').forEach(function (button) {
         button.addEventListener('click', async function () {
-          const fileName = button.getAttribute('data-rebuild-file') || '';
+          const fileName = button.getAttribute('data-file-name') || '';
+          const docId = button.getAttribute('data-rebuild-doc-id') || '';
+          const workspaceRoot = button.getAttribute('data-workspace-root') || '';
           button.disabled = true;
           setStatus(rebuildStatus, '正在重建文件 ' + fileName + ' ...', 'warn');
           try {
             const data = await requestJson('/api/markdown-kb/rebuild-file', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ file_name: fileName })
+              body: JSON.stringify({ doc_id: docId, file_name: fileName, workspace_root: workspaceRoot })
             });
             setStatus(rebuildStatus, '单文件重建完成：' + data.file_name + '，共 ' + data.chunk_count + ' 个 chunks。', 'ok');
             await Promise.all([loadFiles(), loadStatus(), loadPluginConfig()]);

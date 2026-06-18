@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from fastapi import APIRouter, Body, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from akm.config import load_config
 
@@ -230,12 +230,17 @@ class SqliteKbIndexStore(IndexStore):
     def _init_db(self) -> None:
         conn = self._connect()
         try:
+            row = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()
+            if row and row[0] > 0:
+                self._ensure_column(conn, "kb_documents", "workspace_root", "TEXT NOT NULL DEFAULT ''")
+                self._ensure_column(conn, "kb_chunks", "workspace_root", "TEXT NOT NULL DEFAULT ''")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS kb_documents (
                     doc_id TEXT PRIMARY KEY,
                     file_name TEXT NOT NULL,
                     file_path TEXT NOT NULL,
+                    workspace_root TEXT NOT NULL DEFAULT '',
                     content_hash TEXT NOT NULL,
                     file_size_bytes INTEGER NOT NULL DEFAULT 0,
                     title TEXT DEFAULT '',
@@ -251,6 +256,7 @@ class SqliteKbIndexStore(IndexStore):
                     doc_id TEXT NOT NULL,
                     file_name TEXT NOT NULL,
                     file_path TEXT NOT NULL,
+                    workspace_root TEXT NOT NULL DEFAULT '',
                     title TEXT DEFAULT '',
                     heading_level INTEGER NOT NULL DEFAULT 0,
                     chunk_index INTEGER NOT NULL,
@@ -275,9 +281,11 @@ class SqliteKbIndexStore(IndexStore):
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_kb_documents_file_name ON kb_documents(file_name);
+                CREATE INDEX IF NOT EXISTS idx_kb_documents_workspace_root ON kb_documents(workspace_root);
                 CREATE INDEX IF NOT EXISTS idx_kb_documents_content_hash ON kb_documents(content_hash);
                 CREATE INDEX IF NOT EXISTS idx_kb_chunks_doc_id ON kb_chunks(doc_id);
                 CREATE INDEX IF NOT EXISTS idx_kb_chunks_file_name ON kb_chunks(file_name);
+                CREATE INDEX IF NOT EXISTS idx_kb_chunks_workspace_root ON kb_chunks(workspace_root);
                 CREATE INDEX IF NOT EXISTS idx_kb_chunks_doc_chunk_index ON kb_chunks(doc_id, chunk_index);
                 CREATE INDEX IF NOT EXISTS idx_kb_vectors_chunk_id ON kb_vectors(chunk_id);
                 """
@@ -285,6 +293,14 @@ class SqliteKbIndexStore(IndexStore):
             conn.commit()
         finally:
             conn.close()
+
+    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, ddl: str) -> None:
+        """为历史数据库补齐新增列，避免升级后直接重建索引前无法启动。"""
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing = {str(row[1]) for row in rows}
+        if column_name in existing:
+            return
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}")
 
     def _load_meta_map(self, conn: sqlite3.Connection) -> dict:
         rows = conn.execute("SELECT meta_key, meta_value FROM kb_index_meta").fetchall()
@@ -304,6 +320,7 @@ class SqliteKbIndexStore(IndexStore):
             "doc_id": row["doc_id"],
             "file_name": row["file_name"],
             "file_path": row["file_path"],
+            "workspace_root": row["workspace_root"],
             "title": row["title"],
             "heading_level": row["heading_level"],
             "chunk_index": row["chunk_index"],
@@ -363,14 +380,15 @@ class SqliteKbIndexStore(IndexStore):
                 conn.execute(
                     """
                     INSERT INTO kb_documents(
-                        doc_id, file_name, file_path, content_hash, file_size_bytes,
+                        doc_id, file_name, file_path, workspace_root, content_hash, file_size_bytes,
                         title, chunk_count, updated_at, indexed_at, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         doc_id,
                         first.get("file_name") or "",
                         first.get("file_path") or "",
+                        first.get("workspace_root") or "",
                         first.get("content_hash") or "",
                         0,
                         first.get("title") or "",
@@ -385,15 +403,16 @@ class SqliteKbIndexStore(IndexStore):
                 conn.execute(
                     """
                     INSERT INTO kb_chunks(
-                        chunk_id, doc_id, file_name, file_path, title, heading_level,
+                        chunk_id, doc_id, file_name, file_path, workspace_root, title, heading_level,
                         chunk_index, chunk_text, content_hash, created_at, updated_at, indexed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.get("id"),
                         item.get("doc_id"),
                         item.get("file_name") or "",
                         item.get("file_path") or "",
+                        item.get("workspace_root") or "",
                         item.get("title") or "",
                         _safe_int(item.get("heading_level"), 0),
                         _safe_int(item.get("chunk_index"), 0),
@@ -492,7 +511,10 @@ async def plugin_status():
 
 
 @router.post("/files/upload")
-async def upload_markdown(files: list[UploadFile] = File(...)):
+async def upload_markdown(
+    files: list[UploadFile] = File(...),
+    workspace_root: str = Form(default=""),
+):
     """接收并保存多个 Markdown 文件。
 
     约束保持极简：
@@ -501,7 +523,7 @@ async def upload_markdown(files: list[UploadFile] = File(...)):
     3. 若同名文件重复上传，则覆盖旧文件，降低骨架阶段的交互复杂度。
     """
     plugin = _get_plugin()
-    return await plugin.save_markdown_files(files)
+    return await plugin.save_markdown_files(files, workspace_root)
 
 
 @router.get("/files")
@@ -511,11 +533,33 @@ async def list_markdown_files():
     return plugin.list_files()
 
 
+@router.post("/files/bind-workspace")
+async def bind_markdown_file_workspace(payload: dict = Body(...)):
+    """为单个 Markdown 文件绑定工作目录。"""
+    plugin = _get_plugin()
+    return plugin.bind_file_workspace(
+        str((payload or {}).get("file_name", "") or ""),
+        str((payload or {}).get("workspace_root", "") or ""),
+        str((payload or {}).get("doc_id", "") or ""),
+    )
+
+
 @router.delete("/files/{name}")
 async def delete_markdown_file(name: str):
     """删除指定 Markdown 文件，并同步移除其索引条目。"""
     plugin = _get_plugin()
     return plugin.delete_file(name)
+
+
+@router.post("/files/delete")
+async def delete_markdown_file_by_payload(payload: dict = Body(...)):
+    """按 doc_id 或 (file_name, workspace_root) 删除 Markdown 文件。"""
+    plugin = _get_plugin()
+    return plugin.delete_file(
+        str((payload or {}).get("file_name", "") or ""),
+        str((payload or {}).get("workspace_root", "") or ""),
+        str((payload or {}).get("doc_id", "") or ""),
+    )
 
 
 @router.post("/rebuild")
@@ -529,7 +573,11 @@ async def rebuild_index():
 async def rebuild_single_file(payload: dict = Body(...)):
     """只重建单个 Markdown 文件。"""
     plugin = _get_plugin()
-    return await plugin.rebuild_file(str((payload or {}).get("file_name", "") or ""))
+    return await plugin.rebuild_file(
+        str((payload or {}).get("file_name", "") or ""),
+        str((payload or {}).get("workspace_root", "") or ""),
+        str((payload or {}).get("doc_id", "") or ""),
+    )
 
 
 @router.post("/sync")
@@ -579,9 +627,19 @@ class Plugin(PluginBase):
         """
         global _plugin_instance
         _plugin_instance = self
+        self._ensure_runtime_ready()
+        self.logger.info("[markdown_kb] 数据目录已就绪: %s", self._data_root)
+
+    def _ensure_runtime_ready(self) -> None:
+        if getattr(self, "_store", None) is not None:
+            return
+        if not getattr(self, "name", ""):
+            return
         self._data_root = self._resolve_data_root()
         self._docs_dir = self._data_root / "docs"
         self._index_store_dir = self._data_root / "index_store"
+        self._file_bindings_path = self._data_root / "file_bindings.json"
+        self._doc_manifest_path = self._data_root / "doc_manifest.json"
         self._index_path = self._index_store_dir / "index.json"
         self._docs_dir.mkdir(parents=True, exist_ok=True)
         self._index_store_dir.mkdir(parents=True, exist_ok=True)
@@ -593,7 +651,163 @@ class Plugin(PluginBase):
         self._numpy_available = None
         self._query_embedding_cache = OrderedDict()
         self._query_result_cache = OrderedDict()
-        self.logger.info("[markdown_kb] 数据目录已就绪: %s", self._data_root)
+
+    def _load_doc_manifest(self) -> list[dict]:
+        """读取文档清单；若不存在则从现有 docs 和旧绑定表自动迁移。"""
+        manifest_path = getattr(self, "_doc_manifest_path", None)
+        if manifest_path is not None and manifest_path.exists():
+            try:
+                data = json.loads(manifest_path.read_text("utf-8"))
+            except Exception:
+                data = []
+            if isinstance(data, list):
+                entries = [self._normalize_doc_entry(item) for item in data if isinstance(item, dict)]
+                return self._merge_unmanaged_docs_into_manifest(entries)
+
+        entries = []
+        bindings = self._load_file_bindings()
+        for path in sorted(self._docs_dir.glob("*.md")):
+            file_name = path.name
+            workspace_root = self._normalize_workspace_root(bindings.get(file_name) or "")
+            entries.append(self._build_doc_entry(file_name, workspace_root, file_name))
+        if manifest_path is not None:
+            self._save_doc_manifest(entries)
+        return entries
+
+    def _merge_unmanaged_docs_into_manifest(self, entries: list[dict]) -> list[dict]:
+        """把尚未登记到 manifest 的历史物理文件自动补进清单。"""
+        known_storage_names = {str(item.get("storage_name") or "") for item in entries}
+        bindings = self._load_file_bindings()
+        changed = False
+        for path in sorted(self._docs_dir.glob("*.md")):
+            if path.name in known_storage_names:
+                continue
+            workspace_root = self._normalize_workspace_root(bindings.get(path.name) or "")
+            entries.append(self._build_doc_entry(path.name, workspace_root, path.name))
+            changed = True
+        if changed and getattr(self, "_doc_manifest_path", None) is not None:
+            self._save_doc_manifest(entries)
+        return entries
+
+    def _save_doc_manifest(self, entries: list[dict]) -> None:
+        """写入文档清单。"""
+        manifest_path = getattr(self, "_doc_manifest_path", None)
+        if manifest_path is None:
+            raise RuntimeError("markdown_kb 文档清单尚未初始化")
+        normalized = [self._normalize_doc_entry(item) for item in entries if isinstance(item, dict)]
+        manifest_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), "utf-8")
+
+    def _build_doc_entry(self, file_name: str, workspace_root: str, storage_name: str) -> dict:
+        """构造文档清单条目。"""
+        safe_name = Path(str(file_name or "")).name
+        normalized_workspace = self._normalize_workspace_root(workspace_root)
+        return {
+            "doc_id": self._make_doc_id(safe_name, normalized_workspace),
+            "file_name": safe_name,
+            "workspace_root": normalized_workspace,
+            "storage_name": Path(str(storage_name or safe_name)).name,
+        }
+
+    def _normalize_doc_entry(self, entry: dict) -> dict:
+        """规整文档清单条目，兼容历史数据。"""
+        file_name = Path(str((entry or {}).get("file_name") or "")).name
+        workspace_root = self._normalize_workspace_root((entry or {}).get("workspace_root") or "")
+        storage_name = Path(str((entry or {}).get("storage_name") or file_name)).name
+        doc_id = str((entry or {}).get("doc_id") or self._make_doc_id(file_name, workspace_root))
+        return {
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "workspace_root": workspace_root,
+            "storage_name": storage_name,
+        }
+
+    def _make_doc_id(self, file_name: str, workspace_root: str) -> str:
+        """用“工作目录 + 文件名”生成稳定文档 ID。"""
+        basis = f"{self._normalize_workspace_root(workspace_root)}::{Path(str(file_name or '')).name}"
+        return hashlib.sha1(basis.encode("utf-8")).hexdigest()
+
+    def _storage_name_for_entry(self, file_name: str, workspace_root: str) -> str:
+        """为不同工作目录下的同名逻辑文档生成唯一物理文件名。"""
+        safe_name = Path(str(file_name or "")).name
+        normalized_workspace = self._normalize_workspace_root(workspace_root)
+        if not normalized_workspace:
+            return safe_name
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix or ".md"
+        short_hash = hashlib.sha1(normalized_workspace.encode("utf-8")).hexdigest()[:10]
+        return f"{stem}__{short_hash}{suffix}"
+
+    def _doc_storage_path(self, entry: dict) -> Path:
+        """解析文档条目的实际物理存储路径。"""
+        return self._docs_dir / Path(str((entry or {}).get("storage_name") or "")).name
+
+    def _find_doc_entry(self, *, doc_id: str = "", file_name: str = "", workspace_root: str = "") -> dict:
+        """按 doc_id 或 (file_name, workspace_root) 查找单个文档条目。"""
+        entries = self._load_doc_manifest()
+        normalized_doc_id = str(doc_id or "").strip()
+        normalized_name = Path(str(file_name or "")).name
+        normalized_workspace = self._normalize_workspace_root(workspace_root)
+
+        if normalized_doc_id:
+            for entry in entries:
+                if entry.get("doc_id") == normalized_doc_id:
+                    return entry
+            raise HTTPException(status_code=404, detail="文档不存在")
+
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="file_name 不能为空")
+
+        matches = [entry for entry in entries if entry.get("file_name") == normalized_name]
+        if normalized_workspace or not matches:
+            matches = [entry for entry in matches if entry.get("workspace_root") == normalized_workspace]
+        if not matches:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail="存在同名文档，请补充 workspace_root 或 doc_id")
+        return matches[0]
+
+    def _load_file_bindings(self) -> dict[str, str]:
+        """读取文件级工作目录绑定表。"""
+        bindings_path = getattr(self, "_file_bindings_path", None)
+        if bindings_path is None:
+            return {}
+        if not bindings_path.exists():
+            return {}
+        try:
+            data = json.loads(bindings_path.read_text("utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        result = {}
+        for key, value in data.items():
+            file_name = Path(str(key or "")).name
+            if not file_name:
+                continue
+            result[file_name] = self._normalize_workspace_root(value)
+        return result
+
+    def _save_file_bindings(self, bindings: dict[str, str]) -> None:
+        """写入文件级工作目录绑定表。"""
+        bindings_path = getattr(self, "_file_bindings_path", None)
+        if bindings_path is None:
+            raise RuntimeError("markdown_kb 文件绑定存储尚未初始化")
+        normalized = {}
+        for key, value in (bindings or {}).items():
+            file_name = Path(str(key or "")).name
+            if not file_name:
+                continue
+            normalized[file_name] = self._normalize_workspace_root(value)
+        bindings_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), "utf-8")
+
+    def _resolve_file_workspace_root(self, file_name: str, settings: dict | None = None) -> str:
+        """解析单个文件最终使用的工作目录绑定。"""
+        safe_name = Path(str(file_name or "")).name
+        bindings = self._load_file_bindings()
+        if safe_name in bindings:
+            return self._normalize_workspace_root(bindings.get(safe_name) or "")
+        settings = settings or self._settings()
+        return self._normalize_workspace_root(settings.get("document_workspace_root") or "")
 
     def _create_index_store(self) -> IndexStore:
         """创建当前使用的索引 backend。
@@ -620,6 +834,7 @@ class Plugin(PluginBase):
 
     def get_status(self) -> dict:
         """汇总插件当前状态，供页面和 API 直接复用。"""
+        self._ensure_runtime_ready()
         docs = sorted(self._docs_dir.glob("*.md"))
         index_stats = self._store.stats()
         health = self.health_check()
@@ -650,25 +865,31 @@ class Plugin(PluginBase):
 
         这里同时附带是否已进入索引的标记，方便前端后续区分“已上传但未重建”与“已入库”。
         """
+        self._ensure_runtime_ready()
         indexed_documents = self._store.list_documents()
-        chunk_counts_by_file: dict[str, int] = {}
+        chunk_counts_by_doc: dict[str, int] = {}
         for item in indexed_documents:
-            file_name = str(item.get("file_name") or "")
-            if not file_name:
+            doc_id = str(item.get("doc_id") or "")
+            if not doc_id:
                 continue
-            chunk_counts_by_file[file_name] = chunk_counts_by_file.get(file_name, 0) + 1
+            chunk_counts_by_doc[doc_id] = chunk_counts_by_doc.get(doc_id, 0) + 1
 
         files = []
-        for path in sorted(self._docs_dir.glob("*.md")):
+        for entry in self._load_doc_manifest():
+            path = self._doc_storage_path(entry)
+            if not path.exists():
+                continue
             stat = path.stat()
             payload = path.read_bytes()
             files.append({
-                "file_name": path.name,
+                "doc_id": entry.get("doc_id") or "",
+                "file_name": entry.get("file_name") or path.name,
                 "size_bytes": stat.st_size,
                 "sha256": hashlib.sha256(payload).hexdigest(),
                 "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat(),
-                "indexed": chunk_counts_by_file.get(path.name, 0) > 0,
-                "chunk_count": chunk_counts_by_file.get(path.name, 0),
+                "indexed": chunk_counts_by_doc.get(entry.get("doc_id") or "", 0) > 0,
+                "chunk_count": chunk_counts_by_doc.get(entry.get("doc_id") or "", 0),
+                "workspace_root": self._normalize_workspace_root(entry.get("workspace_root") or ""),
             })
 
         return {
@@ -677,30 +898,83 @@ class Plugin(PluginBase):
             "count": len(files),
         }
 
-    def delete_file(self, name: str) -> dict:
+    def delete_file(self, name: str, workspace_root: str = "", doc_id: str = "") -> dict:
         """删除指定 Markdown 文件，并同步清理索引中对应的 chunks。"""
-        safe_name = Path((name or "").strip()).name
+        self._ensure_runtime_ready()
+        entry = self._find_doc_entry(doc_id=doc_id, file_name=name, workspace_root=workspace_root)
+        safe_name = Path(str(entry.get("file_name") or "")).name
         if not safe_name or not safe_name.lower().endswith(".md"):
             raise HTTPException(status_code=400, detail="仅支持删除 .md 文件")
 
-        target = self._docs_dir / safe_name
+        target = self._doc_storage_path(entry)
         if not target.exists():
             raise HTTPException(status_code=404, detail="文件不存在")
 
         target.unlink()
 
-        delete_result = self._store.delete_by_file(safe_name)
+        manifest = [item for item in self._load_doc_manifest() if str(item.get("doc_id") or "") != str(entry.get("doc_id") or "")]
+        self._save_doc_manifest(manifest)
+
+        existing_documents = self._store.list_documents()
+        removed_count = sum(1 for item in existing_documents if str(item.get("doc_id") or "") == str(entry.get("doc_id") or ""))
+        current_documents = [item for item in existing_documents if str(item.get("doc_id") or "") != str(entry.get("doc_id") or "")]
+        self._store.replace_all(current_documents, {
+            "last_rebuilt_at": _utc_now_iso(),
+            "embedding_model": self._settings()["embedding_model"],
+        })
         self._invalidate_embedding_cache()
-        removed_count = delete_result.get("removed_chunks", 0)
 
         return {
             "ok": True,
+            "doc_id": entry.get("doc_id") or "",
             "file_name": safe_name,
             "removed_chunks": removed_count,
         }
 
+    def bind_file_workspace(self, file_name: str, workspace_root: str, doc_id: str = "") -> dict:
+        """为单个文件绑定工作目录。
+
+        规则：
+        1. 文件必须已存在于 `docs_dir`；
+        2. 同一工作目录下文件名天然唯一，因为绑定键就是 `file_name`；
+        3. 绑定修改后不会自动重建索引，需要调用方显式执行 `rebuild-file` / `sync` / `rebuild`。
+        """
+        self._ensure_runtime_ready()
+        entry = self._find_doc_entry(doc_id=doc_id, file_name=file_name, workspace_root="")
+        safe_name = Path(str(entry.get("file_name") or "")).name
+        if not safe_name or not safe_name.lower().endswith(".md"):
+            raise HTTPException(status_code=400, detail="仅支持为 .md 文件绑定工作目录")
+
+        target = self._doc_storage_path(entry)
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="文件不存在")
+
+        normalized_workspace = self._normalize_workspace_root(workspace_root)
+        manifest = self._load_doc_manifest()
+        updated = []
+        for item in manifest:
+            if str(item.get("doc_id") or "") == str(entry.get("doc_id") or ""):
+                updated.append({
+                    "doc_id": str(item.get("doc_id") or ""),
+                    "file_name": safe_name,
+                    "workspace_root": normalized_workspace,
+                    "storage_name": str(item.get("storage_name") or safe_name),
+                })
+            else:
+                updated.append(item)
+        self._save_doc_manifest(updated)
+
+        return {
+            "ok": True,
+            "doc_id": entry.get("doc_id") or "",
+            "file_name": safe_name,
+            "workspace_root": normalized_workspace,
+            "needs_rebuild": True,
+        }
+
     def clear_index(self, delete_docs: bool = False) -> dict:
         """清空索引，并可选删除原始 Markdown 文档。"""
+        self._ensure_runtime_ready()
         clear_result = self._store.clear()
         self._invalidate_embedding_cache()
         removed_docs = 0
@@ -721,6 +995,7 @@ class Plugin(PluginBase):
 
     def _build_doc_index_map(self) -> dict[str, dict]:
         """把当前索引中的 chunk 聚合成文件级视图，便于增量判断。"""
+        self._ensure_runtime_ready()
         grouped: dict[str, dict] = {}
         for item in self._store.list_documents():
             doc_id = str(item.get("doc_id") or "")
@@ -732,6 +1007,7 @@ class Plugin(PluginBase):
                     "doc_id": doc_id,
                     "file_name": item.get("file_name") or "",
                     "file_path": item.get("file_path") or "",
+                    "workspace_root": item.get("workspace_root") or "",
                     "chunk_count": 0,
                     "content_hashes": [],
                 }
@@ -745,28 +1021,34 @@ class Plugin(PluginBase):
 
     def _scan_doc_sources(self) -> dict[str, dict]:
         """扫描当前 docs 目录，生成文件级源数据快照。"""
+        self._ensure_runtime_ready()
         settings = self._settings()
         result = {}
-        for path in sorted(self._docs_dir.glob("*.md")):
+        for entry in self._load_doc_manifest():
+            path = self._doc_storage_path(entry)
+            if not path.exists():
+                continue
             payload = path.read_bytes()
-            doc_id = self._get_doc_id_for_path(path)
-            preview_chunks = self._chunk_markdown_file(path, settings)
+            doc_id = str(entry.get("doc_id") or self._get_doc_id_for_path(path))
+            preview_chunks = self._chunk_markdown_file(path, settings, entry)
             chunk_hashes = sorted(str(item.get("content_hash") or "") for item in preview_chunks)
             aggregate_hash = hashlib.sha256("|".join(chunk_hashes).encode("utf-8")).hexdigest() if chunk_hashes else hashlib.sha256(b"").hexdigest()
             result[doc_id] = {
                 "doc_id": doc_id,
-                "file_name": path.name,
+                "file_name": entry.get("file_name") or path.name,
                 "file_path": str(path.resolve()),
                 "content_hash": hashlib.sha256(payload).hexdigest(),
                 "aggregate_hash": aggregate_hash,
                 "chunk_count": len(preview_chunks),
                 "size_bytes": len(payload),
+                "workspace_root": self._normalize_workspace_root(entry.get("workspace_root") or ""),
                 "updated_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat(),
             }
         return result
 
     def preview_sync(self) -> dict:
         """只做增量判断，不真正写索引。"""
+        self._ensure_runtime_ready()
         indexed_docs = self._build_doc_index_map()
         source_docs = self._scan_doc_sources()
 
@@ -781,6 +1063,9 @@ class Plugin(PluginBase):
                 added.append(source)
                 continue
             if source["file_name"] != indexed.get("file_name"):
+                changed.append(source)
+                continue
+            if source.get("workspace_root") != (indexed.get("workspace_root") or ""):
                 changed.append(source)
                 continue
             if source["aggregate_hash"] != indexed.get("aggregate_hash"):
@@ -808,6 +1093,7 @@ class Plugin(PluginBase):
 
     def health_check(self) -> dict:
         """返回更偏运维视角的健康/漂移信息。"""
+        self._ensure_runtime_ready()
         preview = self.preview_sync()
         summary = preview.get("summary", {})
         issues = []
@@ -825,18 +1111,20 @@ class Plugin(PluginBase):
             "summary": summary,
         }
 
-    async def rebuild_file(self, file_name: str) -> dict:
+    async def rebuild_file(self, file_name: str, workspace_root: str = "", doc_id: str = "") -> dict:
         """只重建单个文件的 chunks 与向量。"""
-        safe_name = Path((file_name or "").strip()).name
+        self._ensure_runtime_ready()
+        entry = self._find_doc_entry(doc_id=doc_id, file_name=file_name, workspace_root=workspace_root)
+        safe_name = Path(str(entry.get("file_name") or "")).name
         if not safe_name or not safe_name.lower().endswith(".md"):
             raise HTTPException(status_code=400, detail="仅支持重建 .md 文件")
 
-        target = self._docs_dir / safe_name
+        target = self._doc_storage_path(entry)
         if not target.exists():
             raise HTTPException(status_code=404, detail="文件不存在")
 
         settings = self._settings()
-        chunks = self._chunk_markdown_file(target, settings)
+        chunks = self._chunk_markdown_file(target, settings, entry)
         embeddings = await self._embed_texts([item["chunk_text"] for item in chunks], settings["embedding_model"])
         if len(embeddings) != len(chunks):
             raise HTTPException(status_code=502, detail="embedding 返回数量与 chunks 数量不一致")
@@ -846,7 +1134,7 @@ class Plugin(PluginBase):
             item["embedding"] = embedding
             item["indexed_at"] = now
 
-        current_documents = [item for item in self._store.list_documents() if item.get("file_name") != safe_name]
+        current_documents = [item for item in self._store.list_documents() if str(item.get("doc_id") or "") != str(entry.get("doc_id") or "")]
         current_documents.extend(chunks)
         self._store.replace_all(current_documents, {
             "last_rebuilt_at": now,
@@ -856,6 +1144,7 @@ class Plugin(PluginBase):
 
         return {
             "ok": True,
+            "doc_id": entry.get("doc_id") or "",
             "file_name": safe_name,
             "chunk_count": len(chunks),
             "last_rebuilt_at": now,
@@ -869,6 +1158,7 @@ class Plugin(PluginBase):
         - hash 变化 -> changed
         - 索引有但 docs 没有 -> removed
         """
+        self._ensure_runtime_ready()
         preview = self.preview_sync()
         if not apply_changes:
             preview["applied"] = False
@@ -881,15 +1171,15 @@ class Plugin(PluginBase):
         }
 
         for item in preview["removed"]:
-            self.delete_file(str(item.get("file_name") or ""))
+            self.delete_file(str(item.get("file_name") or ""), str(item.get("workspace_root") or ""), str(item.get("doc_id") or ""))
             applied["removed"].append(item.get("file_name"))
 
         for item in preview["added"]:
-            result = await self.rebuild_file(str(item.get("file_name") or ""))
+            result = await self.rebuild_file(str(item.get("file_name") or ""), str(item.get("workspace_root") or ""), str(item.get("doc_id") or ""))
             applied["added"].append(result.get("file_name"))
 
         for item in preview["changed"]:
-            result = await self.rebuild_file(str(item.get("file_name") or ""))
+            result = await self.rebuild_file(str(item.get("file_name") or ""), str(item.get("workspace_root") or ""), str(item.get("doc_id") or ""))
             applied["changed"].append(result.get("file_name"))
 
         latest = self.preview_sync()
@@ -897,8 +1187,9 @@ class Plugin(PluginBase):
         latest["applied_changes"] = applied
         return latest
 
-    async def save_markdown_file(self, file: UploadFile) -> dict:
+    async def save_markdown_file(self, file: UploadFile, workspace_root: str = "") -> dict:
         """保存单个上传的 Markdown 文件并返回最小元信息。"""
+        self._ensure_runtime_ready()
         filename = (file.filename or "").strip()
         if not filename:
             raise HTTPException(status_code=400, detail="文件名不能为空")
@@ -913,20 +1204,33 @@ class Plugin(PluginBase):
         if not payload:
             raise HTTPException(status_code=400, detail="上传内容不能为空")
 
-        target = self._docs_dir / safe_name
+        normalized_workspace = self._normalize_workspace_root(workspace_root)
+        manifest = self._load_doc_manifest()
+        for item in manifest:
+            if item.get("file_name") == safe_name and self._normalize_workspace_root(item.get("workspace_root") or "") == normalized_workspace:
+                entry = self._normalize_doc_entry(item)
+                break
+        else:
+            storage_name = self._storage_name_for_entry(safe_name, normalized_workspace)
+            entry = self._build_doc_entry(safe_name, normalized_workspace, storage_name)
+            manifest.append(entry)
+        target = self._doc_storage_path(entry)
         target.write_bytes(payload)
+        self._save_doc_manifest(manifest)
 
         sha256 = hashlib.sha256(payload).hexdigest()
         return {
             "ok": True,
+            "doc_id": entry.get("doc_id") or "",
             "file_name": safe_name,
             "saved_path": str(target),
             "size_bytes": len(payload),
             "sha256": sha256,
+            "workspace_root": normalized_workspace,
             "uploaded_at": _utc_now_iso(),
         }
 
-    async def save_markdown_files(self, files: list[UploadFile]) -> dict:
+    async def save_markdown_files(self, files: list[UploadFile], workspace_root: str = "") -> dict:
         """批量保存 Markdown 文件。
 
         设计说明：
@@ -934,12 +1238,13 @@ class Plugin(PluginBase):
         2. 同名文件仍保持覆盖语义，和单文件上传保持一致；
         3. 返回统一摘要，前端可以直接展示“共上传 N 个”的结果。
         """
+        self._ensure_runtime_ready()
         if not files:
             raise HTTPException(status_code=400, detail="至少上传一个文件")
 
         results = []
         for file in files:
-            results.append(await self.save_markdown_file(file))
+            results.append(await self.save_markdown_file(file, workspace_root))
 
         return {
             "ok": True,
@@ -954,10 +1259,11 @@ class Plugin(PluginBase):
         1. 第一版目标是先验证切片和检索质量；
         2. 全量语义最简单，排障成本最低。
         """
-        docs = sorted(self._docs_dir.glob("*.md"))
+        self._ensure_runtime_ready()
+        manifest = [entry for entry in self._load_doc_manifest() if self._doc_storage_path(entry).exists()]
         settings = self._settings()
 
-        if not docs:
+        if not manifest:
             empty_index = self._store.replace_all([], {
                 "last_rebuilt_at": _utc_now_iso(),
                 "embedding_model": settings["embedding_model"],
@@ -968,10 +1274,11 @@ class Plugin(PluginBase):
                 "chunk_count": 0,
                 "last_rebuilt_at": empty_index["last_rebuilt_at"],
             }
-
+        
         chunks = []
-        for path in docs:
-            chunks.extend(self._chunk_markdown_file(path, settings))
+        for entry in manifest:
+            path = self._doc_storage_path(entry)
+            chunks.extend(self._chunk_markdown_file(path, settings, entry))
 
         embeddings = await self._embed_texts(
             [item["chunk_text"] for item in chunks],
@@ -995,7 +1302,7 @@ class Plugin(PluginBase):
 
         return {
             "ok": True,
-            "doc_count": len(docs),
+            "doc_count": len(manifest),
             "chunk_count": len(documents),
             "last_rebuilt_at": now,
             "embedding_model": settings["embedding_model"],
@@ -1003,6 +1310,7 @@ class Plugin(PluginBase):
 
     async def query(self, payload: dict) -> dict:
         """执行纯检索，不调用 chat。"""
+        self._ensure_runtime_ready()
         question = str((payload or {}).get("question", "") or "").strip()
         if not question:
             raise HTTPException(status_code=400, detail="question 不能为空")
@@ -1023,6 +1331,7 @@ class Plugin(PluginBase):
 
     async def ask(self, payload: dict) -> dict:
         """执行检索增强问答。"""
+        self._ensure_runtime_ready()
         question = str((payload or {}).get("question", "") or "").strip()
         if not question:
             raise HTTPException(status_code=400, detail="question 不能为空")
@@ -1065,6 +1374,7 @@ class Plugin(PluginBase):
             "semantic_weight": semantic_weight,
             "keyword_weight": keyword_weight,
             "score_threshold": min(1.0, max(0.0, _safe_float(cfg.get("score_threshold"), 0.7))),
+            "document_workspace_root": self._normalize_workspace_root(cfg.get("document_workspace_root") or ""),
         }
 
     def _resolve_top_k(self, requested: Any) -> int:
@@ -1085,7 +1395,7 @@ class Plugin(PluginBase):
         """落盘索引数据。"""
         self._store.save(data)
 
-    def _chunk_markdown_file(self, path: Path, settings: dict) -> list[dict]:
+    def _chunk_markdown_file(self, path: Path, settings: dict, entry: dict | None = None) -> list[dict]:
         """按“标题优先”策略切分 Markdown 文件。
 
         处理顺序：
@@ -1095,10 +1405,12 @@ class Plugin(PluginBase):
         4. 用字符级 overlap 保留相邻上下文。
         """
         text = path.read_text("utf-8")
+        entry = self._normalize_doc_entry(entry or self._build_doc_entry(path.name, self._resolve_file_workspace_root(path.name, settings), path.name))
+        workspace_root = self._normalize_workspace_root(entry.get("workspace_root") or "")
         sections = self._split_into_sections(text, path.stem)
         chunks = []
         for section in sections:
-            chunks.extend(self._build_chunks_from_section(path, section, settings))
+            chunks.extend(self._build_chunks_from_section(path, section, settings, workspace_root, entry))
         return chunks
 
     def _split_into_sections(self, text: str, fallback_title: str) -> list[dict]:
@@ -1133,7 +1445,7 @@ class Plugin(PluginBase):
             })
         return sections
 
-    def _build_chunks_from_section(self, path: Path, section: dict, settings: dict) -> list[dict]:
+    def _build_chunks_from_section(self, path: Path, section: dict, settings: dict, workspace_root: str, entry: dict) -> list[dict]:
         """把单个 section 再拆成多个 chunk。"""
         title = str(section.get("title") or path.stem).strip() or path.stem
         heading_level = _safe_int(section.get("heading_level"), 0)
@@ -1157,9 +1469,10 @@ class Plugin(PluginBase):
             chunk_id = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()
             chunks.append({
                 "id": chunk_id,
-                "doc_id": hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest(),
-                "file_name": path.name,
+                "doc_id": str(entry.get("doc_id") or hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()),
+                "file_name": str(entry.get("file_name") or path.name),
                 "file_path": str(path.resolve()),
+                "workspace_root": workspace_root,
                 "title": title,
                 "heading_level": heading_level,
                 "chunk_index": idx,
@@ -1215,7 +1528,14 @@ class Plugin(PluginBase):
             start += step
         return [item for item in parts if item]
 
-    async def _retrieve(self, question: str, top_k: int, embedding_model: str, reranker_model: str) -> list[dict]:
+    async def _retrieve(
+        self,
+        question: str,
+        top_k: int,
+        embedding_model: str,
+        reranker_model: str,
+        project_context: dict | None = None,
+    ) -> list[dict]:
         """执行检索。
 
         当前采用“两阶段、尽量保守”的策略：
@@ -1228,6 +1548,9 @@ class Plugin(PluginBase):
             raise HTTPException(status_code=400, detail="当前知识库为空，请先上传文档并执行重建")
 
         settings = self._settings()
+        documents = self._filter_documents_by_workspace(documents, project_context)
+        if not documents:
+            raise HTTPException(status_code=400, detail="当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引")
 
         query_cache_key = self._query_cache_key(
             question,
@@ -1237,6 +1560,7 @@ class Plugin(PluginBase):
             settings["semantic_weight"],
             settings["keyword_weight"],
             settings["score_threshold"],
+            project_context,
         )
         cached_hits = self._cache_get(self._query_result_cache, query_cache_key)
         if cached_hits is not None:
@@ -1263,6 +1587,8 @@ class Plugin(PluginBase):
             candidates = await self._rerank_hits(question, candidates, reranker_model)
         score_threshold = settings["score_threshold"]
         filtered = [item for item in candidates if _safe_float(item.get("score"), 0.0) >= score_threshold]
+        if not self._has_request_workspace(project_context):
+            filtered = self._prefer_project_hits(filtered, project_context)
         final_hits = filtered[:top_k]
         self._cache_set(self._query_result_cache, query_cache_key, list(final_hits), max_items=64)
         return final_hits
@@ -1294,8 +1620,14 @@ class Plugin(PluginBase):
         semantic_weight: float,
         keyword_weight: float,
         score_threshold: float,
+        project_context: dict | None,
     ) -> tuple:
         """构造 query 结果缓存 key。"""
+        project_id = ""
+        project_name = ""
+        if isinstance(project_context, dict):
+            project_id = str(project_context.get("project_id") or "")
+            project_name = str(project_context.get("project_name") or "")
         return (
             question,
             int(top_k),
@@ -1304,8 +1636,95 @@ class Plugin(PluginBase):
             round(float(semantic_weight), 6),
             round(float(keyword_weight), 6),
             round(float(score_threshold), 6),
+            project_id,
+            project_name,
             self._current_embedding_cache_revision(),
         )
+
+    def _prefer_project_hits(self, hits: list[dict], project_context: dict | None) -> list[dict]:
+        """优先保留与当前项目更贴近的候选文档。
+
+        当前阶段先不修改索引结构，因此只能做轻量启发式收敛：
+        1. 先看 `project_name` 是否与文件名 stem 完全一致；
+        2. 再看标题或文件名里是否包含项目名；
+        3. 如果没有任何候选命中这些规则，则直接回退原始 hits，避免因为过滤过强把结果清空。
+        """
+        if not hits or not isinstance(project_context, dict):
+            return hits
+
+        project_name = self._normalize_project_name(project_context.get("project_name") or "")
+        if not project_name:
+            return hits
+
+        matched = []
+        for item in hits:
+            if self._is_hit_matching_project(item, project_name):
+                matched.append(item)
+        return matched or hits
+
+    def _filter_documents_by_workspace(self, documents: list[dict], project_context: dict | None) -> list[dict]:
+        """按工作目录对索引文档做强匹配过滤。
+
+        行为约定：
+        1. 如果请求里有当前工作目录，则保留“公共文档 + 当前工作目录文档”；
+        2. 如果请求里没有当前工作目录，则只保留 `workspace_root` 为空的公共文档；
+        3. 这样既能让有上下文的请求复用公共知识，也能在无上下文时避免误命中其他项目文档。
+        """
+        if not documents:
+            return documents
+
+        if not isinstance(project_context, dict):
+            return [item for item in documents if not self._normalize_workspace_root(item.get("workspace_root") or "")]
+
+        request_workspace = self._normalize_workspace_root(
+            project_context.get("workspace_root") or project_context.get("working_directory") or ""
+        )
+        if request_workspace:
+            return [
+                item for item in documents
+                if not self._normalize_workspace_root(item.get("workspace_root") or "")
+                or self._normalize_workspace_root(item.get("workspace_root") or "") == request_workspace
+            ]
+
+        return [item for item in documents if not self._normalize_workspace_root(item.get("workspace_root") or "")]
+
+    def _is_hit_matching_project(self, hit: dict, project_name: str) -> bool:
+        """判断单条命中是否属于当前项目候选。"""
+        if not isinstance(hit, dict) or not project_name:
+            return False
+
+        file_name = str(hit.get("file_name") or "").strip()
+        file_stem = self._normalize_project_name(Path(file_name).stem)
+        title = self._normalize_project_name(hit.get("title") or "")
+        if file_stem == project_name:
+            return True
+        if project_name in file_stem:
+            return True
+        if project_name in title:
+            return True
+        return False
+
+    def _normalize_project_name(self, value: Any) -> str:
+        """把项目名规整成便于比较的轻量形式。"""
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+
+    def _normalize_workspace_root(self, value: Any) -> str:
+        """规整工作目录，避免尾斜杠等细节导致本应命中的文档失配。"""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text.rstrip("/\\")
+
+    def _has_request_workspace(self, project_context: dict | None) -> bool:
+        """判断当前请求是否携带可用工作目录。"""
+        if not isinstance(project_context, dict):
+            return False
+        return bool(self._normalize_workspace_root(
+            project_context.get("workspace_root") or project_context.get("working_directory") or ""
+        ))
 
     def _cache_get(self, cache: OrderedDict, key):
         """读取 LRU 缓存并刷新最近使用顺序。"""
@@ -1629,6 +2048,185 @@ class Plugin(PluginBase):
                     return "\n".join(part for part in parts if part).strip()
         return ""
 
+    def _extract_project_context(self, request: dict) -> dict:
+        """从不同客户端请求体中抽取统一的工作域上下文。
+
+        当前先兼容三类来源：
+        1. OpenCode：`messages[].content` 中的 `<env>...</env>` 文本
+        2. Codex Responses：`input[].content[].text` 中的 `<environment_context>...</environment_context>` 文本
+        3. Claude Messages：文本中的 `Primary working directory`
+
+        设计原则：
+        1. 只做保守抽取，不臆测不存在的字段；
+        2. 优先使用 workspace/root 级信息，其次才回退到 working directory；
+        3. 返回结构统一，便于后续直接注入提示词或进一步做项目级过滤。
+        """
+        if not isinstance(request, dict):
+            return {}
+
+        messages = request.get("messages")
+        if isinstance(messages, list):
+            context = self._extract_project_context_from_opencode_messages(messages)
+            if context:
+                return context
+            context = self._extract_project_context_from_message_texts(messages)
+            if context:
+                return context
+
+        input_value = request.get("input")
+        if isinstance(input_value, list):
+            context = self._extract_project_context_from_responses_input(input_value)
+            if context:
+                return context
+
+        system_value = request.get("system")
+        context = self._extract_project_context_from_claude_system(system_value)
+        if context:
+            return context
+        return {}
+
+    def _extract_project_context_from_opencode_messages(self, messages: list[Any]) -> dict:
+        """从 OpenCode 风格消息文本中的 `<env>` 片段抽取工作域信息。"""
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            for text in self._iter_text_blocks(message.get("content")):
+                workspace_root = self._extract_xml_like_env_value(text, "Workspace root folder")
+                working_directory = self._extract_xml_like_env_value(text, "Working directory")
+                if workspace_root or working_directory:
+                    return self._normalize_project_context({
+                        "workspace_root": workspace_root,
+                        "working_directory": working_directory,
+                        "source": "opencode.messages.content.env",
+                    })
+        return {}
+
+    def _extract_project_context_from_responses_input(self, input_value: list[Any]) -> dict:
+        """从 Codex Responses 文本里的 `<environment_context>` 抽取工作域信息。"""
+        for item in input_value:
+            if not isinstance(item, dict):
+                continue
+            for text in self._iter_text_blocks(item.get("content")):
+                workspace_root = self._extract_tag_value(text, "workspace_root")
+                working_directory = self._extract_tag_value(text, "cwd")
+                if workspace_root or working_directory:
+                    return self._normalize_project_context({
+                        "workspace_root": workspace_root,
+                        "working_directory": working_directory,
+                        "source": "codex.input.content.text.environment_context",
+                    })
+        return {}
+
+    def _extract_project_context_from_claude_system(self, system_value: Any) -> dict:
+        """从 Claude Messages 的 system 文本中抽取工作目录。
+
+        Claude 当前已知形态通常会在 `system[].text` 里写入：
+        `Primary working directory: /path/to/project`
+
+        这里仅提取这一条，不尝试从整段 system prompt 中做更激进的语义解析。
+        """
+        blocks = system_value if isinstance(system_value, list) else [system_value]
+        for block in blocks:
+            text = ""
+            if isinstance(block, dict):
+                text = str(block.get("text") or "")
+            elif isinstance(block, str):
+                text = block
+            if not text:
+                continue
+            match = re.search(r"Primary working directory\s*:\s*(.+)", text)
+            if not match:
+                continue
+            working_directory = match.group(1).strip()
+            return self._normalize_project_context({
+                "workspace_root": "",
+                "working_directory": working_directory,
+                "source": "claude.system.text",
+            })
+        for text in self._iter_text_blocks(system_value):
+            match = re.search(r"Primary working directory\s*:\s*(.+)", text)
+            if not match:
+                continue
+            working_directory = match.group(1).strip()
+            return self._normalize_project_context({
+                "workspace_root": "",
+                "working_directory": working_directory,
+                "source": "claude.messages.content.text",
+            })
+        return {}
+
+    def _extract_project_context_from_message_texts(self, messages: list[Any]) -> dict:
+        """从任意消息文本块中回退提取工作目录提示。
+
+        设计目的：
+        1. 兼容把环境提示包进 `messages[].content[].text` 的客户端；
+        2. 避免把 Claude / 其他兼容客户端强耦合到单一顶层字段结构；
+        3. 当前只识别 `Primary working directory` 这一条保守信号。
+        """
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            for text in self._iter_text_blocks(message.get("content")):
+                match = re.search(r"Primary working directory\s*:\s*(.+)", text)
+                if not match:
+                    continue
+                working_directory = match.group(1).strip()
+                return self._normalize_project_context({
+                    "workspace_root": "",
+                    "working_directory": working_directory,
+                    "source": "claude.messages.content.text",
+                })
+        return {}
+
+    def _iter_text_blocks(self, value: Any) -> list[str]:
+        """把不同协议里的文本块统一摊平成字符串列表。"""
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            text = value.get("text")
+            return [str(text)] if text else []
+        if isinstance(value, list):
+            texts = []
+            for item in value:
+                texts.extend(self._iter_text_blocks(item))
+            return texts
+        return []
+
+    def _extract_xml_like_env_value(self, text: str, label: str) -> str:
+        """从 OpenCode `<env>` 文本块中提取 `Label: value` 形式字段。"""
+        if not isinstance(text, str) or not text:
+            return ""
+        match = re.search(rf"{re.escape(label)}\s*:\s*(.+)", text)
+        return match.group(1).strip() if match else ""
+
+    def _extract_tag_value(self, text: str, tag_name: str) -> str:
+        """从类似 XML 的上下文文本中提取指定标签内容。"""
+        if not isinstance(text, str) or not text:
+            return ""
+        match = re.search(rf"<{re.escape(tag_name)}>(.*?)</{re.escape(tag_name)}>", text, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def _normalize_project_context(self, raw: dict) -> dict:
+        """把不同来源的工作域字段收敛成统一结构。"""
+        if not isinstance(raw, dict):
+            return {}
+
+        workspace_root = str(raw.get("workspace_root") or "").strip()
+        working_directory = str(raw.get("working_directory") or "").strip()
+        source = str(raw.get("source") or "").strip()
+        canonical_root = workspace_root or working_directory
+        if not canonical_root:
+            return {}
+
+        project_name = Path(canonical_root).name.strip()
+        return {
+            "workspace_root": workspace_root,
+            "working_directory": working_directory,
+            "project_name": project_name,
+            "project_id": canonical_root,
+            "source": source,
+        }
+
     def _detect_request_protocol(self, request: dict) -> str:
         """根据请求体特征判断当前协议类型。"""
         if isinstance(request.get("messages"), list):
@@ -1639,15 +2237,28 @@ class Plugin(PluginBase):
             return "responses"
         return ""
 
-    def _build_injection_text(self, hits: list[dict]) -> str:
+    def _build_injection_text(self, hits: list[dict], project_context: dict | None = None) -> str:
         """把命中片段组装成统一注入模板。"""
         parts = [
             "以下是与当前问题相关的参考资料。你必须优先依据这些资料回答。",
             "",
             "如果资料不足以支持结论，必须明确回答“不知道”或“资料中未提及”。",
             "",
-            "参考资料：",
         ]
+        if isinstance(project_context, dict) and project_context:
+            parts.extend([
+                "当前工作域：",
+                f"- project_name: {project_context.get('project_name') or '-'}",
+                f"- workspace_root: {project_context.get('workspace_root') or '-'}",
+                f"- working_directory: {project_context.get('working_directory') or '-'}",
+                f"- source: {project_context.get('source') or '-'}",
+                "",
+                "回答时请优先以当前工作域为准；如果参考资料无法证明与当前工作域一致，必须明确说明“资料中未提及”。",
+                "",
+            ])
+        parts.extend([
+            "参考资料：",
+        ])
         for idx, hit in enumerate(hits, start=1):
             parts.append(f"[片段 {idx}] 文件: {hit.get('file_name', '-')} | 标题: {hit.get('title', '-')} | chunk: {hit.get('chunk_index', 0)}")
             parts.append(str(hit.get("chunk_text") or ""))
@@ -1685,6 +2296,7 @@ class Plugin(PluginBase):
         3. 只有检索命中非空时才注入；
         4. 没命中、抽不到问题或检索失败时都直接透传。
         """
+        self._ensure_runtime_ready()
         if not isinstance(request, dict):
             return None
 
@@ -1710,16 +2322,24 @@ class Plugin(PluginBase):
         if not question:
             return request
 
+        project_context = self._extract_project_context(request)
+
         settings = self._settings()
         try:
-            hits = await self._retrieve(question, settings["top_k"], settings["embedding_model"], settings["reranker_model"])
+            hits = await self._retrieve(
+                question,
+                settings["top_k"],
+                settings["embedding_model"],
+                settings["reranker_model"],
+                project_context,
+            )
         except Exception:
             return request
 
         if not hits:
             return request
 
-        injection_text = self._build_injection_text(hits)
+        injection_text = self._build_injection_text(hits, project_context)
         if protocol == "chat":
             return self._inject_for_chat(request, injection_text)
         if protocol == "messages":

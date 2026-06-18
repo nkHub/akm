@@ -244,6 +244,36 @@ files: <一个或多个 .md 文件>
 - 这个接口不会自动重建索引
 - 如果用户已经直接维护了 `docs_dir`，通常不需要再调用它
 
+## 绑定工作目录接口
+
+请求地址：
+
+```text
+http://127.0.0.1:8800/api/markdown-kb/files/bind-workspace
+```
+
+请求方法：
+
+```text
+POST
+```
+
+推荐请求体：
+
+```json
+{
+  "file_name": "AI Key Manager.md",
+  "workspace_root": "/Users/nk/Desktop/ccs"
+}
+```
+
+使用说明：
+
+- 这个接口用于给单个 Markdown 文档绑定工作目录
+- 绑定会持久化到插件侧的文件映射中
+- 绑定后需要再执行 `rebuild-file`、`sync` 或 `rebuild` 才会进入索引
+- 当请求里没有工作目录时，检索只会命中未绑定工作目录的公共文档
+
 ## 增量同步接口
 
 请求地址：

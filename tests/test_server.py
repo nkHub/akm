@@ -29,11 +29,12 @@ async def test_markdown_kb_on_request_injects_hits_for_kb_model(monkeypatch):
         "top_k": 2,
     }
 
-    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
         assert question == "请根据知识库回答"
         assert top_k == 2
         assert embedding_model == "text-embedding-3-small"
         assert reranker_model == ""
+        assert project_context in (None, {})
         return [{
             "file_name": "guide.md",
             "title": "Guide",
@@ -67,7 +68,7 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
         "top_k": 2,
     }
 
-    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
         return []
 
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
@@ -95,7 +96,7 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
         "top_k": 1,
     }
 
-    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
         return [{
             "file_name": "guide.md",
             "title": "Guide",
@@ -115,6 +116,392 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
     assert out["model"] == "gpt-4.1"
     assert "Knowledge base content" in out["instructions"]
     assert "原始系统要求" in out["instructions"]
+
+
+def test_markdown_kb_extracts_project_context_from_opencode_message_text():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    request = {
+        "model": "kb:gpt-5.4",
+        "messages": [{
+            "role": "system",
+            "content": "Here is some useful information about the environment you are running in:\n<env>\n  Working directory: /Users/nk/Desktop/ccs\n  Workspace root folder: /Users/nk/Desktop/ccs\n  Is directory a git repo: yes\n</env>",
+        }],
+    }
+
+    context = plugin._extract_project_context(request)
+    assert context["workspace_root"] == "/Users/nk/Desktop/ccs"
+    assert context["working_directory"] == "/Users/nk/Desktop/ccs"
+    assert context["project_name"] == "ccs"
+    assert context["project_id"] == "/Users/nk/Desktop/ccs"
+    assert context["source"] == "opencode.messages.content.env"
+
+
+def test_markdown_kb_extracts_project_context_from_codex_environment_context_text():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    request = {
+        "model": "kb:gpt-5.4",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "<environment_context>\n  <cwd>/Users/nk/Desktop/project/bonnie-clyde</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-06-18</current_date>\n  <workspace_root>/Users/nk/Desktop/project/bonnie-clyde</workspace_root>\n</environment_context>",
+            }],
+        }],
+    }
+
+    context = plugin._extract_project_context(request)
+    assert context["workspace_root"] == "/Users/nk/Desktop/project/bonnie-clyde"
+    assert context["working_directory"] == "/Users/nk/Desktop/project/bonnie-clyde"
+    assert context["project_name"] == "bonnie-clyde"
+    assert context["project_id"] == "/Users/nk/Desktop/project/bonnie-clyde"
+    assert context["source"] == "codex.input.content.text.environment_context"
+
+
+def test_markdown_kb_extracts_project_context_from_claude_system_reminder_text():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    request = {
+        "model": "kb:kimi-k2.5-free",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "# Environment\nYou have been invoked in the following environment: \n - Primary working directory: /Users/nk/Desktop/publish/erp2_table\n - Is a git repository: true\n - Platform: darwin\n",
+            }],
+        }],
+    }
+
+    context = plugin._extract_project_context(request)
+    assert context["workspace_root"] == ""
+    assert context["working_directory"] == "/Users/nk/Desktop/publish/erp2_table"
+    assert context["project_name"] == "erp2_table"
+    assert context["project_id"] == "/Users/nk/Desktop/publish/erp2_table"
+    assert context["source"] == "claude.messages.content.text"
+
+
+def test_markdown_kb_prefer_project_hits_keeps_matching_project_documents():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    hits = [
+        {"file_name": "bonnie-clyde.md", "title": "Bonnie Clyde", "score": 0.91},
+        {"file_name": "AI Key Manager.md", "title": "AI Key Manager", "score": 0.95},
+        {"file_name": "notes.md", "title": "bonnie-clyde rollout", "score": 0.87},
+    ]
+    project_context = {
+        "project_name": "bonnie-clyde",
+        "project_id": "/Users/nk/Desktop/project/bonnie-clyde",
+    }
+
+    filtered = plugin._prefer_project_hits(hits, project_context)
+    assert len(filtered) == 2
+    assert filtered[0]["file_name"] == "bonnie-clyde.md"
+    assert filtered[1]["file_name"] == "notes.md"
+
+
+def test_markdown_kb_prefer_project_hits_falls_back_when_no_match():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    hits = [
+        {"file_name": "AI Key Manager.md", "title": "AI Key Manager", "score": 0.95},
+        {"file_name": "notes.md", "title": "General Notes", "score": 0.87},
+    ]
+    project_context = {
+        "project_name": "bonnie-clyde",
+        "project_id": "/Users/nk/Desktop/project/bonnie-clyde",
+    }
+
+    filtered = plugin._prefer_project_hits(hits, project_context)
+    assert filtered == hits
+
+
+def test_markdown_kb_settings_include_document_workspace_root():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "document_workspace_root": "/Users/nk/Desktop/ccs/",
+    }
+
+    settings = plugin._settings()
+    assert settings["document_workspace_root"] == "/Users/nk/Desktop/ccs"
+
+
+def test_markdown_kb_chunk_metadata_carries_document_workspace_root(tmp_path):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    path = tmp_path / "AI Key Manager.md"
+    path.write_text("# Title\n\nBody", "utf-8")
+
+    chunks = plugin._chunk_markdown_file(path, {
+        "chunk_size": 800,
+        "chunk_overlap": 120,
+        "document_workspace_root": "/Users/nk/Desktop/ccs/",
+    })
+
+    assert chunks
+    assert chunks[0]["workspace_root"] == "/Users/nk/Desktop/ccs"
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_bind_file_workspace_marks_file_for_rebuild(monkeypatch):
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-bind-workspace")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "guide.md").write_text("# Guide\n\nBody", "utf-8")
+
+    await plugin.rebuild_index()
+    bind_result = plugin.bind_file_workspace("guide.md", "/Users/nk/Desktop/ccs/")
+    assert bind_result["ok"] is True
+    assert bind_result["workspace_root"] == "/Users/nk/Desktop/ccs"
+    assert bind_result["needs_rebuild"] is True
+
+    files = plugin.list_files()
+    assert files["files"][0]["workspace_root"] == "/Users/nk/Desktop/ccs"
+
+    preview = plugin.preview_sync()
+    assert preview["summary"]["changed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_rebuild_file_persists_bound_workspace(monkeypatch):
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-bind-rebuild")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            return httpx.Response(200, json={"data": [{"embedding": [1.0, float(idx + 1)], "index": idx} for idx, _ in enumerate(inputs)]})
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "guide.md").write_text("# Guide\n\nBody", "utf-8")
+
+    plugin.bind_file_workspace("guide.md", "/Users/nk/Desktop/project/bonnie-clyde")
+    rebuild = await plugin.rebuild_file("guide.md")
+    assert rebuild["ok"] is True
+
+    documents = plugin._store.list_documents()
+    assert documents
+    assert all(item["workspace_root"] == "/Users/nk/Desktop/project/bonnie-clyde" for item in documents)
+
+
+def test_markdown_kb_with_workspace_searches_public_and_current_workspace_documents():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    documents = [
+        {"file_name": "public.md", "workspace_root": ""},
+        {"file_name": "AI Key Manager.md", "workspace_root": "/Users/nk/Desktop/ccs"},
+        {"file_name": "bonnie-clyde.md", "workspace_root": "/Users/nk/Desktop/project/bonnie-clyde"},
+        {"file_name": "erp2_table.md", "workspace_root": "/Users/nk/Desktop/publish/erp2_table"},
+    ]
+    project_context = {
+        "workspace_root": "/Users/nk/Desktop/project/bonnie-clyde",
+        "working_directory": "/Users/nk/Desktop/project/bonnie-clyde",
+    }
+
+    filtered = plugin._filter_documents_by_workspace(documents, project_context)
+    assert len(filtered) == 2
+    assert filtered[0]["file_name"] == "public.md"
+    assert filtered[1]["file_name"] == "bonnie-clyde.md"
+
+
+def test_markdown_kb_without_workspace_only_searches_unbound_documents():
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    documents = [
+        {"file_name": "AI Key Manager.md", "workspace_root": ""},
+        {"file_name": "bonnie-clyde.md", "workspace_root": "/Users/nk/Desktop/project/bonnie-clyde"},
+    ]
+    project_context = {
+        "workspace_root": "",
+        "working_directory": "",
+    }
+
+    filtered = plugin._filter_documents_by_workspace(documents, project_context)
+    assert len(filtered) == 1
+    assert filtered[0]["file_name"] == "AI Key Manager.md"
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_injects_realistic_project_context(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 1,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
+        return [{
+            "file_name": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "chunk_text": "Knowledge base content",
+        }]
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "kb:gpt-5.4",
+        "messages": [
+            {
+                "role": "system",
+                "content": "<env>\n  Working directory: /Users/nk/Desktop/ccs\n  Workspace root folder: /Users/nk/Desktop/ccs\n</env>",
+            },
+            {
+                "role": "user",
+                "content": "请根据知识库回答",
+            },
+        ],
+    }
+
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert out["messages"][0]["role"] == "system"
+    assert "workspace_root: /Users/nk/Desktop/ccs" in out["messages"][0]["content"]
+    assert "working_directory: /Users/nk/Desktop/ccs" in out["messages"][0]["content"]
+    assert "project_name: ccs" in out["messages"][0]["content"]
+    assert "Knowledge base content" in out["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_with_workspace_uses_public_and_current_workspace_hits(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 1,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
+        documents = [
+            {"file_name": "public.md", "workspace_root": "", "embedding": [0.1]},
+            {"file_name": "bonnie-clyde.md", "workspace_root": "/Users/nk/Desktop/project/bonnie-clyde", "embedding": [0.1]},
+            {"file_name": "AI Key Manager.md", "workspace_root": "/Users/nk/Desktop/ccs", "embedding": [0.1]},
+        ]
+        filtered = plugin._filter_documents_by_workspace(documents, project_context)
+        return [{
+            "file_name": item["file_name"],
+            "title": item["file_name"],
+            "chunk_index": 0,
+            "chunk_text": item["file_name"],
+        } for item in filtered]
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "kb:gpt-5.4",
+        "messages": [
+            {
+                "role": "system",
+                "content": "<env>\n  Working directory: /Users/nk/Desktop/ccs\n  Workspace root folder: /Users/nk/Desktop/ccs\n</env>",
+            },
+            {
+                "role": "user",
+                "content": "请根据知识库回答",
+            },
+        ],
+    }
+
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert out["messages"][0]["role"] == "system"
+    assert "public.md" in out["messages"][0]["content"]
+    assert "AI Key Manager.md" in out["messages"][0]["content"]
+    assert "bonnie-clyde.md" not in out["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_without_workspace_only_uses_unbound_documents(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 1,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
+        documents = [
+            {"file_name": "public.md", "workspace_root": "", "embedding": [0.1]},
+            {"file_name": "bonnie-clyde.md", "workspace_root": "/Users/nk/Desktop/project/bonnie-clyde", "embedding": [0.1]},
+        ]
+        filtered = plugin._filter_documents_by_workspace(documents, project_context)
+        return [{
+            "file_name": item["file_name"],
+            "title": item["file_name"],
+            "chunk_index": 0,
+            "chunk_text": item["file_name"],
+        } for item in filtered]
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "kb:gpt-5.4",
+        "messages": [
+            {
+                "role": "user",
+                "content": "请根据知识库回答",
+            },
+        ],
+    }
+
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert out["messages"][0]["role"] == "system"
+    assert "public.md" in out["messages"][0]["content"]
+    assert "bonnie-clyde.md" not in out["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -152,7 +539,7 @@ async def test_markdown_kb_runs_after_model_matcher_for_kb_aliases(monkeypatch):
     await pm.load_all(FastAPI())
     markdown_plugin = pm.plugins["markdown_kb"]
 
-    async def fake_retrieve(question, top_k, embedding_model, reranker_model):
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
         return [{
             "file_name": "guide.md",
             "title": "Guide",
