@@ -7,6 +7,7 @@
 1. 每次修改项目内容后，都要检查并同步更新根目录 `README.md`。
 2. 涉及更新管理相关内容时，必须同步更新 `docs/release-guide.md`。
 3. 涉及插件更新相关内容时，必须同步更新 `docs/design/plugin-system.md`。
+4. 涉及组件更新相关内容时，必须同步更新 `docs/design/web-components.md`。
 
 ## 执行要求
 

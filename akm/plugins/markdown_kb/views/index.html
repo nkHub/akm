@@ -687,6 +687,59 @@
       }
     }
 
+    function renderTestModelOptions(selectNode, pluginDefaultValue, labelPrefix) {
+      const options = [];
+      const defaultValue = String(pluginDefaultValue || '').trim();
+      const prefix = labelPrefix || '跟随插件默认模型';
+      const defaultLabel = defaultValue
+        ? (prefix + '（当前：' + defaultValue + '）')
+        : (prefix + '（当前未设置）');
+
+      options.push('<option value="__default__">' + escapeHtml(defaultLabel) + '</option>');
+      availableModels.forEach(function (model) {
+        options.push('<option value="' + escapeHtml(model) + '">' + escapeHtml(model) + '</option>');
+      });
+      selectNode.innerHTML = options.join('');
+      selectNode.value = '__default__';
+    }
+
+    function resolveTestModelPayloadValue(selectNode) {
+      const raw = String(selectNode && selectNode.value || '').trim();
+      if (!raw || raw === '__default__') {
+        return undefined;
+      }
+      return raw;
+    }
+
+    function renderTestRerankerOptions(selectNode, pluginDefaultValue) {
+      const options = [];
+      const defaultValue = String(pluginDefaultValue || '').trim();
+      const defaultLabel = defaultValue
+        ? ('跟随插件默认 reranker（当前：' + defaultValue + '）')
+        : '跟随插件默认 reranker（当前未启用）';
+
+      options.push('<option value="__default__">' + escapeHtml(defaultLabel) + '</option>');
+      options.push('<option value="__disabled__">不启用 rerank</option>');
+
+      availableModels.forEach(function (model) {
+        options.push('<option value="' + escapeHtml(model) + '">' + escapeHtml(model) + '</option>');
+      });
+
+      selectNode.innerHTML = options.join('');
+      selectNode.value = '__default__';
+    }
+
+    function resolveTestRerankerPayloadValue(selectNode) {
+      const raw = String(selectNode && selectNode.value || '').trim();
+      if (!raw || raw === '__default__') {
+        return undefined;
+      }
+      if (raw === '__disabled__') {
+        return '';
+      }
+      return raw;
+    }
+
     async function loadModels() {
       try {
         const data = await requestJson('/v1/models');
@@ -709,11 +762,11 @@
       configSemanticWeight.value = String(pluginConfig.semantic_weight == null ? 1 : pluginConfig.semantic_weight);
       configKeywordWeight.value = String(pluginConfig.keyword_weight == null ? 0 : pluginConfig.keyword_weight);
 
-      renderModelOptions(queryEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
-      renderModelOptions(queryRerankerModel, '', '不启用 rerank');
-      renderModelOptions(askEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
-      renderModelOptions(askChatModel, pluginConfig.chat_model || '', '跟随插件默认问答模型');
-      renderModelOptions(askRerankerModel, '', '不启用 rerank');
+      renderTestModelOptions(queryEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
+      renderTestRerankerOptions(queryRerankerModel, pluginConfig.reranker_model || '');
+      renderTestModelOptions(askEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
+      renderTestModelOptions(askChatModel, pluginConfig.chat_model || '', '跟随插件默认问答模型');
+      renderTestRerankerOptions(askRerankerModel, pluginConfig.reranker_model || '');
     }
 
     function buildPluginConfigPayload() {
@@ -1042,8 +1095,8 @@
           body: JSON.stringify({
             question: question,
             top_k: topK,
-            embedding_model: queryEmbeddingModel.value || undefined,
-            reranker_model: queryRerankerModel.value || undefined
+            embedding_model: resolveTestModelPayloadValue(queryEmbeddingModel),
+            reranker_model: resolveTestRerankerPayloadValue(queryRerankerModel)
           })
         });
         setStatus(queryStatus, '检索完成：返回 ' + (data.hits || []).length + ' 个命中片段，embedding 模型：' + (data.embedding_model || pluginConfig.embedding_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
@@ -1074,9 +1127,9 @@
           body: JSON.stringify({
             question: question,
             top_k: topK,
-            embedding_model: askEmbeddingModel.value || undefined,
-            chat_model: askChatModel.value || undefined,
-            reranker_model: askRerankerModel.value || undefined
+            embedding_model: resolveTestModelPayloadValue(askEmbeddingModel),
+            chat_model: resolveTestModelPayloadValue(askChatModel),
+            reranker_model: resolveTestRerankerPayloadValue(askRerankerModel)
           })
         });
         setStatus(askStatus, '问答完成：已使用 ' + (data.citations || []).length + ' 个引用片段，问答模型：' + (data.chat_model || pluginConfig.chat_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
