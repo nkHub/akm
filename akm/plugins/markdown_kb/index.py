@@ -1348,6 +1348,148 @@ class Plugin(PluginBase):
         """返回当前向量计算后端标签，便于状态页展示。"""
         return "numpy" if self._import_numpy_optional() is not None else "python"
 
+    def _extract_user_question_for_chat(self, request: dict) -> str:
+        """从 Chat Completions 请求中抽取最后一条用户问题。"""
+        messages = request.get("messages")
+        if not isinstance(messages, list):
+            return ""
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") in {"text", "input_text"}:
+                        parts.append(str(item.get("text") or ""))
+                return "\n".join(part for part in parts if part).strip()
+        return ""
+
+    def _extract_user_question_for_messages(self, request: dict) -> str:
+        """从 Anthropic Messages 风格请求中抽取最后一个用户问题。"""
+        return self._extract_user_question_for_chat(request)
+
+    def _extract_user_question_for_responses(self, request: dict) -> str:
+        """从 Responses 请求中尽量抽取最后一个用户问题。"""
+        input_value = request.get("input")
+        if isinstance(input_value, str):
+            return input_value.strip()
+        if isinstance(input_value, list):
+            for item in reversed(input_value):
+                if not isinstance(item, dict) or item.get("role") != "user":
+                    continue
+                content = item.get("content")
+                if isinstance(content, str):
+                    return content.strip()
+                if isinstance(content, list):
+                    parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") in {"input_text", "text"}:
+                            parts.append(str(block.get("text") or ""))
+                    return "\n".join(part for part in parts if part).strip()
+        return ""
+
+    def _detect_request_protocol(self, request: dict) -> str:
+        """根据请求体特征判断当前协议类型。"""
+        if isinstance(request.get("messages"), list):
+            if "max_tokens" in request and "system" in request:
+                return "messages"
+            return "chat"
+        if "input" in request:
+            return "responses"
+        return ""
+
+    def _build_injection_text(self, hits: list[dict]) -> str:
+        """把命中片段组装成统一注入模板。"""
+        parts = [
+            "以下是与当前问题相关的参考资料。你必须优先依据这些资料回答。",
+            "",
+            "如果资料不足以支持结论，必须明确回答“不知道”或“资料中未提及”。",
+            "",
+            "参考资料：",
+        ]
+        for idx, hit in enumerate(hits, start=1):
+            parts.append(f"[片段 {idx}] 文件: {hit.get('file_name', '-')} | 标题: {hit.get('title', '-')} | chunk: {hit.get('chunk_index', 0)}")
+            parts.append(str(hit.get("chunk_text") or ""))
+            parts.append("---")
+        return "\n".join(parts).rstrip("-\n")
+
+    def _inject_for_chat(self, request: dict, injection_text: str) -> dict:
+        """为 Chat Completions 注入 system 参考资料。"""
+        messages = list(request.get("messages") or [])
+        messages.insert(0, {"role": "system", "content": injection_text})
+        request["messages"] = messages
+        return request
+
+    def _inject_for_messages(self, request: dict, injection_text: str) -> dict:
+        """为 Messages 请求注入 system。"""
+        original = request.get("system")
+        if isinstance(original, str) and original.strip():
+            request["system"] = injection_text + "\n\n原始系统要求：\n" + original.strip()
+        else:
+            request["system"] = injection_text
+        return request
+
+    def _inject_for_responses(self, request: dict, injection_text: str) -> dict:
+        """为 Responses 请求注入 instructions。"""
+        original = str(request.get("instructions") or "").strip()
+        request["instructions"] = injection_text if not original else injection_text + "\n\n原始系统要求：\n" + original
+        return request
+
+    async def on_request(self, request) -> dict | None:
+        """显式触发式知识库注入。
+
+        当前最小版本规则：
+        1. 只有 `model` 以 `kb:` 开头时才尝试注入；
+        2. 先抽取最后一个用户问题；
+        3. 只有检索命中非空时才注入；
+        4. 没命中、抽不到问题或检索失败时都直接透传。
+        """
+        if not isinstance(request, dict):
+            return None
+
+        raw_model = str(request.get("model") or "").strip()
+        if not raw_model.startswith("kb:"):
+            return None
+
+        real_model = raw_model[3:].strip()
+        if not real_model:
+            return None
+        request["model"] = real_model
+
+        protocol = self._detect_request_protocol(request)
+        if protocol == "chat":
+            question = self._extract_user_question_for_chat(request)
+        elif protocol == "messages":
+            question = self._extract_user_question_for_messages(request)
+        elif protocol == "responses":
+            question = self._extract_user_question_for_responses(request)
+        else:
+            return request
+
+        if not question:
+            return request
+
+        settings = self._settings()
+        try:
+            hits = await self._retrieve(question, settings["top_k"], settings["embedding_model"], settings["reranker_model"])
+        except Exception:
+            return request
+
+        if not hits:
+            return request
+
+        injection_text = self._build_injection_text(hits)
+        if protocol == "chat":
+            return self._inject_for_chat(request, injection_text)
+        if protocol == "messages":
+            return self._inject_for_messages(request, injection_text)
+        if protocol == "responses":
+            return self._inject_for_responses(request, injection_text)
+        return request
+
     async def _rerank_hits(self, question: str, hits: list[dict], model: str) -> list[dict]:
         """对向量召回结果执行第二阶段 rerank。
 
