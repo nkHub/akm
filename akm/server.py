@@ -33,7 +33,7 @@ from akm.audit import (
     AuditLogQueue,
 )
 from akm.config import load_config, save_config, get as config_get
-from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
+from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent, get_agent_profile
 from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
 from akm.db import get_keys_log_path
@@ -1298,6 +1298,15 @@ async def _build_usage_metrics(
 
 # ── 统计内存缓存（30 秒过期，减少重复解析）──
 _stats_cache: dict[str, tuple[float, dict]] = {}
+# agent profile 查询缓存（_get_stats 循环中避免每个 provider 重复调用）
+_agent_profile_cache: dict[str, object] = {}
+
+
+def _get_agent_profile_cached(provider: str):
+    """带缓存的 agent profile 查询，用于统计聚合时区分 token 语义。"""
+    if provider not in _agent_profile_cache:
+        _agent_profile_cache[provider] = get_agent_profile(provider)
+    return _agent_profile_cache[provider]
 
 @app.get("/api/stats")
 async def api_stats(days: int = Query(default=1, ge=1, le=365)):
@@ -1395,7 +1404,21 @@ def _get_stats(days: int) -> dict:
         model = r.get("model", "unknown")
         ts = str(r.get("timestamp", ""))[:10]
 
-        total_prompt += p - cached
+        # ── 区分 token 语义 ──────────────────────────────────
+        # Anthropic Messages API 的 `input_tokens`（映射为 prompt_tokens）
+        # 已经是扣除缓存命中后的实际计费量，而 `cache_read_input_tokens`
+        # （映射为 cached_tokens）是缓存命中总量。两者是独立的口径，
+        # 用 `prompt - cached` 做减法会得出负值。
+        # OpenAI Chat API 的 `prompt_tokens` 则是包含缓存的总量，
+        # `cached_tokens` 是其中子集，减法才有意义。
+        # 这里通过 Agent 的 supports_messages 标记来区分两种语义：
+        # - Messages 语义（Anthropic）：net_prompt = p（已扣除缓存）
+        # - Chat 语义（OpenAI）：   net_prompt = max(0, p - cached)
+        _profile = _get_agent_profile_cached(provider)
+        _is_messages_semantics = bool(_profile and _profile.supports_messages)
+        net_prompt = p if _is_messages_semantics else max(0, p - cached)
+
+        total_prompt += net_prompt
         total_completion += c
         total_tokens += t
         total_cached += cached
@@ -1403,7 +1426,7 @@ def _get_stats(days: int) -> dict:
         # 按供应商
         if provider not in by_provider:
             by_provider[provider] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_provider[provider]["prompt"] += p - cached
+        by_provider[provider]["prompt"] += net_prompt
         by_provider[provider]["completion"] += c
         by_provider[provider]["total"] += t
         by_provider[provider]["cached"] += cached
@@ -1412,7 +1435,7 @@ def _get_stats(days: int) -> dict:
         # 按模型
         if model not in by_model:
             by_model[model] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_model[model]["prompt"] += p - cached
+        by_model[model]["prompt"] += net_prompt
         by_model[model]["completion"] += c
         by_model[model]["total"] += t
         by_model[model]["cached"] += cached
@@ -1421,7 +1444,7 @@ def _get_stats(days: int) -> dict:
         # 按 key
         if key_alias not in by_key:
             by_key[key_alias] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_key[key_alias]["prompt"] += p - cached
+        by_key[key_alias]["prompt"] += net_prompt
         by_key[key_alias]["completion"] += c
         by_key[key_alias]["total"] += t
         by_key[key_alias]["cached"] += cached
@@ -1430,7 +1453,7 @@ def _get_stats(days: int) -> dict:
         # 按天
         if ts not in daily:
             daily[ts] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        daily[ts]["prompt"] += p - cached
+        daily[ts]["prompt"] += net_prompt
         daily[ts]["completion"] += c
         daily[ts]["total"] += t
         daily[ts]["cached"] += cached
