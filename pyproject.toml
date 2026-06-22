@@ -17,6 +17,7 @@ dependencies = [
     "pillow>=10.0",
     "python-multipart>=0.0.5",
     "numpy>=1.26.0",
+    "markdown-chunker>=0.1.3",
 ]
 
 [project.scripts]

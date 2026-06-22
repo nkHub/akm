@@ -288,6 +288,43 @@ def test_markdown_kb_chunk_metadata_carries_document_workspace_root(tmp_path):
     assert chunks[0]["workspace_root"] == "/Users/nk/Desktop/ccs"
 
 
+def test_markdown_kb_chunking_prefers_markdown_chunker(monkeypatch, tmp_path):
+    import akm.plugins.markdown_kb.index as markdown_kb_module
+    from akm.plugins.markdown_kb.index import Plugin
+
+    class FakeMarkdownChunkingStrategy:
+        """模拟第三方 chunker，验证插件优先走结构化切片入口。"""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def chunk_markdown(self, text):
+            assert "# Title" in text
+            return [
+                "# Title\n\n第一段内容",
+                "## Details\n\n第二段内容",
+            ]
+
+    monkeypatch.setattr(markdown_kb_module, "MarkdownChunkingStrategy", FakeMarkdownChunkingStrategy)
+
+    plugin = Plugin()
+    path = tmp_path / "guide.md"
+    path.write_text("# Title\n\n第一段内容\n\n## Details\n\n第二段内容", "utf-8")
+
+    chunks = plugin._chunk_markdown_file(path, {
+        "chunk_size": 800,
+        "chunk_overlap": 120,
+        "document_workspace_root": "",
+    })
+
+    assert len(chunks) == 2
+    assert chunks[0]["title"] == "Title"
+    assert chunks[0]["heading_level"] == 1
+    assert chunks[1]["title"] == "Details"
+    assert chunks[1]["heading_level"] == 2
+    assert chunks[0]["chunk_text"].startswith("# Title")
+
+
 @pytest.mark.asyncio
 async def test_markdown_kb_bind_file_workspace_marks_file_for_rebuild(monkeypatch):
     from fastapi import FastAPI

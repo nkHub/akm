@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+try:
+    from markdown_chunker import MarkdownChunkingStrategy
+except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
+    MarkdownChunkingStrategy = None
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
@@ -1404,22 +1408,106 @@ class Plugin(PluginBase):
         self._store.save(data)
 
     def _chunk_markdown_file(self, path: Path, settings: dict, entry: dict | None = None) -> list[dict]:
-        """按“标题优先”策略切分 Markdown 文件。
+        """优先使用 `markdown-chunker` 切分 Markdown 文件。
 
-        处理顺序：
-        1. 先识别 `# / ## / ###` 标题，把文档拆成若干 section；
-        2. section 内优先按空行段落累计；
-        3. 超过 chunk_size 时再切分；
-        4. 用字符级 overlap 保留相邻上下文。
+        设计说明：
+        1. 默认优先走第三方 `markdown-chunker`，利用它对标题、表格、代码块和列表的结构感知切片；
+        2. 若运行环境尚未安装依赖，或第三方切片过程中抛错，则自动回退到仓库原有的“标题优先 + 段落累计 + 字符级兜底”逻辑；
+        3. 这样既能提升 Markdown 结构保持能力，也不会把插件可用性绑定到外部依赖是否安装成功。
         """
         text = path.read_text("utf-8")
         entry = self._normalize_doc_entry(entry or self._build_doc_entry(path.name, self._resolve_file_workspace_root(path.name, settings), path.name))
         workspace_root = self._normalize_workspace_root(entry.get("workspace_root") or "")
+        chunk_texts = self._chunk_markdown_text_with_markdown_chunker(text, path, settings)
+        chunks = self._build_chunks_from_texts(path, chunk_texts, workspace_root, entry)
+        if chunks:
+            return chunks
+
         sections = self._split_into_sections(text, path.stem)
         chunks = []
         for section in sections:
             chunks.extend(self._build_chunks_from_section(path, section, settings, workspace_root, entry))
         return chunks
+
+    def _chunk_markdown_text_with_markdown_chunker(self, text: str, path: Path, settings: dict) -> list[str]:
+        """使用 `markdown-chunker` 生成结构感知 chunk 文本列表。
+
+        参数映射策略：
+        1. `soft_max_len` 直接沿用现有 `chunk_size`，保持“目标 chunk 大小”的用户心智不变；
+        2. `hard_max_len` 允许在 `chunk_size + chunk_overlap` 范围内稍微放宽，减少为了严格卡长度而切断结构块；
+        3. `min_chunk_len` 使用 `chunk_size - chunk_overlap`，让相邻内容在更接近原先 overlap 语义的前提下尽量被合并。
+
+        注意：
+        `markdown-chunker` 本身并不直接暴露字符级 overlap 选项，因此这里只做“尺寸语义映射”；
+        真正需要字符滑窗兜底时，仍由本地 fallback 逻辑负责。
+        """
+        if MarkdownChunkingStrategy is None:
+            return []
+
+        chunk_size = max(200, _safe_int(settings.get("chunk_size"), 800))
+        overlap = max(0, _safe_int(settings.get("chunk_overlap"), 120))
+        min_chunk_len = max(200, chunk_size - overlap)
+        hard_max_len = max(chunk_size, chunk_size + overlap)
+
+        try:
+            strategy = MarkdownChunkingStrategy(
+                min_chunk_len=min_chunk_len,
+                soft_max_len=chunk_size,
+                hard_max_len=hard_max_len,
+                detect_headers_footers=False,
+                remove_duplicates=False,
+                add_metadata=False,
+                document_title=path.stem,
+                source_document=path.name,
+            )
+            chunks = strategy.chunk_markdown(text)
+        except Exception as exc:
+            self.logger.warning("[markdown_kb] markdown-chunker 切片失败，已回退到内置切片器: %s", exc)
+            return []
+
+        normalized_chunks = []
+        for item in chunks or []:
+            compact = str(item or "").strip()
+            if compact:
+                normalized_chunks.append(compact)
+        return normalized_chunks
+
+    def _build_chunks_from_texts(self, path: Path, chunk_texts: list[str], workspace_root: str, entry: dict) -> list[dict]:
+        """把纯文本 chunk 列表包装成索引所需的标准 metadata 结构。"""
+        chunks = []
+        for idx, raw_chunk_text in enumerate(chunk_texts):
+            chunk_text = str(raw_chunk_text or "").strip()
+            if not chunk_text:
+                continue
+
+            title, heading_level = self._extract_chunk_heading(chunk_text, path.stem)
+            content_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+            stable_source = f"{path.resolve()}::{idx}::{content_hash}"
+            chunk_id = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()
+            chunks.append({
+                "id": chunk_id,
+                "doc_id": str(entry.get("doc_id") or hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()),
+                "file_name": str(entry.get("file_name") or path.name),
+                "file_path": str(path.resolve()),
+                "workspace_root": workspace_root,
+                "title": title,
+                "heading_level": heading_level,
+                "chunk_index": idx,
+                "chunk_text": chunk_text,
+                "content_hash": content_hash,
+                "created_at": _utc_now_iso(),
+                "updated_at": _utc_now_iso(),
+            })
+        return chunks
+
+    def _extract_chunk_heading(self, chunk_text: str, fallback_title: str) -> tuple[str, int]:
+        """从 chunk 文本中提取首个 Markdown 标题，供检索结果展示来源标题。"""
+        heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+        for line in str(chunk_text or "").splitlines():
+            matched = heading_re.match(line.strip())
+            if matched:
+                return matched.group(2).strip(), len(matched.group(1))
+        return fallback_title, 0
 
     def _split_into_sections(self, text: str, fallback_title: str) -> list[dict]:
         """把 Markdown 原文按标题拆成 section。"""
