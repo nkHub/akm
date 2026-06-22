@@ -1411,11 +1411,16 @@ def _get_stats(days: int) -> dict:
         # 用 `prompt - cached` 做减法会得出负值。
         # OpenAI Chat API 的 `prompt_tokens` 则是包含缓存的总量，
         # `cached_tokens` 是其中子集，减法才有意义。
-        # 这里通过 Agent 的 supports_messages 标记来区分两种语义：
-        # - Messages 语义（Anthropic）：net_prompt = p（已扣除缓存）
-        # - Chat 语义（OpenAI）：   net_prompt = max(0, p - cached)
+        # 这里只对「仅支持 Messages、不支持 Chat」的供应商（如 Anthropic）
+        # 采用 Messages 语义；同时支持两者的供应商（如 DeepSeek）仍按
+        # Chat 语义处理——因为走 Chat 协议时返回的是 OpenAI 风格 usage，
+        # 且 Messages 路径下 cached 始终为 0，两种公式等价。
+        # - Messages 语义（纯 Anthropic）：net_prompt = p（已扣除缓存）
+        # - Chat 语义（其余）：         net_prompt = max(0, p - cached)
         _profile = _get_agent_profile_cached(provider)
-        _is_messages_semantics = bool(_profile and _profile.supports_messages)
+        _is_messages_semantics = bool(
+            _profile and _profile.supports_messages and not _profile.supports_chat
+        )
         net_prompt = p if _is_messages_semantics else max(0, p - cached)
 
         total_prompt += net_prompt
