@@ -74,6 +74,38 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _normalize_embedding_vector(values: list[float]) -> list[float]:
+    """把 embedding 归一化为单位向量，便于让 L2 距离更接近原有余弦相似度语义。
+
+    设计说明：
+    1. 现有 Python 回退链路使用的是余弦相似度；
+    2. sqlite-vec 默认 KNN 更适合直接基于距离做粗召回；
+    3. 这里把写入 vec 表和查询向量都归一化到单位长度，这样欧氏距离与余弦相似度
+       存在稳定单调关系，能尽量减少切换召回后端后排序心智的突变。
+    """
+    vector = [_safe_float(item, 0.0) for item in list(values or [])]
+    if not vector:
+        return []
+    norm = math.sqrt(sum(item * item for item in vector))
+    if norm <= 1e-12:
+        return vector
+    return [item / norm for item in vector]
+
+
+def _sqlite_vec_distance_to_score(distance: float) -> float:
+    """把 sqlite-vec 的单位向量 L2 距离换算回近似余弦相似度分数。
+
+    对单位向量 `u`、`v` 有：
+    `||u-v||^2 = 2 - 2cos(theta)`，因此：
+    `cos(theta) = 1 - distance^2 / 2`
+
+    这样对外暴露的 `vector_score` 仍保持“越大越相关”的语义，便于继续和
+    归一化 BM25 分做线性融合。
+    """
+    value = 1.0 - ((_safe_float(distance, 0.0) ** 2) / 2.0)
+    return max(-1.0, min(1.0, value))
+
+
 def _normalize_weight_pair(primary: float, secondary: float) -> tuple[float, float]:
     """把两路权重归一化到 0~1，总和为 1。
 
@@ -128,6 +160,38 @@ class IndexStore(ABC):
     @abstractmethod
     def clear(self) -> dict:
         """清空索引内容，并返回清理结果。"""
+
+    def list_documents_by_scope(self, workspace_root: str = "", selected_doc: dict | None = None) -> list[dict]:
+        """按 workspace / selected_doc 返回当前候选文档集合。
+
+        默认回退到全量 `list_documents()`，保证历史 backend 至少保持可用；
+        更高效的 backend 可自行覆写，在存储层提前完成过滤。
+        """
+        documents = list(self.list_documents())
+        normalized_workspace = str(workspace_root or "").strip()
+        if normalized_workspace:
+            documents = [
+                item for item in documents
+                if not str(item.get("workspace_root") or "").strip()
+                or str(item.get("workspace_root") or "").strip() == normalized_workspace
+            ]
+        else:
+            documents = [item for item in documents if not str(item.get("workspace_root") or "").strip()]
+
+        if not isinstance(selected_doc, dict):
+            return documents
+        selected_doc_id = str(selected_doc.get("doc_id") or "").strip()
+        if selected_doc_id:
+            return [item for item in documents if str(item.get("doc_id") or "").strip() == selected_doc_id]
+        selected_file_name = Path(str(selected_doc.get("file_name") or "").strip()).name
+        selected_workspace = str(selected_doc.get("workspace_root") or "").strip()
+        if not selected_file_name:
+            return documents
+        return [
+            item for item in documents
+            if Path(str(item.get("file_name") or "")).name == selected_file_name
+            and str(item.get("workspace_root") or "").strip() == selected_workspace
+        ]
 
 
 class JsonIndexStore(IndexStore):
@@ -207,29 +271,113 @@ class JsonIndexStore(IndexStore):
 class SqliteKbIndexStore(IndexStore):
     """基于插件私有 `kb.db` 的 SQLite 索引存储。
 
-    当前版本先把：
+    当前版本把：
     1. 文件元数据
     2. chunk 元数据
     3. embedding 向量
     统一收口到一个 SQLite 文件里。
 
-    检索阶段暂时仍由 Python 层读取向量后计算相似度，避免在本地 SQLite Vector
-    扩展尚未确认安装方式之前，就把迁移绑定到某个未验证的运行时依赖上。
+    检索路径采用“sqlite-vec 优先、Python 回退兜底”：
+    1. 如果当前运行时能够加载 sqlite-vec，则第一阶段粗召回优先在 SQLite 内完成；
+    2. 同时继续保留 `embedding_json`，便于在 vec 不可用、维度不一致或测试环境下
+       自动回退到 NumPy / Python 余弦计算；
+    3. 这样既能把 workspace 过滤前推到 SQL 层，也不会把插件可用性强绑到某个单一
+       本地 Python 发行版上。
     """
 
     backend_name = "sqlite"
+
+    _vec_table_name = "kb_vec_chunks"
 
     def __init__(self, db_path: Path, logger):
         self.db_path = db_path
         self.logger = logger
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._sqlite_vec_module = None
+        self._vec_runtime_import_error = None
+        self._vec_runtime_available = False
+        self._vec_runtime_checked = False
+        self._vec_version = ""
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        self._ensure_vec_runtime(conn)
         return conn
+
+    def _import_sqlite_vec_optional(self):
+        """按需导入 sqlite-vec Python 包，并缓存导入结果。"""
+        if self._vec_runtime_checked:
+            return self._sqlite_vec_module
+        self._vec_runtime_checked = True
+        try:
+            import sqlite_vec  # type: ignore
+            self._sqlite_vec_module = sqlite_vec
+        except Exception as exc:
+            self._sqlite_vec_module = None
+            self._vec_runtime_import_error = str(exc)
+        return self._sqlite_vec_module
+
+    def _ensure_vec_runtime(self, conn: sqlite3.Connection) -> bool:
+        """尝试为当前 SQLite 连接加载 sqlite-vec 扩展。
+
+        注意这里的“可用”是按“当前 Python 运行时 + 当前连接”判断的：
+        - 运行时不支持 `enable_load_extension()` 时，直接返回 False；
+        - 包未安装、扩展加载失败时，也返回 False；
+        - 成功后会把版本号缓存起来，供状态接口展示。
+        """
+        sqlite_vec_module = self._import_sqlite_vec_optional()
+        if sqlite_vec_module is None:
+            self._vec_runtime_available = False
+            return False
+        if not hasattr(conn, "enable_load_extension"):
+            self._vec_runtime_available = False
+            return False
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec_module.load(conn)
+            row = conn.execute("select vec_version()").fetchone()
+            self._vec_version = str(row[0] if row else "") if row else ""
+            self._vec_runtime_available = True
+            return True
+        except Exception as exc:
+            self._vec_runtime_available = False
+            self._vec_runtime_import_error = str(exc)
+            return False
+
+    def _vec_table_exists(self, conn: sqlite3.Connection) -> bool:
+        """判断当前库里是否已经存在 vec 虚表。"""
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = ?",
+            (self._vec_table_name,),
+        ).fetchone()
+        return bool(row and int(row[0]) > 0)
+
+    def _drop_vec_table(self, conn: sqlite3.Connection) -> None:
+        """删除 vec 虚表。
+
+        说明：
+        1. vec0 的维度在建表时固定，因此 embedding 维度变化时必须整表重建；
+        2. 当前 `replace_all()` 本来就是全量替换，直接 drop/recreate 最简单稳定；
+        3. 如果当前运行时无法加载 sqlite-vec，则这里只做温和跳过，继续保留 JSON
+           向量与 Python/NumPy 回退路径，避免因为本地环境差异直接让重建失败。
+        """
+        if not self._vec_runtime_available:
+            return
+        if not self._vec_table_exists(conn):
+            return
+        conn.execute(f"DROP TABLE IF EXISTS {self._vec_table_name}")
+
+    def _create_vec_table(self, conn: sqlite3.Connection, embedding_dim: int) -> None:
+        """按当前 embedding 维度创建 vec0 虚表。"""
+        if not self._vec_runtime_available or embedding_dim <= 0:
+            return
+        conn.execute(
+            f"CREATE VIRTUAL TABLE {self._vec_table_name} "
+            f"USING vec0(chunk_id text primary key, embedding float[{int(embedding_dim)}])"
+        )
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -359,19 +507,30 @@ class SqliteKbIndexStore(IndexStore):
 
     def save(self, data: dict) -> None:
         documents = list((data or {}).get("documents", []))
-        metadata = {
-            "last_rebuilt_at": (data or {}).get("last_rebuilt_at"),
-            "embedding_model": (data or {}).get("embedding_model"),
-        }
+        metadata = dict((data or {}).get("metadata") or {})
+        metadata.setdefault("last_rebuilt_at", (data or {}).get("last_rebuilt_at"))
+        metadata.setdefault("embedding_model", (data or {}).get("embedding_model"))
         self.replace_all(documents, metadata)
 
     def replace_all(self, documents: list[dict], metadata: dict) -> dict:
         conn = self._connect()
         try:
             now = metadata.get("last_rebuilt_at")
+            embeddings = [
+                list(item.get("embedding") or [])
+                for item in list(documents or [])
+                if isinstance(item.get("embedding"), list) and list(item.get("embedding") or [])
+            ]
+            dims = {len(vector) for vector in embeddings if vector}
+            embedding_dim = int(next(iter(dims))) if len(dims) == 1 else 0
+            vec_ready = bool(self._vec_runtime_available and embedding_dim > 0 and len(dims) == 1)
+
             conn.execute("DELETE FROM kb_vectors")
             conn.execute("DELETE FROM kb_chunks")
             conn.execute("DELETE FROM kb_documents")
+            self._drop_vec_table(conn)
+            if vec_ready:
+                self._create_vec_table(conn, embedding_dim)
 
             by_doc: dict[str, list[dict]] = {}
             for item in list(documents or []):
@@ -431,8 +590,30 @@ class SqliteKbIndexStore(IndexStore):
                     "INSERT INTO kb_vectors(chunk_id, embedding_json) VALUES (?, ?)",
                     (item.get("id"), json.dumps(item.get("embedding") or [], ensure_ascii=False)),
                 )
+                if vec_ready and item.get("id"):
+                    conn.execute(
+                        f"INSERT INTO {self._vec_table_name}(chunk_id, embedding) VALUES (?, ?)",
+                        (
+                            item.get("id"),
+                            json.dumps(_normalize_embedding_vector(item.get("embedding") or []), ensure_ascii=False),
+                        ),
+                    )
 
-            self._save_meta_map(conn, metadata)
+            metadata_to_save = dict(metadata or {})
+            metadata_to_save["vec_available"] = "1" if self._vec_runtime_available else "0"
+            metadata_to_save["vec_ready"] = "1" if vec_ready else "0"
+            metadata_to_save["vec_enabled"] = "1" if (self._vec_runtime_available and vec_ready) else "0"
+            metadata_to_save["vec_version"] = self._vec_version or ""
+            metadata_to_save["embedding_dim"] = str(int(embedding_dim))
+            if embeddings and len(dims) > 1:
+                metadata_to_save["vec_disabled_reason"] = "mixed_embedding_dimensions"
+            elif embeddings and embedding_dim <= 0:
+                metadata_to_save["vec_disabled_reason"] = "invalid_embedding_dimension"
+            elif not self._vec_runtime_available:
+                metadata_to_save["vec_disabled_reason"] = "sqlite_vec_unavailable"
+            else:
+                metadata_to_save["vec_disabled_reason"] = ""
+            self._save_meta_map(conn, metadata_to_save)
             conn.commit()
         finally:
             conn.close()
@@ -477,6 +658,12 @@ class SqliteKbIndexStore(IndexStore):
                 "last_rebuilt_at": meta.get("last_rebuilt_at"),
                 "embedding_model": meta.get("embedding_model"),
                 "db_path": str(self.db_path),
+                "vec_available": self._vec_runtime_available,
+                "vec_ready": str(meta.get("vec_ready") or "") == "1",
+                "vec_enabled": self._vec_runtime_available and str(meta.get("vec_ready") or "") == "1",
+                "vec_version": self._vec_version or str(meta.get("vec_version") or ""),
+                "embedding_dim": _safe_int(meta.get("embedding_dim"), 0),
+                "vec_disabled_reason": str(meta.get("vec_disabled_reason") or ""),
             }
         finally:
             conn.close()
@@ -490,6 +677,7 @@ class SqliteKbIndexStore(IndexStore):
             conn.execute("DELETE FROM kb_vectors")
             conn.execute("DELETE FROM kb_chunks")
             conn.execute("DELETE FROM kb_documents")
+            self._drop_vec_table(conn)
             conn.execute("DELETE FROM kb_index_meta")
             conn.commit()
         finally:
@@ -498,6 +686,146 @@ class SqliteKbIndexStore(IndexStore):
             "removed_chunks": removed_count,
             "snapshot": self.load(),
         }
+
+    def search_by_vector(
+        self,
+        query_vector: list[float],
+        limit: int,
+        workspace_root: str = "",
+        selected_doc: dict | None = None,
+    ) -> list[dict]:
+        """使用 sqlite-vec 在数据库侧完成第一阶段向量召回。
+
+        返回值约定：
+        - 只返回候选 `chunk_id` 与原始 `distance`，由上层继续换算成 `vector_score`；
+        - workspace / selected_doc 过滤会前推到 SQL 条件里，避免别的项目 chunk 先把
+          top-N 名额挤满，再在 Python 里“后过滤”导致结果看起来不准。
+        """
+        conn = self._connect()
+        try:
+            meta = self._load_meta_map(conn)
+            if not (self._vec_runtime_available and str(meta.get("vec_ready") or "") == "1"):
+                return []
+            embedding_dim = _safe_int(meta.get("embedding_dim"), 0)
+            normalized_query = _normalize_embedding_vector(query_vector)
+            if embedding_dim <= 0 or len(normalized_query) != embedding_dim:
+                return []
+
+            normalized_workspace = str(workspace_root or "").strip()
+            selected_doc = selected_doc if isinstance(selected_doc, dict) else {}
+            params: list[Any] = [json.dumps(normalized_query, ensure_ascii=False), max(1, int(limit))]
+            clauses = []
+            if normalized_workspace:
+                clauses.append("(c.workspace_root = '' OR c.workspace_root = ?)")
+                params.append(normalized_workspace)
+            else:
+                clauses.append("c.workspace_root = ''")
+
+            selected_doc_id = str(selected_doc.get("doc_id") or "").strip()
+            if selected_doc_id:
+                clauses.append("c.doc_id = ?")
+                params.append(selected_doc_id)
+            else:
+                selected_file_name = Path(str(selected_doc.get("file_name") or "").strip()).name
+                selected_workspace = str(selected_doc.get("workspace_root") or "").strip()
+                if selected_file_name:
+                    clauses.append("c.file_name = ?")
+                    clauses.append("c.workspace_root = ?")
+                    params.extend([selected_file_name, selected_workspace])
+
+            where_sql = ""
+            if clauses:
+                where_sql = " AND " + " AND ".join(clauses)
+            rows = conn.execute(
+                f"""
+                SELECT c.chunk_id, c.doc_id, c.file_name, c.workspace_root, distance
+                FROM {self._vec_table_name} v
+                JOIN kb_chunks c ON c.chunk_id = v.chunk_id
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                  {where_sql}
+                ORDER BY distance ASC
+                """,
+                params,
+            ).fetchall()
+            return [
+                {
+                    "id": row["chunk_id"],
+                    "doc_id": row["doc_id"],
+                    "file_name": row["file_name"],
+                    "workspace_root": row["workspace_root"],
+                    "distance": _safe_float(row["distance"], 0.0),
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_documents_by_chunk_ids(self, chunk_ids: list[str]) -> list[dict]:
+        """按给定 chunk_id 顺序批量读取完整文档条目。"""
+        normalized_chunk_ids = [str(item or "").strip() for item in list(chunk_ids or []) if str(item or "").strip()]
+        if not normalized_chunk_ids:
+            return []
+        conn = self._connect()
+        try:
+            placeholders = ", ".join("?" for _ in normalized_chunk_ids)
+            rows = conn.execute(
+                f"""
+                SELECT c.*, v.embedding_json
+                FROM kb_chunks c
+                LEFT JOIN kb_vectors v ON v.chunk_id = c.chunk_id
+                WHERE c.chunk_id IN ({placeholders})
+                """,
+                normalized_chunk_ids,
+            ).fetchall()
+            by_id = {
+                str(row["chunk_id"]): self._document_from_row(row, row["embedding_json"])
+                for row in rows
+            }
+            return [by_id[item] for item in normalized_chunk_ids if item in by_id]
+        finally:
+            conn.close()
+
+    def list_documents_by_scope(self, workspace_root: str = "", selected_doc: dict | None = None) -> list[dict]:
+        """在 SQLite 层按 scope 过滤文档，避免 fallback 前先把全量文档拉回内存。"""
+        conn = self._connect()
+        try:
+            normalized_workspace = str(workspace_root or "").strip()
+            selected_doc = selected_doc if isinstance(selected_doc, dict) else {}
+            params: list[Any] = []
+            clauses = []
+            if normalized_workspace:
+                clauses.append("(c.workspace_root = '' OR c.workspace_root = ?)")
+                params.append(normalized_workspace)
+            else:
+                clauses.append("c.workspace_root = ''")
+
+            selected_doc_id = str(selected_doc.get("doc_id") or "").strip()
+            if selected_doc_id:
+                clauses.append("c.doc_id = ?")
+                params.append(selected_doc_id)
+            else:
+                selected_file_name = Path(str(selected_doc.get("file_name") or "").strip()).name
+                if selected_file_name:
+                    clauses.append("c.file_name = ?")
+                    params.append(selected_file_name)
+                    clauses.append("c.workspace_root = ?")
+                    params.append(str(selected_doc.get("workspace_root") or "").strip())
+
+            where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT c.*, v.embedding_json
+                FROM kb_chunks c
+                LEFT JOIN kb_vectors v ON v.chunk_id = c.chunk_id
+                {where_sql}
+                ORDER BY c.file_name ASC, c.chunk_index ASC
+                """,
+                params,
+            ).fetchall()
+            return [self._document_from_row(row, row["embedding_json"]) for row in rows]
+        finally:
+            conn.close()
 
 
 @router.get("/status")
@@ -822,9 +1150,9 @@ class Plugin(PluginBase):
         当前默认固定使用 SQLite `kb.db` backend。
 
         说明：
-        1. `kb.db + Python 层相似度计算` 是当前确认可用的主路径；
-        2. `VectorLiteDbIndexStore` 仍保留在代码里，作为未来真实接入时的骨架参考；
-        3. 但在真正接入前，不再把“后端切换”暴露成当前用户可配置项，避免出现“能配但其实不会生效”的伪配置。
+        1. 当前主路径是 `kb.db + sqlite-vec 优先粗召回 + Python/NumPy 自动回退`；
+        2. `VectorLiteDbIndexStore` 仍保留在代码里，作为更早期骨架的参考；
+        3. 对外依然不暴露“后端切换”配置，避免出现“能配但其实不会生效”的伪配置。
         """
         self._kb_db_path = self._index_store_dir / "kb.db"
         return SqliteKbIndexStore(self._kb_db_path, self.logger)
@@ -862,6 +1190,12 @@ class Plugin(PluginBase):
             "last_updated_at": latest_updated_at,
             "last_rebuilt_at": index_stats.get("last_rebuilt_at"),
             "embedding_model": index_stats.get("embedding_model"),
+            "vec_available": bool(index_stats.get("vec_available")),
+            "vec_ready": bool(index_stats.get("vec_ready")),
+            "vec_enabled": bool(index_stats.get("vec_enabled")),
+            "vec_version": index_stats.get("vec_version") or "",
+            "embedding_dim": _safe_int(index_stats.get("embedding_dim"), 0),
+            "vector_retrieval_backend": self._vector_retrieval_backend_label(),
             "vector_compute_backend": self._vector_compute_backend_label(),
             "health": health,
             "ready": True,
@@ -1643,18 +1977,7 @@ class Plugin(PluginBase):
         2. 但如果配置了 reranker_model，则第一阶段退回纯语义召回，把最终排序权完全交给 rerank；
         3. 最终统一按 score_threshold 过滤，避免把明显不相关的低分片段继续暴露给 query / ask / 自动注入链路。
         """
-        documents = self._load_documents_for_retrieval()
-        if not documents:
-            raise HTTPException(status_code=400, detail="当前知识库为空，请先上传文档并执行重建")
-
         settings = self._settings()
-        documents = self._filter_documents_by_workspace(documents, project_context)
-        if not documents:
-            raise HTTPException(status_code=400, detail="当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引")
-        documents = self._filter_documents_by_selected_doc(documents, selected_doc)
-        if not documents:
-            raise HTTPException(status_code=400, detail="当前所选文档不在本次检索范围内，请检查 workspace 或改为不指定文档")
-
         query_cache_key = self._query_cache_key(
             question,
             top_k,
@@ -1670,16 +1993,50 @@ class Plugin(PluginBase):
         if cached_hits is not None:
             return list(cached_hits)
 
+        request_workspace = ""
+        if self._has_request_workspace(project_context):
+            request_workspace = self._normalize_workspace_root(
+                (project_context or {}).get("workspace_root")
+                or (project_context or {}).get("working_directory")
+                or ""
+            )
         query_vector = await self._get_query_embedding(question, embedding_model)
+        documents = self._store.list_documents_by_scope(request_workspace, selected_doc)
+        if not documents:
+            all_documents = self._load_documents_for_retrieval()
+            if not all_documents:
+                raise HTTPException(status_code=400, detail="当前知识库为空，请先上传文档并执行重建")
+            scoped_documents = self._filter_documents_by_workspace(all_documents, project_context)
+            if not scoped_documents:
+                raise HTTPException(status_code=400, detail="当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引")
+            scoped_documents = self._filter_documents_by_selected_doc(scoped_documents, selected_doc)
+            if not scoped_documents:
+                raise HTTPException(status_code=400, detail="当前所选文档不在本次检索范围内，请检查 workspace 或改为不指定文档")
+            documents = scoped_documents
+
+        vector_candidates = self._retrieve_candidates_with_sqlite_vec(
+            query_vector=query_vector,
+            documents=documents,
+            top_k=top_k,
+            project_context=project_context,
+            selected_doc=selected_doc,
+            request_workspace=request_workspace,
+        )
+        candidate_documents = vector_candidates if vector_candidates else documents
         semantic_weight = settings["semantic_weight"]
         keyword_weight = settings["keyword_weight"]
 
         scored = self._score_documents(
             question,
             query_vector,
-            documents,
+            candidate_documents,
             semantic_weight,
             keyword_weight,
+            vector_score_overrides={
+                str(item.get("id") or ""): _safe_float(item.get("vector_score"), 0.0)
+                for item in vector_candidates
+                if str(item.get("id") or "")
+            } if vector_candidates else None,
         )
 
         scored.sort(key=lambda item: item["score"], reverse=True)
@@ -1693,6 +2050,52 @@ class Plugin(PluginBase):
         final_hits = filtered[:top_k]
         self._cache_set(self._query_result_cache, query_cache_key, list(final_hits), max_items=64)
         return final_hits
+
+    def _retrieve_candidates_with_sqlite_vec(
+        self,
+        query_vector: list[float],
+        documents: list[dict],
+        top_k: int,
+        project_context: dict | None,
+        selected_doc: dict | None,
+        request_workspace: str,
+    ) -> list[dict]:
+        """优先使用 sqlite-vec 完成第一阶段候选召回。
+
+        返回空列表表示“当前这次请求没有走成 sqlite-vec”，调用方会自动退回原有
+        的全量文档 + Python/NumPy 相似度计算路径。
+        """
+        if not documents:
+            return []
+        candidate_limit = min(max(12, top_k * 4), max(len(documents), top_k))
+        rows = self._store.search_by_vector(
+            query_vector=query_vector,
+            limit=candidate_limit,
+            workspace_root=request_workspace,
+            selected_doc=selected_doc,
+        )
+        if not rows:
+            return []
+        candidate_ids = [str(item.get("id") or "") for item in rows if str(item.get("id") or "")]
+        if not candidate_ids:
+            return []
+        documents_by_id = self._store.get_documents_by_chunk_ids(candidate_ids)
+        if not documents_by_id:
+            return []
+        distance_map = {
+            str(item.get("id") or ""): _safe_float(item.get("distance"), 0.0)
+            for item in rows
+            if str(item.get("id") or "")
+        }
+        results = []
+        for item in documents_by_id:
+            chunk_id = str(item.get("id") or "")
+            if not chunk_id:
+                continue
+            enriched = dict(item)
+            enriched["vector_score"] = _sqlite_vec_distance_to_score(distance_map.get(chunk_id, 0.0))
+            results.append(enriched)
+        return results
 
     def _invalidate_embedding_cache(self) -> None:
         """在索引写操作后清空内存向量缓存。"""
@@ -1975,6 +2378,7 @@ class Plugin(PluginBase):
         documents: list[dict],
         semantic_weight: float,
         keyword_weight: float,
+        vector_score_overrides: dict[str, float] | None = None,
     ) -> list[dict]:
         """根据 query 为当前文档集合计算混合分。
 
@@ -1986,6 +2390,22 @@ class Plugin(PluginBase):
 
         这样 query / ask 的结果里会同时保留各阶段分数，便于后续观察为什么某个 chunk 被召回。
         """
+        if vector_score_overrides:
+            keyword_scores = self._score_keywords(question, documents)
+            scored = []
+            for idx, item in enumerate(documents):
+                chunk_id = str(item.get("id") or "")
+                scored.append(
+                    self._build_scored_hit(
+                        item,
+                        _safe_float(vector_score_overrides.get(chunk_id), 0.0),
+                        keyword_scores[idx],
+                        semantic_weight,
+                        keyword_weight,
+                    )
+                )
+            return scored
+
         np = self._import_numpy_optional()
         keyword_scores = self._score_keywords(question, documents)
         if np is not None and self._embedding_cache_matrix is not None and self._embedding_cache_norms is not None:
@@ -2206,6 +2626,18 @@ class Plugin(PluginBase):
     def _vector_compute_backend_label(self) -> str:
         """返回当前向量计算后端标签，便于状态页展示。"""
         return "numpy" if self._import_numpy_optional() is not None else "python"
+
+    def _vector_retrieval_backend_label(self) -> str:
+        """返回当前第一阶段向量召回后端标签。
+
+        这里区分“向量召回”和“向量计算”两个概念：
+        - `vector_retrieval_backend` 表示第一阶段粗召回到底走 sqlite-vec 还是 Python/NumPy；
+        - `vector_compute_backend` 仍表示 Python 回退链路内部用的是 NumPy 还是纯 Python。
+        """
+        stats = self._store.stats()
+        if bool(stats.get("vec_enabled")):
+            return "sqlite-vec"
+        return self._vector_compute_backend_label()
 
     def _extract_user_question_for_chat(self, request: dict) -> str:
         """从 Chat Completions 请求中抽取最后一条用户问题。"""
