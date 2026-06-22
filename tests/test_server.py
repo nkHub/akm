@@ -2981,6 +2981,49 @@ async def test_markdown_kb_query_falls_back_when_index_contains_mixed_embedding_
     assert len(result["hits"]) >= 1
 
 
+def test_markdown_kb_tokenize_keywords_prefers_jieba_for_cjk_segments(monkeypatch):
+    """中文分词在 jieba 可用时应优先使用自然词粒度。"""
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.logger = logging.getLogger("test.markdown_kb.jieba")
+    plugin._jieba_warned_unavailable = False
+
+    class DummyJieba:
+        @staticmethod
+        def lcut(text, cut_all=False):
+            assert text == "参考考试大纲生成复习计划"
+            assert cut_all is False
+            return ["参考", "考试大纲", "生成", "复习计划"]
+
+    monkeypatch.setattr("akm.plugins.markdown_kb.index.jieba", DummyJieba)
+
+    tokens = plugin._tokenize_keywords("参考考试大纲生成复习计划")
+    assert "参考考试大纲生成复习计划" in tokens
+    assert "考试大纲" in tokens
+    assert "复习计划" in tokens
+    assert "生成" in tokens
+    assert "考试" not in tokens
+
+
+def test_markdown_kb_tokenize_keywords_falls_back_to_sliding_windows_when_jieba_unavailable(monkeypatch):
+    """当 jieba 不可用时，应继续使用原有 2~4 字滑窗分词。"""
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.logger = logging.getLogger("test.markdown_kb.jieba.fallback")
+    plugin._jieba_warned_unavailable = False
+
+    monkeypatch.setattr("akm.plugins.markdown_kb.index.jieba", None)
+
+    tokens = plugin._tokenize_keywords("参考考试大纲生成复习计划")
+    assert "参考考试大纲生成复习计划" in tokens
+    assert "考试大纲" in tokens
+    assert "复习计划" in tokens
+    assert "考试" in tokens
+    assert "复习" in tokens
+
+
 @pytest.mark.asyncio
 async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(monkeypatch):
     """当 sqlite-vec 可用时，第一阶段候选应优先来自 store 侧向量召回。"""

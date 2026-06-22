@@ -931,6 +931,7 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
   1. 运行时可加载 `sqlite-vec` 时，第一阶段粗召回优先在 SQLite 内完成 KNN 查询；
   2. 向量仍保留一份 `embedding_json`，用于运行时不支持扩展、vec 表尚未就绪或索引混入不同 embedding 维度时的兜底计算；
   3. 若环境里安装了 `numpy`，则优先走矩阵化相似度计算；否则继续回退到 Python 循环计算；
+- 当前 BM25 字面召回里的中文分词也已经从“纯 2~4 字滑窗”升级为“`jieba` 优先、滑窗回退”：英文 token 逻辑保持不变，中文连续片段优先使用 `jieba` 自然分词，只有在本地环境未安装 `jieba` 或分词失败时才退回原滑窗策略；
 - 目前这条回退链路不是临时权宜，而是刻意保留的兼容层：这样既能让主路径吃到 `sqlite-vec` 的 SQL 侧粗召回收益，也不会把插件可用性强绑到某一个本地 Python / SQLite 发行版；
 - 运行前提仍然要满足：当前 Python 的 `sqlite3` 必须支持 `enable_load_extension()`，否则即使已经安装 `sqlite-vec` 包，也只能走回退链路；
 - 当前在 Apple Silicon macOS 上，仓库已验证可行的方式是让 `pyenv 3.12.13` 链接 Homebrew SQLite，并在打包时把 `sqlite_vec` 一并收进 `.app`；

@@ -203,7 +203,7 @@ akm-menubar
 
 检索阶段的规则是：如果当前请求里能提取出工作目录，则会检索“`workspace_root` 为空的公共文档 + 当前工作目录对应的文档”；如果当前请求里提取不到工作目录，则只检索 `workspace_root` 为空的公共文档。这样既兼容 OpenCode / Codex / Claude 这类能提供工作域上下文的请求，也允许把未绑定工作目录的通用文档作为兜底公共知识使用。
 
-针对字面检索，当前版本已经把原来的轻量关键词覆盖率升级成了 BM25 融合：query 和 chunk 会继续复用同一套中英文轻量 tokenization，中文连续片段会展开为更细粒度的 2~4 字滑窗，英文则按 token 拆分；在此基础上，第一阶段会把向量分和归一化后的 BM25 分按 `semantic_weight / keyword_weight` 做线性融合。因此像“参考考试大纲生成复习计划”或 “generate a study plan from the exam outline” 这类问题，不再要求整句在文档里逐字出现，也能通过“考试大纲 / 复习计划”或 “exam outline / study plan” 这类局部短语拿到更稳定的字面相关性分数。
+针对字面检索，当前版本已经把原来的轻量关键词覆盖率升级成了 BM25 融合：query 和 chunk 会继续复用同一套中英文 tokenization，英文仍按 token 拆分；中文连续片段则优先使用 `jieba` 做自然分词，若当前环境未安装 `jieba` 再自动回退到 2~4 字滑窗；在此基础上，第一阶段会把向量分和归一化后的 BM25 分按 `semantic_weight / keyword_weight` 做线性融合。因此像“参考考试大纲生成复习计划”或 “generate a study plan from the exam outline” 这类问题，不再要求整句在文档里逐字出现，也能通过“考试大纲 / 复习计划”或 “exam outline / study plan” 这类局部短语拿到更稳定的字面相关性分数。
 
 当前版本已经按“方案一”把默认索引持久化切到插件私有 `~/.akm/markdown_kb/index_store/kb.db`：保留 `docs/` 原文目录、忽略旧 `index.json`、通过全量 `rebuild` 重新写入 SQLite，并支持只清空索引或连同原始文档一起删除。
 

@@ -26,6 +26,10 @@ from typing import Any
 
 import httpx
 try:
+    import jieba
+except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
+    jieba = None
+try:
     from markdown_chunker import MarkdownChunkingStrategy
 except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
     MarkdownChunkingStrategy = None
@@ -984,6 +988,7 @@ class Plugin(PluginBase):
         self._bm25_cache_documents = []
         self._bm25_cache_stats = None
         self._numpy_available = None
+        self._jieba_warned_unavailable = False
         self._query_embedding_cache = OrderedDict()
         self._query_result_cache = OrderedDict()
 
@@ -2514,8 +2519,10 @@ class Plugin(PluginBase):
 
         这里同时兼顾中英文：
         - 英文 / 数字 / 连字符词使用正则拆词；
-        - 中文不再只保留整段，而是把连续中文片段进一步切成 2~4 字滑窗，避免
-          “参考考试大纲生成复习计划” 这类长句只有整句完全命中时才有分。
+        - 中文优先使用 `jieba` 做自然分词，让“考试大纲 / 复习计划 / 订单管理”
+          这类词组更稳定地进入 BM25；
+        - 若当前环境没有安装 `jieba`，则自动回退到现有的 2~4 字滑窗，避免
+          检索链路因为可选依赖缺失直接不可用。
         """
         if not text:
             return []
@@ -2523,8 +2530,49 @@ class Plugin(PluginBase):
         cjk_tokens = []
         for segment in re.findall(r"[\u4e00-\u9fff]{2,}", text):
             cjk_tokens.append(segment)
-            cjk_tokens.extend(self._expand_cjk_segment_tokens(segment))
+            cjk_tokens.extend(self._tokenize_cjk_segment(segment))
         return latin_tokens + cjk_tokens
+
+    def _tokenize_cjk_segment(self, segment: str) -> list[str]:
+        """对连续中文片段执行“jieba 优先、滑窗回退”的分词。
+
+        设计说明：
+        1. query 与 document 两侧都复用这一入口，避免分词语义漂移；
+        2. 优先使用 jieba，是为了减少纯滑窗带来的高噪声碎片 token；
+        3. 回退逻辑继续保留，保证本地环境没装 jieba 时仍能工作。
+        """
+        segment = str(segment or "").strip()
+        if len(segment) < 2:
+            return []
+        jieba_tokens = self._tokenize_cjk_with_jieba(segment)
+        if jieba_tokens:
+            return jieba_tokens
+        return self._expand_cjk_segment_tokens(segment)
+
+    def _tokenize_cjk_with_jieba(self, segment: str) -> list[str]:
+        """使用 jieba 对中文连续片段做自然分词。
+
+        这里会过滤掉单字 token：
+        1. 单字 token 在 BM25 里通常噪声很高；
+        2. 更长的中文词组更符合当前知识库检索的目标；
+        3. 整段原文仍会在外层保留，因此不会完全丢掉长短语信号。
+        """
+        if jieba is None:
+            if not self._jieba_warned_unavailable:
+                self.logger.info("[markdown_kb] jieba 不可用，中文 BM25 分词已回退到 2~4 字滑窗")
+                self._jieba_warned_unavailable = True
+            return []
+        try:
+            tokens = []
+            for raw in jieba.lcut(segment, cut_all=False):
+                token = str(raw or "").strip()
+                if len(token) < 2:
+                    continue
+                tokens.append(token)
+            return tokens
+        except Exception as exc:
+            self.logger.warning("[markdown_kb] jieba 中文分词失败，已回退到滑窗分词: %s", exc)
+            return []
 
     def _expand_cjk_segment_tokens(self, segment: str) -> list[str]:
         """把连续中文片段展开成 2~4 字滑窗 token。
