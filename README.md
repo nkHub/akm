@@ -165,17 +165,17 @@ akm-menubar
 
 当前版本还给 `markdown_kb` 补上了更接近 Dify 使用习惯的检索调优项：`top_k` 默认 `4`、最大 `10`，无论是否启用 rerank 都会控制最终保留条数；
   `score_threshold` 采用 `0~1` 区间，默认 `0.7`，用于过滤低相关片段；
-  `semantic_weight / keyword_weight` 则只在**未启用** `reranker_model` 时参与第一阶段排序，用来调节“语义召回”和“关键词命中”各自的占比。
+  `semantic_weight / keyword_weight` 会共同参与第一阶段排序，用来调节“语义召回”和“BM25 字面召回”各自的占比。
 
 当前配置还新增了 `document_workspace_root`：它用于声明当前这批 Markdown 文档所属的工作目录，重建索引后会把该工作目录写入 SQLite 元数据。
 
 检索阶段的规则是：如果当前请求里能提取出工作目录，则会检索“`workspace_root` 为空的公共文档 + 当前工作目录对应的文档”；如果当前请求里提取不到工作目录，则只检索 `workspace_root` 为空的公共文档。这样既兼容 OpenCode / Codex / Claude 这类能提供工作域上下文的请求，也允许把未绑定工作目录的通用文档作为兜底公共知识使用。
 
-针对关键词检索，当前版本已经不再依赖中英文整句原样匹配来抬高分数，而是统一回到词块 / 短窗口覆盖率：中文连续片段会展开为更细粒度的 2~4 字滑窗，英文则按 token 覆盖率统计，因此像“参考考试大纲生成复习计划”或 “generate a study plan from the exam outline” 这类问题，不再要求整句在文档里逐字出现，也能通过“考试大纲 / 复习计划”或 “exam outline / study plan” 这类局部短语拿到合理关键词分。
+针对字面检索，当前版本已经把原来的轻量关键词覆盖率升级成了 BM25 融合：query 和 chunk 会继续复用同一套中英文轻量 tokenization，中文连续片段会展开为更细粒度的 2~4 字滑窗，英文则按 token 拆分；在此基础上，第一阶段会把向量分和归一化后的 BM25 分按 `semantic_weight / keyword_weight` 做线性融合。因此像“参考考试大纲生成复习计划”或 “generate a study plan from the exam outline” 这类问题，不再要求整句在文档里逐字出现，也能通过“考试大纲 / 复习计划”或 “exam outline / study plan” 这类局部短语拿到更稳定的字面相关性分数。
 
 当前版本已经按“方案一”把默认索引持久化切到插件私有 `~/.akm/markdown_kb/index_store/kb.db`：保留 `docs/` 原文目录、忽略旧 `index.json`、通过全量 `rebuild` 重新写入 SQLite，并支持只清空索引或连同原始文档一起删除。
 
-当前默认实现是 `SqliteKbIndexStore`，向量仍先存 SQLite；检索阶段会优先使用内存预加载 + NumPy 矩阵化相似度计算，并补上 query embedding 缓存与 query 结果缓存；若当前环境尚未安装 `numpy` 则自动回退到 Python 循环计算。未启用 rerank 时，第一阶段会输出 `vector_score / keyword_score / hybrid_score` 方便观察召回原因；启用 rerank 后，第一阶段会退回纯语义召回，把最终排序和阈值判断统一交给 `rerank_score`。
+当前默认实现是 `SqliteKbIndexStore`，向量仍先存 SQLite；检索阶段会优先使用内存预加载 + NumPy 矩阵化相似度计算，并补上 query embedding 缓存、query 结果缓存以及与文档快照绑定的 BM25 统计缓存；若当前环境尚未安装 `numpy` 则自动回退到 Python 循环计算。第一阶段会统一输出 `vector_score / keyword_score / hybrid_score` 方便观察召回原因，其中 `keyword_score` 现在表示归一化后的 BM25 分；启用 rerank 后，第一阶段仍保留“向量分 + BM25 分”的混合粗召回，第二阶段再把候选交给 `rerank_score` 重排。
 
 插件页面本身会先进入 AKM 后台宿主页，因此左侧菜单和顶部栏会保留；真正的插件原始 HTML 则通过 `/plugins/<name>/raw` 供宿主页 iframe 加载。
 
@@ -197,7 +197,7 @@ akm-menubar
 
 `markdown_kb` 还额外开放了一个文件级工作目录绑定接口：`POST /api/markdown-kb/files/bind-workspace`。调用方可以按 `file_name` 为单个 Markdown 文档绑定 `workspace_root`，接口成功后会返回 `needs_rebuild=true`；这表示绑定关系已经持久化，但仍需再执行一次 `rebuild-file`、`sync` 或 `rebuild`，新的工作目录绑定才会真正进入索引并参与检索过滤。
 
-`markdown_kb` 的测试页现在还支持按单个文档收窄 `query / ask` 范围：检索测试和问答测试都提供一个“文档范围”下拉，默认不选，此时继续沿用请求里的 `workspace_root / working_directory` 语义，只检索“公共文档 + 当前工作域文档”；如果显式选中文档，则会在 workspace 过滤之后进一步只保留该文档的 chunks。对应地，`POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 也支持直接从请求体显式接收 `workspace_root / working_directory`，不强依赖 OpenCode / Codex / Claude 自动注入环境上下文。
+`markdown_kb` 的测试页现在会基于当前文件列表渲染一个去重后的 “Workspace 范围” 下拉：检索测试和问答测试默认不选，此时继续沿用请求里的 `workspace_root / working_directory` 语义，只检索“公共文档 + 当前工作域文档”；如果显式选中某个 workspace，则会直接把该 workspace 作为当前请求的工作域传给 `query / ask`，从而只保留“公共文档 + 该 workspace 文档”的候选范围。对应地，`POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 也支持直接从请求体显式接收 `workspace_root / working_directory`，不强依赖 OpenCode / Codex / Claude 自动注入环境上下文。
 
 配置文件位于 `~/.akm/config.json`，可通过 Web 设置页面修改：
 

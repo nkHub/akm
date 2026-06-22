@@ -125,6 +125,24 @@ def test_build_headers_falls_back_to_akm_user_agent_without_native_value(monkeyp
     assert headers["User-Agent"].startswith("akm/")
 
 
+def test_build_headers_special_request_uses_default_akm_user_agent(monkeypatch):
+    """特殊请求在未透传原始 User-Agent 时，也应统一使用 akm/<version> 标识。"""
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: False if key == "use_native_user_agent" else default)
+    agent = Agent(name="openai", default_base_url="https://api.openai.com")
+    key = {"api_key": "sk-test123"}
+    headers = agent.build_headers(key, api_path="embeddings")
+    assert headers["User-Agent"].startswith("akm/")
+
+
+def test_build_headers_special_request_still_prefers_native_user_agent_when_enabled(monkeypatch):
+    """特殊请求在开启透传开关后，仍应优先使用客户端原始 User-Agent。"""
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+    agent = Agent(name="openai", default_base_url="https://api.openai.com")
+    key = {"api_key": "sk-test123"}
+    headers = agent.build_headers(key, api_path="images/generations", original_user_agent="OpenCode/9.9.9")
+    assert headers["User-Agent"] == "OpenCode/9.9.9"
+
+
 def test_build_headers_custom_auth():
     """Key 有自定义 auth_header 时使用 key 的模板"""
     agent = Agent(name="openai", default_base_url="https://api.openai.com")
