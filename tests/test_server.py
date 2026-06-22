@@ -336,6 +336,16 @@ async def test_markdown_kb_bind_file_workspace_marks_file_for_rebuild(monkeypatc
     test_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
 
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            return httpx.Response(200, json={"data": [{"embedding": [1.0, float(idx + 1)], "index": idx} for idx, _ in enumerate(inputs)]})
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
@@ -709,6 +719,7 @@ async def test_embeddings_forward_success(monkeypatch):
 
     async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "embeddings"
+        assert original_user_agent == "python-httpx/0.28.1"
         return {
             "status_code": 200,
             "body": '{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0}],"model":"text-embedding-3-small","usage":{"prompt_tokens":8,"total_tokens":8}}',
@@ -741,6 +752,7 @@ async def test_rerank_forward_success(monkeypatch):
 
     async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "rerank"
+        assert original_user_agent == "python-httpx/0.28.1"
         return {
             "status_code": 200,
             "body": '{"results":[{"index":1,"relevance_score":0.98},{"index":0,"relevance_score":0.42}],"model":"rerank-v1","usage":{"total_tokens":12}}',
@@ -774,6 +786,7 @@ async def test_image_generations_forward_success(monkeypatch):
     async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
         assert api_path == "images/generations"
         assert request_timeout == 300
+        assert original_user_agent == "python-httpx/0.28.1"
         return {
             "status_code": 200,
             "body": '{"created":123,"data":[{"url":"https://example.com/image.png"}]}',
@@ -892,6 +905,7 @@ async def test_image_edits_forward_success(monkeypatch):
         assert body["__akm_form_fields__"]["prompt"] == "edit cat"
         assert body["__akm_form_files__"]["image"][0] == "cat.png"
         assert request_timeout == 300
+        assert original_user_agent == "python-httpx/0.28.1"
         return {
             "status_code": 200,
             "body": '{"created":123,"data":[{"url":"https://example.com/edited.png"}]}',
@@ -916,6 +930,59 @@ async def test_image_edits_forward_success(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["data"][0]["url"] == "https://example.com/edited.png"
+
+
+@pytest.mark.asyncio
+async def test_special_routes_forward_original_user_agent_when_present(monkeypatch):
+    """特殊接口应继续把入口原始 User-Agent 传给公共转发链路，以便请求头开关统一生效。"""
+
+    captured = []
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent=""):
+        captured.append((api_path, original_user_agent))
+        return {
+            "status_code": 200,
+            "body": '{"ok":true}',
+            "key_alias": "test-key",
+            "provider": "openai",
+            "model": body.get("model", ""),
+            "error": "",
+            "latency_ms": 1,
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post(
+            "/v1/embeddings",
+            json={"model": "text-embedding-3-small", "input": "hello"},
+            headers={"User-Agent": "OpenCode/1.0.0"},
+        )
+        await client.post(
+            "/v1/rerank",
+            json={"model": "rerank-v1", "query": "hello", "documents": ["a", "b"]},
+            headers={"User-Agent": "OpenCode/1.0.0"},
+        )
+        await client.post(
+            "/v1/images/generations",
+            json={"model": "gpt-image-1", "prompt": "a cat"},
+            headers={"User-Agent": "OpenCode/1.0.0"},
+        )
+        await client.post(
+            "/v1/images/edits",
+            data={"model": "gpt-image-2", "prompt": "edit cat"},
+            files={"image": ("cat.png", io.BytesIO(b"fake-bytes"), "image/png")},
+            headers={"User-Agent": "OpenCode/1.0.0"},
+        )
+
+    assert captured == [
+        ("embeddings", "OpenCode/1.0.0"),
+        ("rerank", "OpenCode/1.0.0"),
+        ("images/generations", "OpenCode/1.0.0"),
+        ("images/edits", "OpenCode/1.0.0"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2362,6 +2429,7 @@ async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
 
     assert raw_resp.status_code == 200
     assert "Markdown 知识库" in raw_resp.text
+    assert "Workspace 范围" in raw_resp.text
     assert "AKM 后台" not in raw_resp.text
 
 
@@ -2459,6 +2527,9 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
         "utf-8",
     )
 
+    bind_result = plugin.bind_file_workspace("guide.md", "/Users/nk/Desktop/ccs")
+    assert bind_result["workspace_root"] == "/Users/nk/Desktop/ccs"
+
     rebuild = await plugin.rebuild_index()
     assert rebuild["ok"] is True
     assert rebuild["doc_count"] == 2
@@ -2479,37 +2550,44 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
 
     query_result = await plugin.query({"question": "How does Markdown plugin query work?", "top_k": 2})
     assert query_result["ok"] is True
-    assert len(query_result["hits"]) == 2
+    assert len(query_result["hits"]) == 1
     assert query_result["reranker_model"] == "rerank-v1"
-    assert query_result["hits"][0]["file_name"] in {"guide.md", "release.md"}
+    assert query_result["hits"][0]["file_name"] == "release.md"
     assert all("chunk_text" in item for item in query_result["hits"])
     assert query_result["hits"][0]["rerank_score"] is not None
 
-    release_file = next(item for item in files["files"] if item["file_name"] == "release.md")
     scoped_query_result = await plugin.query({
         "question": "When should I run rebuild?",
         "top_k": 5,
         "workspace_root": "",
-        "doc_id": release_file["doc_id"],
     })
-    assert scoped_query_result["selected_doc_id"] == release_file["doc_id"]
     assert all(item["file_name"] == "release.md" for item in scoped_query_result["hits"])
+
+    workspace_scoped_query_result = await plugin.query({
+        "question": "How does Markdown plugin query work?",
+        "top_k": 5,
+        "workspace_root": "/Users/nk/Desktop/ccs",
+        "working_directory": "/Users/nk/Desktop/ccs",
+    })
+    assert workspace_scoped_query_result["workspace_root"] == "/Users/nk/Desktop/ccs"
+    assert any(item["file_name"] == "guide.md" for item in workspace_scoped_query_result["hits"])
+    assert all(item["file_name"] in {"guide.md", "release.md"} for item in workspace_scoped_query_result["hits"])
 
     ask_result = await plugin.ask({"question": "When should I run rebuild?", "top_k": 2})
     assert ask_result["ok"] is True
     assert ask_result["answer"].startswith("基于资料的回答:")
-    assert len(ask_result["citations"]) == 2
+    assert len(ask_result["citations"]) == 1
     assert ask_result["reranker_model"] == "rerank-v1"
 
-    guide_file = next(item for item in files["files"] if item["file_name"] == "guide.md")
-    scoped_ask_result = await plugin.ask({
+    workspace_scoped_ask_result = await plugin.ask({
         "question": "How does Markdown plugin query work?",
         "top_k": 5,
-        "workspace_root": "",
-        "doc_id": guide_file["doc_id"],
+        "workspace_root": "/Users/nk/Desktop/ccs",
+        "working_directory": "/Users/nk/Desktop/ccs",
     })
-    assert scoped_ask_result["selected_doc_id"] == guide_file["doc_id"]
-    assert all(item["file_name"] == "guide.md" for item in scoped_ask_result["citations"])
+    assert workspace_scoped_ask_result["workspace_root"] == "/Users/nk/Desktop/ccs"
+    assert any(item["file_name"] == "guide.md" for item in workspace_scoped_ask_result["citations"])
+    assert all(item["file_name"] in {"guide.md", "release.md"} for item in workspace_scoped_ask_result["citations"])
 
     (docs_dir / "guide.md").write_text(
         "# Markdown Guide\n\nMarkdown plugin keeps docs local.\n\n## Query\n\nUse query to inspect chunks.\n\n## Ask\n\nUse ask to answer with citations.\n\n## Sync\n\nSync only changed files.\n",
@@ -2640,7 +2718,7 @@ async def test_markdown_kb_keyword_weight_only_affects_non_rerank_order(monkeypa
 
 @pytest.mark.asyncio
 async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_weight(monkeypatch):
-    """启用 rerank 后，最终排序看 rerank，但 top_k 和阈值仍然生效。"""
+    """启用 rerank 后，最终排序看 rerank，但第一阶段仍保留关键词粗召回。"""
     from fastapi import FastAPI
     from akm.plugins.plugin_manager import PluginManager
 
@@ -2655,15 +2733,15 @@ async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_
             inputs = json.get("input")
             if isinstance(inputs, str):
                 inputs = [inputs]
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        {"embedding": [1.0, float(idx + 1)], "index": idx}
-                        for idx, item in enumerate(inputs)
-                    ]
-                },
-            )
+            def vectorize(text):
+                raw = str(text or "").lower()
+                if raw.strip() == "exactterm":
+                    return [1.0, 0.0]
+                if "unrelated semantic background" in raw:
+                    return [1.0, 0.0]
+                return [0.0, 1.0]
+
+            return httpx.Response(200, json={"data": [{"embedding": vectorize(item), "index": idx} for idx, item in enumerate(inputs)]})
 
         if url.endswith("/v1/rerank"):
             return httpx.Response(
@@ -2672,7 +2750,6 @@ async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_
                     "results": [
                         {"index": 1, "relevance_score": 0.95},
                         {"index": 0, "relevance_score": 0.72},
-                        {"index": 2, "relevance_score": 0.31},
                     ]
                 },
             )
@@ -2692,8 +2769,8 @@ async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     (docs_dir / "a.md").write_text("# Alpha\n\nexactterm alpha", "utf-8")
-    (docs_dir / "b.md").write_text("# Beta\n\nexactterm beta", "utf-8")
-    (docs_dir / "c.md").write_text("# Gamma\n\nexactterm gamma", "utf-8")
+    (docs_dir / "b.md").write_text("# Beta\n\nexactterm beta exactterm", "utf-8")
+    (docs_dir / "c.md").write_text("# Gamma\n\nunrelated semantic background without keyword hit", "utf-8")
 
     await plugin.rebuild_index()
 
@@ -2704,13 +2781,15 @@ async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_
 
     result = await plugin.query({"question": "exactterm", "top_k": 2})
     assert len(result["hits"]) == 2
-    assert [item["file_name"] for item in result["hits"]] == ["b.md", "a.md"]
+    assert [item["file_name"] for item in result["hits"]] == ["a.md", "b.md"]
     assert all(item["rerank_score"] is not None for item in result["hits"])
     assert all(item["score"] >= 0.7 for item in result["hits"])
+    assert all(item["file_name"] != "c.md" for item in result["hits"])
+    assert result["hits"][1]["hybrid_score"] > result["hits"][0]["hybrid_score"]
 
     result_top1 = await plugin.query({"question": "exactterm", "top_k": 1})
     assert len(result_top1["hits"]) == 1
-    assert result_top1["hits"][0]["file_name"] == "b.md"
+    assert result_top1["hits"][0]["file_name"] == "a.md"
 
 
 @pytest.mark.asyncio

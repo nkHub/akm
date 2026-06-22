@@ -68,7 +68,7 @@ class Agent:
 
         auth_header 模板中的 {api_key} 会被替换为解密后的 Key
         """
-        user_agent = self._resolve_user_agent(original_user_agent)
+        user_agent = self._resolve_user_agent(api_path, original_user_agent)
         # 走 /anthropic/v1/messages 的供应商需要使用 Anthropic 风格请求头。
         if self.messages_use_anthropic_path and api_path == "messages":
             return {
@@ -85,8 +85,8 @@ class Agent:
             "User-Agent": user_agent,
         }
 
-    def _resolve_user_agent(self, original_user_agent: str = "") -> str:
-        """根据全局配置决定上游请求使用的 User-Agent。"""
+    def _resolve_user_agent(self, api_path: str = "", original_user_agent: str = "") -> str:
+        """根据全局配置和接口类型决定上游请求使用的 User-Agent。"""
         if bool(config_get("use_native_user_agent", False)):
             native = str(original_user_agent or "").strip()
             if native:

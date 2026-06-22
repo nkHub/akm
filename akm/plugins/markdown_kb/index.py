@@ -652,6 +652,9 @@ class Plugin(PluginBase):
         self._embedding_cache_documents = []
         self._embedding_cache_matrix = None
         self._embedding_cache_norms = None
+        self._bm25_cache_revision = None
+        self._bm25_cache_documents = []
+        self._bm25_cache_stats = None
         self._numpy_available = None
         self._query_embedding_cache = OrderedDict()
         self._query_result_cache = OrderedDict()
@@ -1670,9 +1673,6 @@ class Plugin(PluginBase):
         query_vector = await self._get_query_embedding(question, embedding_model)
         semantic_weight = settings["semantic_weight"]
         keyword_weight = settings["keyword_weight"]
-        if reranker_model:
-            semantic_weight = 1.0
-            keyword_weight = 0.0
 
         scored = self._score_documents(
             question,
@@ -1700,6 +1700,9 @@ class Plugin(PluginBase):
         self._embedding_cache_documents = []
         self._embedding_cache_matrix = None
         self._embedding_cache_norms = None
+        self._bm25_cache_revision = None
+        self._bm25_cache_documents = []
+        self._bm25_cache_stats = None
         self._query_result_cache.clear()
 
     def _invalidate_query_caches(self) -> None:
@@ -2041,42 +2044,45 @@ class Plugin(PluginBase):
         }
 
     def _score_keywords(self, question: str, documents: list[dict]) -> list[float]:
-        """为候选文档计算轻量关键词分。
+        """为候选文档计算归一化 BM25 分。
 
-        目标不是替代全文检索，而是在不引入额外依赖的前提下补一层“字面命中”信号：
-        - 标题命中应比正文命中更值钱；
-        - 不再依赖“整句原样匹配”拿高分，而是统一回到词块 / 短窗口覆盖率；
-        - 分值最终压到 0~1，方便和向量分做线性混合。
+        设计说明：
+        1. query 与 document 统一复用当前的轻量 tokenization，保持中英文行为一致；
+        2. BM25 原始分只在当前候选集内比较，因此这里再做一次 0~1 归一化；
+        3. 对外字段仍沿用 `keyword_score`，避免打破现有 API 与前端展示结构。
         """
         normalized_question = self._normalize_keyword_text(question)
-        tokens = self._tokenize_keywords(normalized_question)
-        if not normalized_question or not tokens:
+        query_tokens = list(dict.fromkeys(self._tokenize_keywords(normalized_question)))
+        if not normalized_question or not query_tokens or not documents:
             return [0.0 for _ in documents]
 
-        scores = []
-        unique_tokens = list(dict.fromkeys(tokens))
-        token_weights = self._build_keyword_token_weights(unique_tokens)
-        total_weight = max(1e-6, sum(token_weights.values()))
-        for item in documents:
-            title_text = self._normalize_keyword_text(item.get("title") or "")
-            chunk_text = self._normalize_keyword_text(item.get("chunk_text") or "")
-            title_compact = title_text.replace(" ", "")
-            chunk_compact = chunk_text.replace(" ", "")
+        bm25_stats = self._get_bm25_stats(documents)
+        if not bm25_stats:
+            return [0.0 for _ in documents]
 
-            title_hit_weight = 0.0
-            body_hit_weight = 0.0
-            for token in unique_tokens:
-                if not token:
+        raw_scores = []
+        tokenized_documents = list(bm25_stats.get("tokenized_documents") or [])
+        document_lengths = list(bm25_stats.get("document_lengths") or [])
+        average_length = float(bm25_stats.get("average_length") or 0.0)
+        document_frequency = dict(bm25_stats.get("document_frequency") or {})
+        doc_count = max(1, len(tokenized_documents))
+        k1 = 1.5
+        b = 0.75
+
+        for idx, tokens in enumerate(tokenized_documents):
+            length = float(document_lengths[idx] if idx < len(document_lengths) else len(tokens))
+            term_frequency = self._build_term_frequency(tokens)
+            score = 0.0
+            for token in query_tokens:
+                freq = float(term_frequency.get(token) or 0.0)
+                if freq <= 0:
                     continue
-                weight = token_weights.get(token, 1.0)
-                if token in title_text or token in title_compact:
-                    title_hit_weight += weight
-                if token in chunk_text or token in chunk_compact:
-                    body_hit_weight += weight
-
-            coverage_score = (title_hit_weight * 1.4 + body_hit_weight * 1.0) / (total_weight * 2.4)
-            scores.append(min(1.0, coverage_score))
-        return scores
+                df = int(document_frequency.get(token) or 0)
+                idf = math.log(1.0 + ((doc_count - df + 0.5) / (df + 0.5)))
+                denominator = freq + k1 * (1.0 - b + b * (length / max(1e-6, average_length)))
+                score += idf * ((freq * (k1 + 1.0)) / max(1e-6, denominator))
+            raw_scores.append(score)
+        return self._normalize_keyword_scores(raw_scores)
 
     def _normalize_keyword_text(self, text: Any) -> str:
         """把文本规整成适合关键词匹配的形式。"""
@@ -2118,23 +2124,63 @@ class Plugin(PluginBase):
                 tokens.append(segment[start:start + window])
         return tokens
 
-    def _build_keyword_token_weights(self, tokens: list[str]) -> dict[str, float]:
-        """为关键词 token 分配轻量权重。
+    def _get_bm25_stats(self, documents: list[dict]) -> dict:
+        """返回当前文档集合对应的 BM25 统计缓存。"""
+        revision = self._current_embedding_cache_revision()
+        if self._bm25_cache_revision == revision and self._bm25_cache_documents == documents and self._bm25_cache_stats:
+            return self._bm25_cache_stats
 
-        权重规则保持简单：
-        - 更长的中文窗口给予更高权重，避免 2 字片段把所有分值稀释得过于平均；
-        - 英文 token 统一按长度做温和加权；
-        - 结果只用于相对覆盖率计算，不追求 BM25 级复杂度。
-        """
-        weights = {}
+        tokenized_documents = [self._tokenize_document_for_bm25(item) for item in documents]
+        document_lengths = [len(tokens) for tokens in tokenized_documents]
+        average_length = (sum(document_lengths) / len(document_lengths)) if document_lengths else 0.0
+        document_frequency: dict[str, int] = {}
+        for tokens in tokenized_documents:
+            for token in set(tokens):
+                document_frequency[token] = document_frequency.get(token, 0) + 1
+        stats = {
+            "tokenized_documents": tokenized_documents,
+            "document_lengths": document_lengths,
+            "average_length": average_length,
+            "document_frequency": document_frequency,
+        }
+        self._bm25_cache_revision = revision
+        self._bm25_cache_documents = list(documents)
+        self._bm25_cache_stats = stats
+        return stats
+
+    def _tokenize_document_for_bm25(self, item: dict) -> list[str]:
+        """为单个候选文档生成 BM25 token 序列。"""
+        title_text = self._normalize_keyword_text(item.get("title") or "")
+        chunk_text = self._normalize_keyword_text(item.get("chunk_text") or "")
+        merged = "\n".join(part for part in [title_text, chunk_text] if part)
+        tokens = self._tokenize_keywords(merged)
+        if title_text:
+            title_tokens = self._tokenize_keywords(title_text)
+            # 标题词额外重复一遍，等价于给标题更高词频权重，尽量保留旧逻辑中的标题偏置。
+            tokens.extend(title_tokens)
+        return tokens
+
+    def _build_term_frequency(self, tokens: list[str]) -> dict[str, int]:
+        """统计单篇文档内 token 词频。"""
+        frequencies: dict[str, int] = {}
         for token in tokens:
             if not token:
                 continue
-            if re.fullmatch(r"[\u4e00-\u9fff]+", token):
-                weights[token] = float(min(4, len(token)))
-            else:
-                weights[token] = 1.0 + min(1.5, len(token) / 10.0)
-        return weights
+            frequencies[token] = frequencies.get(token, 0) + 1
+        return frequencies
+
+    def _normalize_keyword_scores(self, raw_scores: list[float]) -> list[float]:
+        """把 BM25 原始分压到 0~1，便于与向量分融合。"""
+        if not raw_scores:
+            return []
+        minimum = min(raw_scores)
+        maximum = max(raw_scores)
+        if maximum - minimum <= 1e-9:
+            return [0.0 for _ in raw_scores]
+        return [
+            max(0.0, min(1.0, (float(score) - minimum) / (maximum - minimum)))
+            for score in raw_scores
+        ]
 
     def _import_numpy_optional(self):
         """按需导入 NumPy。
