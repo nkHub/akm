@@ -404,7 +404,7 @@
     <section class="section-grid">
       <div class="card span-12">
         <h2>检索配置</h2>
-        <p class="lead">这里直接修改 `markdown_kb` 插件配置。`semantic / keyword` 权重只在未启用 rerank 时参与第一阶段排序；`top_k` 与 `score_threshold` 在 query / ask 和 `kb:` 自动注入链路里都会生效。</p>
+        <p class="lead">这里直接修改 `markdown_kb` 插件配置。`semantic / keyword` 权重只在未启用 rerank 时参与第一阶段排序；`top_k` 与 `score_threshold` 在 query / ask 和自动注入链路里都会生效。</p>
         <div class="section-grid" style="margin-bottom:0;">
           <div class="field span-4">
             <label for="config-embedding-model">Embedding 模型</label>
@@ -485,7 +485,7 @@
 
       <div class="card span-8">
         <h2>检索测试</h2>
-        <p class="lead">这里直接调用 `POST /api/markdown-kb/query`。`embedding_model` 是必填项；`reranker_model` 是可选项。建议先看命中的 chunk 是否合理，再决定是否继续调优切片规则或 `top_k`。</p>
+        <p class="lead">这里直接调用 `POST /api/markdown-kb/query`。`embedding_model` 是必填项；`reranker_model` 是可选项。现在还支持按单个文档收窄检索范围；如果不选文档，则继续按请求里的 `workspace` 语义决定“公共文档 + 当前工作域文档”的检索范围。建议先看命中的 chunk 是否合理，再决定是否继续调优切片规则或 `top_k`。</p>
         <div class="field">
           <label for="query-question">问题</label>
           <textarea id="query-question" placeholder="例如：这个插件的重建索引应该在什么时候执行？"></textarea>
@@ -503,6 +503,10 @@
             <label for="query-reranker-model">Reranker 模型</label>
             <select id="query-reranker-model" class="select"></select>
           </div>
+          <div class="field span-6">
+            <label for="query-doc-select">文档范围</label>
+            <select id="query-doc-select" class="select"></select>
+          </div>
         </div>
         <div class="actions">
           <button class="button" id="query-btn" type="button">执行检索</button>
@@ -515,7 +519,7 @@
     <section class="section-grid">
       <div class="card span-12">
         <h2>问答测试</h2>
-        <p class="lead">这里直接调用 `POST /api/markdown-kb/ask`，会先检索知识库片段，再通过 AKM 本地代理生成最终答案，并把引用结果一起返回。`embedding_model` 是必填项，`reranker_model` 是可选项；默认显示 `gpt-4o-mini`，是因为插件配置里的 `chat_model` 默认值就是它；现在这里已经支持直接从当前模型列表中选择覆盖。</p>
+        <p class="lead">这里直接调用 `POST /api/markdown-kb/ask`，会先检索知识库片段，再通过 AKM 本地代理生成最终答案，并把引用结果一起返回。`embedding_model` 是必填项，`reranker_model` 是可选项；默认显示 `gpt-4o-mini`，是因为插件配置里的 `chat_model` 默认值就是它；现在这里已经支持直接从当前模型列表中选择覆盖，也支持按单个文档收窄引用范围；如果不选文档，则继续按请求里的 `workspace` 语义决定检索范围。</p>
         <div class="field">
           <label for="ask-question">问题</label>
           <textarea id="ask-question" placeholder="例如：这个知识库后期动态维护最推荐先做什么？"></textarea>
@@ -536,6 +540,10 @@
           <div class="field span-4">
             <label for="ask-reranker-model">Reranker 模型</label>
             <select id="ask-reranker-model" class="select"></select>
+          </div>
+          <div class="field span-4">
+            <label for="ask-doc-select">文档范围</label>
+            <select id="ask-doc-select" class="select"></select>
           </div>
         </div>
         <div class="actions">
@@ -593,6 +601,7 @@
     const queryTopK = document.getElementById('query-top-k');
     const queryEmbeddingModel = document.getElementById('query-embedding-model');
     const queryRerankerModel = document.getElementById('query-reranker-model');
+    const queryDocSelect = document.getElementById('query-doc-select');
     const queryBtn = document.getElementById('query-btn');
     const queryStatus = document.getElementById('query-status');
     const queryResults = document.getElementById('query-results');
@@ -602,6 +611,7 @@
     const askEmbeddingModel = document.getElementById('ask-embedding-model');
     const askChatModel = document.getElementById('ask-chat-model');
     const askRerankerModel = document.getElementById('ask-reranker-model');
+    const askDocSelect = document.getElementById('ask-doc-select');
     const askBtn = document.getElementById('ask-btn');
     const askStatus = document.getElementById('ask-status');
     const askAnswerWrap = document.getElementById('ask-answer-wrap');
@@ -609,6 +619,7 @@
     const askCitations = document.getElementById('ask-citations');
 
     let currentFiles = [];
+    let currentFilesMeta = [];
     let availableModels = [];
     let pluginConfig = null;
 
@@ -738,6 +749,44 @@
         return '';
       }
       return raw;
+    }
+
+    function formatWorkspaceLabel(workspaceRoot) {
+      const normalized = String(workspaceRoot || '').trim();
+      return normalized || '公共文档';
+    }
+
+    function renderDocScopeOptions(selectNode, files) {
+      const options = ['<option value="">不指定文档（按 workspace 过滤）</option>'];
+      (files || []).forEach(function (item) {
+        const docId = String(item.doc_id || '').trim();
+        const fileName = String(item.file_name || '').trim();
+        const workspaceRoot = String(item.workspace_root || '').trim();
+        if (!docId || !fileName) {
+          return;
+        }
+        options.push('<option value="' + escapeHtml(docId) + '">' + escapeHtml(fileName + ' · ' + formatWorkspaceLabel(workspaceRoot)) + '</option>');
+      });
+      selectNode.innerHTML = options.join('');
+      selectNode.value = '';
+    }
+
+    function resolveSelectedDocPayload(selectNode) {
+      const docId = String(selectNode && selectNode.value || '').trim();
+      if (!docId) {
+        return {};
+      }
+      const file = (currentFilesMeta || []).find(function (item) {
+        return String(item.doc_id || '').trim() === docId;
+      });
+      if (!file) {
+        return { doc_id: docId };
+      }
+      return {
+        doc_id: docId,
+        file_name: String(file.file_name || '').trim(),
+        workspace_root: String(file.workspace_root || '').trim()
+      };
     }
 
     async function loadModels() {
@@ -907,8 +956,14 @@
       filesList.innerHTML = '<div class="empty">正在加载文件列表...</div>';
       try {
         const data = await requestJson('/api/markdown-kb/files');
-        renderFiles(data.files || []);
+        currentFilesMeta = data.files || [];
+        renderFiles(currentFilesMeta);
+        renderDocScopeOptions(queryDocSelect, currentFilesMeta);
+        renderDocScopeOptions(askDocSelect, currentFilesMeta);
       } catch (error) {
+        currentFilesMeta = [];
+        renderDocScopeOptions(queryDocSelect, currentFilesMeta);
+        renderDocScopeOptions(askDocSelect, currentFilesMeta);
         filesList.innerHTML = '<div class="empty">文件列表读取失败：' + escapeHtml(String(error.message || error)) + '</div>';
       }
     }
@@ -1068,7 +1123,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(buildPluginConfigPayload())
         });
-        setStatus(configStatus, '配置已保存。新的检索默认参数会立即用于 query / ask 与 kb: 自动注入。', 'ok');
+        setStatus(configStatus, '配置已保存。新的检索默认参数会立即用于 query / ask 与自动注入链路。', 'ok');
         await Promise.all([loadPluginConfig(), loadStatus()]);
       } catch (error) {
         setStatus(configStatus, '保存失败：' + String(error.message || error), 'error');
@@ -1101,15 +1156,16 @@
       setStatus(queryStatus, '正在执行检索...', '');
       queryResults.innerHTML = '';
       try {
+        const selectedDoc = resolveSelectedDocPayload(queryDocSelect);
         const data = await requestJson('/api/markdown-kb/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify(Object.assign({
             question: question,
             top_k: topK,
             embedding_model: resolveTestModelPayloadValue(queryEmbeddingModel),
             reranker_model: resolveTestRerankerPayloadValue(queryRerankerModel)
-          })
+          }, selectedDoc))
         });
         setStatus(queryStatus, '检索完成：返回 ' + (data.hits || []).length + ' 个命中片段，embedding 模型：' + (data.embedding_model || pluginConfig.embedding_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
         renderHits(queryResults, data.hits || []);
@@ -1133,16 +1189,17 @@
       askAnswerWrap.style.display = 'none';
       askCitations.innerHTML = '';
       try {
+        const selectedDoc = resolveSelectedDocPayload(askDocSelect);
         const data = await requestJson('/api/markdown-kb/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify(Object.assign({
             question: question,
             top_k: topK,
             embedding_model: resolveTestModelPayloadValue(askEmbeddingModel),
             chat_model: resolveTestModelPayloadValue(askChatModel),
             reranker_model: resolveTestRerankerPayloadValue(askRerankerModel)
-          })
+          }, selectedDoc))
         });
         setStatus(askStatus, '问答完成：已使用 ' + (data.citations || []).length + ' 个引用片段，问答模型：' + (data.chat_model || pluginConfig.chat_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
         askAnswer.textContent = data.answer || '';

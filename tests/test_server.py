@@ -19,7 +19,7 @@ from akm.server import app, _default_image_generation_model, _image_supported_mo
 
 
 @pytest.mark.asyncio
-async def test_markdown_kb_on_request_injects_hits_for_kb_model(monkeypatch):
+async def test_markdown_kb_on_request_injects_hits_for_chat_request(monkeypatch):
     from akm.plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
@@ -45,7 +45,7 @@ async def test_markdown_kb_on_request_injects_hits_for_kb_model(monkeypatch):
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
 
     request = {
-        "model": "kb:gpt-4o-mini",
+        "model": "gpt-4o-mini",
         "messages": [
             {"role": "user", "content": "请根据知识库回答"}
         ],
@@ -74,7 +74,7 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
 
     request = {
-        "model": "kb:gpt-4o-mini",
+        "model": "gpt-4o-mini",
         "messages": [
             {"role": "user", "content": "请根据知识库回答"}
         ],
@@ -107,7 +107,7 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
 
     request = {
-        "model": "kb:gpt-4.1",
+        "model": "gpt-4.1",
         "input": "给我答案",
         "instructions": "你是一个助手。",
     }
@@ -118,12 +118,49 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
     assert "原始系统要求" in out["instructions"]
 
 
+@pytest.mark.asyncio
+async def test_markdown_kb_on_request_handles_messages_system_injection(monkeypatch):
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 1,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
+        assert question == "请结合知识库回答"
+        return [{
+            "file_name": "guide.md",
+            "title": "Guide",
+            "chunk_index": 0,
+            "chunk_text": "Knowledge base content",
+        }]
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "claude-sonnet-4",
+        "max_tokens": 1024,
+        "system": "你是一个助手。",
+        "messages": [
+            {"role": "user", "content": "请结合知识库回答"}
+        ],
+    }
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert out["model"] == "claude-sonnet-4"
+    assert "Knowledge base content" in out["system"]
+    assert "原始系统要求" in out["system"]
+
+
 def test_markdown_kb_extracts_project_context_from_opencode_message_text():
     from akm.plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     request = {
-        "model": "kb:gpt-5.4",
+        "model": "gpt-5.4",
         "messages": [{
             "role": "system",
             "content": "Here is some useful information about the environment you are running in:\n<env>\n  Working directory: /Users/nk/Desktop/ccs\n  Workspace root folder: /Users/nk/Desktop/ccs\n  Is directory a git repo: yes\n</env>",
@@ -143,7 +180,7 @@ def test_markdown_kb_extracts_project_context_from_codex_environment_context_tex
 
     plugin = Plugin()
     request = {
-        "model": "kb:gpt-5.4",
+        "model": "gpt-5.4",
         "input": [{
             "type": "message",
             "role": "user",
@@ -167,7 +204,7 @@ def test_markdown_kb_extracts_project_context_from_claude_system_reminder_text()
 
     plugin = Plugin()
     request = {
-        "model": "kb:kimi-k2.5-free",
+        "model": "kimi-k2.5-free",
         "messages": [{
             "role": "user",
             "content": [{
@@ -390,7 +427,7 @@ async def test_markdown_kb_on_request_injects_realistic_project_context(monkeypa
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
 
     request = {
-        "model": "kb:gpt-5.4",
+        "model": "gpt-5.4",
         "messages": [
             {
                 "role": "system",
@@ -440,7 +477,7 @@ async def test_markdown_kb_on_request_with_workspace_uses_public_and_current_wor
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
 
     request = {
-        "model": "kb:gpt-5.4",
+        "model": "gpt-5.4",
         "messages": [
             {
                 "role": "system",
@@ -488,7 +525,7 @@ async def test_markdown_kb_on_request_without_workspace_only_uses_unbound_docume
     monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
 
     request = {
-        "model": "kb:gpt-5.4",
+        "model": "gpt-5.4",
         "messages": [
             {
                 "role": "user",
@@ -505,7 +542,7 @@ async def test_markdown_kb_on_request_without_workspace_only_uses_unbound_docume
 
 
 @pytest.mark.asyncio
-async def test_markdown_kb_runs_after_model_matcher_for_kb_aliases(monkeypatch):
+async def test_markdown_kb_runs_after_model_matcher_for_plain_aliases(monkeypatch):
     from fastapi import FastAPI
     from akm.plugins.plugin_manager import PluginManager
 
@@ -523,7 +560,7 @@ async def test_markdown_kb_runs_after_model_matcher_for_kb_aliases(monkeypatch):
             "markdown_kb": True,
         },
         "plugin_configs": {
-            "model_matcher": {"aliases": "kb-default=kb:gpt-4o-mini"},
+            "model_matcher": {"aliases": "default-chat=gpt-4o-mini"},
             "markdown_kb": {
                 "embedding_model": "text-embedding-3-small",
                 "reranker_model": "",
@@ -550,7 +587,7 @@ async def test_markdown_kb_runs_after_model_matcher_for_kb_aliases(monkeypatch):
     monkeypatch.setattr(markdown_plugin, "_retrieve", fake_retrieve)
 
     body = {
-        "model": "kb-default",
+        "model": "default-chat",
         "messages": [{"role": "user", "content": "根据知识库回答"}],
     }
     out = await pm.run_hook("on_request", request=body)
@@ -1714,6 +1751,17 @@ def test_extract_tokens_prefers_anthropic_cache_read_input_tokens():
     assert out["total_tokens"] == 2180
 
 
+def test_extract_tokens_keeps_responses_input_tokens_without_cache_read_addback():
+    from akm.server import _extract_tokens
+    body = '{"usage":{"input_tokens":1200,"output_tokens":80,"cached_tokens":900,"total_tokens":1280}}'
+    out = _extract_tokens(body)
+    assert out is not None
+    assert out["prompt_tokens"] == 1200
+    assert out["completion_tokens"] == 80
+    assert out["cached_tokens"] == 900
+    assert out["total_tokens"] == 1280
+
+
 def test_extract_tokens_keeps_explicit_zero_usage_metrics():
     from akm.server import _extract_tokens
     body = '{"results":[{"index":0,"relevance_score":0.88}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}'
@@ -2400,11 +2448,31 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
     assert all("chunk_text" in item for item in query_result["hits"])
     assert query_result["hits"][0]["rerank_score"] is not None
 
+    release_file = next(item for item in files["files"] if item["file_name"] == "release.md")
+    scoped_query_result = await plugin.query({
+        "question": "When should I run rebuild?",
+        "top_k": 5,
+        "workspace_root": "",
+        "doc_id": release_file["doc_id"],
+    })
+    assert scoped_query_result["selected_doc_id"] == release_file["doc_id"]
+    assert all(item["file_name"] == "release.md" for item in scoped_query_result["hits"])
+
     ask_result = await plugin.ask({"question": "When should I run rebuild?", "top_k": 2})
     assert ask_result["ok"] is True
     assert ask_result["answer"].startswith("基于资料的回答:")
     assert len(ask_result["citations"]) == 2
     assert ask_result["reranker_model"] == "rerank-v1"
+
+    guide_file = next(item for item in files["files"] if item["file_name"] == "guide.md")
+    scoped_ask_result = await plugin.ask({
+        "question": "How does Markdown plugin query work?",
+        "top_k": 5,
+        "workspace_root": "",
+        "doc_id": guide_file["doc_id"],
+    })
+    assert scoped_ask_result["selected_doc_id"] == guide_file["doc_id"]
+    assert all(item["file_name"] == "guide.md" for item in scoped_ask_result["citations"])
 
     (docs_dir / "guide.md").write_text(
         "# Markdown Guide\n\nMarkdown plugin keeps docs local.\n\n## Query\n\nUse query to inspect chunks.\n\n## Ask\n\nUse ask to answer with citations.\n\n## Sync\n\nSync only changed files.\n",
