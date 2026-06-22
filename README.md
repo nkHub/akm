@@ -10,6 +10,14 @@ pip install -e .
 
 如果希望 `markdown_kb` 真正启用 `sqlite-vec` 做第一阶段向量召回，而不是回退到 NumPy / Python 路径，当前 Python 运行时还需要满足一个额外条件：内置 `sqlite3` 必须支持 `enable_load_extension()`。仓库已经把 `sqlite-vec` 加进项目依赖，但像默认构建的部分 `pyenv` Python 仍可能因为底层 SQLite 绑定不支持扩展加载而自动回退。
 
+最直接的判断方式不是“包有没有装上”，而是看 `markdown_kb` 状态接口返回：
+
+- `vec_available`: 当前运行时是否具备加载 `sqlite-vec` 的基础能力
+- `vec_ready`: 当前索引是否已经准备好 vec 虚表
+- `vec_enabled`: 当前这份索引是否允许走 vec 粗召回
+- `vec_version`: 成功加载时对应的 `sqlite-vec` 版本
+- `vector_retrieval_backend`: 当前第一阶段粗召回最终实际走的是 `sqlite-vec` 还是 Python / NumPy 回退链路
+
 当前在这台 Apple Silicon macOS 机器上，下面这组命令已经实测可行：会让 `pyenv 3.12.13` 链接 Homebrew SQLite，并成功加载 `sqlite-vec`。
 
 ```bash
@@ -200,6 +208,8 @@ akm-menubar
 当前版本已经按“方案一”把默认索引持久化切到插件私有 `~/.akm/markdown_kb/index_store/kb.db`：保留 `docs/` 原文目录、忽略旧 `index.json`、通过全量 `rebuild` 重新写入 SQLite，并支持只清空索引或连同原始文档一起删除。
 
 当前默认实现是 `SqliteKbIndexStore`。向量会继续以 JSON 形式保存在 SQLite 普通表里作为回退数据源；如果当前运行时支持加载 `sqlite-vec`，第一阶段粗召回会优先在 SQLite 内完成 KNN 查询，并把 workspace / selected_doc 过滤条件前推到 SQL 层，避免别的项目 chunk 先占满 top-N 候选；如果本地 Python 的 SQLite 绑定不支持扩展加载，或索引里混入了不同 embedding 维度的数据，则会自动回退到现有的内存预加载 + NumPy 矩阵化相似度计算，若当前环境尚未安装 `numpy` 则继续回退到 Python 循环计算。第一阶段会统一输出 `vector_score / keyword_score / hybrid_score` 方便观察召回原因，其中 `keyword_score` 表示归一化后的 BM25 分；启用 rerank 后，第一阶段仍保留“向量分 + BM25 分”的混合粗召回，第二阶段再把候选交给 `rerank_score` 重排。状态接口现在也会额外返回 `vec_available / vec_ready / vec_enabled / vec_version / vector_retrieval_backend`，便于直接判断当前请求是否真的走到了 `sqlite-vec`。
+
+当前仓库内置依赖名是 `sqlite-vec` / `sqlite_vec`，不是 `sqlite-sec`。如果后续讨论里提到 `sqlite-sec`，应按 `sqlite-vec` 这条向量召回链路理解。
 
 插件页面本身会先进入 AKM 后台宿主页，因此左侧菜单和顶部栏会保留；真正的插件原始 HTML 则通过 `/plugins/<name>/raw` 供宿主页 iframe 加载。
 
