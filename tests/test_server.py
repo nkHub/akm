@@ -2,8 +2,10 @@ import asyncio
 import tempfile
 import json
 import io
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
+from collections import OrderedDict
 
 import httpx
 import pytest
@@ -2977,6 +2979,223 @@ async def test_markdown_kb_query_falls_back_when_index_contains_mixed_embedding_
     result = await plugin.query({"question": "alpha", "top_k": 2})
     assert result["ok"] is True
     assert len(result["hits"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(monkeypatch):
+    """当 sqlite-vec 可用时，第一阶段候选应优先来自 store 侧向量召回。"""
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.name = "markdown_kb"
+    plugin.logger = logging.getLogger("test.markdown_kb.sqlite_vec")
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 2,
+        "semantic_weight": 1,
+        "keyword_weight": 0,
+        "score_threshold": 0,
+    }
+    plugin._ensure_runtime_ready = lambda: None
+    plugin._query_embedding_cache = OrderedDict()
+    plugin._query_result_cache = OrderedDict()
+    plugin._embedding_cache_revision = None
+    plugin._embedding_cache_documents = []
+    plugin._embedding_cache_matrix = None
+    plugin._embedding_cache_norms = None
+    plugin._bm25_cache_revision = None
+    plugin._bm25_cache_documents = []
+    plugin._bm25_cache_stats = None
+    plugin._numpy_available = False
+
+    class FakeStore:
+        def stats(self):
+            return {
+                "document_count": 3,
+                "last_rebuilt_at": "2026-06-22T00:00:00+00:00",
+                "vec_enabled": True,
+            }
+
+        def list_documents_by_scope(self, workspace_root="", selected_doc=None):
+            return [
+                {"id": "a", "doc_id": "d1", "file_name": "a.md", "workspace_root": "", "title": "A", "chunk_index": 0, "chunk_text": "A", "content_hash": "a", "embedding": [0.0, 1.0]},
+                {"id": "b", "doc_id": "d2", "file_name": "b.md", "workspace_root": "", "title": "B", "chunk_index": 0, "chunk_text": "B", "content_hash": "b", "embedding": [1.0, 0.0]},
+                {"id": "c", "doc_id": "d3", "file_name": "c.md", "workspace_root": "", "title": "C", "chunk_index": 0, "chunk_text": "C", "content_hash": "c", "embedding": [0.0, 1.0]},
+            ]
+
+        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None):
+            assert query_vector == [1.0, 0.0]
+            assert limit >= 2
+            return [
+                {"id": "b", "distance": 0.0},
+                {"id": "a", "distance": 0.8},
+            ]
+
+        def get_documents_by_chunk_ids(self, chunk_ids):
+            assert chunk_ids == ["b", "a"]
+            mapping = {
+                "a": {"id": "a", "doc_id": "d1", "file_name": "a.md", "workspace_root": "", "title": "A", "chunk_index": 0, "chunk_text": "A", "content_hash": "a", "embedding": [0.0, 1.0]},
+                "b": {"id": "b", "doc_id": "d2", "file_name": "b.md", "workspace_root": "", "title": "B", "chunk_index": 0, "chunk_text": "B", "content_hash": "b", "embedding": [1.0, 0.0]},
+            }
+            return [mapping[item] for item in chunk_ids]
+
+    plugin._store = FakeStore()
+
+    async def fake_get_query_embedding(question, embedding_model):
+        assert question == "query"
+        assert embedding_model == "text-embedding-3-small"
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(plugin, "_get_query_embedding", fake_get_query_embedding)
+    monkeypatch.setattr(plugin, "_load_documents_for_retrieval", lambda: pytest.fail("sqlite-vec 可用时不应回退全量向量加载"))
+
+    result = await plugin._retrieve("query", 2, "text-embedding-3-small", "", {}, {})
+    assert [item["file_name"] for item in result] == ["b.md", "a.md"]
+    assert result[0]["vector_score"] > result[1]["vector_score"]
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(monkeypatch):
+    """sqlite-vec 召回应在 SQL 层拿到 workspace 过滤条件。"""
+    from akm.plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.name = "markdown_kb"
+    plugin.logger = logging.getLogger("test.markdown_kb.sqlite_vec.workspace")
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 2,
+        "semantic_weight": 1,
+        "keyword_weight": 0,
+        "score_threshold": 0,
+    }
+    plugin._ensure_runtime_ready = lambda: None
+    plugin._query_embedding_cache = OrderedDict()
+    plugin._query_result_cache = OrderedDict()
+    plugin._embedding_cache_revision = None
+    plugin._embedding_cache_documents = []
+    plugin._embedding_cache_matrix = None
+    plugin._embedding_cache_norms = None
+    plugin._bm25_cache_revision = None
+    plugin._bm25_cache_documents = []
+    plugin._bm25_cache_stats = None
+    plugin._numpy_available = False
+
+    captured = {}
+
+    class FakeStore:
+        def stats(self):
+            return {
+                "document_count": 2,
+                "last_rebuilt_at": "2026-06-22T00:00:00+00:00",
+                "vec_enabled": True,
+            }
+
+        def list_documents_by_scope(self, workspace_root="", selected_doc=None):
+            captured["scope_workspace"] = workspace_root
+            captured["scope_selected_doc"] = dict(selected_doc or {})
+            return [
+                {"id": "public", "doc_id": "d1", "file_name": "public.md", "workspace_root": "", "title": "Public", "chunk_index": 0, "chunk_text": "public", "content_hash": "p", "embedding": [1.0, 0.0]},
+                {"id": "ws", "doc_id": "d2", "file_name": "workspace.md", "workspace_root": "/Users/nk/Desktop/ccs", "title": "Workspace", "chunk_index": 0, "chunk_text": "workspace", "content_hash": "w", "embedding": [1.0, 0.0]},
+            ]
+
+        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None):
+            captured["search_workspace"] = workspace_root
+            captured["search_selected_doc"] = dict(selected_doc or {})
+            return [
+                {"id": "ws", "distance": 0.0},
+                {"id": "public", "distance": 0.2},
+            ]
+
+        def get_documents_by_chunk_ids(self, chunk_ids):
+            mapping = {
+                "public": {"id": "public", "doc_id": "d1", "file_name": "public.md", "workspace_root": "", "title": "Public", "chunk_index": 0, "chunk_text": "public", "content_hash": "p", "embedding": [1.0, 0.0]},
+                "ws": {"id": "ws", "doc_id": "d2", "file_name": "workspace.md", "workspace_root": "/Users/nk/Desktop/ccs", "title": "Workspace", "chunk_index": 0, "chunk_text": "workspace", "content_hash": "w", "embedding": [1.0, 0.0]},
+            }
+            return [mapping[item] for item in chunk_ids]
+
+    plugin._store = FakeStore()
+
+    async def fake_get_query_embedding(question, embedding_model):
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(plugin, "_get_query_embedding", fake_get_query_embedding)
+    monkeypatch.setattr(plugin, "_load_documents_for_retrieval", lambda: pytest.fail("sqlite-vec scope 路径不应回退全量加载"))
+
+    result = await plugin._retrieve(
+        "query",
+        2,
+        "text-embedding-3-small",
+        "",
+        {
+            "workspace_root": "/Users/nk/Desktop/ccs",
+            "working_directory": "/Users/nk/Desktop/ccs",
+            "project_name": "ccs",
+            "project_id": "/Users/nk/Desktop/ccs",
+        },
+        {},
+    )
+    assert [item["file_name"] for item in result] == ["workspace.md", "public.md"]
+    assert captured["scope_workspace"] == "/Users/nk/Desktop/ccs"
+    assert captured["search_workspace"] == "/Users/nk/Desktop/ccs"
+
+
+def test_sqlite_kb_index_store_marks_vec_enabled_when_runtime_and_dimensions_are_ready(monkeypatch, tmp_path):
+    """store 在运行时可用且 embedding 维度一致时，应把 vec 状态写入元数据。"""
+    from akm.plugins.markdown_kb.index import SqliteKbIndexStore
+
+    class DummySqliteVec:
+        @staticmethod
+        def load(conn):
+            conn.execute("SELECT 1")
+
+    monkeypatch.setattr(SqliteKbIndexStore, "_import_sqlite_vec_optional", lambda self: DummySqliteVec)
+
+    def fake_ensure(self, conn):
+        self._vec_runtime_available = True
+        self._vec_version = "test-vec"
+        return True
+
+    def fake_create(self, conn, embedding_dim):
+        conn.execute(f"CREATE TABLE {self._vec_table_name}(chunk_id TEXT PRIMARY KEY, embedding TEXT NOT NULL)")
+
+    monkeypatch.setattr(SqliteKbIndexStore, "_ensure_vec_runtime", fake_ensure)
+    monkeypatch.setattr(SqliteKbIndexStore, "_create_vec_table", fake_create)
+
+    store = SqliteKbIndexStore(tmp_path / "kb.db", logging.getLogger("test.sqlite_store.vec"))
+    snapshot = store.replace_all(
+        [
+            {
+                "id": "a",
+                "doc_id": "d1",
+                "file_name": "a.md",
+                "file_path": "/tmp/a.md",
+                "workspace_root": "",
+                "title": "A",
+                "heading_level": 1,
+                "chunk_index": 0,
+                "chunk_text": "alpha",
+                "content_hash": "h1",
+                "created_at": "2026-06-22T00:00:00+00:00",
+                "updated_at": "2026-06-22T00:00:00+00:00",
+                "indexed_at": "2026-06-22T00:00:00+00:00",
+                "embedding": [1.0, 0.0, 0.0],
+            }
+        ],
+        {
+            "last_rebuilt_at": "2026-06-22T00:00:00+00:00",
+            "embedding_model": "text-embedding-small",
+        },
+    )
+    assert snapshot["documents"][0]["file_name"] == "a.md"
+    stats = store.stats()
+    assert stats["vec_available"] is True
+    assert stats["vec_ready"] is True
+    assert stats["vec_enabled"] is True
+    assert stats["vec_version"] == "test-vec"
+    assert stats["embedding_dim"] == 3
 
 
 @pytest.mark.asyncio

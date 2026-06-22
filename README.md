@@ -8,6 +8,30 @@
 pip install -e .
 ```
 
+如果希望 `markdown_kb` 真正启用 `sqlite-vec` 做第一阶段向量召回，而不是回退到 NumPy / Python 路径，当前 Python 运行时还需要满足一个额外条件：内置 `sqlite3` 必须支持 `enable_load_extension()`。仓库已经把 `sqlite-vec` 加进项目依赖，但像默认构建的部分 `pyenv` Python 仍可能因为底层 SQLite 绑定不支持扩展加载而自动回退。
+
+当前在这台 Apple Silicon macOS 机器上，下面这组命令已经实测可行：会让 `pyenv 3.12.13` 链接 Homebrew SQLite，并成功加载 `sqlite-vec`。
+
+```bash
+env \
+  PYTHON_CONFIGURE_OPTS='--enable-loadable-sqlite-extensions' \
+  LDFLAGS='-L/opt/homebrew/opt/sqlite/lib' \
+  CPPFLAGS='-I/opt/homebrew/opt/sqlite/include' \
+  PKG_CONFIG_PATH='/opt/homebrew/opt/sqlite/lib/pkgconfig' \
+  pyenv install -f 3.12.13
+
+~/.pyenv/versions/3.12.13/bin/python -m pip install sqlite-vec
+
+~/.pyenv/versions/3.12.13/bin/python - <<'PY'
+import sqlite3, sqlite_vec
+conn = sqlite3.connect(':memory:')
+conn.enable_load_extension(True)
+sqlite_vec.load(conn)
+print(sqlite3.sqlite_version)
+print(conn.execute('select vec_version()').fetchone()[0])
+PY
+```
+
 ## 打包为 macOS 应用
 
 > 需要 Python 3.12+（推荐 3.12.13），打包过程中 `pyproject.toml` 与 py2app 冲突需临时移走。
@@ -32,7 +56,7 @@ rm -rf build dist
 python setup.py py2app
 ```
 
-应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
+应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
 
 ## 快速开始
 
@@ -175,7 +199,7 @@ akm-menubar
 
 当前版本已经按“方案一”把默认索引持久化切到插件私有 `~/.akm/markdown_kb/index_store/kb.db`：保留 `docs/` 原文目录、忽略旧 `index.json`、通过全量 `rebuild` 重新写入 SQLite，并支持只清空索引或连同原始文档一起删除。
 
-当前默认实现是 `SqliteKbIndexStore`，向量仍先存 SQLite；检索阶段会优先使用内存预加载 + NumPy 矩阵化相似度计算，并补上 query embedding 缓存、query 结果缓存以及与文档快照绑定的 BM25 统计缓存；若当前环境尚未安装 `numpy` 则自动回退到 Python 循环计算。第一阶段会统一输出 `vector_score / keyword_score / hybrid_score` 方便观察召回原因，其中 `keyword_score` 现在表示归一化后的 BM25 分；启用 rerank 后，第一阶段仍保留“向量分 + BM25 分”的混合粗召回，第二阶段再把候选交给 `rerank_score` 重排。
+当前默认实现是 `SqliteKbIndexStore`。向量会继续以 JSON 形式保存在 SQLite 普通表里作为回退数据源；如果当前运行时支持加载 `sqlite-vec`，第一阶段粗召回会优先在 SQLite 内完成 KNN 查询，并把 workspace / selected_doc 过滤条件前推到 SQL 层，避免别的项目 chunk 先占满 top-N 候选；如果本地 Python 的 SQLite 绑定不支持扩展加载，或索引里混入了不同 embedding 维度的数据，则会自动回退到现有的内存预加载 + NumPy 矩阵化相似度计算，若当前环境尚未安装 `numpy` 则继续回退到 Python 循环计算。第一阶段会统一输出 `vector_score / keyword_score / hybrid_score` 方便观察召回原因，其中 `keyword_score` 表示归一化后的 BM25 分；启用 rerank 后，第一阶段仍保留“向量分 + BM25 分”的混合粗召回，第二阶段再把候选交给 `rerank_score` 重排。状态接口现在也会额外返回 `vec_available / vec_ready / vec_enabled / vec_version / vector_retrieval_backend`，便于直接判断当前请求是否真的走到了 `sqlite-vec`。
 
 插件页面本身会先进入 AKM 后台宿主页，因此左侧菜单和顶部栏会保留；真正的插件原始 HTML 则通过 `/plugins/<name>/raw` 供宿主页 iframe 加载。
 

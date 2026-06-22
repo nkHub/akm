@@ -42,8 +42,8 @@ DATA_FILES = [
 
 OPTIONS = {
     "argv_emulation": False,
-    "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "PIL", "anyio"],
-    "includes": ["akm.server", "akm.db", "akm.key_pool", "akm.proxy", "akm.audit", "akm.models", "akm.config", "akm.agent", "akm.adapter", "akm.cli", "markdown_chunker", "_cffi_backend"],
+    "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "PIL", "anyio", "sqlite_vec"],
+    "includes": ["akm.server", "akm.db", "akm.key_pool", "akm.proxy", "akm.audit", "akm.models", "akm.config", "akm.agent", "akm.adapter", "akm.cli", "markdown_chunker", "sqlite_vec", "_cffi_backend"],
     "excludes": ["tkinter", "PyQt5", "PySide2", "wx"],
     "iconfile": "logo.icns",
     "plist": {

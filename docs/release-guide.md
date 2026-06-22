@@ -47,6 +47,8 @@ from akm import __version__
 - Python 3.12.13
 - macOS（py2app 仅支持 macOS）
 
+如果本次打包需要保留 `markdown_kb` 的 `sqlite-vec` 能力，建议先确认打包所用 Python 的 `sqlite3` 支持 `enable_load_extension()`，并且 `_sqlite3` 实际链接到了 Homebrew SQLite。当前仓库已经把 `sqlite_vec` 加进 `setup.py` 的 `packages/includes`，但运行时是否真的能加载扩展，仍取决于打包前那份 Python 本身的 SQLite 绑定方式。
+
 ### 标准打包命令
 
 ```bash
