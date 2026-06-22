@@ -2981,22 +2981,24 @@ async def test_markdown_kb_query_falls_back_when_index_contains_mixed_embedding_
     assert len(result["hits"]) >= 1
 
 
-def test_markdown_kb_tokenize_keywords_prefers_jieba_for_cjk_segments(monkeypatch):
-    """中文分词在 jieba 可用时应优先使用自然词粒度。"""
+def test_markdown_kb_tokenize_keywords_prefers_jieba3_small_for_cjk_segments(monkeypatch):
+    """中文分词在 jieba3 small 可用时应优先使用自然词粒度。"""
     from akm.plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
-    plugin.logger = logging.getLogger("test.markdown_kb.jieba")
-    plugin._jieba_warned_unavailable = False
+    plugin.logger = logging.getLogger("test.markdown_kb.jieba3")
+    plugin._jieba3_warned_unavailable = False
+    plugin._jieba3_small_tokenizer = None
 
-    class DummyJieba:
-        @staticmethod
-        def lcut(text, cut_all=False):
+    class DummyJieba3Tokenizer:
+        def __init__(self, model="base"):
+            assert model == "small"
+
+        def cut_text(self, text):
             assert text == "参考考试大纲生成复习计划"
-            assert cut_all is False
             return ["参考", "考试大纲", "生成", "复习计划"]
 
-    monkeypatch.setattr("akm.plugins.markdown_kb.index.jieba", DummyJieba)
+    monkeypatch.setattr("akm.plugins.markdown_kb.index.Jieba3Tokenizer", DummyJieba3Tokenizer)
 
     tokens = plugin._tokenize_keywords("参考考试大纲生成复习计划")
     assert "参考考试大纲生成复习计划" in tokens
@@ -3006,15 +3008,16 @@ def test_markdown_kb_tokenize_keywords_prefers_jieba_for_cjk_segments(monkeypatc
     assert "考试" not in tokens
 
 
-def test_markdown_kb_tokenize_keywords_falls_back_to_sliding_windows_when_jieba_unavailable(monkeypatch):
-    """当 jieba 不可用时，应继续使用原有 2~4 字滑窗分词。"""
+def test_markdown_kb_tokenize_keywords_falls_back_to_sliding_windows_when_jieba3_unavailable(monkeypatch):
+    """当 jieba3 不可用时，应继续使用原有 2~4 字滑窗分词。"""
     from akm.plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
-    plugin.logger = logging.getLogger("test.markdown_kb.jieba.fallback")
-    plugin._jieba_warned_unavailable = False
+    plugin.logger = logging.getLogger("test.markdown_kb.jieba3.fallback")
+    plugin._jieba3_warned_unavailable = False
+    plugin._jieba3_small_tokenizer = None
 
-    monkeypatch.setattr("akm.plugins.markdown_kb.index.jieba", None)
+    monkeypatch.setattr("akm.plugins.markdown_kb.index.Jieba3Tokenizer", None)
 
     tokens = plugin._tokenize_keywords("参考考试大纲生成复习计划")
     assert "参考考试大纲生成复习计划" in tokens

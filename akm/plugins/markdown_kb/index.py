@@ -26,9 +26,9 @@ from typing import Any
 
 import httpx
 try:
-    import jieba
+    from jieba3 import jieba3 as Jieba3Tokenizer
 except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
-    jieba = None
+    Jieba3Tokenizer = None
 try:
     from markdown_chunker import MarkdownChunkingStrategy
 except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
@@ -988,7 +988,9 @@ class Plugin(PluginBase):
         self._bm25_cache_documents = []
         self._bm25_cache_stats = None
         self._numpy_available = None
-        self._jieba_warned_unavailable = False
+        self._jieba3_warned_unavailable = False
+        self._jieba3_small_tokenizer = None
+        self._jieba3_small_tokenizer_failed = False
         self._query_embedding_cache = OrderedDict()
         self._query_result_cache = OrderedDict()
 
@@ -2519,9 +2521,9 @@ class Plugin(PluginBase):
 
         这里同时兼顾中英文：
         - 英文 / 数字 / 连字符词使用正则拆词；
-        - 中文优先使用 `jieba` 做自然分词，让“考试大纲 / 复习计划 / 订单管理”
+        - 中文优先使用 `jieba3 small` 做自然分词，让“考试大纲 / 复习计划 / 订单管理”
           这类词组更稳定地进入 BM25；
-        - 若当前环境没有安装 `jieba`，则自动回退到现有的 2~4 字滑窗，避免
+        - 若当前环境没有安装 `jieba3`，则自动回退到现有的 2~4 字滑窗，避免
           检索链路因为可选依赖缺失直接不可用。
         """
         if not text:
@@ -2534,45 +2536,70 @@ class Plugin(PluginBase):
         return latin_tokens + cjk_tokens
 
     def _tokenize_cjk_segment(self, segment: str) -> list[str]:
-        """对连续中文片段执行“jieba 优先、滑窗回退”的分词。
+        """对连续中文片段执行“jieba3 small 优先、滑窗回退”的分词。
 
         设计说明：
         1. query 与 document 两侧都复用这一入口，避免分词语义漂移；
-        2. 优先使用 jieba，是为了减少纯滑窗带来的高噪声碎片 token；
-        3. 回退逻辑继续保留，保证本地环境没装 jieba 时仍能工作。
+        2. 优先使用 `jieba3 small`，是为了减少纯滑窗带来的高噪声碎片 token；
+        3. 回退逻辑继续保留，保证本地环境没装 `jieba3` 时仍能工作。
         """
         segment = str(segment or "").strip()
         if len(segment) < 2:
             return []
-        jieba_tokens = self._tokenize_cjk_with_jieba(segment)
-        if jieba_tokens:
-            return jieba_tokens
+        jieba3_tokens = self._tokenize_cjk_with_jieba3(segment)
+        if jieba3_tokens:
+            return jieba3_tokens
         return self._expand_cjk_segment_tokens(segment)
 
-    def _tokenize_cjk_with_jieba(self, segment: str) -> list[str]:
-        """使用 jieba 对中文连续片段做自然分词。
+    def _tokenize_cjk_with_jieba3(self, segment: str) -> list[str]:
+        """使用 `jieba3 small` 对中文连续片段做自然分词。
 
         这里会过滤掉单字 token：
         1. 单字 token 在 BM25 里通常噪声很高；
         2. 更长的中文词组更符合当前知识库检索的目标；
         3. 整段原文仍会在外层保留，因此不会完全丢掉长短语信号。
         """
-        if jieba is None:
-            if not self._jieba_warned_unavailable:
-                self.logger.info("[markdown_kb] jieba 不可用，中文 BM25 分词已回退到 2~4 字滑窗")
-                self._jieba_warned_unavailable = True
+        tokenizer = self._get_jieba3_small_tokenizer()
+        if tokenizer is None:
             return []
         try:
             tokens = []
-            for raw in jieba.lcut(segment, cut_all=False):
+            for raw in tokenizer.cut_text(segment):
                 token = str(raw or "").strip()
                 if len(token) < 2:
                     continue
                 tokens.append(token)
             return tokens
         except Exception as exc:
-            self.logger.warning("[markdown_kb] jieba 中文分词失败，已回退到滑窗分词: %s", exc)
+            self.logger.warning("[markdown_kb] jieba3 small 中文分词失败，已回退到滑窗分词: %s", exc)
             return []
+
+    def _get_jieba3_small_tokenizer(self):
+        """懒加载 `jieba3 small` 分词器实例。
+
+        这里刻意做成延迟初始化：
+        1. 避免插件导入阶段就触发模型文件加载，减少启动抖动；
+        2. 让未安装 `jieba3` 的环境仍能走完整回退链路；
+        3. 单实例复用可以避免 query/document 两侧重复构造 tokenizer。
+        """
+        if getattr(self, "_jieba3_small_tokenizer", None) is not None:
+            return self._jieba3_small_tokenizer
+        if getattr(self, "_jieba3_small_tokenizer_failed", False):
+            return None
+        if Jieba3Tokenizer is None:
+            if not self._jieba3_warned_unavailable:
+                self.logger.info("[markdown_kb] jieba3 不可用，中文 BM25 分词已回退到 2~4 字滑窗")
+                self._jieba3_warned_unavailable = True
+            return None
+        try:
+            self._jieba3_small_tokenizer = Jieba3Tokenizer(model="small")
+            return self._jieba3_small_tokenizer
+        except Exception as exc:
+            self._jieba3_small_tokenizer_failed = True
+            if not self._jieba3_warned_unavailable:
+                self.logger.warning("[markdown_kb] jieba3 small 初始化失败，中文 BM25 分词已回退到滑窗分词: %s", exc)
+                self._jieba3_warned_unavailable = True
+            return None
 
     def _expand_cjk_segment_tokens(self, segment: str) -> list[str]:
         """把连续中文片段展开成 2~4 字滑窗 token。
