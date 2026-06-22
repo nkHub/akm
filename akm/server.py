@@ -1522,6 +1522,16 @@ async def api_logs(
         log["cached_tokens"] = cached
         log["cache_creation_tokens"] = cache_creation
 
+        # 计算 net_prompt_tokens，区分 Chat/Messages token 语义
+        # - Messages 语义（纯 Anthropic）：prompt_tokens 已是扣减缓存后的净值，直接使用
+        # - Chat 语义（其余）：         net_prompt = max(0, p - cached)
+        provider = log.get("provider", "")
+        _profile = _get_agent_profile_cached(provider)
+        _is_messages_semantics = bool(
+            _profile and _profile.supports_messages and not _profile.supports_chat
+        )
+        log["net_prompt_tokens"] = p if _is_messages_semantics else max(0, p - cached)
+
         # 补充转换告警派生字段，前端可直接展示可读文本，避免重复解析逻辑
         conv_codes: list[str] = []
         conv_labels: list[str] = []
