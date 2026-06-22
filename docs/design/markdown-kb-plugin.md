@@ -912,10 +912,13 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - `markdown_kb` 的模型配置在插件列表页弹窗里改成当前 `/v1/models` 驱动的模型列表下拉
 - 模型列表下拉通过通用 setting schema 能力实现，不再在公共模板里写死 `markdown_kb` 特判
 - `data_dir / index_backend` 这类当前阶段无实际价值的伪配置已经从配置 schema 中收掉，状态页改为展示真实的健康/漂移信息
+- `sqlite-vec` 优先的第一阶段向量粗召回已经落地到 `SqliteKbIndexStore`
+- 向量会同时写入 SQLite 普通表 JSON 字段与 vec 虚表，保证 `sqlite-vec` 不可用时仍能自动回退
+- workspace / selected_doc 过滤条件已经前推到 vec SQL 召回阶段，避免其他项目 chunk 先占满候选
+- 状态接口已经补充 `vec_available / vec_ready / vec_enabled / vec_version / vector_retrieval_backend`
 
 当前明确未实现：
 
-- 真正的 SQLite Vector 扩展接入
 - 目录同步 / 目录监听
 - 请求级显式开关、路径白名单、模型白名单等更细粒度的自动注入控制面
 
@@ -924,13 +927,18 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - 对外仍然沿用知识库设计的 API 形态；
 - 底层索引默认落在 `~/.akm/markdown_kb/index_store/kb.db`；
 - 当前持久化已经收口到更完整的 `IndexStore` 接口 + `SqliteKbIndexStore` 默认实现，当前方法边界已覆盖 `replace_all / list_documents / delete_by_file / stats / clear` 这类真实 backend 常见能力；
-- 当前检索阶段会优先使用内存预加载 + NumPy 矩阵化相似度计算，并补上 query embedding 缓存与 query 结果缓存；若运行环境暂时还没安装 `numpy`，则自动回退到 Python 循环计算；
-- 这样做不是为了长期替代向量库，而是因为当前仓库还没有确认可用的 SQLite Vector 扩展接入方式，先把“上传 -> 切片 -> embedding -> 检索 -> 问答”闭环做通；
-- 如果后续接入 SQLite Vector 扩展，优先在现有 `SqliteKbIndexStore` 路线上继续演进，而不是重新引入独立向量后端。
+- 当前检索阶段采用“`sqlite-vec` 优先、NumPy / Python 自动回退”的双路径：
+  1. 运行时可加载 `sqlite-vec` 时，第一阶段粗召回优先在 SQLite 内完成 KNN 查询；
+  2. 向量仍保留一份 `embedding_json`，用于运行时不支持扩展、vec 表尚未就绪或索引混入不同 embedding 维度时的兜底计算；
+  3. 若环境里安装了 `numpy`，则优先走矩阵化相似度计算；否则继续回退到 Python 循环计算；
+- 目前这条回退链路不是临时权宜，而是刻意保留的兼容层：这样既能让主路径吃到 `sqlite-vec` 的 SQL 侧粗召回收益，也不会把插件可用性强绑到某一个本地 Python / SQLite 发行版；
+- 运行前提仍然要满足：当前 Python 的 `sqlite3` 必须支持 `enable_load_extension()`，否则即使已经安装 `sqlite-vec` 包，也只能走回退链路；
+- 当前在 Apple Silicon macOS 上，仓库已验证可行的方式是让 `pyenv 3.12.13` 链接 Homebrew SQLite，并在打包时把 `sqlite_vec` 一并收进 `.app`；
+- 因此当前路线已经明确收敛为“继续沿着 `SqliteKbIndexStore + sqlite-vec 优先召回 + Python 回退兜底` 演进”，而不是重新引入独立向量后端。
 
 因此，下一阶段最合理的工作重心不再是“插件能不能挂进去”，而是沿着这个骨架继续补：
 
 1. 更完整的目录同步与目录监听
 2. 更细粒度的单文件维护与后台任务化
-3. 底层索引从 `SqliteKbIndexStore` 继续推进到 SQLite Vector 扩展
-4. 自动注入聊天链路
+3. 在现有 `sqlite-vec` 路线上继续补齐更多运行时自检、索引修复与诊断信息
+4. 自动注入聊天链路的更细粒度控制面
