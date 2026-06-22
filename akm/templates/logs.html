@@ -408,7 +408,7 @@ function renderLogTable() {
     var pt = Number(log.prompt_tokens != null ? log.prompt_tokens : 0);
     var ct = Number(log.completion_tokens != null ? log.completion_tokens : 0);
     var cached = Number(log.cached_tokens != null ? log.cached_tokens : 0);
-    var effectivePrompt = pt - cached;
+    var effectivePrompt = Number(log.net_prompt_tokens != null ? log.net_prompt_tokens : Math.max(0, pt - cached));
     var hasPromptValue = log.prompt_tokens != null;
     var hasCompletionValue = log.completion_tokens != null;
     var promptHtml = hasPromptValue ? '<span class="text-gray-300">'+effectivePrompt.toLocaleString()+'</span>' + (cached > 0 ? ' <span class="text-teal-400">(R'+cached.toLocaleString()+')</span>' : '') : '<span class="text-gray-600">-</span>';
