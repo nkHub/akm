@@ -17,7 +17,7 @@ dependencies = [
     "pillow>=10.0",
     "python-multipart>=0.0.5",
     "numpy>=1.26.0",
-    "jieba>=0.42.1",
+    "jieba3>=1.0.2",
     "sqlite-vec>=0.1.6",
     "markdown-chunker>=0.1.3",
 ]
