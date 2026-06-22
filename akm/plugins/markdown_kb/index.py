@@ -1319,13 +1319,17 @@ class Plugin(PluginBase):
         settings = self._settings()
         embedding_model = str((payload or {}).get("embedding_model") or settings["embedding_model"]).strip() or settings["embedding_model"]
         reranker_model = str((payload or {}).get("reranker_model") or settings["reranker_model"]).strip()
-        hits = await self._retrieve(question, top_k, embedding_model, reranker_model)
+        project_context = self._extract_project_context(payload)
+        selected_doc = self._resolve_selected_doc_scope(payload)
+        hits = await self._retrieve(question, top_k, embedding_model, reranker_model, project_context, selected_doc)
         return {
             "ok": True,
             "question": question,
             "top_k": top_k,
             "embedding_model": embedding_model,
             "reranker_model": reranker_model,
+            "workspace_root": project_context.get("workspace_root") if isinstance(project_context, dict) else "",
+            "selected_doc_id": selected_doc.get("doc_id") if isinstance(selected_doc, dict) else "",
             "hits": hits,
         }
 
@@ -1341,7 +1345,9 @@ class Plugin(PluginBase):
         embedding_model = str((payload or {}).get("embedding_model") or settings["embedding_model"]).strip() or settings["embedding_model"]
         reranker_model = str((payload or {}).get("reranker_model") or settings["reranker_model"]).strip()
         chat_model = str((payload or {}).get("chat_model") or settings["chat_model"]).strip() or settings["chat_model"]
-        hits = await self._retrieve(question, top_k, embedding_model, reranker_model)
+        project_context = self._extract_project_context(payload)
+        selected_doc = self._resolve_selected_doc_scope(payload)
+        hits = await self._retrieve(question, top_k, embedding_model, reranker_model, project_context, selected_doc)
         answer = await self._generate_answer(question, hits, chat_model)
         return {
             "ok": True,
@@ -1352,6 +1358,8 @@ class Plugin(PluginBase):
             "chat_model": chat_model,
             "embedding_model": embedding_model,
             "reranker_model": reranker_model,
+            "workspace_root": project_context.get("workspace_root") if isinstance(project_context, dict) else "",
+            "selected_doc_id": selected_doc.get("doc_id") if isinstance(selected_doc, dict) else "",
         }
 
     def _settings(self) -> dict:
@@ -1535,6 +1543,7 @@ class Plugin(PluginBase):
         embedding_model: str,
         reranker_model: str,
         project_context: dict | None = None,
+        selected_doc: dict | None = None,
     ) -> list[dict]:
         """执行检索。
 
@@ -1551,6 +1560,9 @@ class Plugin(PluginBase):
         documents = self._filter_documents_by_workspace(documents, project_context)
         if not documents:
             raise HTTPException(status_code=400, detail="当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引")
+        documents = self._filter_documents_by_selected_doc(documents, selected_doc)
+        if not documents:
+            raise HTTPException(status_code=400, detail="当前所选文档不在本次检索范围内，请检查 workspace 或改为不指定文档")
 
         query_cache_key = self._query_cache_key(
             question,
@@ -1561,6 +1573,7 @@ class Plugin(PluginBase):
             settings["keyword_weight"],
             settings["score_threshold"],
             project_context,
+            selected_doc,
         )
         cached_hits = self._cache_get(self._query_result_cache, query_cache_key)
         if cached_hits is not None:
@@ -1621,13 +1634,17 @@ class Plugin(PluginBase):
         keyword_weight: float,
         score_threshold: float,
         project_context: dict | None,
+        selected_doc: dict | None,
     ) -> tuple:
         """构造 query 结果缓存 key。"""
         project_id = ""
         project_name = ""
+        selected_doc_id = ""
         if isinstance(project_context, dict):
             project_id = str(project_context.get("project_id") or "")
             project_name = str(project_context.get("project_name") or "")
+        if isinstance(selected_doc, dict):
+            selected_doc_id = str(selected_doc.get("doc_id") or "")
         return (
             question,
             int(top_k),
@@ -1638,8 +1655,33 @@ class Plugin(PluginBase):
             round(float(score_threshold), 6),
             project_id,
             project_name,
+            selected_doc_id,
             self._current_embedding_cache_revision(),
         )
+
+    def _resolve_selected_doc_scope(self, payload: dict | None) -> dict:
+        """把请求中的文档选择字段收敛成稳定结构。
+
+        设计说明：
+        1. 前端测试页优先传 `doc_id`，因为它能唯一标识“文件名 + workspace_root”组合；
+        2. 仍兼容只传 `file_name/workspace_root` 的调用方，避免把选择逻辑强耦合到单一前端；
+        3. 未显式选择文档时返回空对象，表示继续按 workspace 语义检索整批候选文档。
+        """
+        if not isinstance(payload, dict):
+            return {}
+        doc_id = str(payload.get("doc_id") or payload.get("selected_doc_id") or "").strip()
+        file_name = Path(str(payload.get("file_name") or payload.get("selected_file_name") or "").strip()).name
+        workspace_root = self._normalize_workspace_root(
+            payload.get("selected_workspace_root")
+            or ""
+        )
+        if not doc_id and not file_name:
+            return {}
+        return {
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "workspace_root": workspace_root,
+        }
 
     def _prefer_project_hits(self, hits: list[dict], project_context: dict | None) -> list[dict]:
         """优先保留与当前项目更贴近的候选文档。
@@ -1687,6 +1729,32 @@ class Plugin(PluginBase):
             ]
 
         return [item for item in documents if not self._normalize_workspace_root(item.get("workspace_root") or "")]
+
+    def _filter_documents_by_selected_doc(self, documents: list[dict], selected_doc: dict | None) -> list[dict]:
+        """在 workspace 过滤后，再按显式选中的文档继续收窄候选。
+
+        这里刻意把“文档选择”放在 workspace 过滤之后，原因是：
+        1. 用户请求本身仍然应该先受当前工作域约束；
+        2. 文档下拉只是把当前候选集进一步收窄，而不是绕过工作域隔离；
+        3. 这样默认“不选文档”与显式“选择单文档”可以共用同一条检索主链路。
+        """
+        if not documents or not isinstance(selected_doc, dict):
+            return documents
+
+        selected_doc_id = str(selected_doc.get("doc_id") or "").strip()
+        if selected_doc_id:
+            return [item for item in documents if str(item.get("doc_id") or "") == selected_doc_id]
+
+        selected_file_name = Path(str(selected_doc.get("file_name") or "").strip()).name
+        if not selected_file_name:
+            return documents
+
+        selected_workspace = self._normalize_workspace_root(selected_doc.get("workspace_root") or "")
+        return [
+            item for item in documents
+            if Path(str(item.get("file_name") or "")).name == selected_file_name
+            and self._normalize_workspace_root(item.get("workspace_root") or "") == selected_workspace
+        ]
 
     def _is_hit_matching_project(self, hit: dict, project_name: str) -> bool:
         """判断单条命中是否属于当前项目候选。"""
@@ -2064,6 +2132,15 @@ class Plugin(PluginBase):
         if not isinstance(request, dict):
             return {}
 
+        direct_workspace = str(request.get("workspace_root") or "").strip()
+        direct_working_directory = str(request.get("working_directory") or "").strip()
+        if direct_workspace or direct_working_directory:
+            return self._normalize_project_context({
+                "workspace_root": direct_workspace,
+                "working_directory": direct_working_directory,
+                "source": "direct.payload",
+            })
+
         messages = request.get("messages")
         if isinstance(messages, list):
             context = self._extract_project_context_from_opencode_messages(messages)
@@ -2288,28 +2365,23 @@ class Plugin(PluginBase):
         return request
 
     async def on_request(self, request) -> dict | None:
-        """显式触发式知识库注入。
+        """为三类文本请求执行按需知识库注入。
 
-        当前最小版本规则：
-        1. 只有 `model` 以 `kb:` 开头时才尝试注入；
-        2. 先抽取最后一个用户问题；
-        3. 只有检索命中非空时才注入；
-        4. 没命中、抽不到问题或检索失败时都直接透传。
+        当前规则：
+        1. 仅处理 `chat / messages / responses` 三类文本请求；
+        2. 默认对这三类请求都尝试抽取最后一个用户问题并执行检索；
+        3. 只有检索命中非空时才真正注入参考资料；
+        4. 请求里的模型名不再承担知识库开关语义，保持原样继续下游转发；
+        5. 没命中、抽不到问题或检索失败时都直接透传。
         """
         self._ensure_runtime_ready()
         if not isinstance(request, dict):
             return None
 
-        raw_model = str(request.get("model") or "").strip()
-        if not raw_model.startswith("kb:"):
-            return None
-
-        real_model = raw_model[3:].strip()
-        if not real_model:
-            return None
-        request["model"] = real_model
-
         protocol = self._detect_request_protocol(request)
+        if not protocol:
+            return request
+
         if protocol == "chat":
             question = self._extract_user_question_for_chat(request)
         elif protocol == "messages":

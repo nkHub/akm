@@ -1014,9 +1014,12 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
     prompt = usage.get("prompt_tokens", 0) or 0
     if not prompt:
         prompt = usage.get("input_tokens", 0) or 0
-        # Messages 原始 usage 的 input_tokens 是“未命中缓存的净输入”，
-        # 为了兼容当前统一列语义，这里先补回 cache_read，再交给消费层统一做减法。
-        if "input_tokens" in usage and cached > 0:
+        # 仅 Anthropic Messages 会把“净输入”放在 input_tokens，
+        # 并额外通过 cache_read_input_tokens 表示缓存命中。
+        # Responses/Chat 侧也可能出现 input_tokens，但其语义不一定是
+        # “未命中缓存后的净输入”，这里不能无条件补 cached，
+        # 否则会把 Responses 的总输入重复加大。
+        if "cache_read_input_tokens" in usage and cached > 0:
             prompt += cached
     if total == 0 and (prompt > 0 or completion > 0):
         total = prompt + completion

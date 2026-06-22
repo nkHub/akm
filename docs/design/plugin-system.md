@@ -61,7 +61,7 @@
 
 对于插件配置交互，当前实现也已经统一成一条默认规则：只要插件声明了 `settings`，插件列表页就默认通过“配置”按钮打开弹窗编辑，不再在列表卡片里额外展开内联表单。这样可以避免同一个插件同时出现“弹窗配置”和“展开配置”两套入口。
 
-另外，setting schema 现在支持通过 `type="select" + options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉；`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `markdown_kb` 这类需要选择 embedding / rerank / chat 模型的插件，就不需要再把模型列表逻辑硬编码在公共模板里。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及仅在未启用 rerank 时生效的 `semantic_weight / keyword_weight`。
+另外，setting schema 现在支持通过 `type="select" + options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉；`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `markdown_kb` 这类需要选择 embedding / rerank / chat 模型的插件，就不需要再把模型列表逻辑硬编码在公共模板里。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及仅在未启用 rerank 时生效的 `semantic_weight / keyword_weight`。`markdown_kb` 的测试页还会基于当前文件列表额外渲染一个“文档范围”下拉：默认不选，保持按请求 `workspace` 过滤；如果显式选中文档，则会把 query / ask 的候选范围进一步收窄到该文档。当前 `markdown_kb` 的 `on_request` 也已接到三类文本入口：插件启用后会对 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 自动尝试抽取最后一条用户问题并执行检索，只有命中非空时才按各协议原生字段把参考资料注入回请求体，未命中的请求则原样透传。
 
 ## 四、目录结构
 
