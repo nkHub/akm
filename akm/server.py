@@ -33,7 +33,7 @@ from akm.audit import (
     AuditLogQueue,
 )
 from akm.config import load_config, save_config, get as config_get
-from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent, get_agent_profile
+from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
 from akm.db import get_keys_log_path
@@ -946,57 +946,21 @@ def _extract_tokens(response_body: str) -> dict | None:
         pass
 
     # 2. 尝试解析 SSE 流式响应（多行 data: {...} 格式）
-    usage = None
-    msg_input_tokens = 0
-    msg_output_tokens = 0
-    msg_cached_tokens = 0
+    state = {
+        "usage": None,
+        "msg_input_tokens": 0,
+        "msg_output_tokens": 0,
+        "msg_cached_tokens": 0,
+    }
     for line in response_body.split("\n"):
         line = line.strip()
         if line.startswith("data: ") and not line.startswith("data: [DONE]"):
             try:
                 chunk = json.loads(line[6:])
-                if "usage" in chunk:
-                    usage = chunk["usage"]
-                # responses SSE 格式: response.completed 事件中包含 usage
-                if chunk.get("type") == "response.completed" and chunk.get("response", {}).get("usage"):
-                    usage = chunk["response"]["usage"]
-
-                # messages SSE: message_start.message.usage.input_tokens
-                if chunk.get("type") == "message_start":
-                    msg = chunk.get("message", {}) if isinstance(chunk.get("message"), dict) else {}
-                    u = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
-                    msg_input_tokens = u.get("input_tokens", msg_input_tokens) or msg_input_tokens
-
-                # messages SSE: message_delta.usage.output_tokens/cached_tokens
-                if chunk.get("type") == "message_delta":
-                    u = chunk.get("usage", {}) if isinstance(chunk.get("usage"), dict) else {}
-                    msg_output_tokens = u.get("output_tokens", msg_output_tokens) or msg_output_tokens
-                    msg_cached_tokens = u.get("cached_tokens", msg_cached_tokens) or msg_cached_tokens
+                _update_sse_usage_state(state, chunk)
             except (json.JSONDecodeError, TypeError):
                 pass
-    if usage:
-        parsed = _parse_usage(usage)
-        if parsed:
-            # messages SSE 常见情况：message_delta.usage 只有 output_tokens，
-            # input_tokens 需要从 message_start.message.usage 补齐。
-            if parsed.get("prompt_tokens", 0) == 0 and msg_input_tokens > 0:
-                parsed["prompt_tokens"] = msg_input_tokens
-                parsed["total_tokens"] = parsed.get("prompt_tokens", 0) + parsed.get("completion_tokens", 0)
-                if msg_cached_tokens > 0:
-                    parsed["cached_tokens"] = msg_cached_tokens
-            return parsed
-
-    # messages SSE 兜底：即便上游没给标准 usage，也尽量从 message_start/message_delta 拼回 token 信息
-    if msg_input_tokens > 0 or msg_output_tokens > 0:
-        total = msg_input_tokens + msg_output_tokens
-        return {
-            "prompt_tokens": msg_input_tokens,
-            "completion_tokens": msg_output_tokens,
-            "total_tokens": total,
-            "cached_tokens": msg_cached_tokens,
-        }
-
-    return None
+    return _build_tokens_from_sse_usage_state(state)
 
 
 def _parse_usage_metrics_object(usage: dict) -> dict | None:
@@ -1004,6 +968,12 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
 
     这里抽成独立函数，是为了让“完整响应文本解析”和“流式增量解析”共用同一套口径，
     避免一个链路判定为真实 usage、另一个链路却退化成 EST。
+
+    统一口径约定：
+    1. `prompt_tokens` 始终表示“可再减去 cached_tokens 的总输入”；
+    2. 因此 Anthropic Messages 的 `input_tokens` 需要先补回
+       `cache_read_input_tokens`，再映射到统一的 `prompt_tokens`；
+    3. 这样统计页和日志页都可以继续只认统一列，不必再按 provider 猜 token 语义。
     """
     if not isinstance(usage, dict):
         return None
@@ -1027,7 +997,6 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
         return None
 
     total = usage.get("total_tokens", 0)
-    prompt = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
     completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
     cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
     # 安全提取缓存 token：先查 Chat 格式的 *_details，再查 Messages 格式的直接 cached_tokens 字段。
@@ -1042,6 +1011,13 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
                 cached = details.get("cached_tokens", 0)
                 if cached:
                     break
+    prompt = usage.get("prompt_tokens", 0) or 0
+    if not prompt:
+        prompt = usage.get("input_tokens", 0) or 0
+        # Messages 原始 usage 的 input_tokens 是“未命中缓存的净输入”，
+        # 为了兼容当前统一列语义，这里先补回 cache_read，再交给消费层统一做减法。
+        if "input_tokens" in usage and cached > 0:
+            prompt += cached
     if total == 0 and (prompt > 0 or completion > 0):
         total = prompt + completion
     return {
@@ -1064,7 +1040,10 @@ def _build_tokens_from_sse_usage_state(state: dict) -> dict | None:
             msg_input_tokens = int(state.get("msg_input_tokens", 0) or 0)
             msg_cached_tokens = int(state.get("msg_cached_tokens", 0) or 0)
             if parsed.get("prompt_tokens", 0) == 0 and msg_input_tokens > 0:
-                parsed["prompt_tokens"] = msg_input_tokens
+                # messages SSE 的 message_start 里记录的是净输入，
+                # 这里需要和 message_delta 里的 cached_tokens 合并后，
+                # 才能恢复成统一口径下的总输入 prompt_tokens。
+                parsed["prompt_tokens"] = msg_input_tokens + msg_cached_tokens
                 parsed["total_tokens"] = parsed.get("prompt_tokens", 0) + parsed.get("completion_tokens", 0)
                 if msg_cached_tokens > 0:
                     parsed["cached_tokens"] = msg_cached_tokens
@@ -1074,9 +1053,10 @@ def _build_tokens_from_sse_usage_state(state: dict) -> dict | None:
     msg_output_tokens = int(state.get("msg_output_tokens", 0) or 0)
     msg_cached_tokens = int(state.get("msg_cached_tokens", 0) or 0)
     if msg_input_tokens > 0 or msg_output_tokens > 0:
-        total = msg_input_tokens + msg_output_tokens
+        prompt_total = msg_input_tokens + msg_cached_tokens
+        total = prompt_total + msg_output_tokens
         return {
-            "prompt_tokens": msg_input_tokens,
+            "prompt_tokens": prompt_total,
             "completion_tokens": msg_output_tokens,
             "total_tokens": total,
             "cached_tokens": msg_cached_tokens,
@@ -1298,15 +1278,6 @@ async def _build_usage_metrics(
 
 # ── 统计内存缓存（30 秒过期，减少重复解析）──
 _stats_cache: dict[str, tuple[float, dict]] = {}
-# agent profile 查询缓存（_get_stats 循环中避免每个 provider 重复调用）
-_agent_profile_cache: dict[str, object] = {}
-
-
-def _get_agent_profile_cached(provider: str):
-    """带缓存的 agent profile 查询，用于统计聚合时区分 token 语义。"""
-    if provider not in _agent_profile_cache:
-        _agent_profile_cache[provider] = get_agent_profile(provider)
-    return _agent_profile_cache[provider]
 
 @app.get("/api/stats")
 async def api_stats(days: int = Query(default=1, ge=1, le=365)):
@@ -1404,24 +1375,11 @@ def _get_stats(days: int) -> dict:
         model = r.get("model", "unknown")
         ts = str(r.get("timestamp", ""))[:10]
 
-        # ── 区分 token 语义 ──────────────────────────────────
-        # Anthropic Messages API 的 `input_tokens`（映射为 prompt_tokens）
-        # 已经是扣除缓存命中后的实际计费量，而 `cache_read_input_tokens`
-        # （映射为 cached_tokens）是缓存命中总量。两者是独立的口径，
-        # 用 `prompt - cached` 做减法会得出负值。
-        # OpenAI Chat API 的 `prompt_tokens` 则是包含缓存的总量，
-        # `cached_tokens` 是其中子集，减法才有意义。
-        # 这里只对「仅支持 Messages、不支持 Chat」的供应商（如 Anthropic）
-        # 采用 Messages 语义；同时支持两者的供应商（如 DeepSeek）仍按
-        # Chat 语义处理——因为走 Chat 协议时返回的是 OpenAI 风格 usage，
-        # 且 Messages 路径下 cached 始终为 0，两种公式等价。
-        # - Messages 语义（纯 Anthropic）：net_prompt = p（已扣除缓存）
-        # - Chat 语义（其余）：         net_prompt = max(0, p - cached)
-        _profile = _get_agent_profile_cached(provider)
-        _is_messages_semantics = bool(
-            _profile and _profile.supports_messages and not _profile.supports_chat
-        )
-        net_prompt = p if _is_messages_semantics else max(0, p - cached)
+        # 这里统一按归一化后的 token 列做减法：
+        # - Chat/Responses: prompt_tokens 本就是总输入，cached_tokens 是其子集；
+        # - Messages: 在解析层已把 input_tokens + cache_read_input_tokens
+        #   归一成统一 prompt_tokens，因此这里不再需要按 provider 做特判。
+        net_prompt = max(0, p - cached)
 
         total_prompt += net_prompt
         total_completion += c
@@ -1522,15 +1480,9 @@ async def api_logs(
         log["cached_tokens"] = cached
         log["cache_creation_tokens"] = cache_creation
 
-        # 计算 net_prompt_tokens，区分 Chat/Messages token 语义
-        # - Messages 语义（纯 Anthropic）：prompt_tokens 已是扣减缓存后的净值，直接使用
-        # - Chat 语义（其余）：         net_prompt = max(0, p - cached)
-        provider = log.get("provider", "")
-        _profile = _get_agent_profile_cached(provider)
-        _is_messages_semantics = bool(
-            _profile and _profile.supports_messages and not _profile.supports_chat
-        )
-        log["net_prompt_tokens"] = p if _is_messages_semantics else max(0, p - cached)
+        # 解析层已经把各类 usage 统一成可减 cached 的 prompt_tokens，
+        # 因此前端只需要消费一个 net_prompt_tokens 即可。
+        log["net_prompt_tokens"] = max(0, p - cached)
 
         # 补充转换告警派生字段，前端可直接展示可读文本，避免重复解析逻辑
         conv_codes: list[str] = []

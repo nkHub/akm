@@ -1696,9 +1696,9 @@ def test_extract_tokens_from_messages_sse_fallback():
     )
     out = _extract_tokens(sse)
     assert out is not None
-    assert out["prompt_tokens"] == 123
+    assert out["prompt_tokens"] == 223
     assert out["completion_tokens"] == 7
-    assert out["total_tokens"] == 130
+    assert out["total_tokens"] == 230
     assert out["cached_tokens"] == 100
 
 
@@ -1707,10 +1707,11 @@ def test_extract_tokens_prefers_anthropic_cache_read_input_tokens():
     body = '{"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900,"cache_creation_input_tokens":300}}'
     out = _extract_tokens(body)
     assert out is not None
-    assert out["prompt_tokens"] == 1200
+    assert out["prompt_tokens"] == 2100
     assert out["completion_tokens"] == 80
     assert out["cached_tokens"] == 900
     assert out["cache_creation_tokens"] == 300
+    assert out["total_tokens"] == 2180
 
 
 def test_extract_tokens_keeps_explicit_zero_usage_metrics():
@@ -2083,6 +2084,47 @@ async def test_api_stats_ignores_failed_rows_even_with_key_alias():
     assert data["total_requests"] == 1
     assert data["by_key"]["real-key"]["requests"] == 1
     assert data["by_provider"]["openai"]["requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_api_stats_normalizes_messages_usage_before_aggregation(monkeypatch):
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": True,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+
+    write_log({
+        "provider": "anthropic",
+        "key_alias": "claude-key",
+        "model": "claude-sonnet-4",
+        "request_body": "",
+        "response_body": '{"usage":{"input_tokens":12121,"cache_read_input_tokens":21632,"output_tokens":159,"service_tier":"standard"}}',
+        "status_code": 200,
+        "latency_ms": 10,
+        "error": "",
+        "request_headers": '{}',
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_requests"] == 1
+    assert data["total_prompt_tokens"] == 12121
+    assert data["total_completion_tokens"] == 159
+    assert data["total_cached_tokens"] == 21632
+    assert data["total_tokens"] == 33912
 
 
 @pytest.mark.asyncio
@@ -2782,3 +2824,36 @@ async def test_api_logs_keeps_security_headers_for_frontend():
     row = data["data"][0]
     assert "x-akm-security" in row["request_headers"]
     assert "security_response_warned" in row["request_headers"]
+
+
+@pytest.mark.asyncio
+async def test_api_logs_normalizes_messages_usage_before_render(monkeypatch):
+    async def fake_list_logs_async(**kwargs):
+        return [{
+            "provider": "anthropic",
+            "request_headers": '{}',
+            "response_body": '{"usage":{"input_tokens":12121,"cache_read_input_tokens":21632,"output_tokens":159,"service_tier":"standard"}}',
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_creation_tokens": 0,
+        }]
+
+    async def fake_count_logs_async(**kwargs):
+        return 1
+
+    monkeypatch.setattr("akm.server.list_logs_async", fake_list_logs_async)
+    monkeypatch.setattr("akm.server.count_logs_async", fake_count_logs_async)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs")
+
+    assert resp.status_code == 200
+    row = resp.json()["data"][0]
+    assert row["prompt_tokens"] == 33753
+    assert row["completion_tokens"] == 159
+    assert row["cached_tokens"] == 21632
+    assert row["net_prompt_tokens"] == 12121
+    assert row["total_tokens"] == 33912
