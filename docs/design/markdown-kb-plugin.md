@@ -943,13 +943,13 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 
 ```mermaid
 flowchart TD
-    A["Markdown 来源\n上传 / 批量上传 / docs目录"] --> B["doc_manifest.json\n维护 doc_id / file_name / workspace_root / storage_name"]
+    A["Markdown 来源<br/>上传 / 批量上传 / docs目录"] --> B["doc_manifest.json<br/>维护 doc_id / file_name / workspace_root / storage_name"]
     B --> C{"索引动作"}
     C -->|rebuild| D["全量读取 manifest"]
     C -->|rebuild-file| E["只读取目标文档"]
-    C -->|sync apply| F["preview_sync\n判定 added / changed / removed"]
+    C -->|sync apply| F["preview_sync<br/>判定 added / changed / removed"]
     F --> E
-    F --> G["delete_file\n清理已删除文档索引"]
+    F --> G["delete_file<br/>清理已删除文档索引"]
 
     D --> H["chunk_markdown_file"]
     E --> H
@@ -959,34 +959,34 @@ flowchart TD
     J --> L["chunks"]
     K --> L
 
-    L --> M["/v1/embeddings\n生成 chunk embedding"]
+    L --> M["/v1/embeddings 生成 chunk embedding"]
     M --> N["SqliteKbIndexStore.replace_all"]
-    N --> O["kb_documents\n文档元数据"]
-    N --> P["kb_chunks\nchunk 元数据"]
-    N --> Q["kb_vectors\nembedding_json"]
+    N --> O["kb_documents<br/>文档元数据"]
+    N --> P["kb_chunks<br/>chunk 元数据"]
+    N --> Q["kb_vectors<br/>embedding_json"]
     N --> R{"sqlite-vec 可用且维度一致?"}
-    R -->|是| S["vec 虚表\n第一阶段 KNN 粗召回"]
-    R -->|否| T["仅保留 JSON embedding\n供回退路径使用"]
+    R -->|是| S["vec 虚表<br/>第一阶段 KNN 粗召回"]
+    R -->|否| T["仅保留 JSON embedding<br/>供回退路径使用"]
 
     U["query / ask / on_request"] --> V["抽取 question"]
-    V --> W["抽取 project_context\nworkspace_root / working_directory / project_name"]
+    V --> W["抽取 project_context<br/>workspace_root / working_directory / project_name"]
     W --> X["selected_doc / workspace 过滤"]
-    X --> Y["/v1/embeddings\n生成 query embedding"]
+    X --> Y["/v1/embeddings 生成 query embedding"]
     Y --> Z{"sqlite-vec 粗召回成功?"}
     Z -->|是| AA["候选文档集合"]
     Z -->|否| AB["全量候选文档集合"]
-    AA --> AC["语义分 + BM25 分\n混合排序"]
+    AA --> AC["语义分 + BM25 分混合排序"]
     AB --> AC
     AC --> AD{"配置了 reranker_model?"}
-    AD -->|是| AE["/v1/rerank\n二阶段重排"]
+    AD -->|是| AE["/v1/rerank 二阶段重排"]
     AD -->|否| AF["跳过 rerank"]
-    AE --> AG["score_threshold 过滤\n截断 top_k"]
+    AE --> AG["score_threshold 过滤并截断 top_k"]
     AF --> AG
 
     AG --> AH{"调用入口"}
     AH -->|/query| AI["返回 hits"]
     AH -->|/ask| AJ["拼接 context"]
-    AJ --> AK["/v1/chat/completions\n生成 answer"]
+    AJ --> AK["/v1/chat/completions 生成 answer"]
     AK --> AL["返回 answer + citations"]
     AH -->|on_request| AM{"命中非空?"}
     AM -->|否| AN["原请求透传"]

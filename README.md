@@ -231,20 +231,20 @@ akm-menubar
 
 ```mermaid
 flowchart LR
-    A["/api/markdown-kb/query 或 /ask"] --> B["提取 question\nworkspace_root\nselected_doc"]
+    A["/api/markdown-kb/query 或 /ask"] --> B["提取 question<br/>workspace_root<br/>selected_doc"]
     B --> C["按 workspace / selected_doc 过滤候选文档"]
-    C --> D["/v1/embeddings\n生成 query embedding"]
-    D --> E["sqlite-vec KNN 粗召回\n不可用时回退 NumPy / Python"]
+    C --> D["/v1/embeddings 生成 query embedding"]
+    D --> E["sqlite-vec KNN 粗召回<br/>不可用时回退 NumPy / Python"]
     E --> F["语义分 + BM25 混合排序"]
     F --> G{"配置了 reranker_model?"}
-    G -->|是| H["/v1/rerank\n二阶段重排"]
+    G -->|是| H["/v1/rerank 二阶段重排"]
     G -->|否| I["直接使用当前排序"]
-    H --> J["score_threshold 过滤\n截断 top_k"]
-    I --> J["score_threshold 过滤\n截断 top_k"]
+    H --> J["score_threshold 过滤并截断 top_k"]
+    I --> J
     J --> K{"query 还是 ask?"}
     K -->|query| L["返回 hits"]
     K -->|ask| M["拼接 context"]
-    M --> N["/v1/chat/completions\n生成答案"]
+    M --> N["/v1/chat/completions 生成答案"]
     N --> O["返回 answer + citations"]
 ```
 
