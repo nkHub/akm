@@ -937,6 +937,80 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - 当前在 Apple Silicon macOS 上，仓库已验证可行的方式是让 `pyenv 3.12.13` 链接 Homebrew SQLite，并在打包时把 `sqlite_vec` 一并收进 `.app`；
 - 因此当前路线已经明确收敛为“继续沿着 `SqliteKbIndexStore + sqlite-vec 优先召回 + Python 回退兜底` 演进”，而不是重新引入独立向量后端。
 
+## 当前完整链路图
+
+下面这张图描述的是**当前仓库实现**，不是早期设计阶段的 Chroma 方案。
+
+```mermaid
+flowchart TD
+    A["Markdown 来源\n上传 / 批量上传 / docs目录"] --> B["doc_manifest.json\n维护 doc_id / file_name / workspace_root / storage_name"]
+    B --> C{"索引动作"}
+    C -->|rebuild| D["全量读取 manifest"]
+    C -->|rebuild-file| E["只读取目标文档"]
+    C -->|sync apply| F["preview_sync\n判定 added / changed / removed"]
+    F --> E
+    F --> G["delete_file\n清理已删除文档索引"]
+
+    D --> H["chunk_markdown_file"]
+    E --> H
+    H --> I{"markdown-chunker 可用?"}
+    I -->|是| J["结构感知切片"]
+    I -->|否| K["标题优先切片 fallback"]
+    J --> L["chunks"]
+    K --> L
+
+    L --> M["/v1/embeddings\n生成 chunk embedding"]
+    M --> N["SqliteKbIndexStore.replace_all"]
+    N --> O["kb_documents\n文档元数据"]
+    N --> P["kb_chunks\nchunk 元数据"]
+    N --> Q["kb_vectors\nembedding_json"]
+    N --> R{"sqlite-vec 可用且维度一致?"}
+    R -->|是| S["vec 虚表\n第一阶段 KNN 粗召回"]
+    R -->|否| T["仅保留 JSON embedding\n供回退路径使用"]
+
+    U["query / ask / on_request"] --> V["抽取 question"]
+    V --> W["抽取 project_context\nworkspace_root / working_directory / project_name"]
+    W --> X["selected_doc / workspace 过滤"]
+    X --> Y["/v1/embeddings\n生成 query embedding"]
+    Y --> Z{"sqlite-vec 粗召回成功?"}
+    Z -->|是| AA["候选文档集合"]
+    Z -->|否| AB["全量候选文档集合"]
+    AA --> AC["语义分 + BM25 分\n混合排序"]
+    AB --> AC
+    AC --> AD{"配置了 reranker_model?"}
+    AD -->|是| AE["/v1/rerank\n二阶段重排"]
+    AD -->|否| AF["跳过 rerank"]
+    AE --> AG["score_threshold 过滤\n截断 top_k"]
+    AF --> AG
+
+    AG --> AH{"调用入口"}
+    AH -->|/query| AI["返回 hits"]
+    AH -->|/ask| AJ["拼接 context"]
+    AJ --> AK["/v1/chat/completions\n生成 answer"]
+    AK --> AL["返回 answer + citations"]
+    AH -->|on_request| AM{"命中非空?"}
+    AM -->|否| AN["原请求透传"]
+    AM -->|是| AO["build_injection_text"]
+    AO --> AP{"协议"}
+    AP -->|chat| AQ["插入 system message"]
+    AP -->|messages| AR["追加/覆盖 system"]
+    AP -->|responses| AS["追加/覆盖 instructions"]
+    AQ --> AT["继续走 AKM 主转发链路"]
+    AR --> AT
+    AS --> AT
+```
+
+### 图中三条主链路分别对应什么
+
+1. 文档入库链路
+   `save_markdown_file / save_markdown_files / rebuild_index / rebuild_file / sync_index` 负责把原始 Markdown 变成 chunks 与 embeddings，并最终写入 `kb.db`。
+
+2. 显式检索链路
+   `POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 都会走 `_retrieve()`；两者的差别只在于 `ask` 会在命中片段后继续调用 `/v1/chat/completions` 生成答案。
+
+3. 自动注入链路
+   插件启用后，`on_request()` 会对 `chat / messages / responses` 三类文本请求尝试抽取最后一个用户问题；只有命中非空时才按各协议原生字段注入参考资料，否则保持透传。
+
 因此，下一阶段最合理的工作重心不再是“插件能不能挂进去”，而是沿着这个骨架继续补：
 
 1. 更完整的目录同步与目录监听

@@ -13,11 +13,11 @@ import shutil
 from pathlib import Path
 from httpx import ASGITransport, AsyncClient
 
-from akm.audit import write_log, list_logs
+from akm.audit import AuditLogQueue, write_log, list_logs
 from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
 from akm.health import HealthMonitor
 from akm.key_pool import get_key
-from akm.server import app, _default_image_generation_model, _image_supported_models_from_config
+from akm.server import app, lifespan, _build_runtime_debug_payload, _default_image_generation_model, _image_supported_models_from_config
 
 
 @pytest.mark.asyncio
@@ -1258,6 +1258,8 @@ async def test_debug_runtime_exposes_core_runtime_fields():
     assert data["process"]["pid"] > 0
     assert "rss_bytes" in data["process"]
     assert "thread_count" in data["process"]
+    assert "stopped" in data["audit_queue"]
+    assert "worker_alive" in data["audit_queue"]
 
 
 @pytest.mark.asyncio
@@ -1349,6 +1351,74 @@ async def test_health_detail_exposes_http_client_recreate_metrics():
     assert detail["metrics"]["http_client_recreate_count"] == 1
     assert detail["metrics"]["http_client_last_recreate_reason"] == "too many upstream timeouts"
     assert detail["metrics"]["http_client_last_recreated_at"] != ""
+
+
+@pytest.mark.asyncio
+async def test_runtime_debug_exposes_stopped_audit_queue_state():
+    """运行时诊断应明确暴露审计队列是否已停止，便于排查“服务还活着但日志拒收”。"""
+    queue = AuditLogQueue(maxsize=2)
+    await queue.start()
+    await queue.stop()
+    app.state.audit_log_queue = queue
+
+    payload = _build_runtime_debug_payload(app)
+
+    assert payload["audit_queue"]["enabled"] is True
+    assert payload["audit_queue"]["stopped"] is True
+    assert payload["audit_queue"]["worker_alive"] is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_shutdown_only_stops_its_own_audit_queue(monkeypatch):
+    """旧 lifespan 退出时不应误停新 lifespan 已挂到 app.state 的审计队列。"""
+    from fastapi import FastAPI
+
+    async def fake_load_all(self, fastapi_app, db=None):
+        return None
+
+    class FakeHttpClientPoolManager:
+        """最小假实现：避免测试触发真实网络客户端创建。"""
+
+        is_route_pool = False
+
+        def __init__(self):
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+        def stats(self):
+            return {}
+
+    monkeypatch.setattr("akm.server.load_custom_agents", lambda: None)
+    monkeypatch.setattr("akm.server.PluginManager.load_all", fake_load_all)
+    monkeypatch.setattr("akm.server.HttpClientPoolManager", FakeHttpClientPoolManager)
+
+    fastapi_app = FastAPI()
+
+    old_cm = lifespan(fastapi_app)
+    await old_cm.__aenter__()
+    old_queue = fastapi_app.state.audit_log_queue
+    old_task = fastapi_app.state.health_task
+
+    new_cm = lifespan(fastapi_app)
+    await new_cm.__aenter__()
+    new_queue = fastapi_app.state.audit_log_queue
+    new_task = fastapi_app.state.health_task
+
+    assert new_queue is not old_queue
+    assert new_task is not old_task
+    assert old_queue.is_stopped() is False
+    assert new_queue.is_stopped() is False
+
+    await old_cm.__aexit__(None, None, None)
+
+    assert old_queue.is_stopped() is True
+    assert new_queue.is_stopped() is False
+    assert new_queue.worker_alive() is True
+
+    await new_cm.__aexit__(None, None, None)
+    assert new_queue.is_stopped() is True
 
 
 @pytest.mark.asyncio

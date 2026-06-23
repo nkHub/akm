@@ -62,22 +62,28 @@ async def lifespan(app: FastAPI):
     app.state.plugin_manager = plugin_manager
     health_monitor = HealthMonitor()
     app.state.health_monitor = health_monitor
-    app.state.health_task = asyncio.create_task(health_monitor.run_heartbeat())
+    health_task = asyncio.create_task(health_monitor.run_heartbeat())
+    app.state.health_task = health_task
     audit_queue = AuditLogQueue(maxsize=512)
     await audit_queue.start()
     app.state.audit_log_queue = audit_queue
     app.state.http_client_lock = asyncio.Lock()
-    app.state.http_client = HttpClientPoolManager()
+    http_client = HttpClientPoolManager()
+    app.state.http_client = http_client
     try:
         yield
     finally:
-        await app.state.audit_log_queue.stop()
-        app.state.health_task.cancel()
+        # 只清理当前这轮 lifespan 自己创建出来的对象，避免菜单栏重启时
+        # 旧实例 shutdown 晚到，把新实例刚挂到 app.state 上的资源误停掉。
+        await audit_queue.stop()
+
+        health_task.cancel()
         try:
-            await app.state.health_task
+            await health_task
         except asyncio.CancelledError:
             pass
-        await app.state.http_client.aclose()
+
+        await http_client.aclose()
 
 
 app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
@@ -512,6 +518,8 @@ def _build_runtime_debug_payload(app: FastAPI) -> dict:
         "audit_queue": {
             "enabled": audit_queue is not None,
             "size": audit_queue.qsize() if audit_queue is not None else 0,
+            "stopped": audit_queue.is_stopped() if audit_queue is not None else True,
+            "worker_alive": audit_queue.worker_alive() if audit_queue is not None else False,
             "dropped": getattr(audit_queue, "dropped_count", 0),
             "failures": getattr(audit_queue, "failure_count", 0),
             "last_error": getattr(audit_queue, "last_error", ""),

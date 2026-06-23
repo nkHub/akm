@@ -80,6 +80,14 @@ class AuditLogQueue:
     def qsize(self) -> int:
         return self._queue.qsize()
 
+    def is_stopped(self) -> bool:
+        """返回队列是否处于拒收新日志的停止态。"""
+        return self._stopped
+
+    def worker_alive(self) -> bool:
+        """返回后台 worker 是否仍在运行。"""
+        return self._worker_task is not None and not self._worker_task.done()
+
     async def start(self) -> None:
         """启动单 worker 消费队列。"""
         if self._worker_task is not None and not self._worker_task.done():
