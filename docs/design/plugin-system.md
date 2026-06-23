@@ -63,6 +63,8 @@
 
 另外，setting schema 现在支持通过 `type="select" + options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉；`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `markdown_kb` 这类需要选择 embedding / rerank / chat 模型的插件，就不需要再把模型列表逻辑硬编码在公共模板里。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及第一阶段混合召回使用的 `semantic_weight / keyword_weight`。其中 `keyword_weight` 当前不再是轻量覆盖率信号，而是对应归一化后的 BM25 字面分；因此即使启用 rerank，第一阶段候选召回也仍然会保留“向量分 + BM25 分”的混合粗召回，再由 rerank 做第二阶段重排。`markdown_kb` 现在优先使用第三方 `markdown-chunker` 做结构感知切片，并在依赖缺失或第三方异常时回退到内置的标题优先切片器；这样可以在不牺牲可用性的前提下，提高标题、表格、代码块和列表的结构保持能力。当前 BM25 的中文 tokenization 也已经升级为“`jieba3` 的 `small` 模型优先、2~4 字滑窗回退”：英文 token 逻辑保持不变，中文连续片段优先走自然分词，只有在本地环境未安装 `jieba3` 或初始化失败时才回退到滑窗策略。`markdown_kb` 的测试页还会基于当前文件列表额外渲染一个去重后的 “Workspace 范围” 下拉：默认不选时继续按请求 `workspace` 过滤；如果显式选中某个 workspace，则会把该值写入 `workspace_root / working_directory`，让 query / ask 只在“公共文档 + 该 workspace 文档”范围内执行。当前 `markdown_kb` 的 `on_request` 也已接到三类文本入口：插件启用后会对 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 自动尝试抽取最后一条用户问题并执行检索，只有命中非空时才按各协议原生字段把参考资料注入回请求体，未命中的请求则原样透传。
 
+如果需要查看 `markdown_kb` 从“文档进入索引”到“query / ask / 自动注入主链路”的完整链路图，请优先参考 [docs/design/markdown-kb-plugin.md](/Users/nk/Desktop/ccs/docs/design/markdown-kb-plugin.md)；`README.md` 中也保留了一版面向使用者的高层总览图。
+
 ## 四、目录结构
 
 ```
