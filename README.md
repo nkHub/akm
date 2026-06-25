@@ -186,6 +186,8 @@ akm-menubar
 - 优先使用 `markdown-chunker` 做结构感知切片；依赖缺失或第三方异常时自动回退到内置结构化切片器
 - 全量重建索引、单文件重建、增量同步预览/执行、清空索引
 - 通过本地 AKM `/v1/embeddings`、可选 `/v1/rerank` 与 `/v1/chat/completions` 完成 `query / ask` 闭环
+- 通过 `POST /api/markdown-kb/learn` 接收客户端 Hook 上送的候选材料，归纳为 `.learn.md` 知识条目并写回知识库
+- 提供 `akm markdown-kb-hook` CLI 子命令，封装 `UserPromptSubmit / Stop / PreCompact` 共用的关键词剥离、pending 状态持久化和 `/learn` 调用逻辑
 
 这里的 `embedding_model` 是必填项，`reranker_model` 是可选项。页面侧已经接通状态总览、检索配置、文件管理、索引重建、单文件重建、同步预览/执行、检索测试、问答测试、清空索引和健康状态展示；并且 health / sync 结果已经从摘要数字升级成具体文件列表展示。
 
@@ -222,6 +224,8 @@ akm-menubar
 - 插件位置：`akm/plugins/markdown_kb/`
 - 默认状态：内置但默认关闭，需用户显式启用
 - 文档能力：支持状态查看、批量上传/列出/删除 `.md` 文件
+- 学习入库：支持通过 `/api/markdown-kb/learn` 把客户端 Hook 上送的会话片段沉淀为新知识文档，并自动执行 workspace 绑定、幂等判重与单文件重建
+- Hook 适配：支持通过 `akm markdown-kb-hook prompt-submit|stop|pre-compact` 复用客户端学习触发链路的公共逻辑
 - 分块策略：优先使用 `markdown-chunker` 做结构感知切片，失败时回退到内置结构化切片器
 - 索引能力：支持全量重建、单文件重建、增量同步预览/执行和清空索引
 - 检索链路：通过本地 AKM `/v1/embeddings`、可选 `/v1/rerank` 与 `/v1/chat/completions` 完成 `query / ask`
@@ -251,6 +255,25 @@ flowchart LR
 ## 配置
 
 `markdown_kb` 还额外开放了一个文件级工作目录绑定接口：`POST /api/markdown-kb/files/bind-workspace`。调用方可以按 `file_name` 为单个 Markdown 文档绑定 `workspace_root`，接口成功后会返回 `needs_rebuild=true`；这表示绑定关系已经持久化，但仍需再执行一次 `rebuild-file`、`sync` 或 `rebuild`，新的工作目录绑定才会真正进入索引并参与检索过滤。
+
+`markdown_kb` 现在还提供一个面向客户端 Hook 的学习入库接口：`POST /api/markdown-kb/learn`。它用于接收 `Codex` 或 `Claude Code` 在 `Stop / PreCompact` 阶段整理出的候选材料，服务端会校验 `source / trigger_phase / session_id / dedupe_key`，调用本地 `/v1/chat/completions` 把材料归纳成结构化结果，再统一包装为 `.learn.md` 文档写入 `docs_dir`。同一个 `dedupe_key` 会落到 `~/.akm/markdown_kb/learn_records.json` 做幂等判重，因此即使同一轮会话被 `Stop` 和 `PreCompact` 重复触发，也只会真正入库一次；如果模型判断当前材料没有稳定知识可沉淀，则会返回 `ignored=true` 且不写文档。
+
+为了让 `Codex` 与 `Claude Code` 后续可以共用同一套客户端适配逻辑，仓库里还新增了 `akm markdown-kb-hook` 这组 CLI 子命令。当前提供三类入口：
+
+- `prompt-submit`：只负责检测最后一行关键词、剥离关键词行、写入本地 pending 状态，并把净化后的 prompt 以 JSON 形式返回给客户端
+- `stop`：读取当前 session 的 pending 状态，优先发起一次 `/api/markdown-kb/learn`
+- `pre-compact`：仅在 `stop` 没有成功处理时继续补偿调用 `/api/markdown-kb/learn`
+
+这组命令当前主要解决的是公共逻辑复用问题，而不是替代客户端自己的 Hook 配置：真正接入时，`Codex` 和 `Claude Code` 仍需各自把事件字段映射到这些 CLI 参数上。
+
+仓库当前也已经附带了一份源码态可联调的示例接线：
+
+- `/.codex/hooks.json`
+- `/.codex/hooks/*.py`
+- `/.claude/settings.local.json`
+- `/.claude/hooks/*.py`
+
+这些示例默认都指向当前仓库的源码虚拟环境 `/.venv/bin/python`，适合在重新打包前先做本地 Hook 联调。
 
 `markdown_kb` 的测试页现在会基于当前文件列表渲染一个去重后的 “Workspace 范围” 下拉：检索测试和问答测试默认不选，此时继续沿用请求里的 `workspace_root / working_directory` 语义，只检索“公共文档 + 当前工作域文档”；如果显式选中某个 workspace，则会直接把该 workspace 作为当前请求的工作域传给 `query / ask`，从而只保留“公共文档 + 该 workspace 文档”的候选范围。对应地，`POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 也支持直接从请求体显式接收 `workspace_root / working_directory`，不强依赖 OpenCode / Codex / Claude 自动注入环境上下文。
 

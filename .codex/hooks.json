@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/nk/Desktop/ccs/.venv/bin/python /Users/nk/Desktop/ccs/.codex/hooks/user_prompt_submit.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/nk/Desktop/ccs/.venv/bin/python /Users/nk/Desktop/ccs/.codex/hooks/stop.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/nk/Desktop/ccs/.venv/bin/python /Users/nk/Desktop/ccs/.codex/hooks/pre_compact.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

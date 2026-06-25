@@ -2468,6 +2468,199 @@ async def test_markdown_kb_status_and_upload_api(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_markdown_kb_learn_api_creates_workspace_bound_doc_and_dedupes(monkeypatch):
+    """`/learn` 应能写入新知识文档、绑定 workspace，并在重复触发时只入库一次。"""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-learn-api")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{
+                        "message": {
+                            "content": json_module.dumps({
+                                "should_learn": True,
+                                "title": "退款页重复提交排查",
+                                "summary_markdown": "### 结论\n重复提交来自前端重复绑定提交事件。\n\n### 修复方式\n在重复挂载前先解除旧绑定，并收敛为单一提交入口。",
+                                "quotes": [
+                                    "已经定位到重复绑定 submit 事件。",
+                                    "旧页面恢复时又注册了一次提交处理器。",
+                                ],
+                            }, ensure_ascii=False),
+                        }
+                    }]
+                },
+            )
+        if url.endswith("/v1/embeddings"):
+            inputs = json.get("input")
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "index": idx, "embedding": [float(len(str(item or ""))), 1.0, 0.0]}
+                        for idx, item in enumerate(inputs)
+                    ],
+                    "model": json.get("model", "text-embedding-3-small"),
+                },
+            )
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    json_module = json
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+    fastapi_app.state.plugin_manager = pm
+
+    transport = ASGITransport(app=fastapi_app)
+    learn_payload = {
+        "source": "codex",
+        "trigger_phase": "stop",
+        "session_id": "sess_123",
+        "turn_id": "turn_456",
+        "workspace_root": "/Users/nk/Desktop/ccs",
+        "title_hint": "退款页重复提交排查",
+        "user_prompt": "请帮我排查退款页为什么会重复提交",
+        "assistant_excerpt": "已经定位到重复绑定 submit 事件。",
+        "conversation_excerpt": [
+            {"role": "user", "text": "请帮我排查退款页为什么会重复提交"},
+            {"role": "assistant", "text": "已经定位到重复绑定 submit 事件。"},
+        ],
+        "learn_keyword": "AKM入库",
+        "dedupe_key": "codex:sess_123:turn_456",
+    }
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first_resp = await client.request("POST", "/api/markdown-kb/learn", json=learn_payload)
+        second_resp = await client.request("POST", "/api/markdown-kb/learn", json={
+            **learn_payload,
+            "trigger_phase": "pre_compact",
+        })
+
+    assert first_resp.status_code == 200
+    first_data = first_resp.json()
+    assert first_data["ok"] is True
+    assert first_data["status"] == "completed"
+    assert first_data["ignored"] is False
+    assert first_data["deduped"] is False
+    assert first_data["workspace_root"] == "/Users/nk/Desktop/ccs"
+    assert first_data["file_name"].endswith(".learn.md")
+    assert first_data["chunk_count"] >= 1
+
+    assert second_resp.status_code == 200
+    second_data = second_resp.json()
+    assert second_data["ok"] is True
+    assert second_data["deduped"] is True
+    assert second_data["file_name"] == first_data["file_name"]
+    assert second_data["doc_id"] == first_data["doc_id"]
+
+    learned_entry = plugin._find_doc_entry(doc_id=first_data["doc_id"])
+    learned_path = plugin._doc_storage_path(learned_entry)
+    assert learned_path.exists()
+    learned_text = learned_path.read_text("utf-8")
+    assert "# 退款页重复提交排查" in learned_text
+    assert "## 知识摘要" in learned_text
+    assert "重复绑定提交事件" in learned_text
+    assert "AKM入库" not in learned_text
+
+    listed_files = plugin.list_files()
+    learned_item = next(item for item in listed_files["files"] if item["file_name"] == first_data["file_name"])
+    assert learned_item["indexed"] is True
+    assert learned_item["workspace_root"] == "/Users/nk/Desktop/ccs"
+
+    scoped_query = await plugin.query({
+        "question": "退款页为什么会重复提交",
+        "top_k": 5,
+        "workspace_root": "/Users/nk/Desktop/ccs",
+        "working_directory": "/Users/nk/Desktop/ccs",
+    })
+    assert any(item["file_name"] == first_data["file_name"] for item in scoped_query["hits"])
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_learn_ignored_when_model_says_no_stable_knowledge(monkeypatch):
+    """当模型明确判断无稳定知识可沉淀时，`/learn` 应返回 ignored 且不落盘。"""
+    from fastapi import FastAPI
+    from akm.plugins.plugin_manager import PluginManager
+
+    test_home = Path("/var/folders/ks/s1958s1x2cqfypj2y2_808rm0000gn/T/opencode/test-home-markdown-kb-learn-ignored")
+    if test_home.exists():
+        shutil.rmtree(test_home)
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: test_home))
+
+    async def fake_post(self, url, json=None, **kwargs):
+        if url.endswith("/v1/chat/completions"):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{
+                        "message": {
+                            "content": json_module.dumps({
+                                "should_learn": False,
+                                "title": "",
+                                "summary_markdown": "",
+                                "quotes": [],
+                            }, ensure_ascii=False),
+                        }
+                    }]
+                },
+            )
+        return httpx.Response(404, json={"detail": "unexpected url"})
+
+    json_module = json
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    fastapi_app = FastAPI()
+    pm = PluginManager()
+    await pm.load_all(fastapi_app)
+    plugin = pm.plugins["markdown_kb"]
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await plugin.on_load()
+
+    result = await plugin.learn({
+        "source": "claude_code",
+        "trigger_phase": "stop",
+        "session_id": "sess_ignore",
+        "workspace_root": "/Users/nk/Desktop/ccs",
+        "title_hint": "一次普通寒暄",
+        "user_prompt": "谢谢，今天先这样",
+        "assistant_excerpt": "好的，随时找我。",
+        "conversation_excerpt": [],
+        "learn_keyword": "AKM入库",
+        "dedupe_key": "claude_code:sess_ignore",
+    })
+
+    assert result["ok"] is True
+    assert result["ignored"] is True
+    assert result["status"] == "ignored"
+
+    docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
+    assert list(docs_dir.glob("*.md")) == []
+
+    learn_records = plugin._load_learn_records()
+    assert learn_records["claude_code:sess_ignore"]["status"] == "ignored"
+
+
+@pytest.mark.asyncio
 async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
     """插件页面应通过后台宿主页加载，保留左侧菜单而不是直接返回裸 HTML。"""
     from fastapi import FastAPI
