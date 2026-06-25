@@ -3,6 +3,142 @@
 日期：2026-06-23
 状态：设计中
 
+## 0. 当前实现进度（2026-06-24）
+
+这份文档当前同时承担“设计稿 + 实现接力记录”的作用，便于后续会话直接续做。
+
+### 0.1 已完成
+
+1. 本设计稿已单独提交：
+   - commit：`e89067e`
+   - message：`docs: add markdown kb hook learn design`
+2. 已确认第一版范围仍按本文执行：
+   - 正式支持 `Codex` 与 `Claude Code`
+   - `OpenCode` 暂不纳入第一版正式支持
+   - 关键词只在最后一行精确匹配
+   - 命中后必须在客户端转发前删除关键词行
+3. 当前本轮实现已覆盖服务端、客户端公共适配层以及源码态接线示例，当前已修改但**尚未提交**的文件：
+   - `akm/plugins/markdown_kb/index.py`
+   - `akm/markdown_kb_hook.py`
+   - `akm/cli.py`
+   - `tests/test_server.py`
+   - `tests/test_markdown_kb_hook.py`
+   - `tests/test_markdown_kb_hook_wrappers.py`
+   - `.codex/hooks.json`
+   - `.codex/hooks/*.py`
+   - `.claude/settings.local.json`
+   - `.claude/hooks/*.py`
+
+### 0.2 已落地到代码的内容
+
+当前代码里已经加入了 `/api/markdown-kb/learn` 的第一版最小闭环，核心包括：
+
+1. 新增路由：
+   - `POST /api/markdown-kb/learn`
+2. `markdown_kb` 插件内部新增学习入库主流程：
+   - 校验 `source / trigger_phase / session_id / dedupe_key`
+   - 只允许 `source in {codex, claude_code}`
+   - 只允许 `trigger_phase in {stop, pre_compact}`
+3. 新增幂等记录文件：
+   - `~/.akm/markdown_kb/learn_records.json`
+   - 用 `dedupe_key` 防止 `Stop` 与 `PreCompact` 重复入库
+4. 服务端会调用本地 AKM chat 接口，把候选材料归纳成结构化 JSON：
+   - `should_learn`
+   - `title`
+   - `summary_markdown`
+   - `quotes`
+5. 若 `should_learn=false` 或没有有效摘要，则返回：
+   - `ok=true`
+   - `ignored=true`
+   - 不落盘
+6. 若可沉淀，则会：
+   - 生成 `.learn.md` 文档
+   - 统一包裹元信息壳子
+   - 复用现有 manifest + workspace 绑定落盘链路
+   - 继续调用 `rebuild_file` 刷新索引
+7. 已特别保持以下约束：
+   - 客户端触发关键词不会被写入最终知识文档
+   - 第一版只追加新文档，不修改既有知识文档
+
+此外，客户端公共适配逻辑也已经落到代码里，当前包括：
+
+1. 新增公共适配模块：
+   - `akm/markdown_kb_hook.py`
+2. 新增 CLI 入口：
+   - `akm markdown-kb-hook prompt-submit`
+   - `akm markdown-kb-hook stop`
+   - `akm markdown-kb-hook pre-compact`
+3. 当前已覆盖的客户端公共行为：
+   - 最后一行关键词精确匹配
+   - 命中后剥离关键词行并返回净化后的 prompt
+   - 本地 pending 状态落盘
+   - `Stop` 失败后由 `PreCompact` 复用同一 `dedupe_key` 补偿调用
+4. 当前仓库已附带源码态联调接线示例：
+   - `.codex/hooks.json`
+   - `.codex/hooks/*.py`
+   - `.claude/settings.local.json`
+   - `.claude/hooks/*.py`
+   - 对应 wrapper 也已经补了最小行为测试：
+     - `tests/test_markdown_kb_hook_wrappers.py`
+
+### 0.3 已确认通过的测试
+
+当前已新增并确认通过两组测试：
+
+1. `test_markdown_kb_learn_api_creates_workspace_bound_doc_and_dedupes`
+   - 验证 `/learn` 能落盘
+   - 验证生成文档进入索引
+   - 验证 workspace 绑定生效
+   - 验证同一 `dedupe_key` 重复触发时不会重复入库
+2. `test_markdown_kb_learn_ignored_when_model_says_no_stable_knowledge`
+   - 验证模型返回“无需沉淀”时不会写文档
+   - 验证会写入 ignored 幂等记录
+
+另外客户端公共适配层也已经新增并确认通过以下测试：
+
+1. `test_split_prompt_by_learn_keyword_only_matches_last_line_exactly`
+   - 验证只在最后一行精确匹配关键词时触发
+2. `test_register_prompt_submit_writes_pending_and_reuses_codex_turn_id`
+   - 验证 `UserPromptSubmit` 会写入 pending，并按 `Codex` 的 `session + turn` 生成 dedupe_key
+3. `test_trigger_pending_learn_stop_success_marks_record_completed`
+   - 验证 `Stop` 成功调用 `/learn` 后会把 pending 标记为 completed
+4. `test_trigger_pending_learn_precompact_retries_after_stop_failure`
+   - 验证 `Stop` 失败后 `PreCompact` 会复用同一 dedupe_key 补偿提交
+5. `test_markdown_kb_hook_cli_prompt_submit_returns_sanitized_prompt`
+   - 验证 CLI 入口会输出机器可消费 JSON，方便直接接到客户端 Hook
+
+### 0.4 本轮已确认的问题与修正
+
+首次跑新增测试时，失败原因已经定位，不是 `/learn` 路由缺失，而是测试里：
+
+1. 把 `httpx.AsyncClient.post` 全局 monkeypatch 成了假上游；
+2. 导致测试自己发给 FastAPI 的 `client.post("/api/markdown-kb/learn")` 也被同一个 patch 拦截；
+3. 因此返回了伪造的 `404`，不是服务端真实行为。
+
+这个测试问题已经在本地修正为：
+
+1. 测试请求改走 `client.request("POST", ...)`
+2. 这样测试侧 HTTP 调用不会误吃到对上游模型请求的 monkeypatch
+
+### 0.5 当前仍未完成
+
+当前这一轮已完成的收尾包括：
+
+1. 新增 `/learn` 测试已通过
+2. 客户端公共适配层测试已通过
+3. 已回归一组现有 `markdown_kb` 主流程测试，确认没有行为回归
+4. 已同步更新：
+   - `README.md`
+   - `docs/design/plugin-system.md`
+   - `docs/design/markdown-kb-plugin.md`
+   - `docs/superpowers/specs/2026-06-23-markdown-kb-client-hook-learn-design.md`
+
+当前仍待继续的范围主要在客户端侧：
+
+1. 在真实 `Codex` / `Claude Code` 会话里做端到端联调
+2. 验证不同客户端事件字段是否需要再补兼容映射
+3. 若坚持“关键词绝不进入模型”，则仍需额外引入 launcher / wrapper 层实现真正 prompt 改写
+
 ## 1. 背景
 
 当前项目已经具备两类基础能力：

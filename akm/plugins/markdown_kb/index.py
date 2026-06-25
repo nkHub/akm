@@ -937,6 +937,13 @@ async def ask_markdown_kb(payload: dict = Body(...)):
     return await plugin.ask(payload)
 
 
+@router.post("/learn")
+async def learn_markdown_kb(payload: dict = Body(...)):
+    """根据客户端 Hook 上送的材料提炼知识并写回知识库。"""
+    plugin = _get_plugin()
+    return await plugin.learn(payload)
+
+
 @router.post("/clear")
 async def clear_markdown_kb(payload: dict = Body(default={})):
     """清空索引，并可选删除原始 Markdown 文档。"""
@@ -976,6 +983,7 @@ class Plugin(PluginBase):
         self._index_store_dir = self._data_root / "index_store"
         self._file_bindings_path = self._data_root / "file_bindings.json"
         self._doc_manifest_path = self._data_root / "doc_manifest.json"
+        self._learn_records_path = self._data_root / "learn_records.json"
         self._index_path = self._index_store_dir / "index.json"
         self._docs_dir.mkdir(parents=True, exist_ok=True)
         self._index_store_dir.mkdir(parents=True, exist_ok=True)
@@ -1552,6 +1560,25 @@ class Plugin(PluginBase):
         if not payload:
             raise HTTPException(status_code=400, detail="上传内容不能为空")
 
+        return self._save_markdown_payload(safe_name, payload, workspace_root)
+
+    def _save_markdown_payload(self, file_name: str, payload: bytes, workspace_root: str = "") -> dict:
+        """把 Markdown 二进制内容写入 docs 目录，并维护 manifest。
+
+        这里抽成独立内部方法的原因是：
+        1. 上传接口与 `/learn` 都需要复用同一套“逻辑文件名 + workspace 绑定 + manifest”落盘规则；
+        2. 这样可以避免学习入库为了复用上传能力而再伪造一层 HTTP 文件对象；
+        3. 同时继续保证所有 Markdown 文档入口最终都走同一套持久化语义。
+        """
+        self._ensure_runtime_ready()
+        safe_name = Path(str(file_name or "")).name
+        if safe_name in ("", ".", ".."):
+            raise HTTPException(status_code=400, detail="非法文件名")
+        if not safe_name.lower().endswith(".md"):
+            raise HTTPException(status_code=400, detail="仅支持 .md 文件")
+        if not payload:
+            raise HTTPException(status_code=400, detail="上传内容不能为空")
+
         normalized_workspace = self._normalize_workspace_root(workspace_root)
         manifest = self._load_doc_manifest()
         for item in manifest:
@@ -1708,6 +1735,101 @@ class Plugin(PluginBase):
             "reranker_model": reranker_model,
             "workspace_root": project_context.get("workspace_root") if isinstance(project_context, dict) else "",
             "selected_doc_id": selected_doc.get("doc_id") if isinstance(selected_doc, dict) else "",
+        }
+
+    async def learn(self, payload: dict) -> dict:
+        """把一次会话片段归纳为新的 Markdown 知识条目并写回知识库。
+
+        当前实现刻意保持在插件内部闭环，避免把客户端 transcript 解析逻辑耦合进来：
+        1. 客户端 Hook 只负责把本轮候选材料送进来；
+        2. 服务端统一做校验、归纳、落盘、索引刷新与幂等处理；
+        3. 如果模型判断“这一轮没有稳定知识可沉淀”，则返回 `ignored=True`，但不会报错。
+        """
+        self._ensure_runtime_ready()
+        request = self._normalize_learn_request(payload)
+        dedupe_key = request["dedupe_key"]
+        learn_records = self._load_learn_records()
+        existing = learn_records.get(dedupe_key)
+        if isinstance(existing, dict):
+            return {
+                "ok": True,
+                "deduped": True,
+                "ignored": str(existing.get("status") or "") == "ignored",
+                "status": str(existing.get("status") or "completed"),
+                "dedupe_key": dedupe_key,
+                "doc_id": str(existing.get("doc_id") or ""),
+                "file_name": str(existing.get("file_name") or ""),
+                "workspace_root": str(existing.get("workspace_root") or ""),
+                "learned_at": str(existing.get("learned_at") or existing.get("updated_at") or ""),
+            }
+
+        settings = self._settings()
+        learn_result = await self._generate_learn_summary(request, settings["chat_model"])
+        summary_markdown = str(learn_result.get("summary_markdown") or "").strip()
+        should_learn = bool(learn_result.get("should_learn")) and bool(summary_markdown)
+        if not should_learn:
+            learn_records[dedupe_key] = {
+                "status": "ignored",
+                "source": request["source"],
+                "trigger_phase": request["trigger_phase"],
+                "workspace_root": request["workspace_root"],
+                "updated_at": _utc_now_iso(),
+            }
+            self._save_learn_records(learn_records)
+            return {
+                "ok": True,
+                "ignored": True,
+                "deduped": False,
+                "status": "ignored",
+                "dedupe_key": dedupe_key,
+                "reason": "no_stable_knowledge",
+            }
+
+        title = self._resolve_learn_title(learn_result, request)
+        quotes = self._normalize_learn_quotes(learn_result.get("quotes"))
+        file_name = self._make_learn_file_name(title, dedupe_key, request)
+        markdown_text = self._render_learn_document(
+            title=title,
+            request=request,
+            summary_markdown=summary_markdown,
+            quotes=quotes,
+        )
+        saved = self._save_markdown_payload(
+            file_name=file_name,
+            payload=markdown_text.encode("utf-8"),
+            workspace_root=request["workspace_root"],
+        )
+        rebuilt = await self.rebuild_file(
+            file_name=str(saved.get("file_name") or ""),
+            workspace_root=request["workspace_root"],
+            doc_id=str(saved.get("doc_id") or ""),
+        )
+        learned_at = _utc_now_iso()
+        learn_records[dedupe_key] = {
+            "status": "completed",
+            "source": request["source"],
+            "trigger_phase": request["trigger_phase"],
+            "workspace_root": request["workspace_root"],
+            "doc_id": str(saved.get("doc_id") or ""),
+            "file_name": str(saved.get("file_name") or ""),
+            "learned_at": learned_at,
+            "updated_at": learned_at,
+        }
+        self._save_learn_records(learn_records)
+        return {
+            "ok": True,
+            "ignored": False,
+            "deduped": False,
+            "status": "completed",
+            "source": request["source"],
+            "trigger_phase": request["trigger_phase"],
+            "dedupe_key": dedupe_key,
+            "workspace_root": request["workspace_root"],
+            "doc_id": str(saved.get("doc_id") or ""),
+            "file_name": str(saved.get("file_name") or ""),
+            "chunk_count": rebuilt.get("chunk_count", 0),
+            "chat_model": settings["chat_model"],
+            "learned_at": learned_at,
         }
 
     def _settings(self) -> dict:
@@ -3173,6 +3295,245 @@ class Plugin(PluginBase):
             return str(data["choices"][0]["message"]["content"] or "").strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise HTTPException(status_code=502, detail="chat 返回结构不符合预期") from exc
+
+    async def _generate_learn_summary(self, request: dict, model: str) -> dict:
+        """调用本地 chat 接口，把候选材料提炼成可落盘的知识结构。
+
+        这里要求模型返回 JSON，而不是直接返回最终 Markdown 文档，主要出于两个考虑：
+        1. 服务端仍需要统一包一层稳定元信息壳子，便于后续检索与排障；
+        2. 结构化结果能更清楚地区分“无可沉淀知识”与“有知识但标题/摘录为空”两类情况。
+        """
+        source_label = {
+            "codex": "Codex",
+            "claude_code": "Claude Code",
+        }.get(request["source"], request["source"])
+        material_prompt = self._build_learn_material_prompt(request)
+        system_prompt = (
+            "你负责把一次 AI 协作对话提炼成可检索的 Markdown 知识条目。"
+            "只保留稳定、可复用的知识结论、原因、判断依据、修复方式和注意事项。"
+            "不要输出触发关键词，不要把结果写成完整聊天记录。"
+            "如果材料不足以沉淀为稳定知识，请返回 should_learn=false。"
+            "你必须只返回 JSON 对象，不要输出代码块围栏。"
+            "JSON 字段固定为："
+            "should_learn(boolean), "
+            "title(string), "
+            "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含“关键原话摘录”标题), "
+            "quotes(array[string]，最多 3 条关键原话摘录)。"
+        )
+        user_prompt = (
+            f"来源：{source_label}\n"
+            f"触发阶段：{request['trigger_phase']}\n"
+            f"工作区：{request['workspace_root'] or '未提供'}\n"
+            f"标题提示：{request['title_hint'] or '未提供'}\n\n"
+            f"{material_prompt}"
+        )
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(f"{self._akm_base_url()}/chat/completions", json=payload)
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail="learn chat 接口返回了非法 JSON") from exc
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail=data.get("detail") or data.get("error") or "learn chat 请求失败")
+
+        try:
+            raw_content = str(data["choices"][0]["message"]["content"] or "").strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise HTTPException(status_code=502, detail="learn chat 返回结构不符合预期") from exc
+
+        normalized = raw_content.strip()
+        if normalized.startswith("```"):
+            normalized = re.sub(r"^```(?:json)?\s*", "", normalized, count=1).strip()
+            normalized = re.sub(r"\s*```$", "", normalized, count=1).strip()
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail="learn chat 未返回合法 JSON 对象") from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=502, detail="learn chat 返回结构不符合预期")
+        return parsed
+
+    def _normalize_learn_request(self, payload: dict) -> dict:
+        """校验并规整 `/learn` 请求体。"""
+        data = payload if isinstance(payload, dict) else {}
+        source = str(data.get("source") or "").strip().lower()
+        if source not in {"codex", "claude_code"}:
+            raise HTTPException(status_code=400, detail="source 仅支持 codex 或 claude_code")
+        trigger_phase = str(data.get("trigger_phase") or "").strip().lower()
+        if trigger_phase not in {"stop", "pre_compact"}:
+            raise HTTPException(status_code=400, detail="trigger_phase 仅支持 stop 或 pre_compact")
+        session_id = str(data.get("session_id") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id 不能为空")
+        dedupe_key = str(data.get("dedupe_key") or "").strip()
+        if not dedupe_key:
+            raise HTTPException(status_code=400, detail="dedupe_key 不能为空")
+        workspace_root = self._normalize_workspace_root(data.get("workspace_root") or "")
+        normalized_excerpt = []
+        raw_excerpt = data.get("conversation_excerpt")
+        if isinstance(raw_excerpt, list):
+            for item in raw_excerpt:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "").strip() or "unknown"
+                text = str(item.get("text") or "").strip()
+                if text:
+                    normalized_excerpt.append({
+                        "role": role,
+                        "text": text,
+                    })
+        return {
+            "source": source,
+            "trigger_phase": trigger_phase,
+            "session_id": session_id,
+            "turn_id": str(data.get("turn_id") or "").strip(),
+            "workspace_root": workspace_root,
+            "title_hint": str(data.get("title_hint") or "").strip(),
+            "user_prompt": str(data.get("user_prompt") or "").strip(),
+            "assistant_excerpt": str(data.get("assistant_excerpt") or "").strip(),
+            "conversation_excerpt": normalized_excerpt,
+            "learn_keyword": str(data.get("learn_keyword") or "").strip(),
+            "dedupe_key": dedupe_key,
+        }
+
+    def _build_learn_material_prompt(self, request: dict) -> str:
+        """把请求里的候选材料整理成一个清晰的模型输入块。"""
+        lines = [
+            "候选材料如下。",
+            f"用户问题：{request['user_prompt'] or '未提供'}",
+            f"助手摘录：{request['assistant_excerpt'] or '未提供'}",
+        ]
+        if request["learn_keyword"]:
+            lines.append(f"触发关键词：{request['learn_keyword']}（仅用于审计，不要出现在最终知识中）")
+        if request["conversation_excerpt"]:
+            lines.append("")
+            lines.append("对话摘录：")
+            for item in request["conversation_excerpt"]:
+                lines.append(f"- {item['role']}: {item['text']}")
+        return "\n".join(lines).strip()
+
+    def _resolve_learn_title(self, learn_result: dict, request: dict) -> str:
+        """确定最终知识文档标题，优先使用模型结果，回退到请求侧提示。"""
+        candidates = [
+            str((learn_result or {}).get("title") or "").strip(),
+            str(request.get("title_hint") or "").strip(),
+            str(request.get("user_prompt") or "").strip(),
+            "未命名知识条目",
+        ]
+        for item in candidates:
+            cleaned = re.sub(r"\s+", " ", item).strip(" #\t\r\n")
+            if cleaned:
+                return cleaned[:80]
+        return "未命名知识条目"
+
+    def _normalize_learn_quotes(self, value: Any) -> list[str]:
+        """规整模型返回的关键原话摘录。"""
+        quotes = []
+        if not isinstance(value, list):
+            return quotes
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                quotes.append(text[:500])
+            if len(quotes) >= 3:
+                break
+        return quotes
+
+    def _make_learn_file_name(self, title: str, dedupe_key: str, request: dict) -> str:
+        """生成学习文档文件名。
+
+        这里使用“日期 + dedupe hash + 标题短名”的组合，而不是纯时间戳，
+        这样在极端情况下即使同一轮因为异常重试，也更容易落到同一个逻辑文件名。
+        """
+        date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        short_hash = hashlib.sha1(dedupe_key.encode("utf-8")).hexdigest()[:8]
+        title_seed = str(request.get("title_hint") or request.get("user_prompt") or title or "").strip()
+        safe_title = re.sub(r"[\\/:*?\"<>|\s]+", "-", title_seed).strip("-.")[:40]
+        if not safe_title:
+            safe_title = "learn"
+        return f"{date_prefix}-{short_hash}-{safe_title}.learn.md"
+
+    def _render_learn_document(self, title: str, request: dict, summary_markdown: str, quotes: list[str]) -> str:
+        """把结构化学习结果包装成最终落盘的 Markdown 文档。"""
+        source_label = {
+            "codex": "Codex",
+            "claude_code": "Claude Code",
+        }.get(request["source"], request["source"])
+        lines = [
+            f"# {title}",
+            "",
+            f"- 来源：{source_label}",
+            f"- 触发阶段：{request['trigger_phase']}",
+            f"- 工作区：{request['workspace_root'] or '未提供'}",
+            f"- 会话 ID：{request['session_id']}",
+        ]
+        if request["turn_id"]:
+            lines.append(f"- 轮次 ID：{request['turn_id']}")
+        lines.extend([
+            f"- 记录时间：{_utc_now_iso()}",
+            "",
+            "## 知识摘要",
+            "",
+            summary_markdown.strip(),
+        ])
+        if quotes:
+            lines.extend([
+                "",
+                "## 关键原话摘录",
+                "",
+            ])
+            for quote in quotes:
+                lines.append(f"> {quote}")
+                lines.append("")
+            if lines and not lines[-1].strip():
+                lines.pop()
+        return "\n".join(lines).strip() + "\n"
+
+    def _load_learn_records(self) -> dict[str, dict]:
+        """读取学习幂等记录。
+
+        第一版只需要一个轻量的本地 JSON 文件：
+        1. 记录已经处理过的 `dedupe_key`；
+        2. 记录最终落盘文件名与状态；
+        3. 不引入新的数据库或全局审计表，保持实现边界最小。
+        """
+        path = getattr(self, "_learn_records_path", None)
+        if path is None or not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        result = {}
+        for key, value in data.items():
+            normalized_key = str(key or "").strip()
+            if normalized_key and isinstance(value, dict):
+                result[normalized_key] = dict(value)
+        return result
+
+    def _save_learn_records(self, records: dict[str, dict]) -> None:
+        """保存学习幂等记录。"""
+        path = getattr(self, "_learn_records_path", None)
+        if path is None:
+            raise RuntimeError("markdown_kb learn 记录存储尚未初始化")
+        normalized = {}
+        for key, value in (records or {}).items():
+            normalized_key = str(key or "").strip()
+            if normalized_key and isinstance(value, dict):
+                normalized[normalized_key] = value
+        path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), "utf-8")
 
     def _akm_base_url(self) -> str:
         """根据全局配置构造本地 AKM v1 基础地址。"""

@@ -20,6 +20,7 @@ from akm.key_pool import (
 )
 from akm.proxy import test_key_connectivity
 from akm.audit import list_logs, clean_logs, count_logs
+from akm.markdown_kb_hook import markdown_kb_hook
 from akm.plugins.plugin_manager import PluginManager
 
 
@@ -953,6 +954,9 @@ def doctor():
         click.echo(f"[{level}] {name:<10} {message}")
     if worst == "FAIL":
         raise click.ClickException("doctor 检查失败")
+
+
+main.add_command(markdown_kb_hook)
 
 
 if __name__ == "__main__":
