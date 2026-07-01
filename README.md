@@ -177,59 +177,25 @@ akm-menubar
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉和设置卡片等基础壳组件，供后续页面复用。
 
-仓库当前还提供一个**内置但默认关闭**的 `markdown_kb` 插件，目录位于 `akm/plugins/markdown_kb/`。
+仓库当前还提供一个**内置但默认关闭**的 `markdown_kb` 插件，目录位于 `akm/plugins/markdown_kb/`。启用后提供 Markdown 知识库页面和自动 RAG 注入能力。
 
-它会随 AKM 一起分发，并在用户显式启用后提供一个最小但真实可用的 Markdown 知识库页面。
+### 核心能力
 
-当前能力包括：
-- 查看状态、批量上传/列出/删除 `.md` 文件
-- 优先使用 `markdown-chunker` 做结构感知切片；依赖缺失或第三方异常时自动回退到内置结构化切片器
-- 全量重建索引、单文件重建、增量同步预览/执行、清空索引
-- 通过本地 AKM `/v1/embeddings`、可选 `/v1/rerank` 与 `/v1/chat/completions` 完成 `query / ask` 闭环
-- 通过 `POST /api/markdown-kb/learn` 接收客户端 Hook 上送的候选材料，归纳为 `.learn.md` 知识条目并写回知识库
-- 提供 `akm markdown-kb-hook` CLI 子命令，封装 `UserPromptSubmit / Stop / PreCompact` 共用的关键词剥离、pending 状态持久化和 `/learn` 调用逻辑
+- **文档管理**：批量上传/列出/删除 `.md` 文件，支持 workspace 绑定
+- **索引**：内置标题树切片器，`sqlite-vec` KNN 粗召回（自动回退 NumPy/Python），支持全量重建、单文件重建、增量同步
+- **检索与问答**：通过本地 AKM 代理 的 `/v1/embeddings`、可选 `/v1/rerank`、`/v1/chat/completions` 完成 `query / ask` 闭环
+- **自动注入**：启用后自动拦截 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三类请求，命中知识库时注入参考资料
+- **Hook 学习入库**：通过 Codex/Claude 的 `UserPromptSubmit / Stop / PreCompact` hooks 将会话片段沉淀为 `.learn.md` 知识，自动 workspace 绑定、幂等判重并重建索引
+- **会话扫描器**：`POST /api/markdown-kb/scan-sessions` 扫描 `~/.codex/sessions/` 和 `~/.claude/projects/*/` 下的 JSONL 会话文件，自动归纳知识并更新记忆
+- **记忆系统**：chunk 级 `hit_count` / `memory_value`，艾宾浩斯衰减曲线驱动，多源 boost（learn_new 0.30 / hook_confirm 0.20 / scan_cross 0.15 / retrieval_hit 0.10），高记忆值 chunk（>0.5）可豁免 score_threshold 独立放行；定时自动整理过期记忆
 
-这里的 `embedding_model` 是必填项，`reranker_model` 是可选项。页面侧已经接通状态总览、检索配置、文件管理、索引重建、单文件重建、同步预览/执行、检索测试、问答测试、清空索引和健康状态展示；并且 health / sync 结果已经从摘要数字升级成具体文件列表展示。
+### 检索排序策略
 
-当前页面已经直接提供 `markdown_kb` 自己的配置入口，不用再回插件列表弹窗调整检索参数；`embedding_model / reranker_model / chat_model` 继续使用当前 `/v1/models` 驱动的动态下拉。
+第一阶段粗召回采用**三路融合**：`score = vector_score × semantic_weight + keyword_score(BM25) × keyword_weight + memory_score × memory_weight`，三路权重自动归一化。支持分类加权（`category_bonus`）和父标题命中加权（`parent_bonus`）。若有 reranker 则二阶段重排，最终按 `score_threshold` 过滤截断 `top_k`。
 
-插件配置弹窗的布局现在也支持按插件声明单列或双列：默认单列，`markdown_kb` 当前显式使用双列，让 `top_k / score_threshold / semantic_weight / keyword_weight` 这类短配置项能更紧凑地一行两个显示。上传文档页面现在也支持一次选择多个 `.md` 文件批量保存，但仍然不会在上传阶段自动重建索引。
+### 配置项
 
-检索测试和问答测试页面里的模型下拉现在都按“跟随默认 / 手动覆盖”的方式绑定：`Embedding 模型` 和 `问答模型` 可以选择跟随插件默认值或单次手动指定；`Reranker 模型` 额外保留了第三种“明确不启用 rerank”的状态。这样既能正确显示当前插件默认配置，也不会再因为测试页的展示值和实际请求值不一致而让人误判当前链路到底有没有启用 rerank。
-
-当前版本还给 `markdown_kb` 补上了更接近 Dify 使用习惯的检索调优项：`top_k` 默认 `4`、最大 `10`，无论是否启用 rerank 都会控制最终保留条数；
-  `score_threshold` 采用 `0~1` 区间，默认 `0.7`，用于过滤低相关片段；
-  `semantic_weight / keyword_weight` 会共同参与第一阶段排序，用来调节“语义召回”和“BM25 字面召回”各自的占比。
-
-当前配置还新增了 `document_workspace_root`：它用于声明当前这批 Markdown 文档所属的工作目录，重建索引后会把该工作目录写入 SQLite 元数据。
-
-检索阶段的规则是：如果当前请求里能提取出工作目录，则会检索“`workspace_root` 为空的公共文档 + 当前工作目录对应的文档”；如果当前请求里提取不到工作目录，则只检索 `workspace_root` 为空的公共文档。这样既兼容 OpenCode / Codex / Claude 这类能提供工作域上下文的请求，也允许把未绑定工作目录的通用文档作为兜底公共知识使用。
-
-针对字面检索，当前版本已经把原来的轻量关键词覆盖率升级成了 BM25 融合：query 和 chunk 会继续复用同一套中英文 tokenization，英文仍按 token 拆分；中文连续片段则优先使用 `jieba3` 的 `small` 模型做自然分词，若当前环境未安装 `jieba3` 再自动回退到 2~4 字滑窗；在此基础上，第一阶段会把向量分和归一化后的 BM25 分按 `semantic_weight / keyword_weight` 做线性融合。因此像“参考考试大纲生成复习计划”或 “generate a study plan from the exam outline” 这类问题，不再要求整句在文档里逐字出现，也能通过“考试大纲 / 复习计划”或 “exam outline / study plan” 这类局部短语拿到更稳定的字面相关性分数。
-
-当前版本已经按“方案一”把默认索引持久化切到插件私有 `~/.akm/markdown_kb/index_store/kb.db`：保留 `docs/` 原文目录、忽略旧 `index.json`、通过全量 `rebuild` 重新写入 SQLite，并支持只清空索引或连同原始文档一起删除。
-
-当前默认实现是 `SqliteKbIndexStore`。向量会继续以 JSON 形式保存在 SQLite 普通表里作为回退数据源；如果当前运行时支持加载 `sqlite-vec`，第一阶段粗召回会优先在 SQLite 内完成 KNN 查询，并把 workspace / selected_doc 过滤条件前推到 SQL 层，避免别的项目 chunk 先占满 top-N 候选；如果本地 Python 的 SQLite 绑定不支持扩展加载，或索引里混入了不同 embedding 维度的数据，则会自动回退到现有的内存预加载 + NumPy 矩阵化相似度计算，若当前环境尚未安装 `numpy` 则继续回退到 Python 循环计算。第一阶段会统一输出 `vector_score / keyword_score / hybrid_score` 方便观察召回原因，其中 `keyword_score` 表示归一化后的 BM25 分；启用 rerank 后，第一阶段仍保留“向量分 + BM25 分”的混合粗召回，第二阶段再把候选交给 `rerank_score` 重排。状态接口现在也会额外返回 `vec_available / vec_ready / vec_enabled / vec_version / vector_retrieval_backend`，便于直接判断当前请求是否真的走到了 `sqlite-vec`。
-
-当前仓库内置依赖名是 `sqlite-vec` / `sqlite_vec`，不是 `sqlite-sec`。如果后续讨论里提到 `sqlite-sec`，应按 `sqlite-vec` 这条向量召回链路理解。
-
-插件页面本身会先进入 AKM 后台宿主页，因此左侧菜单和顶部栏会保留；真正的插件原始 HTML 则通过 `/plugins/<name>/raw` 供宿主页 iframe 加载。
-
-`markdown_kb` 插件启用后，现在会默认覆盖 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三类文本请求：它会自动抽取最后一条用户问题执行检索，只有确实命中知识库片段时，才会把参考资料注入到原请求里；未命中的请求继续按原样透传。当前实现已经不再依赖 `kb:` 这类模型名前缀来触发知识库注入，应以这条自动注入链路为准。
-
-`markdown_kb` 的切片现在优先走 `markdown-chunker`，再回退到内置结构化切片器。
-
-### `markdown_kb` 概览
-
-- 插件位置：`akm/plugins/markdown_kb/`
-- 默认状态：内置但默认关闭，需用户显式启用
-- 文档能力：支持状态查看、批量上传/列出/删除 `.md` 文件
-- 学习入库：支持通过 `/api/markdown-kb/learn` 把客户端 Hook 上送的会话片段沉淀为新知识文档，并自动执行 workspace 绑定、幂等判重与单文件重建
-- Hook 适配：支持通过 `akm markdown-kb-hook prompt-submit|stop|pre-compact` 复用客户端学习触发链路的公共逻辑
-- 分块策略：优先使用 `markdown-chunker` 做结构感知切片，失败时回退到内置结构化切片器
-- 索引能力：支持全量重建、单文件重建、增量同步预览/执行和清空索引
-- 检索链路：通过本地 AKM `/v1/embeddings`、可选 `/v1/rerank` 与 `/v1/chat/completions` 完成 `query / ask`
-- 页面能力：状态总览、检索配置、文件管理、重建、同步、检索测试、问答测试、健康状态展示
+`embedding_model`（必填）、`reranker_model`（可选），检索参数：`top_k`（默认 4）、`score_threshold`（0~1，默认 0.7）、`semantic_weight / keyword_weight / memory_weight`。记忆参数：`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours`。
 
 ### `markdown_kb` 显式检索与问答链路
 
@@ -239,11 +205,11 @@ flowchart LR
     B --> C["按 workspace / selected_doc 过滤候选文档"]
     C --> D["/v1/embeddings 生成 query embedding"]
     D --> E["sqlite-vec KNN 粗召回<br/>不可用时回退 NumPy / Python"]
-    E --> F["语义分 + BM25 混合排序"]
+    E --> F["语义分 + BM25 + 记忆分<br/>三路融合排序"]
     F --> G{"配置了 reranker_model?"}
     G -->|是| H["/v1/rerank 二阶段重排"]
     G -->|否| I["直接使用当前排序"]
-    H --> J["score_threshold 过滤并截断 top_k"]
+    H --> J["score_threshold 过滤<br/>高记忆值 chunk 豁免"]
     I --> J
     J --> K{"query 还是 ask?"}
     K -->|query| L["返回 hits"]
