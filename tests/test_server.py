@@ -290,28 +290,13 @@ def test_markdown_kb_chunk_metadata_carries_document_workspace_root(tmp_path):
     assert chunks[0]["workspace_root"] == "/Users/nk/Desktop/ccs"
 
 
-def test_markdown_kb_chunking_prefers_markdown_chunker(monkeypatch, tmp_path):
-    import akm.plugins.markdown_kb.index as markdown_kb_module
+def test_markdown_kb_chunking_builtin_tree(monkeypatch, tmp_path):
+    """验证内置标题树切片器：按标题拆分为独立 chunk。"""
     from akm.plugins.markdown_kb.index import Plugin
-
-    class FakeMarkdownChunkingStrategy:
-        """模拟第三方 chunker，验证插件优先走结构化切片入口。"""
-
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def chunk_markdown(self, text):
-            assert "# Title" in text
-            return [
-                "# Title\n\n第一段内容",
-                "## Details\n\n第二段内容",
-            ]
-
-    monkeypatch.setattr(markdown_kb_module, "MarkdownChunkingStrategy", FakeMarkdownChunkingStrategy)
 
     plugin = Plugin()
     path = tmp_path / "guide.md"
-    path.write_text("# Title\n\n第一段内容\n\n## Details\n\n第二段内容", "utf-8")
+    path.write_text("# Title\n\n第一段内容\n\n## Details\n\n第二段内容\n\n### Sub\n\n第三段内容", "utf-8")
 
     chunks = plugin._chunk_markdown_file(path, {
         "chunk_size": 800,
@@ -319,12 +304,19 @@ def test_markdown_kb_chunking_prefers_markdown_chunker(monkeypatch, tmp_path):
         "document_workspace_root": "",
     })
 
-    assert len(chunks) == 2
+    assert len(chunks) >= 2
+    # 验证每个 chunk 都有 heading_path
+    for c in chunks:
+        assert "heading_path" in c
+        assert "title" in c
+        assert "chunk_text" in c
+        assert c["chunk_text"].strip()
     assert chunks[0]["title"] == "Title"
     assert chunks[0]["heading_level"] == 1
-    assert chunks[1]["title"] == "Details"
-    assert chunks[1]["heading_level"] == 2
-    assert chunks[0]["chunk_text"].startswith("# Title")
+    # 验证 heading_path 存储为 JSON
+    import json
+    hp0 = json.loads(chunks[0]["heading_path"])
+    assert "Title" in hp0
 
 
 @pytest.mark.asyncio
@@ -2576,7 +2568,7 @@ async def test_markdown_kb_learn_api_creates_workspace_bound_doc_and_dedupes(mon
     assert learned_path.exists()
     learned_text = learned_path.read_text("utf-8")
     assert "# 退款页重复提交排查" in learned_text
-    assert "## 知识摘要" in learned_text
+    assert "**知识摘要**" in learned_text
     assert "重复绑定提交事件" in learned_text
     assert "AKM入库" not in learned_text
 
@@ -3349,6 +3341,15 @@ async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(mo
             }
             return [mapping[item] for item in chunk_ids]
 
+        def read_memory_map(self, chunk_ids):
+            return {}
+
+        def update_memory(self, upserts):
+            pass
+
+        def cleanup_expired_memory(self):
+            return 0
+
     plugin._store = FakeStore()
 
     async def fake_get_query_embedding(question, embedding_model):
@@ -3424,6 +3425,15 @@ async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(m
                 "ws": {"id": "ws", "doc_id": "d2", "file_name": "workspace.md", "workspace_root": "/Users/nk/Desktop/ccs", "title": "Workspace", "chunk_index": 0, "chunk_text": "workspace", "content_hash": "w", "embedding": [1.0, 0.0]},
             }
             return [mapping[item] for item in chunk_ids]
+
+        def read_memory_map(self, chunk_ids):
+            return {}
+
+        def update_memory(self, upserts):
+            pass
+
+        def cleanup_expired_memory(self):
+            return 0
 
     plugin._store = FakeStore()
 

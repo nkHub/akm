@@ -7,10 +7,32 @@ description: Use when the user wants to sync local Markdown files into the built
 
 用于把本地 Markdown 文档同步到 AKM 内置 `markdown_kb` 插件当前使用的全局文档目录，并在目录变更后显式更新索引。
 
-当前 skill 的核心定位不是“只会上传文件”，而是把下面两件事串成一个稳定工作流：
+当前 skill 的核心定位不是"只会上传文件"，而是把下面两件事串成一个稳定工作流：
 
 - 维护 `markdown_kb` 的原始文档目录
 - 触发 `sync` 或 `rebuild` 让索引数据库跟上目录状态
+
+---
+
+## 接口参考
+
+> 以下接口的具体请求方式、参数说明和使用说明，请参见 [API 请求规范](references/api-requests.md)。
+>
+> - `GET /api/markdown-kb/status` — 获取状态和目录信息
+> - `POST /api/markdown-kb/files/upload` — 上传文件（辅助入口）
+> - `POST /api/markdown-kb/files/bind-workspace` — 绑定工作目录
+> - `POST /api/markdown-kb/sync` — 增量同步
+> - `POST /api/markdown-kb/rebuild` — 全量重建
+
+---
+
+## 真实目录规则
+
+1. 优先调用状态接口（参见上文接口参考），读取运行时返回的 `docs_dir`。
+2. 如果状态接口不可用，再回退到当前默认目录 `~/.akm/markdown_kb/docs`。
+3. 不要把 `~/.akm/markdown-kb/docs` 当成当前既定实现，因为仓库中的真实目录名是下划线 `_`。
+
+---
 
 ## 适用场景
 
@@ -20,25 +42,47 @@ description: Use when the user wants to sync local Markdown files into the built
 - 用户要在文档变更后执行增量同步或全量重建
 - 用户要先为一个新项目初始化一份标准知识库骨架文档，再写入知识库
 
-## 真实目录规则
-
-1. 优先调用 `GET /api/markdown-kb/status`，读取运行时返回的 `docs_dir`。
-2. 如果状态接口不可用，再回退到当前默认目录 `~/.akm/markdown_kb/docs`。
-3. 不要把 `~/.akm/markdown-kb/docs` 当成当前既定实现，因为仓库中的真实目录名是下划线 `_`。
+---
 
 ## 使用原则
 
 1. 默认把 `docs_dir` 当作全局知识库源目录维护。
 2. 默认优先直接维护 `docs_dir` 中的文件，不强制要求走上传接口。
-3. 文件进入 `docs_dir` 不等于已经进入索引数据库；目录变更后必须显式执行 `sync` 或 `rebuild`。
+3. 文件进入 `docs_dir` 不等于已经进入索引数据库；目录变更后必须显式执行 `sync` 或 `rebuild`（参见上文接口参考）。
 4. 日常小范围变更优先使用 `sync`，大范围替换或索引疑似漂移时使用 `rebuild`。
 5. 当前实现把文档目录当作扁平文件池处理，同名文件会互相覆盖；写入前必须先检查文件名冲突。
 6. 只处理 `.md` 文件，不改写 Markdown 内容本身，除非用户明确要求做内容编辑。
-7. 如果用户明确要求“初始化知识库”，允许由 skill 生成一份新的 Markdown 知识模块文档，再写入 `docs_dir`。
+7. 如果用户明确要求"初始化知识库"，允许由 skill 生成一份新的 Markdown 知识模块文档，再写入 `docs_dir`。
+
+---
+
+## 数据分层
+
+需要始终区分两层数据：
+
+### 1. 原始文档层
+
+- 目录：`docs_dir`（通过状态接口获取）
+- 内容：Markdown 原文文件
+- 作用：作为 `markdown_kb` 后续切片和建索引的唯一来源
+
+### 2. 索引数据库层
+
+- 目录：通常位于 `~/.akm/markdown_kb/index_store/`（通过状态接口获取）
+- 内容：切片结果、向量、索引元数据
+- 作用：供 query / ask 实际检索使用
+
+重要说明：
+
+- 上传接口（参见上文接口参考）只会把文件写入原始文档层
+- 直接维护 `docs_dir` 不会天然丢失原文
+- 但如果目录变了却没执行 `sync` 或 `rebuild`，索引数据库就会过期
+
+---
 
 ## 初始化功能
 
-当用户要求“初始化知识库”时，skill 可以额外执行一次知识模块文档初始化。
+当用户要求"初始化知识库"时，skill 可以额外执行一次知识模块文档初始化。
 
 ### 初始化目标
 
@@ -67,15 +111,15 @@ description: Use when the user wants to sync local Markdown files into the built
 
 #### `P1. 方法论（怎么做）`
 
-- 写“怎么做”，不要写成纯概念说明。
+- 写"怎么做"，不要写成纯概念说明。
 - 至少包含 1 个完整流程，按步骤编号写清楚。
 - 优先收录可以直接执行的 SOP、检查表、决策树、发布流程、排障流程。
-- 每条规则尽量带触发条件，例如“什么时候用 A，什么时候用 B”。
+- 每条规则尽量带触发条件，例如"什么时候用 A，什么时候用 B"。
 - 示例小节：`发布流程`、`故障处理 SOP`、`代码审查 checklist`。
 
 #### `P2. 问题解决方案（踩坑记录）`
 
-- 写“遇到什么问题、为什么、怎么修复、如何避免再踩坑”。
+- 写"遇到什么问题、为什么、怎么修复、如何避免再踩坑"。
 - 推荐固定格式：`现象 -> 原因 -> 修复方案 -> 预防建议`。
 - 优先写实际报错、调试过程、修复命令、回滚方案和预警信号。
 - 如果问题来自外部依赖，补上依赖版本、配置项或环境条件。
@@ -83,7 +127,7 @@ description: Use when the user wants to sync local Markdown files into the built
 
 #### `P3. 概念原理（是什么 + 为什么）`
 
-- 写“是什么、为什么、原理是什么”，不要只列名词。
+- 写"是什么、为什么、原理是什么"，不要只列名词。
 - 适合放技术架构、设计模式、领域模型、流程图式解释、系统边界。
 - 先给一句定义，再给应用场景，最后给关键约束或取舍。
 - 如果涉及对比，先说明各自职责，再说明为什么这个项目选了其中一种。
@@ -92,7 +136,7 @@ description: Use when the user wants to sync local Markdown files into the built
 #### `P4. 外部知识精炼（消化后的外部资料）`
 
 - 只收录已经消化过的外部信息，不直接堆链接。
-- 写摘要时优先保留“结论、适用边界、对当前项目的影响”。
+- 写摘要时优先保留"结论、适用边界、对当前项目的影响"。
 - 如果是书籍、文章、培训或会议内容，尽量提炼成能执行的要点。
 - 必要时标注来源类别，但不要求逐字复述原文。
 - 示例小节：`某技术大会笔记`、`《系统设计面试》要点`。
@@ -108,7 +152,7 @@ description: Use when the user wants to sync local Markdown files into the built
 使用原则：
 
 1. 优先基于当前仓库中的 README、设计文档和关键代码结构生成五模块内容。
-2. 如果资料不足以支持某个细节，明确写“资料中未提及”或不写该结论。
+2. 如果资料不足以支持某个细节，明确写"资料中未提及"或不写该结论。
 3. 如果某个模块缺少足够资料，不要臆测补全；保留空白或明确标注资料不足。
 4. 每个模块都尽量给出小标题和条目化内容，避免长段散文。
 
@@ -118,14 +162,14 @@ description: Use when the user wants to sync local Markdown files into the built
 
 推荐步骤：
 
-1. 调 `GET /api/markdown-kb/status` 获取当前 `docs_dir`
+1. 调用状态接口（参见上文接口参考）获取当前 `docs_dir`
 2. 识别项目名称并生成目标文件名
 3. 检查目标文件名是否已存在；若存在，先提示覆盖风险
 4. 基于当前项目资料整理五模块知识文档
 5. 将五模块知识文档写入目标 Markdown 文件
 6. 将文件写入 `docs_dir`
-7. 执行一次 `POST /api/markdown-kb/sync`，默认使用 `{"apply": true}`
-8. 再次读取状态，确认索引已收录该初始化文档
+7. 调用增量同步接口，使用 `{"apply": true}`（参见上文接口参考）
+8. 再次调用状态接口，确认索引已收录该初始化文档
 
 ### 初始化边界
 
@@ -133,27 +177,7 @@ description: Use when the user wants to sync local Markdown files into the built
 - 初始化文档仍然属于原始文档层，需要后续 `sync` 或 `rebuild` 才能进入索引数据库
 - 如果用户后续提供了更完整的项目知识库文档，可以继续覆盖或新增，不要求保留初始化文档的原始结构
 
-## 数据分层
-
-需要始终区分两层数据：
-
-### 1. 原始文档层
-
-- 目录：`docs_dir`
-- 内容：Markdown 原文文件
-- 作用：作为 `markdown_kb` 后续切片和建索引的唯一来源
-
-### 2. 索引数据库层
-
-- 目录：通常位于 `~/.akm/markdown_kb/index_store/`
-- 内容：切片结果、向量、索引元数据
-- 作用：供 query / ask 实际检索使用
-
-重要说明：
-
-- 上传接口只会把文件写入原始文档层
-- 直接维护 `docs_dir` 不会天然丢失原文
-- 但如果目录变了却没执行 `sync` 或 `rebuild`，索引数据库就会过期
+---
 
 ## 推荐工作流
 
@@ -163,10 +187,10 @@ description: Use when the user wants to sync local Markdown files into the built
 
 推荐步骤：
 
-1. 确认当前 `docs_dir`
+1. 调用状态接口确认当前 `docs_dir`
 2. 直接把目标 `.md` 文件写入、更新或删除到该目录
-3. 执行一次 `POST /api/markdown-kb/sync`，并传 `{"apply": true}`
-4. 查看同步结果和状态结果
+3. 调用增量同步接口，使用 `{"apply": true}`
+4. 再次调用状态接口查看同步结果
 
 ### 批量替换
 
@@ -175,8 +199,8 @@ description: Use when the user wants to sync local Markdown files into the built
 推荐步骤：
 
 1. 先把 `docs_dir` 调整到最终目标状态
-2. 执行一次 `POST /api/markdown-kb/rebuild`
-3. 重建完成后检查状态、健康和检索结果
+2. 调用全量重建接口
+3. 重建完成后调用状态接口检查状态、健康和检索结果
 
 ### 同名文件处理
 
@@ -190,166 +214,39 @@ description: Use when the user wants to sync local Markdown files into the built
 
 不要假设不同来源的同名文件可以自然并存；当前实现会直接覆盖旧文件。
 
-## 状态接口
-
-请求地址：
-
-```text
-http://127.0.0.1:8800/api/markdown-kb/status
-```
-
-请求方法：
-
-```text
-GET
-```
-
-使用目的：
-
-- 获取当前 `docs_dir`
-- 获取当前 `index_store_dir`
-- 判断最近更新时间、最近重建时间和同步状态
-
-## 上传接口
-
-上传接口只作为辅助入口，不是唯一入口。
-
-请求地址：
-
-```text
-http://127.0.0.1:8800/api/markdown-kb/files/upload
-```
-
-请求方法：
-
-```text
-POST
-```
-
-请求类型：
-
-```text
-multipart/form-data
-```
-
-表单字段：
-
-```text
-files: <一个或多个 .md 文件>
-```
-
-使用说明：
-
-- 这个接口会把文件保存到 `docs_dir`
-- 这个接口不会自动重建索引
-- 如果用户已经直接维护了 `docs_dir`，通常不需要再调用它
-
-## 绑定工作目录接口
-
-请求地址：
-
-```text
-http://127.0.0.1:8800/api/markdown-kb/files/bind-workspace
-```
-
-请求方法：
-
-```text
-POST
-```
-
-推荐请求体：
-
-```json
-{
-  "file_name": "AI Key Manager.md",
-  "workspace_root": "/Users/nk/Desktop/ccs"
-}
-```
-
-使用说明：
-
-- 这个接口用于给单个 Markdown 文档绑定工作目录
-- 绑定会持久化到插件侧的文件映射中
-- 绑定后需要再执行 `rebuild-file`、`sync` 或 `rebuild` 才会进入索引
-- 当请求里没有工作目录时，检索只会命中未绑定工作目录的公共文档
-
-## 增量同步接口
-
-请求地址：
-
-```text
-http://127.0.0.1:8800/api/markdown-kb/sync
-```
-
-请求方法：
-
-```text
-POST
-```
-
-推荐请求体：
-
-```json
-{
-  "apply": true
-}
-```
-
-使用说明：
-
-- `apply=false` 或省略时，可用于预览新增、变化、删除
-- `apply=true` 时，真正执行增量同步
-- 默认优先用它处理日常变更
-
-## 全量重建接口
-
-请求地址：
-
-```text
-http://127.0.0.1:8800/api/markdown-kb/rebuild
-```
-
-请求方法：
-
-```text
-POST
-```
-
-使用说明：
-
-- 当目录变更范围大，或怀疑索引状态已经漂移时使用
-- 这是比 `sync` 更重但更彻底的恢复手段
+---
 
 ## 执行建议
 
-1. 用户说“把这些 markdown 加入知识库”时，先判断是直接维护 `docs_dir` 更合适，还是需要调用上传接口。
-2. 用户说“我已经手动改过目录了”时，优先执行状态检查和索引更新，不要重复上传。
-3. 用户说“为什么检索不到新文档”时，优先检查是否只是原文目录已更新但索引数据库尚未同步。
+1. 用户说"把这些 markdown 加入知识库"时，先判断是直接维护 `docs_dir` 更合适，还是需要调用上传接口。
+2. 用户说"我已经手动改过目录了"时，优先执行状态检查和索引更新，不要重复上传。
+3. 用户说"为什么检索不到新文档"时，优先检查是否只是原文目录已更新但索引数据库尚未同步。
 4. 遇到同名文件时，先提示覆盖风险，再决定是否重命名后写入。
 5. 如果只是日常小改动，默认 `sync`；如果是大批量替换，默认 `rebuild`。
-6. 用户说“先帮我初始化一个知识库”时，先生成五模块知识文档，再执行一次 `sync`。
+6. 用户说"先帮我初始化一个知识库"时，先生成五模块知识文档，再执行一次 `sync`。
+
+---
 
 ## 最小执行模板
 
 当用户要求同步 Markdown 文档到知识库时，优先遵循这个顺序：
 
-1. 调 `GET /api/markdown-kb/status` 获取 `docs_dir`
+1. 调用状态接口获取 `docs_dir`
 2. 检查待同步文件是否都是 `.md`
 3. 检查是否存在同名冲突
 4. 直接把文件写入或同步到 `docs_dir`
-5. 执行 `POST /api/markdown-kb/sync`，默认使用 `{"apply": true}`
-6. 再次读取状态，确认索引已更新
+5. 调用增量同步接口，默认使用 `{"apply": true}`
+6. 再次调用状态接口，确认索引已更新
 
-如果是大范围调整，则把第 5 步替换为 `POST /api/markdown-kb/rebuild`。
+如果是大范围调整，则把第 5 步替换为调用全量重建接口。
 
 如果用户要求初始化知识库，则优先遵循这个顺序：
 
-1. 调 `GET /api/markdown-kb/status` 获取 `docs_dir`
+1. 调用状态接口获取 `docs_dir`
 2. 确认项目名称来源
 3. 按项目名称生成 `.md` 文件名
 4. 基于当前项目资料整理五模块知识文档
 5. 将五模块知识文档写入目标 `.md` 文件
 6. 把文件写入 `docs_dir`
-7. 执行 `POST /api/markdown-kb/sync`，默认使用 `{"apply": true}`
-8. 再次读取状态，确认索引已更新
+7. 调用增量同步接口，默认使用 `{"apply": true}`
+8. 再次调用状态接口，确认索引已更新

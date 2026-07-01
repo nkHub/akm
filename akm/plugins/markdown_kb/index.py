@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -29,16 +30,14 @@ try:
     from jieba3 import jieba3 as Jieba3Tokenizer
 except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
     Jieba3Tokenizer = None
-try:
-    from markdown_chunker import MarkdownChunkingStrategy
-except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
-    MarkdownChunkingStrategy = None
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
 from akm.config import load_config
 
 from akm.plugins import PluginBase
+
+from akm.plugins.markdown_kb import session_scanner
 
 
 router = APIRouter()
@@ -110,20 +109,21 @@ def _sqlite_vec_distance_to_score(distance: float) -> float:
     return max(-1.0, min(1.0, value))
 
 
-def _normalize_weight_pair(primary: float, secondary: float) -> tuple[float, float]:
-    """把两路权重归一化到 0~1，总和为 1。
+def _normalize_weights(*weights: float) -> tuple[float, ...]:
+    """把多路权重归一化到 0~1，总和为 1。
 
     说明：
-    1. 配置面板里允许用户填任意非负数，因此这里统一做一次归一化；
-    2. 如果两项都 <= 0，则自动回退为纯主路权重，避免出现全 0 导致所有命中分都被压成 0；
-    3. 当前 markdown_kb 中 primary 对应语义分，secondary 对应关键词分。
+    1. 每权重 clamp 到 >= 0，保留 0 值；
+    2. 全 0 时回退为第一路 = 1.0（保留最后手段的权重）；
+    3. 支持任意路数（语义分 / 关键词分 / 记忆分 / ...）。
     """
-    primary = max(0.0, float(primary or 0.0))
-    secondary = max(0.0, float(secondary or 0.0))
-    total = primary + secondary
+    clamped = tuple(max(0.0, float(w or 0.0)) for w in weights)
+    total = sum(clamped)
     if total <= 0:
-        return 1.0, 0.0
-    return primary / total, secondary / total
+        result = [0.0] * len(clamped)
+        result[0] = 1.0
+        return tuple(result)
+    return tuple(w / total for w in clamped)
 
 
 class IndexStore(ABC):
@@ -390,6 +390,8 @@ class SqliteKbIndexStore(IndexStore):
             if row and row[0] > 0:
                 self._ensure_column(conn, "kb_documents", "workspace_root", "TEXT NOT NULL DEFAULT ''")
                 self._ensure_column(conn, "kb_chunks", "workspace_root", "TEXT NOT NULL DEFAULT ''")
+                self._ensure_column(conn, "kb_chunks", "categories", "TEXT DEFAULT ''")
+                self._ensure_column(conn, "kb_chunks", "heading_path", "TEXT DEFAULT ''")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS kb_documents (
@@ -415,9 +417,11 @@ class SqliteKbIndexStore(IndexStore):
                     workspace_root TEXT NOT NULL DEFAULT '',
                     title TEXT DEFAULT '',
                     heading_level INTEGER NOT NULL DEFAULT 0,
+                    heading_path TEXT DEFAULT '',
                     chunk_index INTEGER NOT NULL,
                     chunk_text TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    categories TEXT DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     indexed_at TEXT NOT NULL,
@@ -434,6 +438,15 @@ class SqliteKbIndexStore(IndexStore):
                 CREATE TABLE IF NOT EXISTS kb_index_meta (
                     meta_key TEXT PRIMARY KEY,
                     meta_value TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS kb_chunk_memory (
+                    chunk_id      TEXT PRIMARY KEY,
+                    hit_count     INTEGER NOT NULL DEFAULT 0,
+                    last_hit_at   TEXT,
+                    memory_value  REAL NOT NULL DEFAULT 0.0,
+                    created_at    TEXT NOT NULL,
+                    FOREIGN KEY(chunk_id) REFERENCES kb_chunks(chunk_id) ON DELETE CASCADE
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_kb_documents_file_name ON kb_documents(file_name);
@@ -479,6 +492,8 @@ class SqliteKbIndexStore(IndexStore):
             "workspace_root": row["workspace_root"],
             "title": row["title"],
             "heading_level": row["heading_level"],
+            "heading_path": row["heading_path"] if "heading_path" in row.keys() else "",
+            "categories": row["categories"] if "categories" in row.keys() else "",
             "chunk_index": row["chunk_index"],
             "chunk_text": row["chunk_text"],
             "content_hash": row["content_hash"],
@@ -571,8 +586,9 @@ class SqliteKbIndexStore(IndexStore):
                     """
                     INSERT INTO kb_chunks(
                         chunk_id, doc_id, file_name, file_path, workspace_root, title, heading_level,
+                        heading_path, categories,
                         chunk_index, chunk_text, content_hash, created_at, updated_at, indexed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.get("id"),
@@ -582,6 +598,8 @@ class SqliteKbIndexStore(IndexStore):
                         item.get("workspace_root") or "",
                         item.get("title") or "",
                         _safe_int(item.get("heading_level"), 0),
+                        str(item.get("heading_path") or ""),
+                        str(item.get("categories") or ""),
                         _safe_int(item.get("chunk_index"), 0),
                         item.get("chunk_text") or "",
                         item.get("content_hash") or "",
@@ -831,6 +849,150 @@ class SqliteKbIndexStore(IndexStore):
         finally:
             conn.close()
 
+    # ---------- 记忆系统方法 ----------
+
+    def read_memory_map(self, chunk_ids: list[str]) -> dict[str, dict]:
+        """批量读取 chunk 的记忆状态，返回 {chunk_id: {memory_value, hit_count, last_hit_at}}。"""
+        if not chunk_ids:
+            return {}
+        conn = self._connect()
+        try:
+            placeholders = ",".join(["?" for _ in chunk_ids])
+            rows = conn.execute(
+                f"SELECT chunk_id, hit_count, last_hit_at, memory_value FROM kb_chunk_memory WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            ).fetchall()
+            return {
+                row["chunk_id"]: {
+                    "memory_value": max(0.0, min(1.0, float(row["memory_value"] or 0.0))),
+                    "hit_count": int(row["hit_count"] or 0),
+                    "last_hit_at": str(row["last_hit_at"] or ""),
+                }
+                for row in rows
+            }
+        finally:
+            conn.close()
+
+    def update_memory(
+        self,
+        upserts: dict[str, dict],
+    ) -> None:
+        """批量 upsert 记忆记录。
+
+        upserts: {chunk_id: {memory_value, hit_count_delta, last_hit_at}}
+        其中 hit_count_delta 表示需要在其现有 hit_count 基础上增加的值。
+        """
+        if not upserts:
+            return
+        conn = self._connect()
+        try:
+            # 先读取现有 hit_count 做 delta 叠加
+            placeholders = ",".join(["?" for _ in upserts])
+            existing_rows = conn.execute(
+                f"SELECT chunk_id, hit_count FROM kb_chunk_memory WHERE chunk_id IN ({placeholders})",
+                list(upserts.keys()),
+            ).fetchall()
+            existing = {row["chunk_id"]: int(row["hit_count"] or 0) for row in existing_rows}
+
+            now = _utc_now_iso()
+            for chunk_id, info in upserts.items():
+                mv = max(0.0, min(1.0, _safe_float(info.get("memory_value"), 0.0)))
+                hit_delta = _safe_int(info.get("hit_count_delta"), 0)
+                total_hits = existing.get(chunk_id, 0) + hit_delta
+                last_hit = str(info.get("last_hit_at") or now)
+                conn.execute(
+                    """
+                    INSERT INTO kb_chunk_memory(chunk_id, hit_count, last_hit_at, memory_value, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                        hit_count = excluded.hit_count,
+                        last_hit_at = excluded.last_hit_at,
+                        memory_value = excluded.memory_value
+                    """,
+                    (chunk_id, total_hits, last_hit, mv, now),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def cleanup_expired_memory(self) -> int:
+        """清理过期记忆记录（memory_value < 0.001 且超过 30 天未命中），返回删除行数。"""
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                """
+                DELETE FROM kb_chunk_memory
+                WHERE memory_value < 0.001
+                  AND (last_hit_at IS NULL OR last_hit_at < datetime('now', '-30 days'))
+                """
+            )
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            conn.close()
+
+    def clear_memory(self) -> None:
+        """清空所有记忆记录（清除索引时调用）。"""
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM kb_chunk_memory")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_sibling_chunks(self, doc_id: str, heading_path: str = "") -> list[dict]:
+        """获取同 doc_id + heading_path 下的所有兄弟 chunk，按 chunk_index 排序。"""
+        conn = self._connect()
+        try:
+            if heading_path:
+                rows = conn.execute(
+                    """
+                    SELECT c.*, v.embedding_json
+                    FROM kb_chunks c
+                    LEFT JOIN kb_vectors v ON v.chunk_id = c.chunk_id
+                    WHERE c.doc_id = ? AND c.heading_path = ?
+                    ORDER BY c.chunk_index ASC
+                    """,
+                    (doc_id, heading_path),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT c.*, v.embedding_json
+                    FROM kb_chunks c
+                    LEFT JOIN kb_vectors v ON v.chunk_id = c.chunk_id
+                    WHERE c.doc_id = ?
+                    ORDER BY c.chunk_index ASC
+                    """,
+                    (doc_id,),
+                ).fetchall()
+            return [self._document_from_row(row, row["embedding_json"]) for row in rows]
+        finally:
+            conn.close()
+
+    def get_all_memory_stats(self) -> dict:
+        """获取记忆表统计指标。"""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as cnt,
+                    COALESCE(AVG(memory_value), 0.0) as avg_val,
+                    SUM(hit_count) as total_hits,
+                    SUM(CASE WHEN memory_value > 0.5 THEN 1 ELSE 0 END) as high_val_cnt
+                FROM kb_chunk_memory
+                """
+            ).fetchone()
+            return {
+                "memory_chunk_count": int(row["cnt"] or 0),
+                "memory_avg_value": round(float(row["avg_val"] or 0.0), 4),
+                "memory_total_hits": int(row["total_hits"] or 0),
+                "memory_high_value_count": int(row["high_val_cnt"] or 0),
+            }
+        finally:
+            conn.close()
+
 
 @router.get("/status")
 async def plugin_status():
@@ -944,6 +1106,25 @@ async def learn_markdown_kb(payload: dict = Body(...)):
     return await plugin.learn(payload)
 
 
+@router.post("/scan-sessions")
+async def scan_sessions_route(payload: dict = Body(...)):
+    """扫描客户端本地会话文件，生成知识并更新记忆。
+
+    请求参数：
+    - since_hours (float): 扫描多久以内的会话，默认 24 小时
+    - max_sessions (int): 最多处理多少个会话，默认 5
+    - learn_enabled (bool): 是否生成 .learn.md 知识，默认 true
+    - memory_enabled (bool): 是否做交叉验证 boost，默认 true
+    """
+    plugin = _get_plugin()
+    return await plugin.scan_sessions(
+        since_hours=float((payload or {}).get("since_hours", 24)),
+        max_sessions=int((payload or {}).get("max_sessions", 5)),
+        learn_enabled=bool((payload or {}).get("learn_enabled", True)),
+        memory_enabled=bool((payload or {}).get("memory_enabled", True)),
+    )
+
+
 @router.post("/clear")
 async def clear_markdown_kb(payload: dict = Body(default={})):
     """清空索引，并可选删除原始 Markdown 文档。"""
@@ -984,6 +1165,9 @@ class Plugin(PluginBase):
         self._file_bindings_path = self._data_root / "file_bindings.json"
         self._doc_manifest_path = self._data_root / "doc_manifest.json"
         self._learn_records_path = self._data_root / "learn_records.json"
+        self._scanned_sessions_path = self._data_root / "scanned_sessions.json"
+        self._organizer_state_path = self._data_root / "organizer_state.json"
+        self._organize_running = False
         self._index_path = self._index_store_dir / "index.json"
         self._docs_dir.mkdir(parents=True, exist_ok=True)
         self._index_store_dir.mkdir(parents=True, exist_ok=True)
@@ -1448,7 +1632,7 @@ class Plugin(PluginBase):
         }
 
     def health_check(self) -> dict:
-        """返回更偏运维视角的健康/漂移信息。"""
+        """返回更偏运维视角的健康/漂移信息，含记忆状态指标。"""
         self._ensure_runtime_ready()
         preview = self.preview_sync()
         summary = preview.get("summary", {})
@@ -1460,11 +1644,19 @@ class Plugin(PluginBase):
         if summary.get("removed", 0) > 0:
             issues.append("存在索引中残留但 docs 中已删除的文件")
 
+        memory_stats = self._store.get_all_memory_stats() or {}
+
         return {
             "ok": True,
             "in_sync": not issues,
             "issues": issues,
             "summary": summary,
+            "memory": {
+                "chunk_count": memory_stats.get("chunk_count", 0),
+                "avg_value": memory_stats.get("avg_value", 0.0),
+                "high_value_count": memory_stats.get("high_value_count", 0),
+                "total_hits": memory_stats.get("total_hits", 0),
+            },
         }
 
     async def rebuild_file(self, file_name: str, workspace_root: str = "", doc_id: str = "") -> dict:
@@ -1503,6 +1695,7 @@ class Plugin(PluginBase):
             "doc_id": entry.get("doc_id") or "",
             "file_name": safe_name,
             "chunk_count": len(chunks),
+            "chunk_ids": [str(c.get("id", "")) for c in chunks],
             "last_rebuilt_at": now,
         }
 
@@ -1787,12 +1980,16 @@ class Plugin(PluginBase):
 
         title = self._resolve_learn_title(learn_result, request)
         quotes = self._normalize_learn_quotes(learn_result.get("quotes"))
+        keywords = [str(k).strip() for k in (learn_result.get("keywords") or []) if str(k).strip()]
+        categories = [str(c).strip() for c in (learn_result.get("categories") or []) if str(c).strip()]
         file_name = self._make_learn_file_name(title, dedupe_key, request)
         markdown_text = self._render_learn_document(
             title=title,
             request=request,
             summary_markdown=summary_markdown,
             quotes=quotes,
+            keywords=keywords,
+            categories=categories,
         )
         saved = self._save_markdown_payload(
             file_name=file_name,
@@ -1805,6 +2002,62 @@ class Plugin(PluginBase):
             doc_id=str(saved.get("doc_id") or ""),
         )
         learned_at = _utc_now_iso()
+
+        # 记忆更新：新 chunk 初始记忆 + 交叉验证存量 chunks
+        new_chunk_ids: list[str] = rebuilt.get("chunk_ids", [])
+        memory_boosted_chunks = 0
+        if settings.get("memory_enabled") and new_chunk_ids and self._store:
+            # 新 chunk 初始记忆值 (learn_new = 0.30)
+            init_batch = {}
+            for cid in new_chunk_ids:
+                init_batch[cid] = {"new_memory": 0.30, "hit_delta": 1, "now": learned_at}
+            self._store.update_memory(init_batch)
+
+            # 交叉验证：用 summary_markdown 检索存量 chunks，排除本次新生成的
+            try:
+                query_vector = await self._get_query_embedding(summary_markdown[:2000], settings["embedding_model"])
+                all_documents = self._store.list_documents()
+                # 排除新生成的 doc 的所有 chunk
+                exclude_doc_id = str(saved.get("doc_id") or "")
+                existing_docs = [d for d in all_documents if str(d.get("doc_id") or "") != exclude_doc_id]
+                if existing_docs:
+                    # 用 sqlite-vec 粗召回
+                    candidates = self._retrieve_candidates_with_sqlite_vec(
+                        query_vector=query_vector,
+                        documents=existing_docs,
+                        top_k=max(settings["top_k"], 4) * 2,
+                        request_workspace=request["workspace_root"],
+                    )
+                    if candidates:
+                        scored = self._score_documents(
+                            "", query_vector, candidates,
+                            semantic_weight=1.0, keyword_weight=0.0, memory_weight=0.0,
+                            category_bonus=0.0, category_list=[],
+                            vector_score_overrides={
+                                str(c.get("id") or ""): _safe_float(c.get("vector_score"), 0.0)
+                                for c in candidates if str(c.get("id") or "")
+                            },
+                        )
+                        # 取向量分 > 0.5 的作为交叉验证命中，排除新 chunk
+                        cross_boost = 0.20
+                        cross_batch = {}
+                        max_score = max((_safe_float(h.get("vector_score"), 0.0) for h in scored), default=1.0) or 1.0
+                        for hit in scored:
+                            vs = _safe_float(hit.get("vector_score"), 0.0)
+                            chunk_id = str(hit.get("id") or "")
+                            if vs >= 0.5 and chunk_id and chunk_id not in new_chunk_ids:
+                                score_ratio = vs / max_score
+                                cross_batch[chunk_id] = {
+                                    "new_memory": cross_boost * score_ratio,
+                                    "hit_delta": 1,
+                                    "now": learned_at,
+                                }
+                                memory_boosted_chunks += 1
+                        if cross_batch:
+                            self._store.update_memory(cross_batch)
+            except Exception:
+                # 交叉验证失败不影响 learn 主流程
+                pass
         learn_records[dedupe_key] = {
             "status": "completed",
             "source": request["source"],
@@ -1828,9 +2081,345 @@ class Plugin(PluginBase):
             "doc_id": str(saved.get("doc_id") or ""),
             "file_name": str(saved.get("file_name") or ""),
             "chunk_count": rebuilt.get("chunk_count", 0),
+            "keywords": keywords,
+            "categories": categories,
+            "memory_new_chunks": len(new_chunk_ids),
+            "memory_boosted_chunks": memory_boosted_chunks,
             "chat_model": settings["chat_model"],
             "learned_at": learned_at,
         }
+
+    # ──────────────────────── Session Scanner ────────────────────────
+
+    async def scan_sessions(
+        self,
+        since_hours: float = 24,
+        max_sessions: int = 5,
+        learn_enabled: bool = True,
+        memory_enabled: bool = True,
+    ) -> dict:
+        """扫描客户端本地会话文件，生成知识并更新记忆。
+
+        支持 Codex 和 Claude Code 两种客户端格式，自动检测并归一化。
+        采用两阶段原子写入：learn dedupe 先落盘，memory 后补。
+        """
+        self._ensure_runtime_ready()
+        settings = self._settings()
+        learn_enabled = learn_enabled and bool(settings.get("memory_enabled"))
+        memory_enabled = memory_enabled and bool(settings.get("memory_enabled"))
+        now = _utc_now_iso()
+
+        # 收集会话文件
+        codex_files = session_scanner.list_codex_sessions(since_hours)[:max_sessions * 2]
+        claude_files = session_scanner.list_claude_sessions(since_hours)[:max_sessions * 2]
+        all_files = codex_files + claude_files
+        all_files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+
+        scanned_records = session_scanner.load_scanned_records(self._data_root)
+        results: list[dict] = []
+        total_learned = 0
+        total_boosted = 0
+
+        for fpath in all_files:
+            if len(results) >= max_sessions:
+                break
+
+            session_data = session_scanner.parse_session_file(fpath)
+            if not session_data or not session_data.get("turns"):
+                continue
+
+            source = session_data["source"]
+            session_id = session_data["session_id"]
+            dedupe_key = f"{source}:{session_id}"
+
+            # 检查是否已处理
+            existing = scanned_records.get(dedupe_key)
+            if isinstance(existing, dict):
+                if session_scanner.needs_memory_update(existing) and memory_enabled:
+                    # 上次 learn 成功但 memory 未完成，补做
+                    boosted = await self._scan_memory_only(session_data, settings)
+                    session_scanner.mark_scanned_memory(scanned_records, dedupe_key, boosted, now)
+                    session_scanner.save_scanned_records(self._data_root, scanned_records)
+                    total_boosted += boosted
+                results.append({
+                    "session_id": session_id,
+                    "source": source,
+                    "deduped": True,
+                    "memory_patch": session_scanner.needs_memory_update(existing) if isinstance(existing, dict) else False,
+                })
+                continue
+
+            # 新会话 → learn + memory
+            doc_count = 0
+            boosted = 0
+            try:
+                doc_count = await self._scan_learn_from_session(session_data, settings) if learn_enabled else 0
+            except Exception as exc:
+                logger.warning("[markdown_kb] 扫描学习失败 %s: %s", fpath.name, exc)
+
+            if learn_enabled and doc_count > 0:
+                session_scanner.mark_scanned_learned(scanned_records, dedupe_key, doc_count, now)
+                session_scanner.save_scanned_records(self._data_root, scanned_records)
+
+            if memory_enabled:
+                try:
+                    boosted = await self._scan_memory_only(session_data, settings)
+                except Exception:
+                    pass
+
+            if learn_enabled and doc_count > 0:
+                session_scanner.mark_scanned_memory(scanned_records, dedupe_key, boosted, now)
+            elif not learn_enabled and boosted > 0:
+                # 只做 memory 的场景
+                session_scanner.mark_scanned_memory(scanned_records, dedupe_key, boosted, now)
+            session_scanner.save_scanned_records(self._data_root, scanned_records)
+
+            total_learned += doc_count
+            total_boosted += boosted
+            results.append({
+                "session_id": session_id,
+                "source": source,
+                "deduped": False,
+                "doc_count": doc_count,
+                "boosted_chunks": boosted,
+            })
+
+        # 更新最后扫描时间
+        scanned_records["_last_scan_at"] = now
+        session_scanner.save_scanned_records(self._data_root, scanned_records)
+
+        return {
+            "ok": True,
+            "scanned": len(results),
+            "total_learned": total_learned,
+            "total_boosted": total_boosted,
+            "results": results,
+        }
+
+    async def _scan_learn_from_session(self, session_data: dict, settings: dict) -> int:
+        """从单个 session 生成知识条目。返回生成的 .learn.md 数量。"""
+        source = session_data["source"]
+        session_id = session_data["session_id"]
+        cwd = session_data.get("cwd", "")
+        turns = session_data.get("turns", [])
+
+        user_msgs = [t for t in turns if t.get("role") == "user"]
+        assistant_msgs = [t for t in turns if t.get("role") == "assistant"]
+
+        if not user_msgs:
+            return 0
+
+        # 构造 learn 兼容的请求对象
+        trigger_phase = "scan"
+        dedupe_key = f"{source}:{session_id}"
+        first_user = str(user_msgs[0].get("text", "")).strip()
+        title_hint = first_user[:80] if first_user else ""
+
+        learn_request = {
+            "source": source,
+            "trigger_phase": trigger_phase,
+            "session_id": session_id,
+            "dedupe_key": dedupe_key,
+            "workspace_root": cwd,
+            "title_hint": title_hint,
+            "user_prompt": first_user,
+            "turn_id": "",
+            "assistant_excerpt": "\n".join(
+                str(m.get("text", "")) for m in assistant_msgs[-3:]
+            )[:4000] if assistant_msgs else "",
+            "conversation_excerpt": turns,
+            "learn_keyword": "扫描入库",
+        }
+
+        # 调用 learn 核心逻辑（跳过幂等检查，由扫描记录管理去重）
+        chat_model = settings["chat_model"]
+        learn_result = await self._generate_learn_summary(learn_request, chat_model)
+        summary_markdown = str(learn_result.get("summary_markdown") or "").strip()
+        should_learn = bool(learn_result.get("should_learn")) and bool(summary_markdown)
+        if not should_learn:
+            return 0
+
+        title = self._resolve_learn_title(learn_result, learn_request)
+        quotes = self._normalize_learn_quotes(learn_result.get("quotes"))
+        keywords = [str(k).strip() for k in (learn_result.get("keywords") or []) if str(k).strip()]
+        categories = [str(c).strip() for c in (learn_result.get("categories") or []) if str(c).strip()]
+        file_name = self._make_learn_file_name(title, dedupe_key, learn_request)
+        markdown_text = self._render_learn_document(
+            title=title, request=learn_request, summary_markdown=summary_markdown,
+            quotes=quotes, keywords=keywords, categories=categories,
+        )
+        saved = self._save_markdown_payload(
+            file_name=file_name, payload=markdown_text.encode("utf-8"), workspace_root=cwd,
+        )
+        rebuilt = await self.rebuild_file(
+            file_name=str(saved.get("file_name") or ""),
+            workspace_root=cwd,
+            doc_id=str(saved.get("doc_id") or ""),
+        )
+        new_chunk_ids = rebuilt.get("chunk_ids", [])
+        if settings.get("memory_enabled") and new_chunk_ids and self._store:
+            init_batch = {}
+            for cid in new_chunk_ids:
+                init_batch[cid] = {"new_memory": 0.30, "hit_delta": 1, "now": _utc_now_iso()}
+            self._store.update_memory(init_batch)
+
+        return 1 if rebuilt.get("chunk_count", 0) > 0 else 0
+
+    async def _scan_memory_only(self, session_data: dict, settings: dict) -> int:
+        """对 session 中的 user questions 做交叉验证 boost，不生成知识。"""
+        turns = session_data.get("turns", [])
+        user_questions = [t.get("text", "").strip() for t in turns if t.get("role") == "user" and t.get("text")]
+        if not user_questions:
+            return 0
+
+        combined = "\n".join(user_questions[:3])[:2000]
+        query_vector = await self._get_query_embedding(combined, settings["embedding_model"])
+        all_documents = self._store.list_documents()
+        if not all_documents:
+            return 0
+
+        candidates = self._retrieve_candidates_with_sqlite_vec(
+            query_vector=query_vector,
+            documents=all_documents,
+            top_k=max(settings["top_k"], 4) * 2,
+            request_workspace=session_data.get("cwd", ""),
+        )
+        if not candidates:
+            return 0
+
+        scored = self._score_documents(
+            "", query_vector, candidates,
+            semantic_weight=1.0, keyword_weight=0.0, memory_weight=0.0,
+            category_bonus=0.0, category_list=[],
+            vector_score_overrides={
+                str(c.get("id") or ""): _safe_float(c.get("vector_score"), 0.0)
+                for c in candidates if str(c.get("id") or "")
+            },
+        )
+        max_score = max((_safe_float(h.get("vector_score"), 0.0) for h in scored), default=1.0) or 1.0
+        scan_boost = 0.15
+        batch = {}
+        for hit in scored:
+            vs = _safe_float(hit.get("vector_score"), 0.0)
+            chunk_id = str(hit.get("id") or "")
+            if vs >= 0.4 and chunk_id:
+                score_ratio = vs / max_score
+                batch[chunk_id] = {"new_memory": scan_boost * score_ratio, "hit_delta": 1, "now": _utc_now_iso()}
+        if batch and self._store:
+            self._store.update_memory(batch)
+        return len(batch)
+
+    async def _trigger_lazy_scan(self) -> None:
+        """惰性后台扫描触发器：距上次扫描超过 30 分钟则异步启动。"""
+        try:
+            data_root = getattr(self, "_data_root", None)
+            if not data_root:
+                return
+            records = session_scanner.load_scanned_records(data_root)
+            last_scan = records.get("_last_scan_at", "")
+            if last_scan:
+                try:
+                    last_dt = datetime.fromisoformat(last_scan.replace("Z", "+00:00"))
+                    elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    if elapsed < 1800:  # 30 分钟
+                        return
+                except (ValueError, TypeError):
+                    pass
+            asyncio.create_task(self.scan_sessions(
+                since_hours=24, max_sessions=3, learn_enabled=False, memory_enabled=True,
+            ))
+        except Exception:
+            pass
+
+    # ======================== 自动整理记忆 ========================
+    def _load_organizer_state(self) -> dict:
+        """加载 organizer 持久化状态。"""
+        path = getattr(self, "_organizer_state_path", None)
+        if not path or not path.exists():
+            return {"message_count": 0, "last_organize_at": ""}
+        try:
+            return json.loads(path.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"message_count": 0, "last_organize_at": ""}
+
+    def _save_organizer_state(self, state: dict) -> None:
+        """保存 organizer 持久化状态。"""
+        path = getattr(self, "_organizer_state_path", None)
+        if not path:
+            return
+        try:
+            path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+        except OSError:
+            pass
+
+    async def _trigger_organize(self) -> None:
+        """自动整理触发器：满足消息计数或定时周期任一条件时异步触发。
+
+        设计说明：
+        1. 每次 `_retrieve` 调用时检查，消息计数 +1；
+        2. 消息数达到 `organize_message_threshold` 或距上次整理超过 `organize_interval_hours` 触发；
+        3. 互斥锁 `_organize_running` 防止重复触发；
+        4. 异步执行，不阻塞检索。
+        """
+        settings = self._settings()
+        msg_threshold = _safe_int(settings.get("organize_message_threshold"), 50)
+        interval_hours = _safe_float(settings.get("organize_interval_hours"), 24.0)
+
+        state = self._load_organizer_state()
+        state["message_count"] = _safe_int(state.get("message_count"), 0) + 1
+
+        should_trigger = False
+        if state["message_count"] >= msg_threshold:
+            should_trigger = True
+        else:
+            last_at = str(state.get("last_organize_at") or "")
+            if last_at:
+                try:
+                    last_dt = datetime.fromisoformat(last_at.replace("Z", "+00:00"))
+                    elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    if elapsed >= interval_hours * 3600:
+                        should_trigger = True
+                except (ValueError, TypeError):
+                    should_trigger = True
+            else:
+                should_trigger = True
+
+        self._save_organizer_state(state)
+
+        if not should_trigger:
+            return
+
+        # 互斥锁：上一次整理未完成则跳过
+        if getattr(self, "_organize_running", False):
+            return
+        self._organize_running = True
+        asyncio.create_task(self._organize())
+
+    async def _organize(self) -> None:
+        """执行一次完整的自动整理：扫描 session → 学习新知识 → 交叉验证存量 → 清理过期记忆。"""
+        try:
+            data_root = getattr(self, "_data_root", None)
+            if not data_root:
+                return
+
+            # 扫描最近 24h 的 session，生成知识 + 更新记忆
+            await self.scan_sessions(
+                since_hours=24, max_sessions=5, learn_enabled=True, memory_enabled=True,
+            )
+
+            # 清理过期记忆
+            if self._store:
+                self._store.cleanup_expired_memory()
+
+            # 重置计数器
+            state = self._load_organizer_state()
+            state["message_count"] = 0
+            state["last_organize_at"] = _utc_now_iso()
+            self._save_organizer_state(state)
+        except Exception:
+            pass
+        finally:
+            self._organize_running = False
 
     def _settings(self) -> dict:
         """统一解析插件配置，并做最基本的类型收敛。"""
@@ -1838,10 +2427,20 @@ class Plugin(PluginBase):
         chunk_size = max(200, _safe_int(cfg.get("chunk_size"), 800))
         chunk_overlap = max(0, min(chunk_size // 2, _safe_int(cfg.get("chunk_overlap"), 120)))
         top_k = max(1, min(10, _safe_int(cfg.get("top_k"), 4)))
-        semantic_weight, keyword_weight = _normalize_weight_pair(
+
+        semantic_weight, keyword_weight, memory_weight = _normalize_weights(
             _safe_float(cfg.get("semantic_weight"), 1.0),
             _safe_float(cfg.get("keyword_weight"), 0.0),
+            _safe_float(cfg.get("memory_weight"), 0.1),
         )
+
+        default_categories = [
+            "技术实现", "业务逻辑", "架构设计", "调试修复", "配置部署", "代码风格",
+        ]
+        category_list = cfg.get("category_list") or default_categories
+        if not isinstance(category_list, list):
+            category_list = default_categories
+
         return {
             "embedding_model": str(cfg.get("embedding_model") or "text-embedding-3-small").strip() or "text-embedding-3-small",
             "reranker_model": str(cfg.get("reranker_model") or "").strip(),
@@ -1851,8 +2450,19 @@ class Plugin(PluginBase):
             "top_k": top_k,
             "semantic_weight": semantic_weight,
             "keyword_weight": keyword_weight,
+            "memory_weight": memory_weight,
             "score_threshold": min(1.0, max(0.0, _safe_float(cfg.get("score_threshold"), 0.7))),
             "document_workspace_root": self._normalize_workspace_root(cfg.get("document_workspace_root") or ""),
+            # 记忆系统配置
+            "memory_enabled": bool(cfg.get("memory_enabled", True)),
+            "memory_boost": _safe_float(cfg.get("memory_boost"), 0.15),
+            "memory_decay_half_life_hours": _safe_float(cfg.get("memory_decay_half_life_hours"), 24.0),
+            # 分类加权配置
+            "category_bonus": _safe_float(cfg.get("category_bonus"), 0.10),
+            "category_list": category_list,
+            # 自动整理记忆配置
+            "organize_interval_hours": _safe_float(cfg.get("organize_interval_hours"), 24.0),
+            "organize_message_threshold": max(1, _safe_int(cfg.get("organize_message_threshold"), 50)),
         }
 
     def _resolve_top_k(self, requested: Any) -> int:
@@ -1874,221 +2484,322 @@ class Plugin(PluginBase):
         self._store.save(data)
 
     def _chunk_markdown_file(self, path: Path, settings: dict, entry: dict | None = None) -> list[dict]:
-        """优先使用 `markdown-chunker` 切分 Markdown 文件。
+        """使用内置标题树切片器切分 Markdown 文件。
 
-        设计说明：
-        1. 默认优先走第三方 `markdown-chunker`，利用它对标题、表格、代码块和列表的结构感知切片；
-        2. 若运行环境尚未安装依赖，或第三方切片过程中抛错，则自动回退到仓库原有的“标题优先 + 段落累计 + 字符级兜底”逻辑；
-        3. 这样既能提升 Markdown 结构保持能力，也不会把插件可用性绑定到外部依赖是否安装成功。
+        采用标题树优先策略，每个标题 section 独立成 chunk，
+        超长 section 按 list 项 → 段落 → 字符级逐级拆分。
+        块级元素（代码块、引用块、表格、HTML）保持完整不可截断。
         """
         text = path.read_text("utf-8")
         entry = self._normalize_doc_entry(entry or self._build_doc_entry(path.name, self._resolve_file_workspace_root(path.name, settings), path.name))
         workspace_root = self._normalize_workspace_root(entry.get("workspace_root") or "")
-        chunk_texts = self._chunk_markdown_text_with_markdown_chunker(text, path, settings)
-        chunks = self._build_chunks_from_texts(path, chunk_texts, workspace_root, entry)
-        if chunks:
-            return chunks
-
-        sections = self._split_into_sections(text, path.stem)
-        chunks = []
-        for section in sections:
-            chunks.extend(self._build_chunks_from_section(path, section, settings, workspace_root, entry))
-        return chunks
-
-    def _chunk_markdown_text_with_markdown_chunker(self, text: str, path: Path, settings: dict) -> list[str]:
-        """使用 `markdown-chunker` 生成结构感知 chunk 文本列表。
-
-        参数映射策略：
-        1. `soft_max_len` 直接沿用现有 `chunk_size`，保持“目标 chunk 大小”的用户心智不变；
-        2. `hard_max_len` 允许在 `chunk_size + chunk_overlap` 范围内稍微放宽，减少为了严格卡长度而切断结构块；
-        3. `min_chunk_len` 使用 `chunk_size - chunk_overlap`，让相邻内容在更接近原先 overlap 语义的前提下尽量被合并。
-
-        注意：
-        `markdown-chunker` 本身并不直接暴露字符级 overlap 选项，因此这里只做“尺寸语义映射”；
-        真正需要字符滑窗兜底时，仍由本地 fallback 逻辑负责。
-        """
-        if MarkdownChunkingStrategy is None:
-            return []
-
         chunk_size = max(200, _safe_int(settings.get("chunk_size"), 800))
         overlap = max(0, _safe_int(settings.get("chunk_overlap"), 120))
-        min_chunk_len = max(200, chunk_size - overlap)
-        hard_max_len = max(chunk_size, chunk_size + overlap)
+        return self._chunk_markdown_tree(text, path, chunk_size, overlap, workspace_root, entry)
 
-        try:
-            strategy = MarkdownChunkingStrategy(
-                min_chunk_len=min_chunk_len,
-                soft_max_len=chunk_size,
-                hard_max_len=hard_max_len,
-                detect_headers_footers=False,
-                remove_duplicates=False,
-                add_metadata=False,
-                document_title=path.stem,
-                source_document=path.name,
-            )
-            chunks = strategy.chunk_markdown(text)
-        except Exception as exc:
-            self.logger.warning("[markdown_kb] markdown-chunker 切片失败，已回退到内置切片器: %s", exc)
-            return []
+    def _chunk_markdown_tree(
+        self,
+        text: str,
+        path: Path,
+        chunk_size: int,
+        overlap: int,
+        workspace_root: str,
+        entry: dict,
+    ) -> list[dict]:
+        """标题树优先切片器。"""
 
-        normalized_chunks = []
-        for item in chunks or []:
-            compact = str(item or "").strip()
-            if compact:
-                normalized_chunks.append(compact)
-        return normalized_chunks
-
-    def _build_chunks_from_texts(self, path: Path, chunk_texts: list[str], workspace_root: str, entry: dict) -> list[dict]:
-        """把纯文本 chunk 列表包装成索引所需的标准 metadata 结构。"""
-        chunks = []
-        for idx, raw_chunk_text in enumerate(chunk_texts):
-            chunk_text = str(raw_chunk_text or "").strip()
-            if not chunk_text:
-                continue
-
-            title, heading_level = self._extract_chunk_heading(chunk_text, path.stem)
-            content_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-            stable_source = f"{path.resolve()}::{idx}::{content_hash}"
-            chunk_id = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()
-            chunks.append({
-                "id": chunk_id,
-                "doc_id": str(entry.get("doc_id") or hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()),
-                "file_name": str(entry.get("file_name") or path.name),
-                "file_path": str(path.resolve()),
-                "workspace_root": workspace_root,
-                "title": title,
-                "heading_level": heading_level,
-                "chunk_index": idx,
-                "chunk_text": chunk_text,
-                "content_hash": content_hash,
-                "created_at": _utc_now_iso(),
-                "updated_at": _utc_now_iso(),
-            })
-        return chunks
-
-    def _extract_chunk_heading(self, chunk_text: str, fallback_title: str) -> tuple[str, int]:
-        """从 chunk 文本中提取首个 Markdown 标题，供检索结果展示来源标题。"""
-        heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-        for line in str(chunk_text or "").splitlines():
-            matched = heading_re.match(line.strip())
-            if matched:
-                return matched.group(2).strip(), len(matched.group(1))
-        return fallback_title, 0
-
-    def _split_into_sections(self, text: str, fallback_title: str) -> list[dict]:
-        """把 Markdown 原文按标题拆成 section。"""
+        # --------------------------- 第 1 步：解析标题树 ---------------------------
+        section_sep_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
         lines = text.splitlines()
-        sections = []
-        current_title = fallback_title
-        current_level = 0
+        root_sections: list[dict] = []
+        stack: list[dict] = [{"level": 0, "children": root_sections}]
         current_lines: list[str] = []
-        heading_re = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 
         for line in lines:
-            matched = heading_re.match(line.strip())
+            matched = section_sep_re.match(line.strip())
             if matched:
-                if current_lines:
-                    sections.append({
-                        "title": current_title,
-                        "heading_level": current_level,
-                        "content": "\n".join(current_lines).strip(),
-                    })
-                current_level = len(matched.group(1))
-                current_title = matched.group(2).strip()
+                level = len(matched.group(1))
+                title = matched.group(2).strip()
+                content_text = "\n".join(current_lines).strip()
                 current_lines = []
+
+                # 将累积内容保存到当前最深节点（即将被弹出的节点）
+                if stack and content_text:
+                    stack[-1]["content"] = content_text
+
+                # 创建新节点
+                node: dict = {
+                    "title": title,
+                    "level": level,
+                    "content": "",
+                    "heading_path": [],
+                    "children": [],
+                }
+
+                # 找到父节点（弹出同层或更深层节点）
+                while stack and stack[-1]["level"] >= level:
+                    stack.pop()
+
+                parent = stack[-1] if stack else {"children": root_sections}
+                parent["children"].append(node)
+                stack.append(node)
                 continue
             current_lines.append(line)
 
-        if current_lines or not sections:
-            sections.append({
-                "title": current_title,
-                "heading_level": current_level,
-                "content": "\n".join(current_lines).strip(),
-            })
-        return sections
+        # 最后一段内容归属于最深节点
+        content_text = "\n".join(current_lines).strip()
+        if stack and content_text:
+            stack[-1]["content"] = content_text
 
-    def _build_chunks_from_section(self, path: Path, section: dict, settings: dict, workspace_root: str, entry: dict) -> list[dict]:
-        """把单个 section 再拆成多个 chunk。"""
-        title = str(section.get("title") or path.stem).strip() or path.stem
-        heading_level = _safe_int(section.get("heading_level"), 0)
-        content = str(section.get("content") or "").strip()
-        chunk_size = settings["chunk_size"]
-        overlap = settings["chunk_overlap"]
+        # --------------------------- 第 2 步：为每个节点计算 heading_path ---------------------------
+        def assign_heading_paths(nodes: list[dict], parent_path: list[str]):
+            for node in nodes:
+                node["heading_path"] = list(parent_path) + [node["title"]]
+                assign_heading_paths(node.get("children", []), node["heading_path"])
 
-        if not content:
-            body_parts = [title]
-        else:
-            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", content) if p.strip()]
-            if not paragraphs:
-                paragraphs = [content]
-            body_parts = self._pack_paragraphs(paragraphs, chunk_size, overlap)
+        assign_heading_paths(root_sections, [])
 
-        chunks = []
-        for idx, body in enumerate(body_parts):
-            chunk_text = title if not body else f"{title}\n\n{body}".strip()
+        # --------------------------- 第 3 步：将树扁平化为 chunk 列表 ---------------------------
+        doc_id = str(entry.get("doc_id") or hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest())
+        max_section_size = chunk_size * 2
+        all_chunks: list[dict] = []
+        chunk_id_counter = 0
+
+        def _make_chunk(lines_body: list[str], h_path: list[str], title: str, level: int) -> dict:
+            nonlocal chunk_id_counter
+            chunk_text = "\n".join(lines_body).strip()
             content_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-            stable_source = f"{path.resolve()}::{idx}::{content_hash}"
+            stable_source = f"{path.resolve()}::{chunk_id_counter}::{content_hash}"
             chunk_id = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()
-            chunks.append({
+            chunk_id_counter += 1
+            # 从 chunk_text 中提取知识分类元数据
+            categories = ""
+            cat_match = re.search(r"\*\*知识分类\*\*[：:]\s*(.+?)(?:\n|$)", chunk_text)
+            if cat_match:
+                categories = cat_match.group(1).strip()
+            return {
                 "id": chunk_id,
-                "doc_id": str(entry.get("doc_id") or hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()),
+                "doc_id": doc_id,
                 "file_name": str(entry.get("file_name") or path.name),
                 "file_path": str(path.resolve()),
                 "workspace_root": workspace_root,
                 "title": title,
-                "heading_level": heading_level,
-                "chunk_index": idx,
+                "heading_level": level,
+                "heading_path": json.dumps(h_path, ensure_ascii=False) if h_path else "",
+                "categories": categories,
+                "chunk_index": chunk_id_counter - 1,
                 "chunk_text": chunk_text,
                 "content_hash": content_hash,
                 "created_at": _utc_now_iso(),
                 "updated_at": _utc_now_iso(),
-            })
-        return chunks
+            }
 
-    def _pack_paragraphs(self, paragraphs: list[str], chunk_size: int, overlap: int) -> list[str]:
-        """优先按段落累计；超出时再退化为字符级切片。"""
-        chunks: list[str] = []
-        current = ""
+        def _is_block_element_start(line: str) -> bool:
+            """检测块级元素起始行（代码块、引用、表格、HTML）。"""
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                return True
+            if stripped.startswith(">"):
+                return True
+            if stripped.startswith("|") and "|" in stripped[1:]:
+                return True
+            if re.match(r"^</?[a-zA-Z]", stripped):
+                return True
+            return False
 
-        for paragraph in paragraphs:
-            if len(paragraph) > chunk_size:
-                if current:
-                    chunks.append(current)
-                    current = ""
-                chunks.extend(self._split_long_text(paragraph, chunk_size, overlap))
-                continue
+        def _is_same_block_element(start_marker: str) -> callable:
+            """返回判断后续行是否属于同一块级元素的函数。"""
+            if start_marker.startswith("```"):
+                lang = start_marker[3:].strip()
+                if lang:
+                    return lambda line, inside: inside or not line.strip().startswith("```")
+                return lambda line, inside: not line.strip().startswith("```") or inside
+            if start_marker.startswith(">"):
+                return lambda line, inside: line.strip().startswith(">") or (inside and line.strip() == "")
+            if start_marker.startswith("|") and "|" in start_marker[1:]:
+                return lambda line, inside: line.strip().startswith("|")
+            if re.match(r"^</?[a-zA-Z]", start_marker):
+                return lambda line, inside: inside and not re.match(r"^</[a-zA-Z]", line.strip())
+            return lambda line, inside: False
 
-            candidate = paragraph if not current else f"{current}\n\n{paragraph}"
-            if len(candidate) <= chunk_size:
-                current = candidate
-                continue
+        def _collect_block_element(lines_list: list[str], start_idx: int) -> tuple[list[str], int]:
+            """从 start_idx 收集完整块级元素，返回 (块内行列表, 结束索引)。"""
+            start_line = lines_list[start_idx].strip()
+            block_lines = [lines_list[start_idx]]
+            checker = _is_same_block_element(start_line)
+            inside = True
+            idx = start_idx + 1
+            while idx < len(lines_list):
+                inside = checker(lines_list[idx], inside)
+                block_lines.append(lines_list[idx])
+                idx += 1
+                if not inside:
+                    break
+            return block_lines, idx
 
-            if current:
-                chunks.append(current)
-            current = paragraph
+        def _is_list_item(line: str) -> bool:
+            """检测是否为顶层 list 项。"""
+            stripped = line.strip()
+            return bool(re.match(r"^[-*+]\s+", stripped)) or bool(re.match(r"^\d+[.)]\s+", stripped))
 
-        if current:
-            chunks.append(current)
-        return chunks
+        def _split_section_into_chunks(section_lines: list[str], h_path: list[str], title: str, level: int):
+            """将单个 section 的行列表拆分为一个或多个 chunk。"""
+            section_text = "\n".join(section_lines).strip()
+            if not section_text:
+                return
 
-    def _split_long_text(self, text: str, chunk_size: int, overlap: int) -> list[str]:
-        """当单段本身过长时，退化为字符级切片。"""
-        compact = text.strip()
-        if not compact:
-            return []
-        if len(compact) <= chunk_size:
-            return [compact]
+            if len(section_text) <= max_section_size:
+                all_chunks.append(_make_chunk(section_lines, h_path, title, level))
+                return
 
-        step = max(1, chunk_size - overlap)
-        parts = []
-        start = 0
-        while start < len(compact):
-            end = min(len(compact), start + chunk_size)
-            parts.append(compact[start:end].strip())
-            if end >= len(compact):
-                break
-            start += step
-        return [item for item in parts if item]
+            # 超长 section —— 三级级联拆分
+            # 第 0 级：块级元素完整性检查
+            i = 0
+            while i < len(section_lines):
+                line = section_lines[i].strip()
+                if _is_block_element_start(line):
+                    block_lines, end_idx = _collect_block_element(section_lines, i)
+                    block_text = "\n".join(block_lines)
+                    if len(block_text) > chunk_size:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"文档 {path.name} 中块级元素（代码块/引用/表格/HTML）超过 chunk_size({chunk_size}字)，请优化源文档",
+                        )
+                    i = end_idx
+                    continue
+                i += 1
+
+            # 第 1 级：分离 list 和非 list 段
+            # 将 section_lines 按 list 项和非 list 段落分组
+            segments: list[tuple[str, list[str]]] = []  # [(type, lines), ...]
+            i = 0
+            while i < len(section_lines):
+                stripped = section_lines[i].strip()
+                if _is_list_item(stripped):
+                    # 收集连续 list 项
+                    list_lines = []
+                    while i < len(section_lines):
+                        stripped_i = section_lines[i].strip()
+                        if _is_list_item(stripped_i):
+                            # 收集单个 list 项（可能多行）
+                            item_lines = [section_lines[i]]
+                            i += 1
+                            while i < len(section_lines) and section_lines[i].strip() and not _is_list_item(section_lines[i].strip()):
+                                if _is_block_element_start(section_lines[i].strip()):
+                                    blk, end = _collect_block_element(section_lines, i)
+                                    item_lines.extend(blk)
+                                    i = end
+                                    continue
+                                item_lines.append(section_lines[i])
+                                i += 1
+                            list_lines.append(("\n".join(item_lines), item_lines))
+                        elif not stripped_i:
+                            list_lines.append(("\n", [section_lines[i]]))
+                            i += 1
+                        else:
+                            break
+                    segments.append(("list", list_lines))
+                else:
+                    # 收集非 list 段落直到遇到 list 项
+                    para_lines = []
+                    while i < len(section_lines):
+                        s = section_lines[i].strip()
+                        if _is_list_item(s):
+                            break
+                        if _is_block_element_start(s):
+                            blk, end = _collect_block_element(section_lines, i)
+                            para_lines.extend(blk)
+                            i = end
+                            continue
+                        para_lines.append(section_lines[i])
+                        i += 1
+                    para_text = "\n".join(para_lines).strip()
+                    if para_text:
+                        segments.append(("para", para_lines))
+            # 将 list 段按 chunk_size 分组打包
+            current_batch_lines: list[str] = []
+            current_batch_length = 0
+
+            for seg_type, seg_data in segments:
+                if seg_type == "para":
+                    # 非 list 段落独立成 chunk
+                    para_text = "\n".join(seg_data).strip()
+                    if para_text:
+                        if len(para_text) > chunk_size:
+                            # 按段落边界再拆
+                            sub_paras = [p.strip() for p in re.split(r"\n\s*\n", para_text) if p.strip()]
+                            for sp in sub_paras:
+                                if len(sp) > chunk_size:
+                                    for part in self._split_long_text(sp, chunk_size, max(0, chunk_size // 4)):
+                                        if part.strip():
+                                            all_chunks.append(_make_chunk([part.strip()], h_path, title, level))
+                                else:
+                                    all_chunks.append(_make_chunk([sp], h_path, title, level))
+                        else:
+                            all_chunks.append(_make_chunk(seg_data, h_path, title, level))
+                    continue
+
+                # seg_type == "list"
+                list_items: list[tuple[str, list[str]]] = seg_data
+                for item_text, item_lines in list_items:
+                    if len(item_text) > chunk_size:
+                        # 单个 list 项超长 → 按段落边界拆分
+                        sub_paras = [p.strip() for p in re.split(r"\n\s*\n", item_text) if p.strip()]
+                        for sp in sub_paras:
+                            if len(sp) > chunk_size:
+                                for part in self._split_long_text(sp, chunk_size, max(0, chunk_size // 4)):
+                                    if part.strip():
+                                        all_chunks.append(_make_chunk([part.strip()], h_path, title, level))
+                            else:
+                                all_chunks.append(_make_chunk([sp], h_path, title, level))
+                        continue
+
+                    candidate_lines = current_batch_lines + item_lines
+                    candidate_len = len("\n".join(candidate_lines))
+                    if candidate_len <= chunk_size:
+                        current_batch_lines = candidate_lines
+                        current_batch_length = candidate_len
+                    else:
+                        if current_batch_lines:
+                            all_chunks.append(_make_chunk(current_batch_lines, h_path, title, level))
+                        current_batch_lines = list(item_lines)
+                        current_batch_length = len(item_text)
+
+                # 排空最后一批
+                if current_batch_lines:
+                    all_chunks.append(_make_chunk(current_batch_lines, h_path, title, level))
+                    current_batch_lines = []
+                    current_batch_length = 0
+
+        def _flatten_section(node: dict):
+            """递归展开标题树节点为 chunk。"""
+            content = (node.get("content") or "").strip()
+            heading_path = node.get("heading_path", [])
+            children = node.get("children", [])
+            title = node.get("title", "")
+            level = node.get("level", 0)
+
+            if content:
+                _split_section_into_chunks(content.splitlines(), heading_path, title, level)
+            elif not children and heading_path:
+                all_chunks.append(_make_chunk([title], heading_path, title, level))
+
+            for child in children:
+                _flatten_section(child)
+
+        for root_node in root_sections:
+            if root_node.get("content") or root_node.get("children"):
+                _flatten_section(root_node)
+
+        if not all_chunks and root_sections:
+            root = root_sections[0]
+            all_chunks.append(_make_chunk([root.get("title", path.stem)], root.get("heading_path", []), root.get("title", path.stem), root.get("level", 0)))
+
+        # 重新分配 chunk_index 确保连续
+        for i, chunk in enumerate(all_chunks):
+            chunk["chunk_index"] = i
+
+        return all_chunks
 
     async def _retrieve(
         self,
@@ -2101,26 +2812,38 @@ class Plugin(PluginBase):
     ) -> list[dict]:
         """执行检索。
 
-        当前采用“两阶段、尽量保守”的策略：
-        1. 第一阶段默认做语义分 + 关键词分的混合召回；
-        2. 但如果配置了 reranker_model，则第一阶段退回纯语义召回，把最终排序权完全交给 rerank；
-        3. 最终统一按 score_threshold 过滤，避免把明显不相关的低分片段继续暴露给 query / ask / 自动注入链路。
+        检索策略：
+        1. 三路融合排序（语义分 + 关键词分 + 记忆分）× 分类加权；
+        2. 若配置 reranker_model，则追加 rerank 替换 score；
+        3. 记忆值 > 0.5 的 chunk 豁免 score_threshold 过滤；
+        4. 命中后按比例更新记忆值（boost = memory_boost × score_ratio）。
         """
         settings = self._settings()
-        query_cache_key = self._query_cache_key(
-            question,
-            top_k,
-            embedding_model,
-            reranker_model,
-            settings["semantic_weight"],
-            settings["keyword_weight"],
-            settings["score_threshold"],
-            project_context,
-            selected_doc,
-        )
-        cached_hits = self._cache_get(self._query_result_cache, query_cache_key)
-        if cached_hits is not None:
-            return list(cached_hits)
+        memory_enabled = bool(settings.get("memory_enabled"))
+
+        # 惰性后台扫描：距上次扫描超过 30 分钟则异步触发（不阻塞检索）
+        if memory_enabled:
+            asyncio.create_task(self._trigger_lazy_scan())
+
+        # 自动整理记忆触发（消息计数 + 定时周期）
+        asyncio.create_task(self._trigger_organize())
+
+        # 记忆启用时跳过缓存（记忆值随时间衰减，缓存会导致 stale score）
+        if not memory_enabled:
+            query_cache_key = self._query_cache_key(
+                question,
+                top_k,
+                embedding_model,
+                reranker_model,
+                settings["semantic_weight"],
+                settings["keyword_weight"],
+                settings["score_threshold"],
+                project_context,
+                selected_doc,
+            )
+            cached_hits = self._cache_get(self._query_result_cache, query_cache_key)
+            if cached_hits is not None:
+                return list(cached_hits)
 
         request_workspace = ""
         if self._has_request_workspace(project_context):
@@ -2154,6 +2877,80 @@ class Plugin(PluginBase):
         candidate_documents = vector_candidates if vector_candidates else documents
         semantic_weight = settings["semantic_weight"]
         keyword_weight = settings["keyword_weight"]
+        memory_weight = settings.get("memory_weight", 0.0)
+        memory_boost = _safe_float(settings.get("memory_boost"), 0.10)
+        memory_half_life = _safe_float(settings.get("memory_decay_half_life_hours"), 24.0)
+        category_bonus = _safe_float(settings.get("category_bonus"), 0.10)
+        category_list = list(settings.get("category_list") or [])
+
+        # 读取记忆表并做时间衰减
+        memory_map: dict[str, float] = {}
+        if memory_enabled and memory_weight > 0:
+            candidate_ids = [str(item.get("id") or "") for item in candidate_documents if str(item.get("id") or "")]
+            if candidate_ids:
+                raw_memory = self._store.read_memory_map(candidate_ids)
+                decay_lambda = math.log(2) / max(memory_half_life, 0.1)
+                now = datetime.now(timezone.utc)
+                for cid, mem_info in (raw_memory or {}).items():
+                    stored = _safe_float(mem_info.get("memory_value"), 0.0)
+                    last_hit = mem_info.get("last_hit_at") or ""
+                    if stored > 0 and last_hit:
+                        try:
+                            last = datetime.fromisoformat(last_hit.replace("Z", "+00:00"))
+                            delta_hours = (now - last).total_seconds() / 3600.0
+                            if delta_hours > 0:
+                                stored = stored * math.exp(-decay_lambda * delta_hours)
+                        except (ValueError, TypeError):
+                            pass
+                    memory_map[cid] = max(0.0, min(1.0, stored))
+
+        # 计算 parent_bonus_map：query 关键词命中 heading_path → 树形加权
+        parent_bonus_map: dict[str, float] = {}
+        if candidate_documents:
+            # 简单分词：非字母数字字符分割 + 中文 2-4 字滑窗
+            q_words = set()
+            q_lower = question.lower()
+            for token in re.split(r"[^a-z0-9\u4e00-\u9fff]+", q_lower):
+                if not token:
+                    continue
+                if re.search(r"[\u4e00-\u9fff]", token):
+                    for win_size in (2, 3, 4):
+                        for i in range(len(token) - win_size + 1):
+                            q_words.add(token[i:i + win_size])
+                elif len(token) >= 2:
+                    q_words.add(token)
+            if q_words:
+                for item in candidate_documents:
+                    chunk_id = str(item.get("id") or "")
+                    heading_path_str = str(item.get("heading_path") or "")
+                    if not heading_path_str or not chunk_id:
+                        continue
+                    try:
+                        h_path = json.loads(heading_path_str)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not isinstance(h_path, list) or not h_path:
+                        continue
+                    bonus = 0.0
+                    for level_idx, heading_title in enumerate(h_path):
+                        h_lower = str(heading_title).lower()
+                        h_words = set()
+                        for token in re.split(r"[^a-z0-9\u4e00-\u9fff]+", h_lower):
+                            if not token:
+                                continue
+                            if re.search(r"[\u4e00-\u9fff]", token):
+                                for ws in (2, 3, 4):
+                                    for i in range(len(token) - ws + 1):
+                                        h_words.add(token[i:i + ws])
+                            elif len(token) >= 2:
+                                h_words.add(token)
+                        if h_words & q_words:
+                            if level_idx == 0:
+                                bonus = max(bonus, 0.05)
+                            elif level_idx == 1:
+                                bonus = max(bonus, 0.10)
+                    if bonus > 0:
+                        parent_bonus_map[chunk_id] = bonus
 
         scored = self._score_documents(
             question,
@@ -2166,19 +2963,165 @@ class Plugin(PluginBase):
                 for item in vector_candidates
                 if str(item.get("id") or "")
             } if vector_candidates else None,
+            memory_weight=memory_weight,
+            memory_map=memory_map,
+            category_bonus=category_bonus,
+            category_list=category_list,
+            parent_bonus_map=parent_bonus_map,
         )
 
         scored.sort(key=lambda item: item["score"], reverse=True)
         candidates = scored[:max(top_k, min(12, len(scored)))]
         if reranker_model and candidates:
             candidates = await self._rerank_hits(question, candidates, reranker_model)
+
+        # score_threshold 过滤 + 记忆豁免
         score_threshold = settings["score_threshold"]
-        filtered = [item for item in candidates if _safe_float(item.get("score"), 0.0) >= score_threshold]
+        filtered: list[dict] = []
+        for item in candidates:
+            chunk_id = str(item.get("id") or "")
+            mem_val = memory_map.get(chunk_id, 0.0)
+            score = _safe_float(item.get("score"), 0.0)
+            # 记忆豁免：被多次验证过的有价值 chunk 即使 rerank 分略低也保留
+            if mem_val > 0.5 or score >= score_threshold:
+                filtered.append(item)
+
         if not self._has_request_workspace(project_context):
             filtered = self._prefer_project_hits(filtered, project_context)
-        final_hits = filtered[:top_k]
-        self._cache_set(self._query_result_cache, query_cache_key, list(final_hits), max_items=64)
-        return final_hits
+
+        # 分片合并：同 doc_id 的兄弟 chunk 合并为一个完整文档结果
+        merged = self._merge_sibling_hits(filtered, top_k)
+
+        # 更新记忆：按合并后 score 比例做 boost
+        if memory_enabled and memory_boost > 0 and merged:
+            max_score = max((_safe_float(h.get("score"), 0.0) for h in merged), default=0.01)
+            now_iso = _utc_now_iso()
+            decay_lambda = math.log(2) / max(memory_half_life, 0.1)
+            memory_updates: dict[str, dict] = {}
+            for hit in merged:
+                chunk_id = str(hit.get("id") or "")
+                if not chunk_id:
+                    continue
+                score_ratio = _safe_float(hit.get("score"), 0.0) / max(max_score, 0.01)
+                old_memory = memory_map.get(chunk_id, 0.0)
+                boost = memory_boost * score_ratio
+                new_memory = min(1.0, old_memory + boost * (1.0 - old_memory))
+                memory_updates[chunk_id] = {
+                    "memory_value": new_memory,
+                    "hit_count_delta": 1,
+                    "last_hit_at": now_iso,
+                }
+                # 合并结果可能包含兄弟 chunks，全部做 boost
+                for sibling_id in (hit.get("sibling_ids") or []):
+                    if sibling_id not in memory_updates:
+                        sib_old = memory_map.get(sibling_id, 0.0)
+                        sib_new = min(1.0, sib_old + boost * (1.0 - sib_old))
+                        memory_updates[sibling_id] = {
+                            "memory_value": sib_new,
+                            "hit_count_delta": 1,
+                            "last_hit_at": now_iso,
+                        }
+            if memory_updates:
+                self._store.update_memory(memory_updates)
+                self._store.cleanup_expired_memory()
+
+        # 仅非记忆模式缓存（记忆模式下分数有漂移）
+        if not memory_enabled:
+            self._cache_set(self._query_result_cache, query_cache_key, list(merged), max_items=64)
+
+        return merged
+
+    def _merge_sibling_hits(self, hits: list[dict], top_k: int) -> list[dict]:
+        """将同 doc_id 的兄弟 chunk 合并为一个完整文档结果。
+
+        设计说明：
+        1. 同一文档被切片后，不同 chunk 语义关联断裂 —— 检索阶段做合并；
+        2. 按 chunk_index 排序拼接所有兄弟 chunk 的文本；
+        3. score 取所有合并 chunk 中的最高分；
+        4. 多候选属于同一文档时去重合并为一条结果；
+        5. heading_path[0] 作为展示前缀。
+        """
+        if not hits:
+            return []
+
+        # 按 doc_id 分组
+        doc_groups: dict[str, list[dict]] = {}
+        for hit in hits:
+            doc_id = str(hit.get("doc_id") or "")
+            if not doc_id:
+                continue
+            if doc_id not in doc_groups:
+                doc_groups[doc_id] = []
+            doc_groups[doc_id].append(hit)
+
+        merged_results: list[dict] = []
+        for doc_id, group_hits in doc_groups.items():
+            # 取一个样本 hit 获取元信息
+            sample = group_hits[0]
+            file_name = sample.get("file_name", "")
+            workspace_root = sample.get("workspace_root", "")
+
+            try:
+                siblings = self._store.get_sibling_chunks(doc_id)
+            except Exception:
+                # get_sibling_chunks 内部可能报错，此时按 chunk_index 排序已有的 hits
+                group_hits.sort(key=lambda h: _safe_int(h.get("chunk_index"), 0))
+                siblings = [{k: h[k] for k in h if k in ("id", "chunk_index", "chunk_text", "doc_id", "title", "heading_level", "heading_path", "categories") if k in h} for h in group_hits]
+
+            if not siblings:
+                # 只用已有 hits
+                siblings = [{k: h[k] for k in h if k in ("id", "chunk_index", "chunk_text", "doc_id", "title", "heading_level", "heading_path", "categories") if k in h} for h in group_hits]
+
+            # 按 chunk_index 排序并拼接文本
+            siblings.sort(key=lambda c: _safe_int(c.get("chunk_index"), 0))
+            merged_text_parts = [str(c.get("chunk_text") or "") for c in siblings if str(c.get("chunk_text") or "").strip()]
+            merged_text = "\n\n".join(merged_text_parts)
+            if not merged_text:
+                continue
+
+            # score 取所有关联 chunks 中的最高分
+            max_score = max((_safe_float(h.get("score"), 0.0) for h in group_hits), default=0.0)
+
+            # heading_path 前缀提取
+            heading_path = sample.get("heading_path", "")
+            display_prefix = ""
+            if heading_path:
+                try:
+                    path_parts = json.loads(heading_path)
+                    if isinstance(path_parts, list) and path_parts:
+                        display_prefix = " > ".join(str(p) for p in path_parts)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            sibling_ids = [str(c.get("id") or "") for c in siblings]
+
+            merged_results.append({
+                "score": max_score,
+                "hybrid_score": sample.get("hybrid_score", max_score),
+                "vector_score": sample.get("vector_score", 0.0),
+                "keyword_score": sample.get("keyword_score", 0.0),
+                "rerank_score": sample.get("rerank_score"),  # 透传 rerank 分（若有）
+                "memory_score": sample.get("memory_score", 0.0),
+                "category_multiplier": sample.get("category_multiplier", 1.0),
+                "parent_bonus": sample.get("parent_bonus", 0.0),
+                "id": sample.get("id", ""),
+                "doc_id": doc_id,
+                "file_name": file_name,
+                "title": display_prefix or str(sample.get("title") or "") or file_name,
+                "heading_level": sample.get("heading_level", 0),
+                "heading_path": heading_path,
+                "chunk_index": sample.get("chunk_index"),
+                "chunk_text": merged_text,
+                "content_hash": sample.get("content_hash", ""),
+                "workspace_root": workspace_root,
+                "categories": sample.get("categories", ""),
+                "sibling_ids": sibling_ids,
+                "merged_from": len(siblings),
+            })
+
+        # 按 score 降序排序，取 top_k
+        merged_results.sort(key=lambda item: _safe_float(item.get("score"), 0.0), reverse=True)
+        return merged_results[:top_k]
 
     def _retrieve_candidates_with_sqlite_vec(
         self,
@@ -2196,7 +3139,7 @@ class Plugin(PluginBase):
         """
         if not documents:
             return []
-        candidate_limit = min(max(12, top_k * 4), max(len(documents), top_k))
+        candidate_limit = min(max(12, top_k * 6), max(len(documents), top_k))
         rows = self._store.search_by_vector(
             query_vector=query_vector,
             limit=candidate_limit,
@@ -2508,17 +3451,56 @@ class Plugin(PluginBase):
         semantic_weight: float,
         keyword_weight: float,
         vector_score_overrides: dict[str, float] | None = None,
+        memory_weight: float = 0.0,
+        memory_map: dict[str, float] | None = None,
+        category_bonus: float = 0.0,
+        category_list: list[str] | None = None,
+        parent_bonus_map: dict[str, float] | None = None,
     ) -> list[dict]:
         """根据 query 为当前文档集合计算混合分。
 
         打分策略：
         1. `vector_score`：向量余弦相似度，负责语义召回；
         2. `keyword_score`：问题词在标题 / chunk 文本中的覆盖度与短语命中分，负责精确词补强；
-        3. `hybrid_score`：两者按配置权重归一化后的线性组合；
-        4. `score`：第一阶段默认等于 `hybrid_score`；若后续启用 rerank，则会在 `_rerank_hits()` 中被重写为 rerank 分。
-
-        这样 query / ask 的结果里会同时保留各阶段分数，便于后续观察为什么某个 chunk 被召回。
+        3. `memory_score`：艾宾浩斯衰减后的记忆值，负责长期验证；
+        4. `parent_bonus`：query 关键词命中 heading_path 时的树形加权；
+        5. `category_multiplier`：query 分类与 chunk 分类的重叠加成；
+        6. `hybrid_score`：(v×sem + kw×kw + mem×mw + parent_bonus) × cat_mult。
         """
+        parent_bonus_map = parent_bonus_map or {}
+        # 计算记忆分映射
+        memory_map = memory_map or {}
+        decay_lambda = math.log(2) / 24.0
+        now = _utc_now_iso()
+
+        def _get_memory(chunk_id: str) -> float:
+            stored = memory_map.get(chunk_id, 0.0)
+            if stored <= 0:
+                return 0.0
+            return stored  # 已衰减的值由 _retrieve 预处理
+
+        def _get_parent_bonus(chunk_id: str) -> float:
+            return _safe_float(parent_bonus_map.get(chunk_id), 0.0)
+
+        # 检测 query 涉及的分类
+        category_list = category_list or []
+        query_categories: list[str] = []
+        if category_bonus > 0 and category_list:
+            q_lower = question.lower()
+            for cat in category_list:
+                if any(word.lower() in q_lower for word in cat.split()):
+                    query_categories.append(cat)
+
+        def _get_category_multiplier(chunk_categories_str: str) -> float:
+            if not query_categories or category_bonus <= 0:
+                return 1.0
+            chunk_cats = [c.strip() for c in (chunk_categories_str or "").split(",") if c.strip()]
+            overlap = len(set(chunk_cats) & set(query_categories))
+            if not overlap:
+                return 1.0
+            ratio = overlap / len(query_categories)
+            return 1.0 + category_bonus * ratio
+
         if vector_score_overrides:
             keyword_scores = self._score_keywords(question, documents)
             scored = []
@@ -2531,6 +3513,10 @@ class Plugin(PluginBase):
                         keyword_scores[idx],
                         semantic_weight,
                         keyword_weight,
+                        memory_weight=memory_weight,
+                        memory_score=_get_memory(chunk_id),
+                        category_multiplier=_get_category_multiplier(str(item.get("categories") or "")),
+                        parent_bonus=_get_parent_bonus(chunk_id),
                     )
                 )
             return scored
@@ -2551,6 +3537,10 @@ class Plugin(PluginBase):
                         keyword_scores[idx],
                         semantic_weight,
                         keyword_weight,
+                        memory_weight=memory_weight,
+                        memory_score=_get_memory(str(item.get("id") or "")),
+                        category_multiplier=_get_category_multiplier(str(item.get("categories") or "")),
+                        parent_bonus=_get_parent_bonus(str(item.get("id") or "")),
                     )
                     for idx, item in enumerate(documents)
                 ]
@@ -2558,6 +3548,7 @@ class Plugin(PluginBase):
         scored = []
         for idx, item in enumerate(documents):
             embedding = item.get("embedding") or []
+            chunk_id = str(item.get("id") or "")
             scored.append(
                 self._build_scored_hit(
                     item,
@@ -2565,6 +3556,10 @@ class Plugin(PluginBase):
                     keyword_scores[idx],
                     semantic_weight,
                     keyword_weight,
+                    memory_weight=memory_weight,
+                    memory_score=_get_memory(chunk_id),
+                    category_multiplier=_get_category_multiplier(str(item.get("categories") or "")),
+                    parent_bonus=_get_parent_bonus(chunk_id),
                 )
             )
         return scored
@@ -2576,20 +3571,41 @@ class Plugin(PluginBase):
         keyword_score: float,
         semantic_weight: float,
         keyword_weight: float,
+        memory_weight: float = 0.0,
+        memory_score: float = 0.0,
+        category_multiplier: float = 1.0,
+        parent_bonus: float = 0.0,
     ) -> dict:
-        """把单条文档命中组装为带多路分数的统一结构。"""
-        hybrid_score = (vector_score * semantic_weight) + (keyword_score * keyword_weight)
+        """把单条文档命中组装为带多路分数的统一结构。
+
+        分数公式：
+        (v×sem + kw×kw + mem×mw + parent_bonus) × category_multiplier
+        """
+        hybrid_score = (
+            (vector_score * semantic_weight)
+            + (keyword_score * keyword_weight)
+            + (memory_score * memory_weight)
+            + parent_bonus
+        ) * category_multiplier
         return {
             "score": hybrid_score,
             "hybrid_score": hybrid_score,
             "vector_score": vector_score,
             "keyword_score": keyword_score,
+            "memory_score": memory_score,
+            "category_multiplier": category_multiplier,
+            "parent_bonus": parent_bonus,
             "id": item.get("id"),
+            "doc_id": item.get("doc_id", ""),
             "file_name": item.get("file_name"),
             "title": item.get("title"),
+            "heading_level": item.get("heading_level", 0),
+            "heading_path": item.get("heading_path", ""),
             "chunk_index": item.get("chunk_index"),
             "chunk_text": item.get("chunk_text"),
             "content_hash": item.get("content_hash"),
+            "workspace_root": item.get("workspace_root", ""),
+            "categories": item.get("categories", ""),
         }
 
     def _score_keywords(self, question: str, documents: list[dict]) -> list[float]:
@@ -3317,6 +4333,8 @@ class Plugin(PluginBase):
             "JSON 字段固定为："
             "should_learn(boolean), "
             "title(string), "
+            "keywords(array[string], 3-8个核心中文/英文关键词，用于增强检索匹配度，提取文中核心概念和技术名词), "
+            "categories(array[string], 从以下类别中选择 1-3 个最匹配的: 技术实现、业务逻辑、架构设计、调试修复、配置部署、代码风格), "
             "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含“关键原话摘录”标题), "
             "quotes(array[string]，最多 3 条关键原话摘录)。"
         )
@@ -3463,8 +4481,16 @@ class Plugin(PluginBase):
             safe_title = "learn"
         return f"{date_prefix}-{short_hash}-{safe_title}.learn.md"
 
-    def _render_learn_document(self, title: str, request: dict, summary_markdown: str, quotes: list[str]) -> str:
-        """把结构化学习结果包装成最终落盘的 Markdown 文档。"""
+    def _render_learn_document(
+        self, title: str, request: dict, summary_markdown: str, quotes: list[str],
+        keywords: list[str] | None = None, categories: list[str] | None = None,
+    ) -> str:
+        """把结构化学习结果包装成最终落盘的 Markdown 文档。
+
+        新模板一个 .learn.md 就是一个知识点（一个 chunk）：
+        - H2 标题改为粗体，避免切片器按标题拆分
+        - 新增关联关键词和知识分类元数据行
+        """
         source_label = {
             "codex": "Codex",
             "claude_code": "Claude Code",
@@ -3472,28 +4498,40 @@ class Plugin(PluginBase):
         lines = [
             f"# {title}",
             "",
+        ]
+        # 关联关键词（chat 模型自动生成，用于增强 BM25 和语义检索匹配度）
+        if keywords:
+            lines.append(f"**关联关键词**：{', '.join(str(k).strip() for k in keywords if str(k).strip())}")
+            lines.append("")
+        # 知识分类（chat 模型自动归类：技术实现/业务逻辑/架构设计/调试修复/配置部署/代码风格）
+        if categories:
+            lines.append(f"**知识分类**：{', '.join(str(c).strip() for c in categories if str(c).strip())}")
+            lines.append("")
+        lines.extend([
             f"- 来源：{source_label}",
             f"- 触发阶段：{request['trigger_phase']}",
             f"- 工作区：{request['workspace_root'] or '未提供'}",
             f"- 会话 ID：{request['session_id']}",
-        ]
-        if request["turn_id"]:
+        ])
+        if request.get("turn_id"):
             lines.append(f"- 轮次 ID：{request['turn_id']}")
         lines.extend([
             f"- 记录时间：{_utc_now_iso()}",
             "",
-            "## 知识摘要",
+            "---",
+            "",
+            "**知识摘要**",
             "",
             summary_markdown.strip(),
         ])
         if quotes:
             lines.extend([
                 "",
-                "## 关键原话摘录",
+                "**关键原话摘录**",
                 "",
             ])
             for quote in quotes:
-                lines.append(f"> {quote}")
+                lines.append(f'- "{quote}"')
                 lines.append("")
             if lines and not lines[-1].strip():
                 lines.pop()
