@@ -277,6 +277,74 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
+    /* ── 工作区分组 ── */
+    .ws-group {
+      border: 1px solid var(--line);
+      background: var(--panel-soft);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .ws-group-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      cursor: pointer;
+      user-select: none;
+      gap: 10px;
+    }
+
+    .ws-group-header:hover {
+      background: rgba(255,255,255,0.02);
+    }
+
+    .ws-group-label {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .ws-group-toggle {
+      font-size: 10px;
+      color: var(--muted);
+      transition: transform 0.15s;
+    }
+
+    .ws-group-toggle.open {
+      transform: rotate(90deg);
+    }
+
+    .ws-group-stats {
+      display: flex;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    .ws-group-body {
+      display: none;
+      padding: 0 12px 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .ws-group-body.open {
+      display: block;
+    }
+
+    .ws-file {
+      border: 1px solid var(--line);
+      background: var(--panel-soft-2);
+      border-radius: 10px;
+      padding: 10px;
+      margin-top: 8px;
+    }
+
     .empty {
       border: 1px dashed var(--line);
       border-radius: 12px;
@@ -358,6 +426,109 @@
       .page { padding: 14px 10px 28px; }
       .metrics { grid-template-columns: 1fr; }
       .file-head, .result-head { flex-direction: column; }
+    }
+
+    /* ── 记忆面板样式 ── */
+    .memory-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      line-height: 1.5;
+      margin-top: 10px;
+    }
+
+    .memory-table th,
+    .memory-table td {
+      padding: 6px 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+
+    .memory-table th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .memory-table td {
+      color: var(--text);
+    }
+
+    .memory-table .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .memory-bar-wrap {
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--panel-soft-2);
+      overflow: hidden;
+      margin-top: 2px;
+    }
+
+    .memory-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--success));
+      transition: width 0.3s ease;
+    }
+
+    .memory-chunks-list {
+      display: grid;
+      gap: 6px;
+      max-height: 420px;
+      overflow-y: auto;
+      margin-top: 10px;
+    }
+
+    .memory-chunk-item {
+      border: 1px solid var(--line);
+      background: var(--panel-soft);
+      border-radius: 10px;
+      padding: 9px 10px;
+      font-size: 12px;
+    }
+
+    .memory-chunk-meta {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 4px;
+    }
+
+    .memory-chunk-preview {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+      word-break: break-word;
+      margin-top: 4px;
+    }
+
+    .memory-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+
+    .memory-tab {
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .memory-tab.active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
     }
   </style>
 </head>
@@ -444,6 +615,59 @@
     </section>
 
     <section class="section-grid">
+      <div class="card span-12">
+        <h2>记忆可视化</h2>
+        <p class="lead">展示记忆系统的运行状态，包括总体统计、按文档聚合的记忆分布和高记忆 chunk 详情。</p>
+        <div class="metrics" id="memory-summary-metrics">
+          <div class="metric">
+            <div class="metric-label">记忆 Chunk 数</div>
+            <div class="metric-value" id="memory-chunk-count">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">平均记忆值</div>
+            <div class="metric-value" id="memory-avg-value">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">总命中次数</div>
+            <div class="metric-value" id="memory-total-hits">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">高记忆 Chunk (>0.5)</div>
+            <div class="metric-value" id="memory-high-count">-</div>
+          </div>
+        </div>
+        <div class="memory-tabs">
+          <button class="memory-tab active" id="memory-tab-doc" type="button">按文档统计</button>
+          <button class="memory-tab" id="memory-tab-top" type="button">Top 高记忆 Chunk</button>
+        </div>
+        <div id="memory-doc-table-wrap">
+          <table class="memory-table" id="memory-doc-table">
+            <thead>
+              <tr>
+                <th>文档</th>
+                <th>Chunk 数</th>
+                <th>平均记忆</th>
+                <th>最高记忆</th>
+                <th>命中次数</th>
+                <th>记忆条</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="memory-doc-empty" class="empty" style="display:none;">暂无记忆数据。</div>
+        </div>
+        <div id="memory-top-wrap" style="display:none;">
+          <div class="memory-chunks-list" id="memory-top-list"></div>
+          <div id="memory-top-empty" class="empty" style="display:none;">暂无高记忆 chunk。</div>
+        </div>
+        <div class="actions">
+          <button class="button secondary" id="memory-refresh-btn" type="button">刷新记忆统计</button>
+        </div>
+        <div class="status" id="memory-status"></div>
+      </div>
+    </section>
+
+    <section class="section-grid">
       <div class="card span-4">
         <h2>上传文档</h2>
         <p class="lead">支持一次选择多个 `.md` 文件并批量上传到本地知识库目录。上传只负责保存文件，不会自动重建索引。</p>
@@ -485,28 +709,14 @@
 
       <div class="card span-8">
         <h2>检索测试</h2>
-        <p class="lead">这里直接调用 `POST /api/markdown-kb/query`。`embedding_model` 是必填项；`reranker_model` 是可选项。现在还支持通过 workspace 下拉显式指定检索范围；如果不选 workspace，则继续按请求里的 `workspace` 语义决定“公共文档 + 当前工作域文档”的检索范围。建议先看命中的 chunk 是否合理，再决定是否继续调优切片规则或 `top_k`。</p>
+        <p class="lead">直接调用 <code>POST /api/markdown-kb/query</code>，使用插件配置的默认参数。通过 workspace 下拉显式指定检索范围；不选则按请求上下文决定。</p>
         <div class="field">
           <label for="query-question">问题</label>
           <textarea id="query-question" placeholder="例如：这个插件的重建索引应该在什么时候执行？"></textarea>
         </div>
-        <div class="section-grid" style="margin-bottom:0;">
-          <div class="field span-6">
-            <label for="query-top-k">top_k</label>
-            <input id="query-top-k" type="number" min="1" max="10" value="4">
-          </div>
-          <div class="field span-6">
-            <label for="query-embedding-model">Embedding 模型</label>
-            <select id="query-embedding-model" class="select"></select>
-          </div>
-          <div class="field span-6">
-            <label for="query-reranker-model">Reranker 模型</label>
-            <select id="query-reranker-model" class="select"></select>
-          </div>
-          <div class="field span-6">
-            <label for="query-workspace-select">Workspace 范围</label>
-            <select id="query-workspace-select" class="select"></select>
-          </div>
+        <div class="field">
+          <label for="query-workspace-select">Workspace 范围</label>
+          <select id="query-workspace-select" class="select"></select>
         </div>
         <div class="actions">
           <button class="button" id="query-btn" type="button">执行检索</button>
@@ -519,32 +729,14 @@
     <section class="section-grid">
       <div class="card span-12">
         <h2>问答测试</h2>
-        <p class="lead">这里直接调用 `POST /api/markdown-kb/ask`，会先检索知识库片段，再通过 AKM 本地代理生成最终答案，并把引用结果一起返回。`embedding_model` 是必填项，`reranker_model` 是可选项；默认显示 `gpt-4o-mini`，是因为插件配置里的 `chat_model` 默认值就是它；现在这里已经支持直接从当前模型列表中选择覆盖，也支持通过 workspace 下拉收窄引用范围；如果不选 workspace，则继续按请求里的 `workspace` 语义决定检索范围。</p>
+        <p class="lead">直接调用 <code>POST /api/markdown-kb/ask</code>，使用插件配置的默认参数（embedding / chat / reranker）。通过 workspace 下拉收窄引用范围；不选则按请求上下文决定。</p>
         <div class="field">
           <label for="ask-question">问题</label>
           <textarea id="ask-question" placeholder="例如：这个知识库后期动态维护最推荐先做什么？"></textarea>
         </div>
-        <div class="section-grid" style="margin-bottom:0;">
-          <div class="field span-4">
-            <label for="ask-top-k">top_k</label>
-            <input id="ask-top-k" type="number" min="1" max="10" value="4">
-          </div>
-          <div class="field span-4">
-            <label for="ask-embedding-model">Embedding 模型</label>
-            <select id="ask-embedding-model" class="select"></select>
-          </div>
-          <div class="field span-4">
-            <label for="ask-chat-model">问答模型</label>
-            <select id="ask-chat-model" class="select"></select>
-          </div>
-          <div class="field span-4">
-            <label for="ask-reranker-model">Reranker 模型</label>
-            <select id="ask-reranker-model" class="select"></select>
-          </div>
-          <div class="field span-4">
-            <label for="ask-workspace-select">Workspace 范围</label>
-            <select id="ask-workspace-select" class="select"></select>
-          </div>
+        <div class="field">
+          <label for="ask-workspace-select">Workspace 范围</label>
+          <select id="ask-workspace-select" class="select"></select>
         </div>
         <div class="actions">
           <button class="button" id="ask-btn" type="button">执行问答</button>
@@ -598,19 +790,12 @@
     const rebuildStatus = document.getElementById('rebuild-status');
 
     const queryQuestion = document.getElementById('query-question');
-    const queryTopK = document.getElementById('query-top-k');
-    const queryEmbeddingModel = document.getElementById('query-embedding-model');
-    const queryRerankerModel = document.getElementById('query-reranker-model');
     const queryWorkspaceSelect = document.getElementById('query-workspace-select');
     const queryBtn = document.getElementById('query-btn');
     const queryStatus = document.getElementById('query-status');
     const queryResults = document.getElementById('query-results');
 
     const askQuestion = document.getElementById('ask-question');
-    const askTopK = document.getElementById('ask-top-k');
-    const askEmbeddingModel = document.getElementById('ask-embedding-model');
-    const askChatModel = document.getElementById('ask-chat-model');
-    const askRerankerModel = document.getElementById('ask-reranker-model');
     const askWorkspaceSelect = document.getElementById('ask-workspace-select');
     const askBtn = document.getElementById('ask-btn');
     const askStatus = document.getElementById('ask-status');
@@ -698,62 +883,16 @@
       }
     }
 
-    function renderTestModelOptions(selectNode, pluginDefaultValue, labelPrefix) {
-      const options = [];
-      const defaultValue = String(pluginDefaultValue || '').trim();
-      const prefix = labelPrefix || '跟随插件默认模型';
-      const defaultLabel = defaultValue
-        ? (prefix + '（当前：' + defaultValue + '）')
-        : (prefix + '（当前未设置）');
-
-      options.push('<option value="__default__">' + escapeHtml(defaultLabel) + '</option>');
-      availableModels.forEach(function (model) {
-        options.push('<option value="' + escapeHtml(model) + '">' + escapeHtml(model) + '</option>');
-      });
-      selectNode.innerHTML = options.join('');
-      selectNode.value = '__default__';
-    }
-
-    function resolveTestModelPayloadValue(selectNode) {
-      const raw = String(selectNode && selectNode.value || '').trim();
-      if (!raw || raw === '__default__') {
-        return undefined;
-      }
-      return raw;
-    }
-
-    function renderTestRerankerOptions(selectNode, pluginDefaultValue) {
-      const options = [];
-      const defaultValue = String(pluginDefaultValue || '').trim();
-      const defaultLabel = defaultValue
-        ? ('跟随插件默认 reranker（当前：' + defaultValue + '）')
-        : '跟随插件默认 reranker（当前未启用）';
-
-      options.push('<option value="__default__">' + escapeHtml(defaultLabel) + '</option>');
-      options.push('<option value="__disabled__">不启用 rerank</option>');
-
-      availableModels.forEach(function (model) {
-        options.push('<option value="' + escapeHtml(model) + '">' + escapeHtml(model) + '</option>');
-      });
-
-      selectNode.innerHTML = options.join('');
-      selectNode.value = '__default__';
-    }
-
-    function resolveTestRerankerPayloadValue(selectNode) {
-      const raw = String(selectNode && selectNode.value || '').trim();
-      if (!raw || raw === '__default__') {
-        return undefined;
-      }
-      if (raw === '__disabled__') {
-        return '';
-      }
-      return raw;
-    }
-
     function formatWorkspaceLabel(workspaceRoot) {
       const normalized = String(workspaceRoot || '').trim();
       return normalized || '公共文档';
+    }
+
+    function formatBytes(bytes) {
+      const num = Number(bytes || 0);
+      if (num < 1024) return num + ' B';
+      if (num < 1024 * 1024) return (num / 1024).toFixed(1) + ' KB';
+      return (num / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
     function renderWorkspaceScopeOptions(selectNode, files) {
@@ -804,11 +943,7 @@
       configSemanticWeight.value = String(pluginConfig.semantic_weight == null ? 1 : pluginConfig.semantic_weight);
       configKeywordWeight.value = String(pluginConfig.keyword_weight == null ? 0 : pluginConfig.keyword_weight);
 
-      renderTestModelOptions(queryEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
-      renderTestRerankerOptions(queryRerankerModel, pluginConfig.reranker_model || '');
-      renderTestModelOptions(askEmbeddingModel, pluginConfig.embedding_model || '', '跟随插件默认 embedding 模型');
-      renderTestModelOptions(askChatModel, pluginConfig.chat_model || '', '跟随插件默认问答模型');
-      renderTestRerankerOptions(askRerankerModel, pluginConfig.reranker_model || '');
+
     }
 
     function buildPluginConfigPayload() {
@@ -873,77 +1008,141 @@
         return;
       }
 
-      filesList.innerHTML = files.map(function (item) {
-        const fileName = escapeHtml(item.file_name || '-');
-        const docId = escapeHtml(item.doc_id || '');
-        const workspaceRoot = escapeHtml(item.workspace_root || '');
-        return '' +
-          '<div class="file-item">' +
-            '<div class="file-head">' +
-              '<div>' +
-                '<div class="file-title">' + fileName + '</div>' +
-                '<div class="tag-row">' +
-                  '<span class="tag ' + (item.indexed ? 'ok' : 'warn') + '">' + (item.indexed ? '已入索引' : '未入索引') + '</span>' +
-                  '<span class="tag">' + escapeHtml(item.size_bytes) + ' bytes</span>' +
-                  '<span class="tag">' + escapeHtml(item.chunk_count) + ' chunks</span>' +
-                  '<span class="tag">workspace：' + (workspaceRoot || '公共文档') + '</span>' +
-                '</div>' +
+      var groups = {};
+      files.forEach(function (item) {
+        var ws = String(item.workspace_root || '').trim();
+        if (!groups[ws]) groups[ws] = [];
+        groups[ws].push(item);
+      });
+
+      var sortedKeys = Object.keys(groups).sort(function (a, b) {
+        if (a === '' && b !== '') return -1;
+        if (a !== '' && b === '') return 1;
+        return a.localeCompare(b);
+      });
+
+      var htmlParts = [];
+      sortedKeys.forEach(function (ws) {
+        var groupFiles = groups[ws];
+        var docCount = groupFiles.length;
+        var totalSize = groupFiles.reduce(function (sum, f) { return sum + Number(f.size_bytes || 0); }, 0);
+        var totalChunks = groupFiles.reduce(function (sum, f) { return sum + Number(f.chunk_count || 0); }, 0);
+        var label = formatWorkspaceLabel(ws);
+        var wsId = 'ws-' + (ws || '__public__').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        htmlParts.push('' +
+          '<div class="ws-group" id="' + wsId + '">' +
+            '<div class="ws-group-header" data-ws-id="' + wsId + '">' +
+              '<div class="ws-group-label">' +
+                '<span class="ws-group-toggle" id="' + wsId + '-toggle">&#9654;</span>' +
+                escapeHtml(label) +
               '</div>' +
-              '<div class="actions" style="margin-top:0;">' +
-                '<button class="button secondary" type="button" data-rebuild-doc-id="' + docId + '" data-file-name="' + fileName + '" data-workspace-root="' + workspaceRoot + '">重建此文件</button>' +
-                '<button class="button danger" type="button" data-delete-doc-id="' + docId + '" data-file-name="' + fileName + '" data-workspace-root="' + workspaceRoot + '">删除</button>' +
+              '<div class="ws-group-stats">' +
+                '<span>' + docCount + ' 个文档</span>' +
+                '<span>' + formatBytes(totalSize) + '</span>' +
+                '<span>' + totalChunks + ' chunks</span>' +
               '</div>' +
             '</div>' +
-            '<div class="meta">更新时间：' + escapeHtml(item.updated_at || '暂无') + '<br>SHA256：<span class="mono">' + escapeHtml(item.sha256 || '-') + '</span></div>' +
-          '</div>';
-      }).join('');
+            '<div class="ws-group-body" id="' + wsId + '-body">' +
+              groupFiles.map(function (item) {
+                var fileName = escapeHtml(item.file_name || '-');
+                var docId = escapeHtml(item.doc_id || '');
+                return '' +
+                  '<div class="ws-file">' +
+                    '<div class="file-head">' +
+                      '<div>' +
+                        '<div class="file-title">' + fileName + '</div>' +
+                        '<div class="tag-row">' +
+                          '<span class="tag ' + (item.indexed ? 'ok' : 'warn') + '">' + (item.indexed ? '已入索引' : '未入索引') + '</span>' +
+                          '<span class="tag">' + formatBytes(item.size_bytes) + '</span>' +
+                          '<span class="tag">' + escapeHtml(item.chunk_count) + ' chunks</span>' +
+                        '</div>' +
+                      '</div>' +
+                      '<div class="actions" style="margin-top:0;">' +
+                        '<button class="button secondary" type="button" data-rebuild-doc-id="' + docId + '" data-file-name="' + fileName + '" data-workspace-root="' + escapeHtml(ws) + '">重建</button>' +
+                        '<button class="button danger" type="button" data-delete-doc-id="' + docId + '" data-file-name="' + fileName + '" data-workspace-root="' + escapeHtml(ws) + '">删除</button>' +
+                      '</div>' +
+                    '</div>' +
+                    '<div class="meta">更新时间：' + escapeHtml(item.updated_at || '暂无') + '<br>SHA256：<span class="mono">' + escapeHtml((item.sha256 || '-').substring(0, 16)) + '...</span></div>' +
+                  '</div>';
+              }).join('') +
+            '</div>' +
+          '</div>');
+      });
+
+      filesList.innerHTML = htmlParts.join('');
 
       filesList.querySelectorAll('[data-delete-doc-id]').forEach(function (button) {
-        button.addEventListener('click', async function () {
-          const fileName = button.getAttribute('data-file-name') || '';
-          const docId = button.getAttribute('data-delete-doc-id') || '';
-          const workspaceRoot = button.getAttribute('data-workspace-root') || '';
-          const ok = window.confirm('确定删除文件 ' + fileName + ' 吗？这会同步清理它对应的索引片段。');
+        button.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var fileName = button.getAttribute('data-file-name') || '';
+          var docId = button.getAttribute('data-delete-doc-id') || '';
+          var workspaceRoot = button.getAttribute('data-workspace-root') || '';
+          var ok = window.confirm('确定删除文件 ' + fileName + ' 吗？');
           if (!ok) return;
           button.disabled = true;
-          try {
-            await requestJson('/api/markdown-kb/files/delete', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ doc_id: docId, file_name: fileName, workspace_root: workspaceRoot })
-            });
-            await Promise.all([loadFiles(), loadStatus()]);
-          } catch (error) {
-            window.alert('删除失败：' + String(error.message || error));
-          } finally {
-            button.disabled = false;
-          }
+          (async function () {
+            try {
+              await requestJson('/api/markdown-kb/files/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ doc_id: docId, file_name: fileName, workspace_root: workspaceRoot })
+              });
+              await Promise.all([loadFiles(), loadStatus()]);
+            } catch (error) {
+              window.alert('删除失败：' + String(error.message || error));
+            } finally {
+              button.disabled = false;
+            }
+          })();
         });
       });
 
       filesList.querySelectorAll('[data-rebuild-doc-id]').forEach(function (button) {
-        button.addEventListener('click', async function () {
-          const fileName = button.getAttribute('data-file-name') || '';
-          const docId = button.getAttribute('data-rebuild-doc-id') || '';
-          const workspaceRoot = button.getAttribute('data-workspace-root') || '';
+        button.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var fileName = button.getAttribute('data-file-name') || '';
+          var docId = button.getAttribute('data-rebuild-doc-id') || '';
+          var workspaceRoot = button.getAttribute('data-workspace-root') || '';
           button.disabled = true;
           setStatus(rebuildStatus, '正在重建文件 ' + fileName + ' ...', 'warn');
-          try {
-            const data = await requestJson('/api/markdown-kb/rebuild-file', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ doc_id: docId, file_name: fileName, workspace_root: workspaceRoot })
-            });
-            setStatus(rebuildStatus, '单文件重建完成：' + data.file_name + '，共 ' + data.chunk_count + ' 个 chunks。', 'ok');
-            await Promise.all([loadFiles(), loadStatus(), loadPluginConfig()]);
-          } catch (error) {
-            setStatus(rebuildStatus, '单文件重建失败：' + String(error.message || error), 'error');
-          } finally {
-            button.disabled = false;
-          }
+          (async function () {
+            try {
+              var data = await requestJson('/api/markdown-kb/rebuild-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ doc_id: docId, file_name: fileName, workspace_root: workspaceRoot })
+              });
+              setStatus(rebuildStatus, '单文件重建完成：' + data.file_name + '，共 ' + data.chunk_count + ' 个 chunks。', 'ok');
+              await Promise.all([loadFiles(), loadStatus(), loadPluginConfig()]);
+            } catch (error) {
+              setStatus(rebuildStatus, '单文件重建失败：' + String(error.message || error), 'error');
+            } finally {
+              button.disabled = false;
+            }
+          })();
         });
       });
     }
+
+    filesList.addEventListener('click', function (e) {
+      var header = e.target.closest('.ws-group-header');
+      if (!header) return;
+      var wsId = header.getAttribute('data-ws-id');
+      if (!wsId) return;
+      var body = document.getElementById(wsId + '-body');
+      var toggle = document.getElementById(wsId + '-toggle');
+      if (!body || !toggle) return;
+      if (body.classList.contains('open')) {
+        body.classList.remove('open');
+        toggle.classList.remove('open');
+        toggle.innerHTML = '&#9654;';
+      } else {
+        body.classList.add('open');
+        toggle.classList.add('open');
+        toggle.innerHTML = '&#9660;';
+      }
+    });
 
     async function loadFiles() {
       filesList.innerHTML = '<div class="empty">正在加载文件列表...</div>';
@@ -1140,7 +1339,6 @@
 
     queryBtn.addEventListener('click', async function () {
       const question = String(queryQuestion.value || '').trim();
-      const topK = Number(queryTopK.value || 4);
       if (!question) {
         setStatus(queryStatus, '请先输入问题。', 'error');
         return;
@@ -1154,13 +1352,10 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(Object.assign({
-            question: question,
-            top_k: topK,
-            embedding_model: resolveTestModelPayloadValue(queryEmbeddingModel),
-            reranker_model: resolveTestRerankerPayloadValue(queryRerankerModel)
+            question: question
           }, selectedWorkspace))
         });
-        setStatus(queryStatus, '检索完成：返回 ' + (data.hits || []).length + ' 个命中片段，embedding 模型：' + (data.embedding_model || pluginConfig.embedding_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
+        setStatus(queryStatus, '检索完成：返回 ' + (data.hits || []).length + ' 个命中片段。', 'ok');
         renderHits(queryResults, data.hits || []);
       } catch (error) {
         setStatus(queryStatus, '检索失败：' + String(error.message || error), 'error');
@@ -1172,7 +1367,6 @@
 
     askBtn.addEventListener('click', async function () {
       const question = String(askQuestion.value || '').trim();
-      const topK = Number(askTopK.value || 4);
       if (!question) {
         setStatus(askStatus, '请先输入问题。', 'error');
         return;
@@ -1187,14 +1381,10 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(Object.assign({
-            question: question,
-            top_k: topK,
-            embedding_model: resolveTestModelPayloadValue(askEmbeddingModel),
-            chat_model: resolveTestModelPayloadValue(askChatModel),
-            reranker_model: resolveTestRerankerPayloadValue(askRerankerModel)
+            question: question
           }, selectedWorkspace))
         });
-        setStatus(askStatus, '问答完成：已使用 ' + (data.citations || []).length + ' 个引用片段，问答模型：' + (data.chat_model || pluginConfig.chat_model || '-') + '，reranker：' + (data.reranker_model || '未启用') + '。', 'ok');
+        setStatus(askStatus, '问答完成：已使用 ' + (data.citations || []).length + ' 个引用片段。', 'ok');
         askAnswer.textContent = data.answer || '';
         askAnswerWrap.style.display = 'block';
         renderHits(askCitations, data.citations || []);
@@ -1204,6 +1394,116 @@
         askBtn.disabled = false;
       }
     });
+
+    // ── 记忆可视化面板 ──
+    const memoryChunkCount = document.getElementById('memory-chunk-count');
+    const memoryAvgValue = document.getElementById('memory-avg-value');
+    const memoryTotalHits = document.getElementById('memory-total-hits');
+    const memoryHighCount = document.getElementById('memory-high-count');
+    const memoryDocTableWrap = document.getElementById('memory-doc-table-wrap');
+    const memoryDocTable = document.getElementById('memory-doc-table');
+    const memoryDocTableBody = memoryDocTable.querySelector('tbody');
+    const memoryDocEmpty = document.getElementById('memory-doc-empty');
+    const memoryTabDoc = document.getElementById('memory-tab-doc');
+    const memoryTabTop = document.getElementById('memory-tab-top');
+    const memoryTopWrap = document.getElementById('memory-top-wrap');
+    const memoryTopList = document.getElementById('memory-top-list');
+    const memoryTopEmpty = document.getElementById('memory-top-empty');
+    const memoryRefreshBtn = document.getElementById('memory-refresh-btn');
+    const memoryStatus = document.getElementById('memory-status');
+
+    let memoryCurrentTab = 'doc';
+
+    function formatMemoryBar(value) {
+      const pct = Math.round(value * 100);
+      return '<div class="memory-bar-wrap"><div class="memory-bar-fill" style="width:' + pct + '%"></div></div>';
+    }
+
+    function renderMemoryDocTable(data) {
+      const byDoc = data.by_doc || [];
+      if (!byDoc.length) {
+        memoryDocTable.style.display = 'none';
+        memoryDocEmpty.style.display = 'block';
+        return;
+      }
+      memoryDocTable.style.display = '';
+      memoryDocEmpty.style.display = 'none';
+      memoryDocTableBody.innerHTML = byDoc.map(function (row) {
+        return '' +
+          '<tr>' +
+            '<td><span class="mono">' + escapeHtml(row.file_name || '?') + '</span></td>' +
+            '<td>' + row.chunk_count + '</td>' +
+            '<td>' + row.avg_memory.toFixed(4) + '</td>' +
+            '<td>' + row.max_memory.toFixed(4) + '</td>' +
+            '<td>' + row.total_hits + '</td>' +
+            '<td style="min-width:80px;">' + formatMemoryBar(row.max_memory) + '</td>' +
+          '</tr>';
+      }).join('');
+    }
+
+    function renderMemoryTopChunks(data) {
+      const chunks = data.top_chunks || [];
+      if (!chunks.length) {
+        memoryTopList.innerHTML = '';
+        memoryTopEmpty.style.display = 'block';
+        return;
+      }
+      memoryTopEmpty.style.display = 'none';
+      memoryTopList.innerHTML = chunks.map(function (chunk) {
+        return '' +
+          '<div class="memory-chunk-item">' +
+            '<div class="memory-chunk-meta">' +
+              '<span class="tag ok">记忆值 ' + chunk.memory_value.toFixed(4) + '</span>' +
+              '<span class="tag">命中 ' + chunk.hit_count + '</span>' +
+              '<span class="mono" style="color:var(--muted);font-size:11px;">' + escapeHtml(chunk.file_name || '?') + '</span>' +
+            '</div>' +
+            '<div class="memory-chunk-preview">' + escapeHtml(chunk.chunk_text_preview || '') + '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function renderMemorySummary(data) {
+      const summary = data.summary || {};
+      memoryChunkCount.textContent = String(summary.memory_chunk_count ?? '-');
+      memoryAvgValue.textContent = String(summary.memory_avg_value != null ? summary.memory_avg_value.toFixed(4) : '-');
+      memoryTotalHits.textContent = String(summary.memory_total_hits ?? '-');
+      memoryHighCount.textContent = String(summary.memory_high_value_count ?? '-');
+    }
+
+    function switchMemoryTab(tab) {
+      memoryCurrentTab = tab;
+      memoryTabDoc.className = 'memory-tab' + (tab === 'doc' ? ' active' : '');
+      memoryTabTop.className = 'memory-tab' + (tab === 'top' ? ' active' : '');
+      memoryDocTableWrap.style.display = tab === 'doc' ? '' : 'none';
+      memoryTopWrap.style.display = tab === 'top' ? '' : 'none';
+    }
+
+    memoryTabDoc.addEventListener('click', function () {
+      switchMemoryTab('doc');
+    });
+    memoryTabTop.addEventListener('click', function () {
+      switchMemoryTab('top');
+    });
+
+    async function loadMemoryStats() {
+      memoryRefreshBtn.disabled = true;
+      setStatus(memoryStatus, '正在加载记忆统计...', 'warn');
+      try {
+        const data = await requestJson('/api/markdown-kb/memory-stats');
+        renderMemorySummary(data);
+        renderMemoryDocTable(data);
+        renderMemoryTopChunks(data);
+        setStatus(memoryStatus, '记忆统计加载完成。', 'ok');
+      } catch (error) {
+        setStatus(memoryStatus, '加载失败：' + String(error.message || error), 'error');
+      } finally {
+        memoryRefreshBtn.disabled = false;
+      }
+    }
+
+    memoryRefreshBtn.addEventListener('click', loadMemoryStats);
+    // 初始化时加载记忆统计
+    loadMemoryStats();
 
     refreshBtn.addEventListener('click', loadStatus);
     refreshFilesBtn.addEventListener('click', loadFiles);
