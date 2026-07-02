@@ -876,11 +876,13 @@ class SqliteKbIndexStore(IndexStore):
     def update_memory(
         self,
         upserts: dict[str, dict],
+        cap: float = 1.0,
     ) -> None:
         """批量 upsert 记忆记录。
 
         upserts: {chunk_id: {memory_value, hit_count_delta, last_hit_at}}
         其中 hit_count_delta 表示需要在其现有 hit_count 基础上增加的值。
+        cap 为记忆值上限，最终 memory_value 不会超过该值。
         """
         if not upserts:
             return
@@ -895,8 +897,9 @@ class SqliteKbIndexStore(IndexStore):
             existing = {row["chunk_id"]: int(row["hit_count"] or 0) for row in existing_rows}
 
             now = _utc_now_iso()
+            cap_value = max(0.0, min(1.0, cap))
             for chunk_id, info in upserts.items():
-                mv = max(0.0, min(1.0, _safe_float(info.get("memory_value"), 0.0)))
+                mv = max(0.0, min(cap_value, _safe_float(info.get("memory_value"), 0.0)))
                 hit_delta = _safe_int(info.get("hit_count_delta"), 0)
                 total_hits = existing.get(chunk_id, 0) + hit_delta
                 last_hit = str(info.get("last_hit_at") or now)
@@ -937,6 +940,39 @@ class SqliteKbIndexStore(IndexStore):
         try:
             conn.execute("DELETE FROM kb_chunk_memory")
             conn.commit()
+        finally:
+            conn.close()
+
+    def get_learn_doc_memory_stats(self) -> list[dict]:
+        """获取所有 .learn.md 文档的 chunk 记忆统计，按 doc_id 聚合。
+
+        返回每个 learn 文档的：doc_id / file_name / chunk_count / max_memory / total_hits。
+        用于 organizer 判断哪些 learn 文档已无价值、可以清理。
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT c.doc_id, c.file_name,
+                       COUNT(DISTINCT c.chunk_id) as chunk_count,
+                       COALESCE(MAX(m.memory_value), 0.0) as max_memory,
+                       COALESCE(SUM(m.hit_count), 0) as total_hits
+                FROM kb_chunks c
+                LEFT JOIN kb_chunk_memory m ON c.chunk_id = m.chunk_id
+                WHERE c.file_name LIKE '%.learn.md'
+                GROUP BY c.doc_id
+                """
+            ).fetchall()
+            return [
+                {
+                    "doc_id": row["doc_id"],
+                    "file_name": row["file_name"],
+                    "chunk_count": int(row["chunk_count"] or 0),
+                    "max_memory": round(float(row["max_memory"] or 0.0), 4),
+                    "total_hits": int(row["total_hits"] or 0),
+                }
+                for row in rows
+            ]
         finally:
             conn.close()
 
@@ -989,6 +1025,91 @@ class SqliteKbIndexStore(IndexStore):
                 "memory_avg_value": round(float(row["avg_val"] or 0.0), 4),
                 "memory_total_hits": int(row["total_hits"] or 0),
                 "memory_high_value_count": int(row["high_val_cnt"] or 0),
+            }
+        finally:
+            conn.close()
+
+    def get_memory_detail_stats(self, top_n: int = 20) -> dict:
+        """获取记忆详细统计，包含按文档聚合和 top-N 高记忆 chunk。
+
+        返回：
+        - summary: 总体统计
+        - by_doc: 按文档聚合的记忆统计
+        - top_chunks: 记忆值最高的 N 个 chunk 详情
+        """
+        conn = self._connect()
+        try:
+            # 总体统计
+            summary_row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as cnt,
+                    COALESCE(AVG(memory_value), 0.0) as avg_val,
+                    SUM(hit_count) as total_hits,
+                    SUM(CASE WHEN memory_value > 0.5 THEN 1 ELSE 0 END) as high_val_cnt
+                FROM kb_chunk_memory
+                """
+            ).fetchone()
+
+            # 按文档聚合（JOIN kb_chunks 获取 doc_id / file_name）
+            doc_rows = conn.execute(
+                """
+                SELECT c.doc_id, c.file_name,
+                       COUNT(DISTINCT m.chunk_id) as chunk_count,
+                       COALESCE(AVG(m.memory_value), 0.0) as avg_memory,
+                       COALESCE(MAX(m.memory_value), 0.0) as max_memory,
+                       COALESCE(SUM(m.hit_count), 0) as total_hits
+                FROM kb_chunks c
+                INNER JOIN kb_chunk_memory m ON c.chunk_id = m.chunk_id
+                GROUP BY c.doc_id
+                ORDER BY max_memory DESC, total_hits DESC
+                """
+            ).fetchall()
+
+            # Top-N 高记忆 chunk
+            top_rows = conn.execute(
+                """
+                SELECT c.chunk_id, c.doc_id, c.file_name, c.heading_path, c.chunk_text,
+                       m.memory_value, m.hit_count, m.last_hit_at
+                FROM kb_chunk_memory m
+                INNER JOIN kb_chunks c ON m.chunk_id = c.chunk_id
+                ORDER BY m.memory_value DESC, m.hit_count DESC
+                LIMIT ?
+                """,
+                (top_n,),
+            ).fetchall()
+
+            return {
+                "summary": {
+                    "memory_chunk_count": int(summary_row["cnt"] or 0),
+                    "memory_avg_value": round(float(summary_row["avg_val"] or 0.0), 4),
+                    "memory_total_hits": int(summary_row["total_hits"] or 0),
+                    "memory_high_value_count": int(summary_row["high_val_cnt"] or 0),
+                },
+                "by_doc": [
+                    {
+                        "doc_id": row["doc_id"],
+                        "file_name": row["file_name"],
+                        "chunk_count": int(row["chunk_count"] or 0),
+                        "avg_memory": round(float(row["avg_memory"] or 0.0), 4),
+                        "max_memory": round(float(row["max_memory"] or 0.0), 4),
+                        "total_hits": int(row["total_hits"] or 0),
+                    }
+                    for row in doc_rows
+                ],
+                "top_chunks": [
+                    {
+                        "chunk_id": row["chunk_id"],
+                        "doc_id": row["doc_id"],
+                        "file_name": row["file_name"],
+                        "heading_path": str(row["heading_path"] or ""),
+                        "chunk_text_preview": (str(row["chunk_text"] or "")[:200] + "..." if len(str(row["chunk_text"] or "")) > 200 else str(row["chunk_text"] or "")),
+                        "memory_value": round(float(row["memory_value"] or 0.0), 4),
+                        "hit_count": int(row["hit_count"] or 0),
+                        "last_hit_at": str(row["last_hit_at"] or ""),
+                    }
+                    for row in top_rows
+                ],
             }
         finally:
             conn.close()
@@ -1137,6 +1258,13 @@ async def markdown_kb_health():
     """返回知识库健康/漂移检查结果。"""
     plugin = _get_plugin()
     return plugin.health_check()
+
+
+@router.get("/memory-stats")
+async def markdown_kb_memory_stats():
+    """返回记忆系统详细统计，包含按文档聚合和 top-N 高记忆 chunk。"""
+    plugin = _get_plugin()
+    return plugin.get_memory_stats()
 
 
 class Plugin(PluginBase):
@@ -1652,12 +1780,17 @@ class Plugin(PluginBase):
             "issues": issues,
             "summary": summary,
             "memory": {
-                "chunk_count": memory_stats.get("chunk_count", 0),
-                "avg_value": memory_stats.get("avg_value", 0.0),
-                "high_value_count": memory_stats.get("high_value_count", 0),
-                "total_hits": memory_stats.get("total_hits", 0),
+                "chunk_count": memory_stats.get("memory_chunk_count", 0),
+                "avg_value": memory_stats.get("memory_avg_value", 0.0),
+                "high_value_count": memory_stats.get("memory_high_value_count", 0),
+                "total_hits": memory_stats.get("memory_total_hits", 0),
             },
         }
+
+    def get_memory_stats(self) -> dict:
+        """返回记忆系统详细统计，供前端可视化面板使用。"""
+        self._ensure_runtime_ready()
+        return self._store.get_memory_detail_stats()
 
     async def rebuild_file(self, file_name: str, workspace_root: str = "", doc_id: str = "") -> dict:
         """只重建单个文件的 chunks 与向量。"""
@@ -2411,6 +2544,9 @@ class Plugin(PluginBase):
             if self._store:
                 self._store.cleanup_expired_memory()
 
+            # 清理无价值的 learn 文档
+            await self._cleanup_stale_learn_docs()
+
             # 重置计数器
             state = self._load_organizer_state()
             state["message_count"] = 0
@@ -2420,6 +2556,71 @@ class Plugin(PluginBase):
             pass
         finally:
             self._organize_running = False
+
+    async def _cleanup_stale_learn_docs(self) -> None:
+        """清理长期无价值的 .learn.md 文档。
+
+        判断标准：该文档所有 chunk 的 memory_value 均低于阈值（默认 0.05），
+        且距上次命中超过指定的保活天数（默认 7 天）。
+        满足条件的文档会被删除 .learn.md 源文件并清理索引。
+        """
+        settings = getattr(self, "config", {}) or {}
+        cleanup_enabled = bool(settings.get("organize_cleanup_enabled", False))
+        if not cleanup_enabled:
+            return
+        memory_threshold = _safe_float(settings.get("organize_cleanup_memory_threshold"), 0.05)
+        keep_days = _safe_int(settings.get("organize_cleanup_keep_days"), 7)
+        if not self._store:
+            return
+
+        try:
+            stats = self._store.get_learn_doc_memory_stats()
+        except Exception:
+            return
+
+        now_ts = datetime.utcnow()
+        stale_docs = []
+        for stat in stats:
+            if stat["max_memory"] >= memory_threshold:
+                continue
+            if stat["chunk_count"] == 0:
+                # 没有 chunk 的 learn 文档直接清理
+                stale_docs.append(stat)
+                continue
+            # 检查最后命中时间：通过 kb_chunk_memory.last_hit_at 判断
+            # 如果 max_memory == 0 表示从未被检索命中过
+            if stat["max_memory"] == 0 and stat["total_hits"] == 0:
+                # 从未被命中，检查文档创建时间
+                manifest = self._load_doc_manifest()
+                doc_info = next((item for item in manifest if str(item.get("doc_id") or "") == stat["doc_id"]), None)
+                if doc_info:
+                    created_str = str(doc_info.get("created_at") or "")
+                    try:
+                        created_ts = datetime.fromisoformat(created_str)
+                        age_days = (now_ts - created_ts).total_seconds() / 86400
+                        if age_days < keep_days:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                stale_docs.append(stat)
+
+        removed = 0
+        for doc in stale_docs:
+            try:
+                self.delete_file(
+                    name=doc["file_name"],
+                    doc_id=doc["doc_id"],
+                )
+                removed += 1
+            except Exception:
+                pass
+
+        if removed > 0:
+            self.logger.info(
+                "[markdown_kb] 整理完成：清理了 %d 个无价值的 learn 文档（剩余 learn 文档：%d）",
+                removed,
+                len(stats) - removed,
+            )
 
     def _settings(self) -> dict:
         """统一解析插件配置，并做最基本的类型收敛。"""
@@ -2457,12 +2658,16 @@ class Plugin(PluginBase):
             "memory_enabled": bool(cfg.get("memory_enabled", True)),
             "memory_boost": _safe_float(cfg.get("memory_boost"), 0.15),
             "memory_decay_half_life_hours": _safe_float(cfg.get("memory_decay_half_life_hours"), 24.0),
+            "memory_value_cap": _safe_float(cfg.get("memory_value_cap"), 0.7),
             # 分类加权配置
             "category_bonus": _safe_float(cfg.get("category_bonus"), 0.10),
             "category_list": category_list,
             # 自动整理记忆配置
             "organize_interval_hours": _safe_float(cfg.get("organize_interval_hours"), 24.0),
             "organize_message_threshold": max(1, _safe_int(cfg.get("organize_message_threshold"), 50)),
+            "organize_cleanup_enabled": bool(cfg.get("organize_cleanup_enabled", False)),
+            "organize_cleanup_memory_threshold": _safe_float(cfg.get("organize_cleanup_memory_threshold"), 0.05),
+            "organize_cleanup_keep_days": _safe_int(cfg.get("organize_cleanup_keep_days"), 7),
         }
 
     def _resolve_top_k(self, requested: Any) -> int:
@@ -2880,6 +3085,7 @@ class Plugin(PluginBase):
         memory_weight = settings.get("memory_weight", 0.0)
         memory_boost = _safe_float(settings.get("memory_boost"), 0.10)
         memory_half_life = _safe_float(settings.get("memory_decay_half_life_hours"), 24.0)
+        memory_value_cap = _safe_float(settings.get("memory_value_cap"), 0.7)
         category_bonus = _safe_float(settings.get("category_bonus"), 0.10)
         category_list = list(settings.get("category_list") or [])
 
@@ -3005,7 +3211,7 @@ class Plugin(PluginBase):
                 score_ratio = _safe_float(hit.get("score"), 0.0) / max(max_score, 0.01)
                 old_memory = memory_map.get(chunk_id, 0.0)
                 boost = memory_boost * score_ratio
-                new_memory = min(1.0, old_memory + boost * (1.0 - old_memory))
+                new_memory = min(memory_value_cap, old_memory + boost * (1.0 - old_memory))
                 memory_updates[chunk_id] = {
                     "memory_value": new_memory,
                     "hit_count_delta": 1,
@@ -3015,14 +3221,14 @@ class Plugin(PluginBase):
                 for sibling_id in (hit.get("sibling_ids") or []):
                     if sibling_id not in memory_updates:
                         sib_old = memory_map.get(sibling_id, 0.0)
-                        sib_new = min(1.0, sib_old + boost * (1.0 - sib_old))
+                        sib_new = min(memory_value_cap, sib_old + boost * (1.0 - sib_old))
                         memory_updates[sibling_id] = {
                             "memory_value": sib_new,
                             "hit_count_delta": 1,
                             "last_hit_at": now_iso,
                         }
             if memory_updates:
-                self._store.update_memory(memory_updates)
+                self._store.update_memory(memory_updates, cap=memory_value_cap)
                 self._store.cleanup_expired_memory()
 
         # 仅非记忆模式缓存（记忆模式下分数有漂移）
