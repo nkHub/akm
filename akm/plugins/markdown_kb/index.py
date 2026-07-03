@@ -2288,7 +2288,7 @@ class Plugin(PluginBase):
             try:
                 doc_count = await self._scan_learn_from_session(session_data, settings) if learn_enabled else 0
             except Exception as exc:
-                logger.warning("[markdown_kb] 扫描学习失败 %s: %s", fpath.name, exc)
+                self.logger.warning("[markdown_kb] 扫描学习失败 %s: %s", fpath.name, exc)
 
             if learn_enabled and doc_count > 0:
                 session_scanner.mark_scanned_learned(scanned_records, dedupe_key, doc_count, now)
@@ -2547,14 +2547,14 @@ class Plugin(PluginBase):
             # 清理无价值的 learn 文档
             await self._cleanup_stale_learn_docs()
 
-            # 重置计数器
+        except Exception:
+            pass
+        finally:
+            # 无论成功失败都重置计数器，避免卡死触发
             state = self._load_organizer_state()
             state["message_count"] = 0
             state["last_organize_at"] = _utc_now_iso()
             self._save_organizer_state(state)
-        except Exception:
-            pass
-        finally:
             self._organize_running = False
 
     async def _cleanup_stale_learn_docs(self) -> None:
@@ -2645,7 +2645,7 @@ class Plugin(PluginBase):
         return {
             "embedding_model": str(cfg.get("embedding_model") or "text-embedding-3-small").strip() or "text-embedding-3-small",
             "reranker_model": str(cfg.get("reranker_model") or "").strip(),
-            "chat_model": str(cfg.get("chat_model") or "gpt-4o-mini").strip() or "gpt-4o-mini",
+            "chat_model": str(cfg.get("chat_model") or "gpt-5.4-mini").strip() or "gpt-5.4-mini",
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "top_k": top_k,
