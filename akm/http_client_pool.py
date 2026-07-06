@@ -27,14 +27,14 @@ class HttpClientPoolManager:
         self,
         *,
         max_pools: int = 64,
-        idle_ttl_sec: float = 600.0,
+        idle_ttl_sec: float = 120.0,
         max_connections: int = 8,
         max_keepalive_connections: int = 2,
         timeout_sec: float = 120.0,
         connect_timeout_sec: float = 10.0,
     ):
         self.max_pools = max(1, int(max_pools or 64))
-        self.idle_ttl_sec = max(30.0, float(idle_ttl_sec or 600.0))
+        self.idle_ttl_sec = max(30.0, float(idle_ttl_sec or 120.0))
         self.max_connections = max(1, int(max_connections or 8))
         self.max_keepalive_connections = max(0, int(max_keepalive_connections or 2))
         self.timeout_sec = max(1.0, float(timeout_sec or 120.0))
