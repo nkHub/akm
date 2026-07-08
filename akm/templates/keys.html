@@ -503,7 +503,7 @@ var USAGE_SCRIPTS = {
       "method": "GET",
       "headers": {"Authorization": "Bearer {{apiKey}}"}
     },
-    "extractor": "function(response) {\n  const isValid = response?.is_available ?? response?.is_available ?? true;\n  const balance_infos = response?.balance_infos[0];\n  const unit = balance_infos?.currency ?? balance_infos?.currency ?? \"元\";\n  const remaining = balance_infos?.total_balance;\n  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n  return {\n    isValid,\n    invalidMessage,\n    remaining,\n    unit\n  };\n}"
+    "extractor": "function(response) {\n  const isValid = response?.is_available ?? response?.is_available ?? true;\n  const balance_infos = response?.balance_infos[0];\n  const unit = balance_infos?.currency ?? balance_infos?.currency ?? \"元\";\n  const remaining = balance_infos?.total_balance;\n  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n  return {\n    isValid,\n    invalidMessage,\n    remaining,\n    planName: '钱包余额',\n    unit\n  };\n}"
   }
 };
 
