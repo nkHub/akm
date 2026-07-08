@@ -521,24 +521,6 @@ function toggleUsageEnabled() {
   _usageToggleState(!current);
 }
 
-function _scriptToDisplay(raw) {
-  try {
-    var cfg = JSON.parse(raw);
-    var req = JSON.stringify(cfg.request, null, 2);
-    var ext = cfg.extractor || '';
-    return '// ==== request ====\n' + req + '\n// ==== extractor ====\n' + ext;
-  } catch(e) { return raw; }
-}
-
-function _displayToScript(display) {
-  var m = display.match(/^\/\/\s*={3,}\s*request\s*={3,}\s*\n([\s\S]*?)\n\/\/\s*={3,}\s*extractor\s*={3,}\s*\n?([\s\S]*)$/);
-  if (!m) return display;
-  try {
-    var req = JSON.parse(m[1].trim());
-    return JSON.stringify({ request: req, extractor: m[2].trim() });
-  } catch(e) { return display; }
-}
-
 function openUsageConfigModal(alias) {
   fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-config')
     .then(function(r) { return r.json(); })
@@ -549,7 +531,9 @@ function openUsageConfigModal(alias) {
       var enabled = intervalM > 0;
       _usageToggleState(enabled);
       document.getElementById('usage-interval').value = intervalM;
-      document.getElementById('usage-script').value = _scriptToDisplay(data.script || DEFAULT_USAGE_SCRIPT);
+      var raw = data.script || DEFAULT_USAGE_SCRIPT;
+      try { raw = JSON.stringify(JSON.parse(raw), null, 2); } catch(e) {}
+      document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
     })
@@ -558,7 +542,9 @@ function openUsageConfigModal(alias) {
       document.getElementById('usage-alias').value = alias;
       _usageToggleState(false);
       document.getElementById('usage-interval').value = 0;
-      document.getElementById('usage-script').value = _scriptToDisplay(DEFAULT_USAGE_SCRIPT);
+      var raw = DEFAULT_USAGE_SCRIPT;
+      try { raw = JSON.stringify(JSON.parse(raw), null, 2); } catch(e) {}
+      document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
     });
@@ -578,9 +564,7 @@ function saveUsageConfig() {
   var enabled = document.getElementById('usage-toggle').getAttribute('data-enabled') === '1';
   var intervalM = enabled ? (parseInt(document.getElementById('usage-interval').value) || 5) : 0;
   var scriptRaw = document.getElementById('usage-script').value.trim();
-  scriptRaw = _displayToScript(scriptRaw);
 
-  // 验证最终 JSON 有效
   try {
     JSON.parse(scriptRaw);
   } catch(e) {
