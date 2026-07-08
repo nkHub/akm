@@ -101,3 +101,21 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE audit_logs ADD COLUMN {col} INTEGER DEFAULT {default}")
         except sqlite3.OperationalError:
             pass
+    # keys 表 — 用量查询配置列
+    _migrate_key_usage_columns(conn)
+
+
+def _migrate_key_usage_columns(conn: sqlite3.Connection) -> None:
+    """迁移：keys 表添加用量查询相关列"""
+    for col, col_type, default in [
+        ("usage_query_script", "TEXT", "''"),
+        ("usage_query_interval_m", "INTEGER", "5"),
+        ("usage_queried_at", "TEXT", "''"),
+        ("usage_data", "TEXT", "''"),
+        ("usage_error", "TEXT", "''"),
+        ("usage_query_endpoint", "TEXT", "''"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE keys ADD COLUMN {col} {col_type} DEFAULT {default}")
+        except sqlite3.OperationalError:
+            pass

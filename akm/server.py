@@ -23,6 +23,7 @@ from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
     set_provider, set_models, set_auth_header, set_provider_models, key_model_list,
+    get_usage_query_config, set_usage_query_config, update_usage_data, _safe_json_parse,
 )
 from akm.audit import (
     write_log_async,
@@ -45,6 +46,61 @@ from akm.usage_flags import (
     FLAG_MISSING_USAGE_UPSTREAM,
     FLAG_LOOP_GUARD_TRIGGERED,
 )
+from akm.usage_query import execute_query_script, _simple_extract
+
+
+# ── 用量查询自动调度器 ─────────────────────────────────────
+
+class _UsageQueryScheduler:
+    """后台定时调度器：自动执行已开启用查的 key"""
+
+    _CHECK_INTERVAL_SEC = 60  # 每 60 秒扫描一次
+
+    def __init__(self, app: FastAPI):
+        self.app = app
+
+    async def run(self) -> None:
+        """后台循环，周期性检查并执行到期的用量查询"""
+        while True:
+            try:
+                await asyncio.sleep(self._CHECK_INTERVAL_SEC)
+                await self._check_and_query()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    async def _check_and_query(self) -> None:
+        """扫描所有 key，对到期未查询的执行用量查询"""
+        keys = list_keys()
+        now = asyncio.get_running_loop().time()
+        for key in keys:
+            interval_m = int(key.get("usage_query_interval_m", 0) or 0)
+            if interval_m <= 0:
+                continue
+            config = get_usage_query_config(key["alias"])
+            if config is None:
+                continue
+            script_raw = config.get("script", "")
+            if not script_raw:
+                continue
+            # 检查上次查询时间是否已超过间隔
+            queried_at_str = config.get("queried_at", "")
+            if queried_at_str:
+                try:
+                    queried_at = datetime.strptime(queried_at_str, "%Y-%m-%d %H:%M:%S")
+                    elapsed_m = (datetime.now() - queried_at.replace(tzinfo=None)).total_seconds() / 60
+                    if elapsed_m < interval_m:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            # 执行查询
+            try:
+                script_cfg = json.loads(script_raw)
+            except json.JSONDecodeError:
+                continue
+            result = await execute_query_script(key, script_cfg)
+            update_usage_data(key["alias"], result)
 
 
 @asynccontextmanager
@@ -70,11 +126,22 @@ async def lifespan(app: FastAPI):
     app.state.http_client_lock = asyncio.Lock()
     http_client = HttpClientPoolManager()
     app.state.http_client = http_client
+    # 用量查询自动调度器
+    usage_query_scheduler = _UsageQueryScheduler(app)
+    usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
+    app.state.usage_query_scheduler = usage_query_scheduler
+    app.state.usage_scheduler_task = usage_scheduler_task
     try:
         yield
     finally:
         # 只清理当前这轮 lifespan 自己创建出来的对象，避免菜单栏重启时
         # 旧实例 shutdown 晚到，把新实例刚挂到 app.state 上的资源误停掉。
+        usage_scheduler_task.cancel()
+        try:
+            await usage_scheduler_task
+        except asyncio.CancelledError:
+            pass
+
         await audit_queue.stop()
 
         health_task.cancel()
@@ -748,6 +815,12 @@ async def api_list_keys():
         latency = latency_map.get(k["alias"], {})
         k["recent_avg_latency_ms"] = latency.get("recent_avg_latency_ms")
         k["recent_latency_sample_count"] = latency.get("recent_latency_sample_count", 0)
+        # 用量查询结果
+        usage_data_raw = k.pop("usage_data", "") or ""
+        k["usage_data"] = _safe_json_parse(usage_data_raw) if usage_data_raw else None
+        k["usage_queried_at"] = k.pop("usage_queried_at", "") or ""
+        k["usage_error"] = k.pop("usage_error", "") or ""
+        k["usage_query_interval_m"] = int(k.pop("usage_query_interval_m", 0) or 0)
     return {"data": keys}
 
 
@@ -931,6 +1004,97 @@ async def api_refresh_key_provider_models():
         "refreshed": refreshed,
         "failed": failed,
     }
+
+
+# ── 用量查询 API ────────────────────────────────────────────
+
+@app.get("/api/keys/{alias:path}/usage-config")
+async def api_get_usage_config(alias: str):
+    """获取指定 key 的用量查询配置"""
+    existing = get_key(alias)
+    if existing is None:
+        return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
+    config = get_usage_query_config(alias)
+    return {"ok": True, "data": config}
+
+
+@app.patch("/api/keys/{alias:path}/usage-config")
+async def api_set_usage_config(alias: str, request: Request):
+    """设置指定 key 的用量查询配置（脚本 / 查询间隔）"""
+    existing = get_key(alias)
+    if existing is None:
+        return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
+    body = await request.json()
+    script = body.get("script") if "script" in body else None
+    interval_m = body.get("interval_m") if "interval_m" in body else None
+    query_endpoint = body.get("query_endpoint") if "query_endpoint" in body else None
+    set_usage_query_config(alias, script=script, interval_m=interval_m, query_endpoint=query_endpoint)
+    config = get_usage_query_config(alias)
+    return {"ok": True, "data": config}
+
+
+@app.post("/api/keys/{alias:path}/usage-query")
+async def api_query_key_usage(alias: str):
+    """手动触发一次用量查询"""
+    key = get_key(alias)
+    if key is None:
+        return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
+
+    config = get_usage_query_config(alias)
+    if config is None:
+        return JSONResponse(status_code=400, content={"detail": "用量查询配置不存在"})
+
+    script_raw = config.get("script", "")
+    try:
+        script_cfg = json.loads(script_raw)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"detail": "用量查询脚本 JSON 解析失败"})
+
+    http_client = None
+    if hasattr(app.state, "http_client") and app.state.http_client is not None:
+        pool = app.state.http_client
+        http_client = await pool.get_client(
+            provider=key.get("provider", ""),
+            key_alias=alias,
+            model="usage_query",
+            api_path="usage",
+        )
+
+    try:
+        result = await execute_query_script(key, script_cfg, http_client)
+        update_usage_data(alias, result)
+        return {"ok": True, "data": result}
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+        update_usage_data(alias, result)
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/keys/usage-query-all")
+async def api_query_all_keys_usage():
+    """批量触发所有已配置用量查询的 key（仅执行，不阻塞返回）"""
+    keys = list_keys()
+    queried = 0
+    results = []
+
+    for key in keys:
+        config = get_usage_query_config(key["alias"])
+        if config is None or not config.get("script"):
+            continue
+        interval_m = config.get("interval_m", 0)
+        if interval_m <= 0:
+            continue
+        try:
+            script_cfg = json.loads(config["script"])
+        except json.JSONDecodeError:
+            continue
+
+        result = await execute_query_script(key, script_cfg)
+        update_usage_data(key["alias"], result)
+        results.append({"alias": key["alias"], "ok": result.get("ok", False)})
+        queried += 1
+
+    return {"ok": True, "queried": queried, "results": results}
 
 
 # ── 统计 API ───────────────────────────────────────────────

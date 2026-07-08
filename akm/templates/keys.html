@@ -67,6 +67,34 @@
     <div class="flex w-full justify-end"><button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button></div>
   </div>
 </akm-modal>
+
+<akm-modal id="usage-config-modal" title="用量查询配置" max-width="max-w-2xl" panel-class="max-h-[85vh] flex flex-col" body-class="p-4 overflow-y-auto flex-1 min-h-0 space-y-4">
+  <input type="hidden" id="usage-alias" value="">
+  <div class="flex items-center justify-between">
+    <label class="text-sm text-gray-300">启用用量查询</label>
+    <button id="usage-toggle" type="button" onclick="toggleUsageEnabled()" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors bg-gray-600 cursor-pointer">
+      <span id="usage-toggle-dot" class="inline-block h-4 w-4 translate-x-1 transform rounded-full bg-white transition-transform"></span>
+    </button>
+  </div>
+  <div>
+    <label class="block text-xs text-gray-400 mb-1">自动查询间隔（分钟）</label>
+    <input id="usage-interval" type="number" value="5" min="1" max="43200" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+  </div>
+  <div>
+    <label class="block text-xs text-gray-400 mb-1">查询脚本（CCSwitch JS 配置 JSON）</label>
+    <p class="text-[11px] text-gray-500 mb-1">
+      模板变量 <code>{{ "{{baseUrl}}" }}</code> <code>{{ "{{apiKey}}" }}</code>，extractor 在浏览器沙箱执行
+    </p>
+    <textarea id="usage-script" rows="14" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 font-mono focus:outline-none focus:border-indigo-500 placeholder-gray-600" spellcheck="false"></textarea>
+  </div>
+  <div data-modal-footer>
+    <div class="flex gap-2 w-full">
+      <button type="button" onclick="closeUsageConfigModal()" class="flex-1 bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button>
+      <button type="button" id="usage-query-btn" onclick="usageRunQuery()" class="bg-surface border border-border text-indigo-400 hover:text-indigo-300 text-sm px-4 py-2 rounded transition-colors cursor-pointer">立即查询</button>
+      <button id="usage-save-btn" type="button" onclick="saveUsageConfig()" class="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">保存</button>
+    </div>
+  </div>
+</akm-modal>
 {% endblock %}
 
 {% block extra_js %}
@@ -168,19 +196,52 @@ function renderKeys() {
       latencyText = '<span class="'+latencyClass+' text-xs">'+avgLatency.toFixed(1)+'ms</span>';
     }
 
+    // 用量数据显示（放在按钮行下面）
+    var usageData = k.usage_data;
+    var usageInfoLine = '';
+    if (usageData && typeof usageData === 'object') {
+      var extracted = usageData.extracted || usageData;
+      if (extracted && typeof extracted === 'object') {
+        var parts = [];
+        if (extracted.remaining !== undefined && extracted.remaining !== null) {
+          parts.push('\u5269\u4F59: ' + extracted.remaining + (extracted.unit ? ' ' + extracted.unit : ''));
+        }
+        if (extracted.used !== undefined && extracted.used !== null) {
+          parts.push('\u5DF2\u7528: ' + extracted.used + (extracted.unit ? ' ' + extracted.unit : ''));
+        }
+        if (extracted.total !== undefined && extracted.total !== null) {
+          parts.push('\u603B\u989D: ' + extracted.total + (extracted.unit ? ' ' + extracted.unit : ''));
+        }
+        if (extracted.planName) {
+          parts.push(extracted.planName);
+        }
+        if (!extracted.isValid) {
+          parts.push('\u26A0\uFE0F ' + (extracted.invalidMessage || '\u5957\u9910\u5DF2\u5931\u6548'));
+          usageInfoLine = '<div class="px-4 pb-1"><span class="text-red-400 text-xs">' + parts.join(', ') + '</span></div>';
+        } else if (parts.length > 0) {
+          usageInfoLine = '<div class="px-4 pb-1"><span class="text-emerald-400 text-xs">' + parts.join(', ') + '</span></div>';
+        }
+      }
+      if (!usageInfoLine && (usageData.ok === false || usageData.error)) {
+        usageInfoLine = '<div class="px-4 pb-1"><span class="text-red-400 text-xs" title="' + esc(String(usageData.error || '')).replace(/"/g, '&quot;') + '">\u7528\u91CF\u67E5\u8BE2\u5931\u8D25</span></div>';
+      }
+    }
+
     html += '<div class="border border-border rounded-lg bg-surface-light/50 overflow-hidden min-w-0">'+
       '<div class="flex items-center justify-between px-4 py-3 flex-wrap gap-2">'+
       '<div class="flex items-center gap-3 min-w-0">'+
       '<span class="text-indigo-300 font-medium text-sm truncate">'+esc(k.alias)+'</span>'+
       '<span class="text-gray-500 text-xs">'+esc(k.provider)+'</span>'+
       '<span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+sl+'</span>'+
-      '<span class="text-gray-500 text-xs">优先级 '+k.priority+'</span>'+
+      '<span class="text-gray-500 text-xs">\u4F18\u5148\u7EA7 '+k.priority+'</span>'+
       latencyText+'</div>'+
       '<div class="flex items-center gap-1.5 shrink-0">'+
-      '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" class="px-2 py-1 text-xs rounded cursor-pointer transition-colors '+(k.status==='active'?'bg-red-950/30 hover:bg-red-950/50 text-red-400':'bg-green-950/30 hover:bg-green-950/50 text-green-400')+'">'+(k.status==='active'?'禁用':'启用')+'</button>'+
-      '<button onclick="editKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-gray-200 cursor-pointer transition-colors">编辑</button>'+
-      '<button onclick="testConnect(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-indigo-400 cursor-pointer transition-colors">测试</button>'+
-      '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">删除</button></div></div>'+
+      '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" class="px-2 py-1 text-xs rounded cursor-pointer transition-colors '+(k.status==='active'?'bg-red-950/30 hover:bg-red-950/50 text-red-400':'bg-green-950/30 hover:bg-green-950/50 text-green-400')+'">'+(k.status==='active'?'\u7981\u7528':'\u542F\u7528')+'</button>'+
+      '<button onclick="editKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-gray-200 cursor-pointer transition-colors">\u7F16\u8F91</button>'+
+      '<button onclick="testConnect(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-indigo-400 cursor-pointer transition-colors">\u6D4B\u8BD5</button>'+
+      '<button onclick="openUsageConfigModal(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-emerald-400 cursor-pointer transition-colors" title="\u7528\u91CF\u67E5\u8BE2\u914D\u7F6E">\u7528\u91CF</button>'+
+      '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">\u5220\u9664</button></div></div>'+
+      usageInfoLine+
       '<div class="px-4 pb-4 min-w-0">'+
       '<div class="flex items-start gap-2 flex-wrap text-xs min-w-0">'+
       effectiveModelTags+
@@ -401,6 +462,153 @@ function refreshProviderModels() {
       alert('模型列表已部分刷新，成功 ' + (r.data.refreshed || 0) + ' 个，失败 ' + failed.length + ' 个\n' + lines.join('\n') + suffix);
     })
     .catch(function(e){ alert('刷新失败: ' + e.message); });
+}
+
+// ── 用量查询配置 ──────────────────────────────────────────
+
+var DEFAULT_USAGE_SCRIPT = JSON.stringify({
+  "request": {
+    "url": "{{baseUrl}}/v1/usage",
+    "method": "GET",
+    "headers": {"Authorization": "Bearer {{apiKey}}"}
+  },
+  "extractor": "function(response) {\n  const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  const total = response?.total ?? response?.quota?.total ?? response?.total_balance;\n  const used = response?.used ?? response?.quota?.used ?? response?.total_usage;\n  const planName = response?.plan_name ?? response?.plan ?? response?.subscription?.plan;\n  const isValid = response?.is_active ?? response?.isValid ?? true;\n  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n  return {\n    isValid,\n    invalidMessage,\n    remaining,\n    unit,\n    total,\n    used,\n    planName\n  };\n}"
+}, null, 2);
+
+function _usageToggleState(enabled) {
+  var toggle = document.getElementById('usage-toggle');
+  var dot = document.getElementById('usage-toggle-dot');
+  if (!toggle || !dot) return;
+  if (enabled) {
+    toggle.classList.remove('bg-gray-600');
+    toggle.classList.add('bg-indigo-600');
+    dot.classList.remove('translate-x-1');
+    dot.classList.add('translate-x-6');
+  } else {
+    toggle.classList.remove('bg-indigo-600');
+    toggle.classList.add('bg-gray-600');
+    dot.classList.remove('translate-x-6');
+    dot.classList.add('translate-x-1');
+  }
+  toggle.setAttribute('data-enabled', enabled ? '1' : '0');
+}
+
+function toggleUsageEnabled() {
+  var toggle = document.getElementById('usage-toggle');
+  var current = toggle.getAttribute('data-enabled') === '1';
+  _usageToggleState(!current);
+}
+
+function openUsageConfigModal(alias) {
+  fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-config')
+    .then(function(r) { return r.json(); })
+    .then(function(json) {
+      var data = (json && json.data) || {};
+      document.getElementById('usage-alias').value = alias;
+      var intervalM = data.interval_m || 5;
+      var enabled = intervalM > 0;
+      _usageToggleState(enabled);
+      document.getElementById('usage-interval').value = intervalM || 5;
+      document.getElementById('usage-script').value = data.script || DEFAULT_USAGE_SCRIPT;
+      document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
+      document.getElementById('usage-config-modal').open();
+    })
+    .catch(function(e) {
+      console.error('Usage config:', e);
+      document.getElementById('usage-alias').value = alias;
+      _usageToggleState(true);
+      document.getElementById('usage-interval').value = 5;
+      document.getElementById('usage-script').value = DEFAULT_USAGE_SCRIPT;
+      document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
+      document.getElementById('usage-config-modal').open();
+    });
+}
+
+function closeUsageConfigModal() {
+  var modal = document.getElementById('usage-config-modal');
+  if (modal) modal.close();
+}
+
+function saveUsageConfig() {
+  var alias = document.getElementById('usage-alias').value;
+  var enabled = document.getElementById('usage-toggle').getAttribute('data-enabled') === '1';
+  var intervalM = enabled ? (parseInt(document.getElementById('usage-interval').value) || 5) : 0;
+  var scriptRaw = document.getElementById('usage-script').value.trim();
+
+  try {
+    JSON.parse(scriptRaw);
+  } catch(e) {
+    alert('脚本 JSON 格式错误: ' + e.message);
+    return;
+  }
+
+  var btn = document.getElementById('usage-save-btn');
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+
+  fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-config', {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      script: scriptRaw,
+      interval_m: intervalM
+    })
+  })
+  .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+  .then(function(r) {
+    if (r.ok) {
+      closeUsageConfigModal();
+      loadKeys();
+    } else {
+      alert('保存失败: ' + (r.data.detail || '未知错误'));
+    }
+  })
+  .catch(function(e) { alert('请求失败: ' + e.message); })
+  .finally(function() {
+    btn.disabled = false;
+    btn.textContent = '保存';
+  });
+}
+
+function usageRunQuery() {
+  var alias = document.getElementById('usage-alias').value;
+  var scriptRaw = document.getElementById('usage-script').value.trim();
+
+  var scriptCfg;
+  try { scriptCfg = JSON.parse(scriptRaw); } catch(e) { alert('脚本 JSON 格式错误: ' + e.message); return; }
+  if (!scriptCfg.request || !scriptCfg.request.url) { alert('脚本缺少 request.url'); return; }
+
+  var extractorStr = scriptCfg.extractor || '';
+
+  setUsageQueryLoading(true);
+  fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-query', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(json) {
+    var data = (json && json.data) || json || {};
+    // 浏览器沙箱执行 JS extractor
+    if (extractorStr && data.raw_response && data.ok) {
+      try {
+        var fn = new Function('response', 'return (' + extractorStr + ')(response)');
+        var fe = fn(data.raw_response);
+        if (fe && typeof fe === 'object') data.extracted = fe;
+      } catch(ex) {
+        data.extracted = data.extracted || {};
+        data.extracted.extractorError = 'JS extractor 错误: ' + ex.message;
+      }
+    }
+    loadKeys(); // 刷新列表以显示最新用量
+  })
+  .catch(function(e) { alert('请求失败: ' + e.message); })
+  .finally(function() { setUsageQueryLoading(false); });
+}
+
+function setUsageQueryLoading(loading) {
+  var btn = document.getElementById('usage-query-btn');
+  if (!btn) return;
+  btn.disabled = !!loading;
+  btn.textContent = loading ? '查询中...' : '立即查询';
 }
 
 document.addEventListener('DOMContentLoaded', function() {

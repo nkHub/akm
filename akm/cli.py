@@ -17,6 +17,7 @@ from akm.db import get_connection, init_db, get_db_path, get_keys_log_path
 from akm.key_pool import (
     add_key, list_keys, remove_key, set_priority, set_base_url, set_api_key, set_status, get_key,
     set_models, set_provider, set_auth_header,
+    get_usage_query_config, set_usage_query_config,
 )
 from akm.proxy import test_key_connectivity
 from akm.audit import list_logs, clean_logs, count_logs
@@ -859,6 +860,107 @@ def key_health(provider, health, fallback):
                 f"[FAIL] {k['alias']} provider={k['provider']} status={result.get('status_code', 0)} error={result.get('error') or '-'}"
             )
     click.echo(f"巡检完成：成功 {ok_count}，失败 {failed_count}，总计 {len(keys)}")
+
+
+# ── 用量查询命令 ────────────────────────────────────────────
+
+@key.command("usage-query")
+@click.argument("alias")
+def key_usage_query(alias):
+    """手动查询指定 key 的用量/余额（使用已配置的查询脚本）"""
+    k = get_key(alias)
+    if k is None:
+        raise click.ClickException(f"Key '{alias}' 不存在")
+
+    config = get_usage_query_config(alias)
+    if config is None or not config.get("script"):
+        raise click.ClickException(f"Key '{alias}' 未配置用量查询脚本，请先用 set-usage-script 设置")
+
+    script_raw = config.get("script", "")
+    try:
+        script_cfg = json.loads(script_raw)
+    except json.JSONDecodeError:
+        raise click.ClickException("用量查询脚本 JSON 解析失败")
+
+    from akm.usage_query import execute_query_script
+
+    async def _run():
+        limits = httpx.Limits(max_keepalive_connections=2, max_connections=4)
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        async with httpx.AsyncClient(limits=limits, timeout=timeout) as client:
+            return await execute_query_script(k, script_cfg, client)
+
+    click.echo(f"正在查询 [{alias}] {k.get('provider', '')} 用量...")
+    result = asyncio.run(_run())
+
+    if result["ok"]:
+        click.echo(f"✅ 查询成功 ({result['status_code']}, {result['latency_ms']}ms)")
+    else:
+        click.echo(f"❌ 查询失败: {result.get('error', 'Unknown error')}")
+
+    extracted = result.get("extracted", {}) or {}
+    if extracted:
+        click.echo("提取到的用量信息：")
+        for field in ("isValid", "remaining", "unit", "total", "used", "planName", "invalidMessage", "extra"):
+            val = extracted.get(field)
+            if val is not None:
+                click.echo(f"  {field}: {val}")
+
+
+@key.command("set-usage-script")
+@click.argument("alias")
+def key_set_usage_script(alias):
+    """为 key 设置用量查询脚本（交互式编辑 JSON 配置）"""
+    k = get_key(alias)
+    if k is None:
+        raise click.ClickException(f"Key '{alias}' 不存在")
+
+    config = get_usage_query_config(alias)
+    current = config["script"] if config else ""
+
+    click.echo("当前用量查询脚本：")
+    click.echo(current or "(空)")
+    click.echo("")
+    click.echo("请输入新的 JSON 脚本配置（可粘贴 ccswitch 格式）")
+    click.echo("输入空行并使用 Ctrl+D 或 Ctrl+Z 结束输入：")
+
+    lines = []
+    while True:
+        try:
+            line = input()
+            lines.append(line)
+        except EOFError:
+            break
+
+    new_script = "\n".join(lines).strip()
+    if not new_script:
+        raise click.ClickException("未提供脚本内容")
+
+    # 验证 JSON 格式
+    try:
+        json.loads(new_script)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"JSON 格式错误: {e}")
+
+    set_usage_query_config(alias, script=new_script)
+    click.echo(f"Key '{alias}' 用量查询脚本已更新")
+
+
+@key.command("set-usage-interval")
+@click.argument("alias")
+@click.argument("minutes", type=int)
+def key_set_usage_interval(alias, minutes):
+    """设置 key 的自动查询间隔（分钟，0 表示关闭）"""
+    k = get_key(alias)
+    if k is None:
+        raise click.ClickException(f"Key '{alias}' 不存在")
+    if minutes < 0:
+        raise click.ClickException("间隔分钟数不能为负数")
+    set_usage_query_config(alias, interval_m=minutes)
+    if minutes > 0:
+        click.echo(f"Key '{alias}' 用量自动查询间隔已设为 {minutes} 分钟")
+    else:
+        click.echo(f"Key '{alias}' 用量自动查询已关闭")
 
 
 # ── serve 命令 ───────────────────────────────────────────
