@@ -494,7 +494,7 @@ var DEFAULT_USAGE_SCRIPT = JSON.stringify({
     "method": "GET",
     "headers": {"Authorization": "Bearer {{apiKey}}"}
   },
-  "extractor": "function(response) {\n  const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  const total = response?.total ?? response?.quota?.total ?? response?.total_balance;\n  const used = response?.used ?? response?.quota?.used ?? response?.total_usage;\n  const planName = response?.plan_name ?? response?.plan ?? response?.subscription?.plan;\n  const isValid = response?.is_active ?? response?.isValid ?? true;\n  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n  return {\n    isValid,\n    invalidMessage,\n    remaining,\n    unit,\n    total,\n    used,\n    planName\n  };\n}"
+  "extractor": "function(response) {\n  const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  return {\n    isValid: response?.is_active ?? response?.isValid ?? true,\n    remaining,\n    unit,\n  };\n}"
 }, null, 2);
 
 function _usageToggleState(enabled) {
