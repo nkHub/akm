@@ -498,6 +498,8 @@ def set_usage_query_config(alias: str, script: str | None = None, interval_m: in
 
 def update_usage_data(alias: str, data: dict) -> None:
     """更新用量查询结果和错误信息"""
+    # raw_response 体量巨大，仅用于前端 extractor，不落库
+    data = {k: v for k, v in data.items() if k != "raw_response"}
     conn = get_connection()
     conn.execute(
         "UPDATE keys SET usage_data = ?, usage_error = ?, usage_queried_at = datetime('now', 'localtime') WHERE alias = ?",
