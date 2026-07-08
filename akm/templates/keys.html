@@ -524,14 +524,15 @@ function toggleUsageEnabled() {
 // 将存储的 JSON 转为展示格式（request 在前，extractor 以实际函数展示，用分隔符隔离）
 function _usageScriptDisplay(jsonStr) {
   var cfg = JSON.parse(jsonStr);
-  return JSON.stringify(cfg.request, null, 2) + '\n///EXTRACTOR///\n' + (cfg.extractor || 'function(response) {}');
+  return 'request: ' + JSON.stringify(cfg.request, null, 2) + '\n///EXTRACTOR///\n' + (cfg.extractor || 'function(response) {}');
 }
 
 // 将展示格式转回存储的 JSON
 function _usageScriptToJSON(display) {
   var parts = display.split('\n///EXTRACTOR///\n');
   if (parts.length < 2) throw new Error('找不到 extractor 分隔符');
-  var req = JSON.parse(parts[0].trim());
+  var reqText = parts[0].replace(/^request\s*:\s*/, '').trim();
+  var req = JSON.parse(reqText);
   var extFn = parts.slice(1).join('\n///EXTRACTOR///\n').trim();
   return JSON.stringify({ request: req, extractor: extFn });
 }
