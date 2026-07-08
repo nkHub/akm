@@ -9,8 +9,8 @@ from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
 
 # ── 用量查询默认脚本 ─────────────────────────────────────────
-# 格式兼容 ccswitch：整体用 () 包裹为对象字面量表达式
-# extractor 返回字段：isValid, invalidMessage, remaining, unit, planName, total, used, extra
+# 格式兼容 ccswitch：extractor 为 JS 函数字符串
+# extractor 返回字段：isValid, remaining, unit
 
 DEFAULT_USAGE_QUERY_SCRIPT = json.dumps({
     "request": {
@@ -22,19 +22,10 @@ DEFAULT_USAGE_QUERY_SCRIPT = json.dumps({
         "function(response) {\n"
         "  const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;\n"
         "  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n"
-        "  const total = response?.total ?? response?.quota?.total ?? response?.total_balance;\n"
-        "  const used = response?.used ?? response?.quota?.used ?? response?.total_usage;\n"
-        "  const planName = response?.plan_name ?? response?.plan ?? response?.subscription?.plan;\n"
-        "  const isValid = response?.is_active ?? response?.isValid ?? true;\n"
-        "  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n"
         "  return {\n"
-        "    isValid,\n"
-        "    invalidMessage,\n"
+        "    isValid: response?.is_active ?? response?.isValid ?? true,\n"
         "    remaining,\n"
         "    unit,\n"
-        "    total,\n"
-        "    used,\n"
-        "    planName\n"
         "  };\n"
         "}"
     ),
