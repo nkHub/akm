@@ -521,6 +521,23 @@ function toggleUsageEnabled() {
   _usageToggleState(!current);
 }
 
+// 将存储的 JSON 转为展示用的 JS 对象格式（extractor 以实际函数展示）
+function _usageScriptDisplay(jsonStr) {
+  var cfg = JSON.parse(jsonStr);
+  return '{\n  request: ' + JSON.stringify(cfg.request, null, 2) + ',\n  extractor: ' + (cfg.extractor || 'function(response) {}') + '\n}';
+}
+
+// 将展示格式转回存储的 JSON（extractor 函数 toString 回字符串）
+function _usageScriptToJSON(display) {
+  var idx = display.lastIndexOf('extractor:');
+  if (idx === -1) throw new Error('找不到 extractor');
+  var before = display.slice(0, idx);
+  var reqText = before.replace(/^\{\s*request\s*:\s*/, '').replace(/\s*,?\s*$/, '').trim();
+  var req = JSON.parse(reqText);
+  var extFn = display.slice(idx + 'extractor:'.length).trim();
+  return JSON.stringify({ request: req, extractor: extFn });
+}
+
 function openUsageConfigModal(alias) {
   fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-config')
     .then(function(r) { return r.json(); })
@@ -532,7 +549,7 @@ function openUsageConfigModal(alias) {
       _usageToggleState(enabled);
       document.getElementById('usage-interval').value = intervalM;
       var raw = data.script || DEFAULT_USAGE_SCRIPT;
-      try { raw = JSON.stringify(JSON.parse(raw), null, 2); } catch(e) {}
+      try { raw = _usageScriptDisplay(raw); } catch(e) {}
       document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
@@ -543,7 +560,7 @@ function openUsageConfigModal(alias) {
       _usageToggleState(false);
       document.getElementById('usage-interval').value = 0;
       var raw = DEFAULT_USAGE_SCRIPT;
-      try { raw = JSON.stringify(JSON.parse(raw), null, 2); } catch(e) {}
+      try { raw = _usageScriptDisplay(raw); } catch(e) {}
       document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
@@ -566,7 +583,8 @@ function saveUsageConfig() {
   var scriptRaw = document.getElementById('usage-script').value.trim();
 
   try {
-    JSON.parse(scriptRaw);
+    scriptRaw = _usageScriptToJSON(scriptRaw);
+    JSON.parse(scriptRaw); // 再次验证
   } catch(e) {
     alert('脚本 JSON 格式错误: ' + e.message);
     return;
