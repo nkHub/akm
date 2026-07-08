@@ -28,6 +28,7 @@ _DEEPSEEK_USAGE_SCRIPT = {
         "    isValid,\n"
         "    invalidMessage,\n"
         "    remaining,\n"
+        "    planName: '钱包余额',\n"
         "    unit\n"
         "  };\n"
         "}"
