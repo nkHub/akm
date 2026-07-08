@@ -495,7 +495,7 @@ var USAGE_SCRIPTS = {
       "method": "GET",
       "headers": {"Authorization": "Bearer {{apiKey}}"}
     },
-    "extractor": "function(response) {\n  const remaining = response?.remaining;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  const used = response?.subscription.daily_usage_usd;\n  const total = response?.subscription.daily_limit_usd;\n  return {\n    isValid: response?.is_active ?? response?.isValid ?? true,\n    remaining,\n    used,\n    total,\n    unit,\n  };\n}"
+    "extractor": "function(response) {\n  const remaining = response?.remaining;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  const used = response?.subscription?.daily_usage_usd;\n  const total = response?.subscription?.daily_limit_usd;\n  const planName = response?.planName;\n  return {\n    isValid: response?.is_active ?? response?.isValid ?? true,\n    remaining,\n    used,\n    total,\n    unit,\n    planName\n  };\n}"
   },
   deepseek: {
     "request": {
