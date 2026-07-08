@@ -635,8 +635,8 @@ function usageRunQuery() {
   .then(function(r) { return r.json(); })
   .then(function(json) {
     var data = (json && json.data) || json || {};
-    // 浏览器沙箱执行 JS extractor
-    if (extractorStr && data.raw_response && data.ok) {
+    // 浏览器沙箱执行 JS extractor（只要有 raw_response 就执行，由 extractor 自己判断有效性）
+    if (extractorStr && data.raw_response) {
       try {
         var fn = new Function('response', 'return (' + extractorStr + ')(response)');
         var fe = fn(data.raw_response);
