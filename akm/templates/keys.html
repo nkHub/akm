@@ -622,6 +622,7 @@ function usageRunQuery() {
   var alias = document.getElementById('usage-alias').value;
   var scriptRaw = document.getElementById('usage-script').value.trim();
 
+  try { scriptRaw = _usageScriptToJSON(scriptRaw); } catch(e) { alert('脚本格式错误: ' + e.message); return; }
   var scriptCfg;
   try { scriptCfg = JSON.parse(scriptRaw); } catch(e) { alert('脚本 JSON 格式错误: ' + e.message); return; }
   if (!scriptCfg.request || !scriptCfg.request.url) { alert('脚本缺少 request.url'); return; }
@@ -646,7 +647,12 @@ function usageRunQuery() {
         data.extracted.extractorError = 'JS extractor 错误: ' + ex.message;
       }
     }
-    loadKeys(); // 刷新列表以显示最新用量
+    // 将 extractor 结果写库
+    var usageData = { ok: data.ok, error: data.error, status_code: data.status_code, latency_ms: data.latency_ms, raw_response: data.raw_response, extracted: data.extracted, queried_at: data.queried_at };
+    fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-data', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ usage_data: usageData })
+    }).finally(function() { loadKeys(); });
   })
   .catch(function(e) { alert('请求失败: ' + e.message); })
   .finally(function() { setUsageQueryLoading(false); });

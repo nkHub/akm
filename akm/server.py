@@ -1070,6 +1070,18 @@ async def api_query_key_usage(alias: str):
         return {"ok": False, "error": str(e)}
 
 
+@app.post("/api/keys/{alias:path}/usage-data")
+async def api_update_usage_data(alias: str, request: Request):
+    """前端 extractor 执行后将结果写库"""
+    key = get_key(alias)
+    if key is None:
+        return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
+    body = await request.json()
+    usage_data = body.get("usage_data", {})
+    update_usage_data(alias, usage_data)
+    return {"ok": True}
+
+
 @app.post("/api/keys/usage-query-all")
 async def api_query_all_keys_usage():
     """批量触发所有已配置用量查询的 key（仅执行，不阻塞返回）"""
