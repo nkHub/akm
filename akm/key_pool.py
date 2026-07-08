@@ -8,6 +8,38 @@ from cryptography.fernet import Fernet
 from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
 
+# ── 用量查询默认脚本 ─────────────────────────────────────────
+# 格式兼容 ccswitch：整体用 () 包裹为对象字面量表达式
+# extractor 返回字段：isValid, invalidMessage, remaining, unit, planName, total, used, extra
+
+DEFAULT_USAGE_QUERY_SCRIPT = json.dumps({
+    "request": {
+        "url": "{{baseUrl}}/v1/usage",
+        "method": "GET",
+        "headers": {"Authorization": "Bearer {{apiKey}}"},
+    },
+    "extractor": (
+        "function(response) {\n"
+        "  const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;\n"
+        "  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n"
+        "  const total = response?.total ?? response?.quota?.total ?? response?.total_balance;\n"
+        "  const used = response?.used ?? response?.quota?.used ?? response?.total_usage;\n"
+        "  const planName = response?.plan_name ?? response?.plan ?? response?.subscription?.plan;\n"
+        "  const isValid = response?.is_active ?? response?.isValid ?? true;\n"
+        "  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n"
+        "  return {\n"
+        "    isValid,\n"
+        "    invalidMessage,\n"
+        "    remaining,\n"
+        "    unit,\n"
+        "    total,\n"
+        "    used,\n"
+        "    planName\n"
+        "  };\n"
+        "}"
+    ),
+}, ensure_ascii=False)
+
 SECRET_DIR = os.path.expanduser("~/.akm")
 RATE_LIMIT_COOLDOWN = 60  # 限流冷却秒数
 _cipher: Fernet | None = None
@@ -433,3 +465,62 @@ def pick_wildcard_key(model: str = "", exclude_aliases: list[str] | None = None)
 async def pick_wildcard_key_async(model: str = "", exclude_aliases: list[str] | None = None) -> dict | None:
     """异步版本的 pick_wildcard_key"""
     return await asyncio.to_thread(pick_wildcard_key, model, exclude_aliases)
+
+
+# ── 用量查询配置 ─────────────────────────────────────────────
+
+def get_usage_query_config(alias: str) -> dict | None:
+    """获取指定 key 的用量查询配置（脚本 + 间隔 + 最近结果）"""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT usage_query_script, usage_query_interval_m, usage_queried_at, usage_data, usage_error, usage_query_endpoint FROM keys WHERE alias = ?",
+        (alias,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    script_raw = row["usage_query_script"] or ""
+    return {
+        "alias": alias,
+        "script": script_raw if script_raw else DEFAULT_USAGE_QUERY_SCRIPT,
+        "script_is_default": not script_raw,
+        "interval_m": int(row["usage_query_interval_m"] or 0),
+        "queried_at": row["usage_queried_at"] or "",
+        "data": _safe_json_parse(row["usage_data"]),
+        "error": row["usage_error"] or "",
+        "query_endpoint": row["usage_query_endpoint"] or "",
+    }
+
+
+def set_usage_query_config(alias: str, script: str | None = None, interval_m: int | None = None, query_endpoint: str | None = None) -> None:
+    """设置 key 的用量查询配置（脚本 / 查询间隔(分钟) / 自定义端点）"""
+    conn = get_connection()
+    if script is not None:
+        conn.execute("UPDATE keys SET usage_query_script = ? WHERE alias = ?", (script, alias))
+    if interval_m is not None:
+        conn.execute("UPDATE keys SET usage_query_interval_m = ? WHERE alias = ?", (int(interval_m or 0), alias))
+    if query_endpoint is not None:
+        conn.execute("UPDATE keys SET usage_query_endpoint = ? WHERE alias = ?", (query_endpoint, alias))
+    conn.commit()
+    conn.close()
+
+
+def update_usage_data(alias: str, data: dict) -> None:
+    """更新用量查询结果和错误信息"""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE keys SET usage_data = ?, usage_error = ?, usage_queried_at = datetime('now', 'localtime') WHERE alias = ?",
+        (json.dumps(data, ensure_ascii=False), data.get("error", ""), alias),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _safe_json_parse(raw: str | None) -> dict | None:
+    """安全解析 JSON 字符串，失败返回 None"""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
