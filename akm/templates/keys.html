@@ -85,7 +85,7 @@
     <p class="text-[11px] text-gray-500 mb-1">
       模板变量 <code>{{ "{{baseUrl}}" }}</code> <code>{{ "{{apiKey}}" }}</code>，extractor 在浏览器沙箱执行
     </p>
-    <textarea id="usage-script" rows="14" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 font-mono focus:outline-none focus:border-indigo-500 placeholder-gray-600" spellcheck="false"></textarea>
+    <textarea id="usage-script" rows="14" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 font-mono focus:outline-none focus:border-indigo-500 placeholder-gray-600 whitespace-pre-wrap" spellcheck="false"></textarea>
   </div>
   <div data-modal-footer>
     <div class="flex gap-2 w-full">
@@ -107,13 +107,15 @@ var _keyCurrentPage = 1;
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function _fmtQuota(v) {
-  if (typeof v === 'object') {
-    if (v === null) return String(v);
+  if (typeof v === 'object' && v !== null) {
+    if (v.cost !== undefined) return _fmtQuota(v.cost);
+    if (v.actual_cost !== undefined) return _fmtQuota(v.actual_cost);
     if (v.value !== undefined) return _fmtQuota(v.value);
     try { return JSON.stringify(v); } catch(e) { return String(v); }
   }
   var n = Number(v);
-  return isNaN(n) ? String(v) : n.toFixed(2);
+  if (!isNaN(n)) return n.toFixed(2);
+  return String(v);
 }
 
 function _fmtLatency(ms) {
@@ -217,7 +219,7 @@ function renderKeys() {
     // 用量数据显示（放在按钮行下面）
     var usageData = k.usage_data;
     var usageInfoLine = '';
-    if (usageData && typeof usageData === 'object') {
+    if (k.usage_query_interval_m > 0 && usageData && typeof usageData === 'object') {
       var extracted = usageData.extracted || usageData;
       if (extracted && typeof extracted === 'object') {
         var parts = [];
@@ -229,12 +231,6 @@ function renderKeys() {
         }
         if (extracted.total !== undefined && extracted.total !== null) {
           parts.push('总额: ' + _fmtQuota(extracted.total) + (extracted.unit ? ' ' + extracted.unit : ''));
-        }
-        if (extracted.used !== undefined && extracted.used !== null) {
-          parts.push('\u5DF2\u7528: ' + extracted.used + (extracted.unit ? ' ' + extracted.unit : ''));
-        }
-        if (extracted.total !== undefined && extracted.total !== null) {
-          parts.push('\u603B\u989D: ' + extracted.total + (extracted.unit ? ' ' + extracted.unit : ''));
         }
         if (extracted.planName) {
           parts.push(extracted.planName);
