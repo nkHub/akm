@@ -235,7 +235,7 @@ function renderKeys() {
         if (extracted.planName) {
           parts.push(extracted.planName);
         }
-        if (!extracted.isValid) {
+        if (extracted.isValid === false) {
           parts.push('\u26A0\uFE0F ' + (extracted.invalidMessage || '\u5957\u9910\u5DF2\u5931\u6548'));
           usageInfoLine = '<div class="px-4 pb-1"><span class="text-red-400 text-xs">' + parts.join(', ') + '</span></div>';
         } else if (parts.length > 0) {
@@ -642,8 +642,7 @@ function usageRunQuery() {
         var fe = fn(data.raw_response);
         if (fe && typeof fe === 'object') data.extracted = fe;
       } catch(ex) {
-        data.extracted = data.extracted || {};
-        data.extracted.extractorError = 'JS extractor 错误: ' + ex.message;
+        data.extracted = { isValid: false, invalidMessage: 'extractor 错误: ' + ex.message };
       }
     }
     // 将 extractor 结果写库
