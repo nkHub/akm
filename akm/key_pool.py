@@ -9,10 +9,55 @@ from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
 
 # ── 用量查询默认脚本 ─────────────────────────────────────────
-# 格式兼容 ccswitch：extractor 为 JS 函数字符串
-# extractor 返回字段：isValid, remaining, unit
+# 按供应商提供不同的默认脚本，extractor 返回字段由各供应商脚本决定
 
-DEFAULT_USAGE_QUERY_SCRIPT = json.dumps({
+_DEEPSEEK_USAGE_SCRIPT = {
+    "request": {
+        "url": "{{baseUrl}}/user/balance",
+        "method": "GET",
+        "headers": {"Authorization": "Bearer {{apiKey}}"},
+    },
+    "extractor": (
+        "function(response) {\n"
+        "  const isValid = response?.is_available ?? response?.is_available ?? true;\n"
+        "  const balance_infos = response?.balance_infos[0];\n"
+        "  const unit = balance_infos?.currency ?? balance_infos?.currency ?? \"元\";\n"
+        "  const remaining = balance_infos?.total_balance;\n"
+        "  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n"
+        "  return {\n"
+        "    isValid,\n"
+        "    invalidMessage,\n"
+        "    remaining,\n"
+        "    unit\n"
+        "  };\n"
+        "}"
+    ),
+}
+
+_OPENAI_USAGE_SCRIPT = {
+    "request": {
+        "url": "{{baseUrl}}/v1/usage",
+        "method": "GET",
+        "headers": {"Authorization": "Bearer {{apiKey}}"},
+    },
+    "extractor": (
+        "function(response) {\n"
+        "  const remaining = response?.remaining;\n"
+        "  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n"
+        "  const used = response?.subscription.daily_usage_usd;\n"
+        "  const total = response?.subscription.daily_limit_usd;\n"
+        "  return {\n"
+        "    isValid: response?.is_active ?? response?.isValid ?? true,\n"
+        "    remaining,\n"
+        "    used,\n"
+        "    total,\n"
+        "    unit,\n"
+        "  };\n"
+        "}"
+    ),
+}
+
+_GENERIC_USAGE_SCRIPT = {
     "request": {
         "url": "{{baseUrl}}/v1/usage",
         "method": "GET",
@@ -29,7 +74,20 @@ DEFAULT_USAGE_QUERY_SCRIPT = json.dumps({
         "  };\n"
         "}"
     ),
-}, ensure_ascii=False)
+}
+
+_PROVIDER_SCRIPTS = {
+    "openai": json.dumps(_OPENAI_USAGE_SCRIPT, ensure_ascii=False),
+    "deepseek": json.dumps(_DEEPSEEK_USAGE_SCRIPT, ensure_ascii=False),
+}
+
+DEFAULT_USAGE_QUERY_SCRIPT = json.dumps(_GENERIC_USAGE_SCRIPT, ensure_ascii=False)
+
+
+def get_default_usage_script(provider: str = "") -> str:
+    """根据供应商返回对应的默认查询脚本"""
+    provider_lower = (provider or "").lower()
+    return _PROVIDER_SCRIPTS.get(provider_lower, DEFAULT_USAGE_QUERY_SCRIPT)
 
 SECRET_DIR = os.path.expanduser("~/.akm")
 RATE_LIMIT_COOLDOWN = 60  # 限流冷却秒数
@@ -460,7 +518,7 @@ async def pick_wildcard_key_async(model: str = "", exclude_aliases: list[str] | 
 
 # ── 用量查询配置 ─────────────────────────────────────────────
 
-def get_usage_query_config(alias: str) -> dict | None:
+def get_usage_query_config(alias: str, provider: str = "") -> dict | None:
     """获取指定 key 的用量查询配置（脚本 + 间隔 + 最近结果）"""
     conn = get_connection()
     row = conn.execute(
@@ -473,7 +531,7 @@ def get_usage_query_config(alias: str) -> dict | None:
     script_raw = row["usage_query_script"] or ""
     return {
         "alias": alias,
-        "script": script_raw if script_raw else DEFAULT_USAGE_QUERY_SCRIPT,
+        "script": script_raw if script_raw else get_default_usage_script(provider),
         "script_is_default": not script_raw,
         "interval_m": int(row["usage_query_interval_m"] or 0),
         "queried_at": row["usage_queried_at"] or "",

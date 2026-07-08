@@ -261,7 +261,7 @@ function renderKeys() {
         : '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" title="\u542F\u7528" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-green-400 hover:bg-green-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-width="2"/><polygon points="10,8 16,12 10,16" fill="currentColor" stroke="none"/></svg></button>')+
       '<button onclick="editKey(\''+esc(k.alias)+'\')" title="\u7F16\u8F91" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-gray-200 hover:bg-surface-hover"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>'+
       '<button onclick="testConnect(\''+esc(k.alias)+'\')" title="\u6D4B\u8BD5\u8FDE\u63A5" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-indigo-400 hover:bg-indigo-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></button>'+
-      '<button onclick="openUsageConfigModal(\''+esc(k.alias)+'\')" title="\u7528\u91CF\u67E5\u8BE2" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg></button>'+
+      '<button onclick="openUsageConfigModal(\''+esc(k.alias)+'\',\''+esc(k.provider)+'\')" title="\u7528\u91CF\u67E5\u8BE2" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg></button>'+
       '<button onclick="deleteKey(\''+esc(k.alias)+'\')" title="\u5220\u9664" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-red-400 hover:bg-red-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button></div></div>'+
       usageInfoLine+
       '<div class="px-4 pb-4 min-w-0">'+
@@ -488,7 +488,26 @@ function refreshProviderModels() {
 
 // ── 用量查询配置 ──────────────────────────────────────────
 
-var DEFAULT_USAGE_SCRIPT = JSON.stringify({
+var USAGE_SCRIPTS = {
+  openai: {
+    "request": {
+      "url": "{{baseUrl}}/v1/usage",
+      "method": "GET",
+      "headers": {"Authorization": "Bearer {{apiKey}}"}
+    },
+    "extractor": "function(response) {\n  const remaining = response?.remaining;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  const used = response?.subscription.daily_usage_usd;\n  const total = response?.subscription.daily_limit_usd;\n  return {\n    isValid: response?.is_active ?? response?.isValid ?? true,\n    remaining,\n    used,\n    total,\n    unit,\n  };\n}"
+  },
+  deepseek: {
+    "request": {
+      "url": "{{baseUrl}}/user/balance",
+      "method": "GET",
+      "headers": {"Authorization": "Bearer {{apiKey}}"}
+    },
+    "extractor": "function(response) {\n  const isValid = response?.is_available ?? response?.is_available ?? true;\n  const balance_infos = response?.balance_infos[0];\n  const unit = balance_infos?.currency ?? balance_infos?.currency ?? \"元\";\n  const remaining = balance_infos?.total_balance;\n  const invalidMessage = isValid ? undefined : (response?.message ?? response?.error);\n  return {\n    isValid,\n    invalidMessage,\n    remaining,\n    unit\n  };\n}"
+  }
+};
+
+var GENERIC_USAGE_SCRIPT = JSON.stringify({
   "request": {
     "url": "{{baseUrl}}/v1/usage",
     "method": "GET",
@@ -496,6 +515,11 @@ var DEFAULT_USAGE_SCRIPT = JSON.stringify({
   },
   "extractor": "function(response) {\n  const remaining = response?.remaining ?? response?.quota?.remaining ?? response?.balance;\n  const unit = response?.unit ?? response?.quota?.unit ?? \"USD\";\n  return {\n    isValid: response?.is_active ?? response?.isValid ?? true,\n    remaining,\n    unit,\n  };\n}"
 }, null, 2);
+
+function _defaultUsageScript(provider) {
+  var p = (provider || '').toLowerCase();
+  return USAGE_SCRIPTS[p] ? JSON.stringify(USAGE_SCRIPTS[p], null, 2) : GENERIC_USAGE_SCRIPT;
+}
 
 function _usageToggleState(enabled) {
   var toggle = document.getElementById('usage-toggle');
@@ -537,7 +561,7 @@ function _usageScriptToJSON(display) {
   return JSON.stringify({ request: req, extractor: extFn });
 }
 
-function openUsageConfigModal(alias) {
+function openUsageConfigModal(alias, provider) {
   fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-config')
     .then(function(r) { return r.json(); })
     .then(function(json) {
@@ -547,7 +571,7 @@ function openUsageConfigModal(alias) {
       var enabled = intervalM > 0;
       _usageToggleState(enabled);
       document.getElementById('usage-interval').value = intervalM;
-      var raw = data.script || DEFAULT_USAGE_SCRIPT;
+      var raw = data.script || _defaultUsageScript(provider);
       try { raw = _usageScriptDisplay(raw); } catch(e) {}
       document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
@@ -558,7 +582,7 @@ function openUsageConfigModal(alias) {
       document.getElementById('usage-alias').value = alias;
       _usageToggleState(false);
       document.getElementById('usage-interval').value = 0;
-      var raw = DEFAULT_USAGE_SCRIPT;
+      var raw = _defaultUsageScript(provider);
       try { raw = _usageScriptDisplay(raw); } catch(e) {}
       document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);

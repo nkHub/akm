@@ -23,7 +23,7 @@ from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
     set_provider, set_models, set_auth_header, set_provider_models, key_model_list,
-    get_usage_query_config, set_usage_query_config, update_usage_data, _safe_json_parse,
+    get_usage_query_config, set_usage_query_config, update_usage_data, _safe_json_parse, get_default_usage_script,
 )
 from akm.audit import (
     write_log_async,
@@ -78,7 +78,7 @@ class _UsageQueryScheduler:
             interval_m = int(key.get("usage_query_interval_m", 0) or 0)
             if interval_m <= 0:
                 continue
-            config = get_usage_query_config(key["alias"])
+            config = get_usage_query_config(key["alias"], key.get("provider", ""))
             if config is None:
                 continue
             script_raw = config.get("script", "")
@@ -1022,7 +1022,7 @@ async def api_get_usage_config(alias: str):
     existing = get_key(alias)
     if existing is None:
         return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
-    config = get_usage_query_config(alias)
+    config = get_usage_query_config(alias, existing.get("provider", ""))
     return {"ok": True, "data": config}
 
 
