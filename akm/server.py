@@ -46,7 +46,7 @@ from akm.usage_flags import (
     FLAG_MISSING_USAGE_UPSTREAM,
     FLAG_LOOP_GUARD_TRIGGERED,
 )
-from akm.usage_query import execute_query_script, _simple_extract
+from akm.usage_query import execute_query_script
 
 
 # ── 用量查询自动调度器 ─────────────────────────────────────
