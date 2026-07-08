@@ -220,7 +220,7 @@ function renderKeys() {
     var usageData = k.usage_data;
     var usageInfoLine = '';
     if (k.usage_query_interval_m > 0 && usageData && typeof usageData === 'object') {
-      var extracted = usageData.extracted || usageData;
+      var extracted = usageData.extracted;
       if (extracted && typeof extracted === 'object') {
         var parts = [];
         if (extracted.remaining !== undefined && extracted.remaining !== null) {
