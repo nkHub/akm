@@ -100,6 +100,9 @@ class _UsageQueryScheduler:
             except json.JSONDecodeError:
                 continue
             result = await execute_query_script(key, script_cfg)
+            # 自动调度只存 raw_response，不存 _simple_extract 结果
+            # （JS extractor 在浏览器执行，调度器无法运行用户自定义逻辑）
+            result.pop("extracted", None)
             update_usage_data(key["alias"], result)
 
 
