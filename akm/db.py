@@ -109,7 +109,7 @@ def _migrate_key_usage_columns(conn: sqlite3.Connection) -> None:
     """迁移：keys 表添加用量查询相关列"""
     for col, col_type, default in [
         ("usage_query_script", "TEXT", "''"),
-        ("usage_query_interval_m", "INTEGER", "5"),
+        ("usage_query_interval_m", "INTEGER", "0"),
         ("usage_queried_at", "TEXT", "''"),
         ("usage_data", "TEXT", "''"),
         ("usage_error", "TEXT", "''"),

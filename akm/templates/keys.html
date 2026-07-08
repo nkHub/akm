@@ -106,6 +106,24 @@ var _keyCurrentPage = 1;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+function _fmtQuota(v) {
+  if (typeof v === 'object') {
+    if (v === null) return String(v);
+    if (v.value !== undefined) return _fmtQuota(v.value);
+    try { return JSON.stringify(v); } catch(e) { return String(v); }
+  }
+  var n = Number(v);
+  return isNaN(n) ? String(v) : n.toFixed(2);
+}
+
+function _fmtLatency(ms) {
+  var n = Number(ms);
+  if (isNaN(n)) return String(ms);
+  if (n >= 60000) return (n / 60000).toFixed(2) + 'm';
+  if (n >= 1000) return (n / 1000).toFixed(2) + 's';
+  return n.toFixed(2) + 'ms';
+}
+
 function loadKeys() {
   fetch('/api/keys').then(function(r){ return r.json(); }).then(function(json){
     _keysData = json.data || [];
@@ -193,7 +211,7 @@ function renderKeys() {
     if ((k.recent_latency_sample_count || 0) > 0 && k.recent_avg_latency_ms !== null && k.recent_avg_latency_ms !== undefined) {
       var avgLatency = Number(k.recent_avg_latency_ms);
       var latencyClass = avgLatency <= 5000 ? 'text-green-400' : 'text-red-400';
-      latencyText = '<span class="'+latencyClass+' text-xs">'+avgLatency.toFixed(1)+'ms</span>';
+      latencyText = '<span class="'+latencyClass+' text-xs">'+_fmtLatency(avgLatency)+'</span>';
     }
 
     // 用量数据显示（放在按钮行下面）
@@ -204,7 +222,13 @@ function renderKeys() {
       if (extracted && typeof extracted === 'object') {
         var parts = [];
         if (extracted.remaining !== undefined && extracted.remaining !== null) {
-          parts.push('\u5269\u4F59: ' + extracted.remaining + (extracted.unit ? ' ' + extracted.unit : ''));
+          parts.push('剩余: ' + _fmtQuota(extracted.remaining) + (extracted.unit ? ' ' + extracted.unit : ''));
+        }
+        if (extracted.used !== undefined && extracted.used !== null) {
+          parts.push('已用: ' + _fmtQuota(extracted.used) + (extracted.unit ? ' ' + extracted.unit : ''));
+        }
+        if (extracted.total !== undefined && extracted.total !== null) {
+          parts.push('总额: ' + _fmtQuota(extracted.total) + (extracted.unit ? ' ' + extracted.unit : ''));
         }
         if (extracted.used !== undefined && extracted.used !== null) {
           parts.push('\u5DF2\u7528: ' + extracted.used + (extracted.unit ? ' ' + extracted.unit : ''));
@@ -235,12 +259,14 @@ function renderKeys() {
       '<span class="inline-block px-2 py-0.5 rounded text-xs font-medium '+sc+'">'+sl+'</span>'+
       '<span class="text-gray-500 text-xs">\u4F18\u5148\u7EA7 '+k.priority+'</span>'+
       latencyText+'</div>'+
-      '<div class="flex items-center gap-1.5 shrink-0">'+
-      '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" class="px-2 py-1 text-xs rounded cursor-pointer transition-colors '+(k.status==='active'?'bg-red-950/30 hover:bg-red-950/50 text-red-400':'bg-green-950/30 hover:bg-green-950/50 text-green-400')+'">'+(k.status==='active'?'\u7981\u7528':'\u542F\u7528')+'</button>'+
-      '<button onclick="editKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-gray-200 cursor-pointer transition-colors">\u7F16\u8F91</button>'+
-      '<button onclick="testConnect(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-indigo-400 cursor-pointer transition-colors">\u6D4B\u8BD5</button>'+
-      '<button onclick="openUsageConfigModal(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-surface-hover text-gray-400 hover:text-emerald-400 cursor-pointer transition-colors" title="\u7528\u91CF\u67E5\u8BE2\u914D\u7F6E">\u7528\u91CF</button>'+
-      '<button onclick="deleteKey(\''+esc(k.alias)+'\')" class="px-2 py-1 text-xs rounded bg-surface hover:bg-red-950/50 text-gray-400 hover:text-red-400 cursor-pointer transition-colors">\u5220\u9664</button></div></div>'+
+      '<div class="flex items-center gap-0.5 shrink-0">'+
+      (k.status==='active'
+        ? '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\'active\')" title="\u7981\u7528" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-red-400 hover:bg-red-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-width="2"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07" stroke-width="2"/></svg></button>'
+        : '<button onclick="toggleStatus(\''+esc(k.alias)+'\',\''+k.status+'\')" title="\u542F\u7528" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-green-400 hover:bg-green-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-width="2"/><polygon points="10,8 16,12 10,16" fill="currentColor" stroke="none"/></svg></button>')+
+      '<button onclick="editKey(\''+esc(k.alias)+'\')" title="\u7F16\u8F91" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-gray-200 hover:bg-surface-hover"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg></button>'+
+      '<button onclick="testConnect(\''+esc(k.alias)+'\')" title="\u6D4B\u8BD5\u8FDE\u63A5" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-indigo-400 hover:bg-indigo-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></button>'+
+      '<button onclick="openUsageConfigModal(\''+esc(k.alias)+'\')" title="\u7528\u91CF\u67E5\u8BE2" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg></button>'+
+      '<button onclick="deleteKey(\''+esc(k.alias)+'\')" title="\u5220\u9664" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-red-400 hover:bg-red-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button></div></div>'+
       usageInfoLine+
       '<div class="px-4 pb-4 min-w-0">'+
       '<div class="flex items-start gap-2 flex-wrap text-xs min-w-0">'+
@@ -505,10 +531,10 @@ function openUsageConfigModal(alias) {
     .then(function(json) {
       var data = (json && json.data) || {};
       document.getElementById('usage-alias').value = alias;
-      var intervalM = data.interval_m || 5;
+      var intervalM = (data.interval_m != null) ? data.interval_m : 0;
       var enabled = intervalM > 0;
       _usageToggleState(enabled);
-      document.getElementById('usage-interval').value = intervalM || 5;
+      document.getElementById('usage-interval').value = intervalM;
       document.getElementById('usage-script').value = data.script || DEFAULT_USAGE_SCRIPT;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
@@ -516,8 +542,8 @@ function openUsageConfigModal(alias) {
     .catch(function(e) {
       console.error('Usage config:', e);
       document.getElementById('usage-alias').value = alias;
-      _usageToggleState(true);
-      document.getElementById('usage-interval').value = 5;
+      _usageToggleState(false);
+      document.getElementById('usage-interval').value = 0;
       document.getElementById('usage-script').value = DEFAULT_USAGE_SCRIPT;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
@@ -526,7 +552,11 @@ function openUsageConfigModal(alias) {
 
 function closeUsageConfigModal() {
   var modal = document.getElementById('usage-config-modal');
-  if (modal) modal.close();
+  if (!modal) return;
+  if (modal.close) modal.close();
+  var overlay = modal.querySelector('[data-overlay]');
+  if (overlay) overlay.classList.add('hidden');
+  document.body.classList.remove('overflow-hidden');
 }
 
 function saveUsageConfig() {
