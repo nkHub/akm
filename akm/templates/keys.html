@@ -725,6 +725,11 @@ document.addEventListener('DOMContentLoaded', function() {
   });
   loadProviders();
   loadKeys();
+
+  /* 页面重新可见时自动刷新 Key 列表 */
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) loadKeys();
+  });
 });
 </script>
 {% endblock %}
