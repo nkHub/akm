@@ -46,7 +46,7 @@ echo "[4/5] 生成 DMG 背景图"
 python - <<'PY'
 from PIL import Image, ImageDraw
 
-w, h = 960, 600
+w, h = 624, 399
 img = Image.new("RGB", (w, h), "#F6F8FB")
 draw = ImageDraw.Draw(img)
 
@@ -57,26 +57,38 @@ for y in range(h):
     b = int(251 + (246 - 251) * y / h)
     draw.line([(0, y), (w, y)], fill=(r, g, b))
 
-# 左右区域的柔和高亮，缩小框体避免视觉压迫。
-draw.rounded_rectangle((120, 180, 380, 440), radius=24, fill=(255, 255, 255, 220), outline=(220, 226, 235), width=2)
-draw.rounded_rectangle((580, 180, 840, 440), radius=24, fill=(255, 255, 255, 220), outline=(220, 226, 235), width=2)
+# 左右区域的柔和高亮，上一版 480×307 的 1.3 倍缩放。
+draw.rounded_rectangle((78, 117, 247, 286), radius=16, fill=(255, 255, 255, 220), outline=(220, 226, 235), width=2)
+draw.rounded_rectangle((377, 117, 546, 286), radius=16, fill=(255, 255, 255, 220), outline=(220, 226, 235), width=2)
 
 # 中间箭头提示（不依赖字体，避免目标机器缺字库导致渲染异常）。
-draw.polygon([(458, 300), (520, 300), (520, 280), (560, 320), (520, 360), (520, 340), (458, 340)], fill=(120, 130, 150))
+draw.polygon([(298, 195), (338, 195), (338, 182), (364, 208), (338, 234), (338, 221), (298, 221)], fill=(120, 130, 150))
 
 img.save("/tmp/akm-dmg-background.png", "PNG")
 PY
 
-echo "[5/5] 生成 DMG: $DMG_PATH"
+echo "[5/6] 生成 DMG: $DMG_PATH"
+# create-dmg 第 487 行只执行 SetFile -c icnC，缺少 SetFile -a V 隐藏位，
+# 导致 .VolumeIcon.icns 和 .background 在 DMG 中可见。此处临时修补。
+CREATE_DMG=$(readlink -f /opt/homebrew/bin/create-dmg 2>/dev/null || echo "/opt/homebrew/bin/create-dmg")
+if [[ -f "$CREATE_DMG" ]]; then
+  # 在 SetFile -c icnC 后追加 SetFile -a V 隐藏 .VolumeIcon.icns
+  sed -i '' 's/SetFile -c icnC "\$MOUNT_DIR\/.VolumeIcon.icns"/&; SetFile -a V "\$MOUNT_DIR\/.VolumeIcon.icns"; SetFile -a V "\$MOUNT_DIR\/.background"/' "$CREATE_DMG"
+fi
 create-dmg \
   --volname "$APP_NAME" \
   --volicon "logo.icns" \
-  --window-size 960 600 \
-  --icon-size 128 \
+  --window-size 624 399 \
+  --icon-size 77 \
+  --text-size 11 \
   --background "$DMG_BG_PATH" \
-  --icon "$APP_NAME.app" 250 315 \
-  --app-drop-link 710 315 \
+  --icon "$APP_NAME.app" 165 199 \
+  --app-drop-link 459 199 \
   "$DMG_PATH" \
   "$APP_PATH"
+# 还原 create-dmg
+if [[ -f "$CREATE_DMG" ]]; then
+  sed -i '' 's/SetFile -c icnC "\$MOUNT_DIR\/.VolumeIcon.icns"; SetFile -a V "\$MOUNT_DIR\/.VolumeIcon.icns"; SetFile -a V "\$MOUNT_DIR\/.background"/SetFile -c icnC "\$MOUNT_DIR\/.VolumeIcon.icns"/' "$CREATE_DMG"
+fi
 
 echo "完成: $DMG_PATH"
