@@ -71,14 +71,15 @@ class _UsageQueryScheduler:
                 pass
 
     async def _check_and_query(self) -> None:
-        """扫描所有 key，对到期未查询的执行用量查询"""
+        """扫描所有 key，对到期未查询的执行用量查询，存储原始响应供前端 extractor 解析"""
         keys = list_keys()
         now = asyncio.get_running_loop().time()
         for key in keys:
             interval_m = int(key.get("usage_query_interval_m", 0) or 0)
             if interval_m <= 0:
                 continue
-            config = get_usage_query_config(key["alias"], key.get("provider", ""))
+            alias = key["alias"]
+            config = get_usage_query_config(alias, key.get("provider", ""))
             if config is None:
                 continue
             script_raw = config.get("script", "")
@@ -100,15 +101,8 @@ class _UsageQueryScheduler:
             except json.JSONDecodeError:
                 continue
             result = await execute_query_script(key, script_cfg)
-            # 自动调度只记录时间、错误；不写 usage_data（避免覆盖用户的 extractor 结果）
-            from akm.db import get_connection
-            conn = get_connection()
-            conn.execute(
-                "UPDATE keys SET usage_error = ?, usage_queried_at = datetime('now', 'localtime') WHERE alias = ?",
-                (result.get("error", ""), key["alias"]),
-            )
-            conn.commit()
-            conn.close()
+            # 存储完整原始结果（含 raw_response），前端渲染时用 extractor 解析展示
+            update_usage_data(alias, result)
 
 
 @asynccontextmanager
