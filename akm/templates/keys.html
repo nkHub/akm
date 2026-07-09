@@ -180,6 +180,28 @@ function loadProviders() {
   });
 }
 
+function _getExtractorFromScript(scriptRaw) {
+  // 从用量查询脚本 JSON 中提取 extractor JS 函数体
+  try {
+    var cfg = typeof scriptRaw === 'string' ? JSON.parse(scriptRaw) : scriptRaw;
+    return cfg.extractor || '';
+  } catch(e) {
+    return '';
+  }
+}
+
+function _evalExtractor(extractorStr, rawResponse) {
+  // 浏览器沙箱执行 JS extractor
+  try {
+    var fn = new Function('response', 'return (' + extractorStr + ')(response)');
+    var result = fn(rawResponse);
+    if (result && typeof result === 'object') return result;
+  } catch(ex) {
+    return { isValid: false, invalidMessage: 'extractor 错误: ' + ex.message };
+  }
+  return null;
+}
+
 function renderKeys() {
   var container = document.getElementById('key-list-container');
   var empty = document.getElementById('key-empty');
@@ -216,11 +238,19 @@ function renderKeys() {
       latencyText = '<span class="'+latencyClass+' text-xs">'+_fmtLatency(avgLatency)+'</span>';
     }
 
-    // 用量数据显示（放在按钮行下面）
+    // 用量数据显示（放在按钮行下面）—— 前端执行 extractor 解析 raw_response
     var usageData = k.usage_data;
     var usageInfoLine = '';
     if (k.usage_query_interval_m > 0 && usageData && typeof usageData === 'object') {
       var extracted = usageData.extracted;
+      // 如果后端存储了原始响应，前端用 extractor 实时解析展示
+      if (usageData.raw_response && k.usage_query_script) {
+        var extractorStr = _getExtractorFromScript(k.usage_query_script);
+        if (extractorStr) {
+          var fe = _evalExtractor(extractorStr, usageData.raw_response);
+          if (fe) extracted = fe;
+        }
+      }
       if (extracted && typeof extracted === 'object') {
         var parts = [];
         if (extracted.remaining !== undefined && extracted.remaining !== null) {
@@ -659,15 +689,10 @@ function usageRunQuery() {
   .then(function(r) { return r.json(); })
   .then(function(json) {
     var data = (json && json.data) || json || {};
-    // 浏览器沙箱执行 JS extractor（只要有 raw_response 就执行，由 extractor 自己判断有效性）
+    // 浏览器沙箱执行 JS extractor
     if (extractorStr && data.raw_response) {
-      try {
-        var fn = new Function('response', 'return (' + extractorStr + ')(response)');
-        var fe = fn(data.raw_response);
-        if (fe && typeof fe === 'object') data.extracted = fe;
-      } catch(ex) {
-        data.extracted = { isValid: false, invalidMessage: 'extractor 错误: ' + ex.message };
-      }
+      var fe = _evalExtractor(extractorStr, data.raw_response);
+      if (fe) data.extracted = fe;
     }
     // 将 extractor 结果写库
     var usageData = { ok: data.ok, error: data.error, status_code: data.status_code, latency_ms: data.latency_ms, raw_response: data.raw_response, extracted: data.extracted, queried_at: data.queried_at };

@@ -1,4 +1,4 @@
-"""用量查询：后端 HTTP 请求执行 + 前端 JS 提取器
+"""用量查询：后端 HTTP 请求执行 + JS 提取器
 
 查询脚本格式（JS 配置 JSON）:
 {
@@ -12,16 +12,183 @@
 
 模板变量：{{baseUrl}} -> key 的 base_url，{{apiKey}} -> key 的 api_key
 
-后端仅负责发送 HTTP 请求并返回原始响应，不做任何字段提取。
-数据提取完全由前端的 JS extractor 脚本负责。
+后端负责发送 HTTP 请求并尝试在本地执行 JS extractor。
+extractor 执行优先使用 Node.js 子进程，不可用时回退到内置 dukpy 或标记失败。
 """
 
 import json
+import re
+import subprocess
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import httpx
+
+# ── JS extractor 后端执行 ─────────────────────────────────────
+
+_JS_TEMPLATE = """
+const __response__ = {response_json};
+const __extractor__ = {extractor_js};
+const __result__ = __extractor__(__response__);
+console.log(JSON.stringify(__result__));
+""".strip()
+
+
+def _execute_extractor_via_node(extractor_js: str, raw_response: dict) -> dict | None:
+    """通过 Node.js 子进程执行 JS extractor，返回提取结果"""
+    script = _JS_TEMPLATE.format(
+        response_json=json.dumps(raw_response, ensure_ascii=False),
+        extractor_js=extractor_js,
+    )
+    try:
+        proc = subprocess.run(
+            ["node", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return json.loads(proc.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _execute_extractor_builtin(extractor_js: str, raw_response: dict) -> dict | None:
+    """尝试解析常见简单 extractor 模式，在 Python 端直接提取
+
+    仅支持纯字段映射型 extractor，不支持带分支/循环/方法调用的复杂逻辑。
+    如果无法安全解析则返回 None。
+    """
+    # 提取 extractor 函数体：function(response) { return { ... } }
+    m = re.search(
+        r"function\s*\(\s*response\s*\)\s*\{(.*)\}",
+        extractor_js, re.DOTALL | re.MULTILINE,
+    )
+    if not m:
+        return None
+    body = m.group(1).strip()
+    # 只处理简单 return { ... } 形式
+    ret_m = re.match(r"return\s*(\{.*\});?\s*$", body, re.DOTALL)
+    if not ret_m:
+        return None
+    obj_literal = ret_m.group(1)
+
+    # 将 JS 对象字面量转为 Python dict
+    result = {}
+    # 匹配 key: value 对（简单值，不支持嵌套对象/函数调用）
+    pair_pattern = re.compile(
+        r"(\w+)\s*:\s*"
+        r"("
+        r"(?:response\?\.\w+(?:\??\.\w+)*)"
+        r"|(?:\w+(?:\??\.\w+)*)"
+        r"|\"(?:[^\"\\]|\\.)*\""
+        r"|'(?:[^'\\]|\\.)*'"
+        r"|true|false|null"
+        r"|-?\d+(?:\.\d+)?"
+        r")",
+    )
+    # 处理 ?? 链和可选链表达式
+    # 将 response?.a?.b ?? fallback 拆开
+    for m_pair in pair_pattern.finditer(obj_literal):
+        key = m_pair.group(1)
+        val_expr = m_pair.group(2).strip()
+
+        # 解析 ?? 表达式
+        parts = re.split(r"\?\?\s*", val_expr)
+        resolved = None
+        for part in parts:
+            part = part.strip()
+            val = _resolve_js_expr(part, raw_response)
+            if val is not None and val != "" and val != 0:
+                resolved = val
+                break
+        if resolved is None:
+            resolved = _resolve_js_expr(parts[-1].strip(), raw_response)
+        result[key] = resolved
+
+    if not result:
+        return None
+    return result
+
+
+def _resolve_js_expr(expr: str, raw_response: dict):
+    """解析简单 JS 表达式（可选链 + 属性访问）"""
+    expr = expr.strip()
+
+    # boolean/null 字面量
+    if expr == "true":
+        return True
+    if expr == "false":
+        return False
+    if expr == "null":
+        return None
+    if expr == "undefined":
+        return None
+
+    # 数字
+    try:
+        return int(expr)
+    except (ValueError, TypeError):
+        pass
+    try:
+        return float(expr)
+    except (ValueError, TypeError):
+        pass
+
+    # 字符串字面量
+    str_m = re.match(r'^"([^"]*)"$', expr) or re.match(r"^'([^']*)'$", expr)
+    if str_m:
+        return str_m.group(1)
+
+    # response?.a?.b?.c 或 response?.a[0]?.b 可选链
+    chain = expr
+    current = raw_response
+    if chain.startswith("response"):
+        chain = chain[len("response"):]
+    else:
+        return None
+
+    # 分段：?.prop 或 ?.[index] 或 ?.prop?.prop
+    segments = re.findall(r"\?\.(\w+)|\[\s*(\d+)\s*\]|\.(\w+)", chain)
+    if not segments and chain.startswith("?."):
+        # 去掉开头的 ?.
+        pass
+
+    for seg in segments:
+        prop_name = seg[0] or seg[2]
+        index = seg[1]
+        if current is None or not isinstance(current, dict):
+            return None
+        if index:
+            # 数组索引 - response 可能不是数组，但尝试处理 balance_infos[0]
+            val = current.get(prop_name) if prop_name else current
+            if isinstance(val, list) and index:
+                idx = int(index)
+                current = val[idx] if idx < len(val) else None
+            else:
+                current = None
+        elif prop_name:
+            current = current.get(prop_name)
+        if current is None:
+            return None
+    return current
+
+
+def _execute_extractor(extractor_js: str, raw_response: dict) -> dict | None:
+    """执行 JS extractor：优先 Node.js 子进程，回退内置解析"""
+    if not extractor_js or not raw_response:
+        return None
+    if not isinstance(raw_response, dict):
+        return None
+    # 优先 Node.js（最可靠）
+    result = _execute_extractor_via_node(extractor_js, raw_response)
+    if result is not None:
+        return result
+    # 回退：内置 Python 解析（仅支持简单模式）
+    result = _execute_extractor_builtin(extractor_js, raw_response)
+    return result
 
 
 def _render_template(template: str, key: dict) -> str:
