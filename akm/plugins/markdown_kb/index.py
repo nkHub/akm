@@ -4770,7 +4770,7 @@ class Plugin(PluginBase):
             "title(string), "
             "keywords(array[string], 3-8个核心中文/英文关键词，用于增强检索匹配度，提取文中核心概念和技术名词), "
             "categories(array[string], 从以下类别中选择 1-3 个最匹配的: 技术实现、业务逻辑、架构设计、调试修复、配置部署、代码风格), "
-            "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含"关键原话摘录"标题), "
+            "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含\"关键原话摘录\"标题), "
             "quotes(array[string]，最多 3 条关键原话摘录)。"
         )
         system_prompt = (settings.get("learn_summary_system_prompt") or "").strip() or default_learn_prompt
