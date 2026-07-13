@@ -914,7 +914,7 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - 三路融合检索：`vector_score + keyword_score(BM25) + memory_score`，权重自动归一化，支持分类加权
 - 记忆系统：`kb_chunk_memory` 表，艾宾浩斯衰减曲线、多源 boost 分层叠加，高记忆值 chunk 豁免 score_threshold 独立放行
 - 自动整理记忆（organizer）：消息计数 + 定时周期双触发
-- 向量去重合并：新 chunk 入库时按 embedding 余弦相似度与存量 chunk 比对，相似度超过阈值时不新增，改为 boost 已有 chunk 记忆值
+- 向量去重合并：新 chunk 入库时按 embedding 余弦相似度与存量 chunk 比对，相似度超过阈值时通过 LLM 判断是否有补充信息，有则合并文本并重新 embedding，无补充则仅 boost 记忆值
 - 无价值记忆自动清理：`organize_cleanup_enabled` 默认开启，自动清理长期未被检索的 `.learn.md` 文档
 - 知识库页面不再内置独立配置弹窗，配置统一收口到插件列表页弹窗
 - `markdown_kb` 的模型配置使用 `/v1/models` 驱动的动态下拉
