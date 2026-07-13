@@ -1890,12 +1890,33 @@ class Plugin(PluginBase):
         dedup_threshold = _safe_float(settings.get("dedup_similarity_threshold"), 0.92)
         dedup_boosts: dict[str, float] = {}
         dedup_skipped = 0
+        dedup_merged = 0
         if dedup_threshold > 0 and current_documents:
             unique_chunks: list[dict] = []
             for chunk in chunks:
                 nearest = self._find_nearest_chunk_for_dedup(chunk["embedding"])
                 # 优先走 sqlite-vec，不可用时回退到 brute-force 余弦相似度
                 if nearest is not None and nearest["cosine_similarity"] >= dedup_threshold:
+                    existing = next(
+                        (c for c in current_documents if str(c.get("id") or "") == nearest["chunk_id"]),
+                        None,
+                    )
+                    merged_text = None
+                    if existing and isinstance(existing.get("chunk_text"), str) and chunk.get("chunk_text"):
+                        merged_text = await self._merge_chunks_via_llm(
+                            existing["chunk_text"], chunk["chunk_text"], settings["chat_model"],
+                        )
+                    if merged_text:
+                        new_emb = await self._embed_texts([merged_text], settings["embedding_model"])
+                        if new_emb:
+                            existing["chunk_text"] = merged_text
+                            existing["embedding"] = new_emb[0]
+                            existing["indexed_at"] = now
+                            dedup_merged += 1
+                            self.logger.info(
+                                "[markdown_kb] 去重合并文本（vec），chunk %s 已更新",
+                                nearest["chunk_id"],
+                            )
                     dedup_boosts[nearest["chunk_id"]] = max(
                         dedup_boosts.get(nearest["chunk_id"], 0.0), 0.10,
                     )
@@ -1916,6 +1937,26 @@ class Plugin(PluginBase):
                                 best_sim = sim
                                 best_cid = str(existing.get("id") or "")
                     if best_sim >= dedup_threshold and best_cid:
+                        existing = next(
+                            (c for c in current_documents if str(c.get("id") or "") == best_cid),
+                            None,
+                        )
+                        merged_text = None
+                        if existing and isinstance(existing.get("chunk_text"), str) and chunk.get("chunk_text"):
+                            merged_text = await self._merge_chunks_via_llm(
+                                existing["chunk_text"], chunk["chunk_text"], settings["chat_model"],
+                            )
+                        if merged_text:
+                            new_emb = await self._embed_texts([merged_text], settings["embedding_model"])
+                            if new_emb:
+                                existing["chunk_text"] = merged_text
+                                existing["embedding"] = new_emb[0]
+                                existing["indexed_at"] = now
+                                dedup_merged += 1
+                                self.logger.info(
+                                    "[markdown_kb] 去重合并文本（余弦），chunk %s 已更新",
+                                    best_cid,
+                                )
                         dedup_boosts[best_cid] = max(dedup_boosts.get(best_cid, 0.0), 0.10)
                         dedup_skipped += 1
                         self.logger.info(
@@ -1953,6 +1994,7 @@ class Plugin(PluginBase):
             "last_rebuilt_at": now,
             "dedup_skipped": dedup_skipped,
             "dedup_boosted": len(dedup_boosts),
+            "dedup_merged": dedup_merged,
         }
 
     async def sync_index(self, apply_changes: bool = False) -> dict:
@@ -2800,6 +2842,10 @@ class Plugin(PluginBase):
             "organize_cleanup_keep_days": _safe_int(cfg.get("organize_cleanup_keep_days"), 7),
             # 去重合并配置
             "dedup_similarity_threshold": min(1.0, max(0.0, _safe_float(cfg.get("dedup_similarity_threshold"), 0.92))),
+            # Prompt 配置（可在插件配置页直接编辑优化）
+            "learn_summary_system_prompt": str(cfg.get("learn_summary_system_prompt") or "").strip(),
+            "merge_chunks_system_prompt": str(cfg.get("merge_chunks_system_prompt") or "").strip(),
+            "merge_chunks_user_prompt": str(cfg.get("merge_chunks_user_prompt") or "").strip(),
         }
 
     def _resolve_top_k(self, requested: Any) -> int:
@@ -4650,6 +4696,56 @@ class Plugin(PluginBase):
         except (KeyError, IndexError, TypeError) as exc:
             raise HTTPException(status_code=502, detail="chat 返回结构不符合预期") from exc
 
+    async def _merge_chunks_via_llm(self, old_text: str, new_text: str, model: str) -> str | None:
+        """调用本地 chat 模型判断新文本是否补充了已有文本没有的信息，有则合并返回。
+
+        返回合并后的精简文本；若新文本只是重复已有信息或调用失败则返回 None，调用方降级为只 boost 记忆。
+        system_prompt 和 user_prompt 均可通过插件配置页编辑优化，user_prompt 支持 {old_text} / {new_text} 占位符。
+        """
+        settings = self._settings()
+        system_prompt = (settings.get("merge_chunks_system_prompt") or "").strip() or (
+            "你是一个知识合并助手。比较已有文本和新文本，判断新文本是否包含已有文本中没有的实质性补充信息。"
+            "实质性补充指：新事实、新步骤、新细节、新约束条件、新注意事项等。"
+            "如果新文本只是换个说法重复已有信息，视为无补充。"
+        )
+        user_prompt_template = (settings.get("merge_chunks_user_prompt") or "").strip() or (
+            "## 已有文本\n"
+            "{old_text}\n\n"
+            "## 新文本\n"
+            "{new_text}\n\n"
+            "请判断新文本是否有实质性补充。"
+            "如果有，将两段合并为一段精简连贯的 Markdown 文本，保留原有结构要点，不重复，输出合并后的文本。"
+            "如果没有任何实质性补充，只输出 NO_NEW_INFO。"
+            "不要输出任何其他解释或前缀。"
+        )
+        user_prompt = user_prompt_template.replace("{old_text}", old_text).replace("{new_text}", new_text)
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{self._akm_base_url()}/chat/completions", json=payload
+                )
+            data = response.json()
+            if response.status_code != 200:
+                self.logger.warning(
+                    "[markdown_kb] 合并 LLM 请求失败 status=%d", response.status_code,
+                )
+                return None
+            content = str(data["choices"][0]["message"]["content"] or "").strip()
+        except Exception as exc:
+            self.logger.warning("[markdown_kb] 合并 LLM 调用异常: %s", exc)
+            return None
+
+        if not content or content.upper().startswith("NO_NEW_INFO"):
+            return None
+        return content
+
     async def _generate_learn_summary(self, request: dict, model: str) -> dict:
         """调用本地 chat 接口，把候选材料提炼成可落盘的知识结构。
 
@@ -4662,7 +4758,8 @@ class Plugin(PluginBase):
             "claude_code": "Claude Code",
         }.get(request["source"], request["source"])
         material_prompt = self._build_learn_material_prompt(request)
-        system_prompt = (
+        settings = self._settings()
+        default_learn_prompt = (
             "你负责把一次 AI 协作对话提炼成可检索的 Markdown 知识条目。"
             "只保留稳定、可复用的知识结论、原因、判断依据、修复方式和注意事项。"
             "不要输出触发关键词，不要把结果写成完整聊天记录。"
@@ -4673,9 +4770,10 @@ class Plugin(PluginBase):
             "title(string), "
             "keywords(array[string], 3-8个核心中文/英文关键词，用于增强检索匹配度，提取文中核心概念和技术名词), "
             "categories(array[string], 从以下类别中选择 1-3 个最匹配的: 技术实现、业务逻辑、架构设计、调试修复、配置部署、代码风格), "
-            "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含“关键原话摘录”标题), "
+            "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含"关键原话摘录"标题), "
             "quotes(array[string]，最多 3 条关键原话摘录)。"
         )
+        system_prompt = (settings.get("learn_summary_system_prompt") or "").strip() or default_learn_prompt
         user_prompt = (
             f"来源：{source_label}\n"
             f"触发阶段：{request['trigger_phase']}\n"
