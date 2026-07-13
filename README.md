@@ -188,9 +188,9 @@ akm-menubar
 - **索引**：内置标题树切片器，`sqlite-vec` KNN 粗召回（自动回退 NumPy/Python），支持全量重建、单文件重建、增量同步
 - **检索与问答**：通过本地 AKM 代理 的 `/v1/embeddings`、可选 `/v1/rerank`、`/v1/chat/completions` 完成 `query / ask` 闭环
 - **自动注入**：启用后自动拦截 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三类请求，命中知识库时注入参考资料
-- **Hook 学习入库**：通过 Codex/Claude 的 `UserPromptSubmit / Stop / PreCompact` hooks 将会话片段沉淀为 `.learn.md` 知识，自动 workspace 绑定、幂等判重并重建索引
+- **Hook 学习入库**：通过 Codex/Claude 的 `UserPromptSubmit / Stop / PreCompact` hooks 将会话片段沉淀为 `.learn.md` 知识，自动 workspace 绑定、幂等判重并重建索引；重建文件时自动对新 chunk 做向量相似度去重，相似 chunk 合并而非重复入库
 - **会话扫描器**：`POST /api/markdown-kb/scan-sessions` 扫描 `~/.codex/sessions/` 和 `~/.claude/projects/*/` 下的 JSONL 会话文件，自动归纳知识并更新记忆
-- **记忆系统**：chunk 级 `hit_count` / `memory_value`，艾宾浩斯衰减曲线驱动，多源 boost（learn_new 0.30 / hook_confirm 0.20 / scan_cross 0.15 / retrieval_hit 0.10），高记忆值 chunk（>0.5）可豁免 score_threshold 独立放行；定时自动整理过期记忆
+- **记忆系统**：chunk 级 `hit_count` / `memory_value`，艾宾浩斯衰减曲线驱动，多源 boost（learn_new 0.30 / hook_confirm 0.20 / scan_cross 0.20 / retrieval_hit 0.10），高记忆值 chunk（>0.5）可豁免 score_threshold 独立放行；定时自动整理过期记忆并清理无价值 `.learn.md` 文档
 
 ### 检索排序策略
 
@@ -198,7 +198,7 @@ akm-menubar
 
 ### 配置项
 
-`embedding_model`（必填）、`reranker_model`（可选），检索参数：`top_k`（默认 4）、`score_threshold`（0~1，默认 0.7）、`semantic_weight / keyword_weight / memory_weight`。记忆参数：`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours`。
+`embedding_model`（必填）、`reranker_model`（可选），检索参数：`top_k`（默认 4）、`score_threshold`（0~1，默认 0.7）、`semantic_weight / keyword_weight / memory_weight`。记忆参数：`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours`。去重参数：`dedup_similarity_threshold`（默认 0.92）。清理参数：`organize_cleanup_enabled`（默认 true）、`organize_cleanup_memory_threshold`（默认 0.05）、`organize_cleanup_keep_days`（默认 7）。
 
 ### `markdown_kb` 显式检索与问答链路
 

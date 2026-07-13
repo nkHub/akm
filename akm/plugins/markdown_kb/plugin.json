@@ -96,6 +96,40 @@
       "type": "string",
       "default": "",
       "description": "可选。为当前知识库文档声明所属工作目录。启用自动注入时，会优先匹配与当前请求工作目录一致的文档；为空时不做工作目录隔离。"
+    },
+    {
+      "key": "organize_cleanup_enabled",
+      "label": "自动清理无价值记忆",
+      "type": "boolean",
+      "default": true,
+      "description": "启用后，长时间未被检索的 learn 文档会在自动整理时被清理。"
+    },
+    {
+      "key": "organize_cleanup_memory_threshold",
+      "label": "清理记忆阈值",
+      "type": "number",
+      "default": 0.05,
+      "min": 0,
+      "max": 1,
+      "description": "记忆值低于此阈值且从未被检索命中的 chunk 所属文档可能被视为无价值。"
+    },
+    {
+      "key": "organize_cleanup_keep_days",
+      "label": "清理保留天数",
+      "type": "number",
+      "default": 7,
+      "min": 1,
+      "max": 90,
+      "description": "从未被检索命中的 learn 文档至少保活的天数。"
+    },
+    {
+      "key": "dedup_similarity_threshold",
+      "label": "去重相似度阈值",
+      "type": "number",
+      "default": 0.92,
+      "min": 0,
+      "max": 1,
+      "description": "新 chunk 与存量 chunk 的向量余弦相似度超过此阈值时视为重复，不再新增而是 boost 已有 chunk 的记忆值。"
     }
   ]
 }

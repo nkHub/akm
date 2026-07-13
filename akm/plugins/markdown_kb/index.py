@@ -943,6 +943,42 @@ class SqliteKbIndexStore(IndexStore):
         finally:
             conn.close()
 
+    def find_nearest_chunk(self, embedding_vector: list[float]) -> dict | None:
+        """全局向量搜索：在所有 workspace 中查找与给定 embedding 最相似的 chunk。
+
+        返回值：{"chunk_id": ..., "distance": ...} 或 None。
+        仅当 sqlite-vec 可用且索引中存在向量时生效，否则返回 None。
+        用于去重合并时判断新 chunk 是否与存量 chunk 高度相似。
+        """
+        conn = self._connect()
+        try:
+            meta = self._load_meta_map(conn)
+            if not (self._vec_runtime_available and str(meta.get("vec_ready") or "") == "1"):
+                return None
+            embedding_dim = _safe_int(meta.get("embedding_dim"), 0)
+            normalized = _normalize_embedding_vector(embedding_vector)
+            if embedding_dim <= 0 or len(normalized) != embedding_dim:
+                return None
+            rows = conn.execute(
+                f"""
+                SELECT c.chunk_id, distance
+                FROM {self._vec_table_name} v
+                JOIN kb_chunks c ON c.chunk_id = v.chunk_id
+                WHERE v.embedding MATCH ?
+                  AND k = 1
+                ORDER BY distance ASC
+                """,
+                [json.dumps(normalized, ensure_ascii=False)],
+            ).fetchall()
+            if not rows:
+                return None
+            return {
+                "chunk_id": rows[0]["chunk_id"],
+                "distance": _safe_float(rows[0]["distance"], 0.0),
+            }
+        finally:
+            conn.close()
+
     def get_learn_doc_memory_stats(self) -> list[dict]:
         """获取所有 .learn.md 文档的 chunk 记忆统计，按 doc_id 聚合。
 
@@ -1792,8 +1828,41 @@ class Plugin(PluginBase):
         self._ensure_runtime_ready()
         return self._store.get_memory_detail_stats()
 
+    def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
+        """计算两个向量的余弦相似度，返回 0~1 之间的值。"""
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        import math
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(x * x for x in b))
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        return max(0.0, min(1.0, dot / (norm_a * norm_b)))
+
+    def _find_nearest_chunk_for_dedup(self, embedding_vector: list[float]) -> dict | None:
+        """查找与给定 embedding 最相似的存量 chunk，用于去重合并判断。
+
+        优先使用 sqlite-vec 全局向量搜索（在所有 workspace 中查找），
+        不可用时返回 None，调用方应回退到 _cosine_similarity 遍历存量 chunks。
+
+        返回值：{"chunk_id": str, "cosine_similarity": float} 或 None。
+        """
+        if not embedding_vector or not self._store:
+            return None
+        nearest = self._store.find_nearest_chunk(embedding_vector)
+        if nearest is None:
+            return None
+        distance = _safe_float(nearest.get("distance"), 2.0)
+        cosine_sim = _sqlite_vec_distance_to_score(distance)
+        return {"chunk_id": str(nearest.get("chunk_id") or ""), "cosine_similarity": cosine_sim}
+
     async def rebuild_file(self, file_name: str, workspace_root: str = "", doc_id: str = "") -> dict:
-        """只重建单个文件的 chunks 与向量。"""
+        """只重建单个文件的 chunks 与向量。
+
+        新增去重合并能力：新 chunk 与存量 chunk 的向量余弦相似度超过
+        dedup_similarity_threshold 时，不再新增 chunk，改为 boost 已有 chunk 的记忆值。
+        """
         self._ensure_runtime_ready()
         entry = self._find_doc_entry(doc_id=doc_id, file_name=file_name, workspace_root=workspace_root)
         safe_name = Path(str(entry.get("file_name") or "")).name
@@ -1816,20 +1885,74 @@ class Plugin(PluginBase):
             item["indexed_at"] = now
 
         current_documents = [item for item in self._store.list_documents() if str(item.get("doc_id") or "") != str(entry.get("doc_id") or "")]
-        current_documents.extend(chunks)
+
+        # 嵌入向量去重合并：新 chunk 与存量 chunk 做余弦相似度比较
+        dedup_threshold = _safe_float(settings.get("dedup_similarity_threshold"), 0.92)
+        dedup_boosts: dict[str, float] = {}
+        dedup_skipped = 0
+        if dedup_threshold > 0 and current_documents:
+            unique_chunks: list[dict] = []
+            for chunk in chunks:
+                nearest = self._find_nearest_chunk_for_dedup(chunk["embedding"])
+                # 优先走 sqlite-vec，不可用时回退到 brute-force 余弦相似度
+                if nearest is not None and nearest["cosine_similarity"] >= dedup_threshold:
+                    dedup_boosts[nearest["chunk_id"]] = max(
+                        dedup_boosts.get(nearest["chunk_id"], 0.0), 0.10,
+                    )
+                    dedup_skipped += 1
+                    self.logger.info(
+                        "[markdown_kb] 去重合并 chunk（vec），相似度 %.3f >= %.2f，boost 已有 chunk %s",
+                        nearest["cosine_similarity"], dedup_threshold, nearest["chunk_id"],
+                    )
+                elif nearest is None:
+                    # sqlite-vec 不可用，遍历存量 chunks 做余弦相似度比较
+                    best_sim = 0.0
+                    best_cid = ""
+                    for existing in current_documents:
+                        emb = existing.get("embedding")
+                        if isinstance(emb, list) and emb:
+                            sim = self._cosine_similarity(chunk["embedding"], emb)
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_cid = str(existing.get("id") or "")
+                    if best_sim >= dedup_threshold and best_cid:
+                        dedup_boosts[best_cid] = max(dedup_boosts.get(best_cid, 0.0), 0.10)
+                        dedup_skipped += 1
+                        self.logger.info(
+                            "[markdown_kb] 去重合并 chunk（余弦），相似度 %.3f >= %.2f，boost 已有 chunk %s",
+                            best_sim, dedup_threshold, best_cid,
+                        )
+                    else:
+                        unique_chunks.append(chunk)
+                else:
+                    unique_chunks.append(chunk)
+        else:
+            unique_chunks = chunks
+
+        current_documents.extend(unique_chunks)
         self._store.replace_all(current_documents, {
             "last_rebuilt_at": now,
             "embedding_model": settings["embedding_model"],
         })
         self._invalidate_embedding_cache()
 
+        # 应用去重记忆 boost
+        if dedup_boosts and settings.get("memory_enabled") and self._store:
+            batch = {
+                cid: {"memory_value": boost, "hit_count_delta": 1, "last_hit_at": now}
+                for cid, boost in dedup_boosts.items()
+            }
+            self._store.update_memory(batch)
+
         return {
             "ok": True,
             "doc_id": entry.get("doc_id") or "",
             "file_name": safe_name,
-            "chunk_count": len(chunks),
-            "chunk_ids": [str(c.get("id", "")) for c in chunks],
+            "chunk_count": len(unique_chunks),
+            "chunk_ids": [str(c.get("id", "")) for c in unique_chunks],
             "last_rebuilt_at": now,
+            "dedup_skipped": dedup_skipped,
+            "dedup_boosted": len(dedup_boosts),
         }
 
     async def sync_index(self, apply_changes: bool = False) -> dict:
@@ -2143,7 +2266,7 @@ class Plugin(PluginBase):
             # 新 chunk 初始记忆值 (learn_new = 0.30)
             init_batch = {}
             for cid in new_chunk_ids:
-                init_batch[cid] = {"new_memory": 0.30, "hit_delta": 1, "now": learned_at}
+                init_batch[cid] = {"memory_value": 0.30, "hit_count_delta": 1, "last_hit_at": learned_at}
             self._store.update_memory(init_batch)
 
             # 交叉验证：用 summary_markdown 检索存量 chunks，排除本次新生成的
@@ -2181,9 +2304,9 @@ class Plugin(PluginBase):
                             if vs >= 0.5 and chunk_id and chunk_id not in new_chunk_ids:
                                 score_ratio = vs / max_score
                                 cross_batch[chunk_id] = {
-                                    "new_memory": cross_boost * score_ratio,
-                                    "hit_delta": 1,
-                                    "now": learned_at,
+                                    "memory_value": cross_boost * score_ratio,
+                                    "hit_count_delta": 1,
+                                    "last_hit_at": learned_at,
                                 }
                                 memory_boosted_chunks += 1
                         if cross_batch:
@@ -2393,7 +2516,7 @@ class Plugin(PluginBase):
         if settings.get("memory_enabled") and new_chunk_ids and self._store:
             init_batch = {}
             for cid in new_chunk_ids:
-                init_batch[cid] = {"new_memory": 0.30, "hit_delta": 1, "now": _utc_now_iso()}
+                init_batch[cid] = {"memory_value": 0.20, "hit_count_delta": 1, "last_hit_at": _utc_now_iso()}
             self._store.update_memory(init_batch)
 
         return 1 if rebuilt.get("chunk_count", 0) > 0 else 0
@@ -2437,7 +2560,7 @@ class Plugin(PluginBase):
             chunk_id = str(hit.get("id") or "")
             if vs >= 0.4 and chunk_id:
                 score_ratio = vs / max_score
-                batch[chunk_id] = {"new_memory": scan_boost * score_ratio, "hit_delta": 1, "now": _utc_now_iso()}
+                batch[chunk_id] = {"memory_value": scan_boost * score_ratio, "hit_count_delta": 1, "last_hit_at": _utc_now_iso()}
         if batch and self._store:
             self._store.update_memory(batch)
         return len(batch)
@@ -2560,12 +2683,14 @@ class Plugin(PluginBase):
     async def _cleanup_stale_learn_docs(self) -> None:
         """清理长期无价值的 .learn.md 文档。
 
-        判断标准：该文档所有 chunk 的 memory_value 均低于阈值（默认 0.05），
-        且距上次命中超过指定的保活天数（默认 7 天）。
-        满足条件的文档会被删除 .learn.md 源文件并清理索引。
+        判断标准：
+        1. chunk_count == 0 的空文档直接清理；
+        2. 从索引创建后被用户检索命中（retrieval_hits > 0）的文档保留；
+        3. 从未被检索命中且超过保活天数的文档视为无价值，予以清理。
+        注：hit_count 中有 1 次来自创建时的伪命中，排除后才得到真实检索命中数。
         """
         settings = getattr(self, "config", {}) or {}
-        cleanup_enabled = bool(settings.get("organize_cleanup_enabled", False))
+        cleanup_enabled = bool(settings.get("organize_cleanup_enabled", True))
         if not cleanup_enabled:
             return
         memory_threshold = _safe_float(settings.get("organize_cleanup_memory_threshold"), 0.05)
@@ -2581,28 +2706,33 @@ class Plugin(PluginBase):
         now_ts = datetime.utcnow()
         stale_docs = []
         for stat in stats:
-            if stat["max_memory"] >= memory_threshold:
-                continue
             if stat["chunk_count"] == 0:
                 # 没有 chunk 的 learn 文档直接清理
                 stale_docs.append(stat)
                 continue
-            # 检查最后命中时间：通过 kb_chunk_memory.last_hit_at 判断
-            # 如果 max_memory == 0 表示从未被检索命中过
-            if stat["max_memory"] == 0 and stat["total_hits"] == 0:
-                # 从未被命中，检查文档创建时间
-                manifest = self._load_doc_manifest()
-                doc_info = next((item for item in manifest if str(item.get("doc_id") or "") == stat["doc_id"]), None)
-                if doc_info:
-                    created_str = str(doc_info.get("created_at") or "")
-                    try:
-                        created_ts = datetime.fromisoformat(created_str)
-                        age_days = (now_ts - created_ts).total_seconds() / 86400
-                        if age_days < keep_days:
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-                stale_docs.append(stat)
+
+            # 真实检索命中数 = 总命中数 - chunk 数（扣除创建时的伪命中）
+            retrieval_hits = stat["total_hits"] - stat["chunk_count"]
+            if retrieval_hits > 0:
+                # 曾被用户检索命中过，有价值，保留
+                continue
+            if stat["max_memory"] >= memory_threshold:
+                # 记忆值较高（可能来自交叉验证 boost），即使未检索也保留
+                continue
+
+            # 从未被检索命中，检查创建时间
+            manifest = self._load_doc_manifest()
+            doc_info = next((item for item in manifest if str(item.get("doc_id") or "") == stat["doc_id"]), None)
+            if doc_info:
+                created_str = str(doc_info.get("created_at") or "")
+                try:
+                    created_ts = datetime.fromisoformat(created_str)
+                    age_days = (now_ts - created_ts).total_seconds() / 86400
+                    if age_days < keep_days:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            stale_docs.append(stat)
 
         removed = 0
         for doc in stale_docs:
@@ -2665,9 +2795,11 @@ class Plugin(PluginBase):
             # 自动整理记忆配置
             "organize_interval_hours": _safe_float(cfg.get("organize_interval_hours"), 24.0),
             "organize_message_threshold": max(1, _safe_int(cfg.get("organize_message_threshold"), 50)),
-            "organize_cleanup_enabled": bool(cfg.get("organize_cleanup_enabled", False)),
+            "organize_cleanup_enabled": bool(cfg.get("organize_cleanup_enabled", True)),
             "organize_cleanup_memory_threshold": _safe_float(cfg.get("organize_cleanup_memory_threshold"), 0.05),
             "organize_cleanup_keep_days": _safe_int(cfg.get("organize_cleanup_keep_days"), 7),
+            # 去重合并配置
+            "dedup_similarity_threshold": min(1.0, max(0.0, _safe_float(cfg.get("dedup_similarity_threshold"), 0.92))),
         }
 
     def _resolve_top_k(self, requested: Any) -> int:
