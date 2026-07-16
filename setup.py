@@ -30,6 +30,8 @@ DATA_FILES = [
         "akm/templates/keys.html",
         "akm/templates/settings.html",
         "akm/templates/about.html",
+        "akm/templates/plugins.html",
+        "akm/templates/plugin_host.html",
     ]),
     ("static", [
         "akm/static/marked.min.js",
@@ -42,9 +44,9 @@ DATA_FILES = [
 
 OPTIONS = {
     "argv_emulation": False,
-    "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "PIL", "anyio", "sqlite_vec"],
+    "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "anyio", "sqlite_vec"],
     "includes": ["akm.server", "akm.db", "akm.key_pool", "akm.proxy", "akm.audit", "akm.models", "akm.config", "akm.agent", "akm.adapter", "akm.cli", "sqlite_vec", "_cffi_backend"],
-    "excludes": ["tkinter", "PyQt5", "PySide2", "wx", "jieba3", "numpy", "numpy._core", "numpy.linalg", "numpy.fft", "numpy.random", "numpy.distutils", "numpy.lib", "numpy.ma", "numpy.matrixlib", "numpy.polynomial", "numpy.testing", "numpy.typing"],
+    "excludes": ["tkinter", "PyQt5", "PySide2", "wx", "jieba3", "numpy", "numpy._core", "numpy.linalg", "numpy.fft", "numpy.random", "numpy.distutils", "numpy.lib", "numpy.ma", "numpy.matrixlib", "numpy.polynomial", "numpy.testing", "numpy.typing", "docutils", "pygments", "PIL"],
     "iconfile": "logo.icns",
     "plist": {
         "CFBundleName": "AI Key Manager",
@@ -62,5 +64,4 @@ setup(
     name="AI Key Manager",
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
-    setup_requires=["py2app"],
 )
