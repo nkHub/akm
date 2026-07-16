@@ -18,7 +18,7 @@
    - 关键词只在最后一行精确匹配
    - 命中后必须在客户端转发前删除关键词行
 3. 当前本轮实现已覆盖服务端、客户端公共适配层以及源码态接线示例，当前已修改但**尚未提交**的文件：
-   - `akm/plugins/markdown_kb/index.py`
+   - `plugins/markdown_kb/index.py`
    - `akm/markdown_kb_hook.py`
    - `akm/cli.py`
    - `tests/test_server.py`

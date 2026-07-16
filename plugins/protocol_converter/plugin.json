@@ -4,7 +4,6 @@
   "has_menu": false,
   "category": "converter",
   "description": "协议格式转换：Responses↔Chat、Messages↔Chat、Chat↔Responses/Messages",
-  "builtin": true,
   "required": false,
   "converts": [
     {"from": "responses", "to": "chat"},

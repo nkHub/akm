@@ -172,7 +172,7 @@ akm/
 
 > `converts` 字段声明源格式和目标格式，PluginManager 通过 `get_converter(from, to)` 查找匹配的转换插件。
 
-当前内置 `protocol_converter` 已合并 Responses / Messages / Chat 三类转换能力，而不是按旧设计拆成多个 converter 插件。它在 Responses → Chat 链路中还维护一层轻量内存会话缓存，用于 Codex 通过 `previous_response_id` 续接 Chat-only 上游时恢复上一轮 Chat 历史；缓存内容包含 `assistant` 文本、`reasoning_content`、`tool_calls` 与后续 `tool` 结果所需的 `tool_call_id`，默认最多保留 256 条、24 小时，进程重启后清空。
+当前 `protocol_converter` 已合并 Responses / Messages / Chat 三类转换能力，而不是按旧设计拆成多个 converter 插件。它在 Responses → Chat 链路中还维护一层轻量内存会话缓存，用于 Codex 通过 `previous_response_id` 续接 Chat-only 上游时恢复上一轮 Chat 历史；缓存内容包含 `assistant` 文本、`reasoning_content`、`tool_calls` 与后续 `tool` 结果所需的 `tool_call_id`，默认最多保留 256 条、24 小时，进程重启后清空。
 
 `protocol_converter` 针对 Codex + DeepSeek thinking/tool-call 场景做了以下兼容处理：
 

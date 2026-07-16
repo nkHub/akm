@@ -180,7 +180,7 @@ akm-menubar
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉和设置卡片等基础壳组件，供后续页面复用。
 
-仓库当前还提供一个**内置但默认关闭**的 `markdown_kb` 插件，目录位于 `akm/plugins/markdown_kb/`。启用后提供 Markdown 知识库页面和自动 RAG 注入能力。
+仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，目录位于 `plugins/markdown_kb/`。启用后提供 Markdown 知识库页面和自动 RAG 注入能力。
 
 ### 核心能力
 

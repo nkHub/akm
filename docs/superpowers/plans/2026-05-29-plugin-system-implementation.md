@@ -952,8 +952,8 @@ document.addEventListener('DOMContentLoaded', loadPlugins);
 **目标:** 将 `responses_adapter.py` + `messages_adapter.py` + `chat_adapter.py` 合并为单一插件 `protocol_converter`，删除 `akm/adapters/` 目录。
 
 **Files:**
-- Create: `akm/plugins/protocol_converter/plugin.json`
-- Create: `akm/plugins/protocol_converter/index.py`
+- Create: `plugins/protocol_converter/plugin.json`
+- Create: `plugins/protocol_converter/index.py`
 - Delete: `akm/adapters/` (全部文件)
 - Modify: `akm/agent.py` (移除硬编码适配器)
 - Modify: `akm/proxy.py` (通过 PluginManager 获取转换器)

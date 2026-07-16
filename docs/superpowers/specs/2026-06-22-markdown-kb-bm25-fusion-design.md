@@ -101,7 +101,7 @@
 
 ### 核心代码
 
-- `akm/plugins/markdown_kb/index.py`
+- `plugins/markdown_kb/index.py`
 
 预计新增或调整的职责：
 
