@@ -37,7 +37,7 @@ _DEEPSEEK_USAGE_SCRIPT = {
 
 _OPENAI_USAGE_SCRIPT = {
     "request": {
-        "url": "{{baseUrl}}/v1/usage",
+        "url": "{{baseUrl}}/v1/usage?date={{date}}",
         "method": "GET",
         "headers": {"Authorization": "Bearer {{apiKey}}"},
     },

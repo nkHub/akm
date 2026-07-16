@@ -1889,7 +1889,7 @@ async def log_viewer(request: Request):
 @app.get("/keys")
 async def keys_page(request: Request):
     """Key 管理页面"""
-    return HTMLResponse(_render_template("keys.html", title="Key管理", active="keys"))
+    return HTMLResponse(_render_template("keys.html", title="Key管理", active="keys", baseUrl="{{baseUrl}}", apiKey="{{apiKey}}", date="{{date}}"))
 
 
 @app.get("/settings")

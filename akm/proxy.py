@@ -710,7 +710,7 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
             return {
                 "model": model,
                 "input": "hi",
-                "max_output_tokens": 1,
+                "max_output_tokens": 16,
             }
         if api_path == "messages":
             return {
