@@ -10,7 +10,7 @@
   "extractor": "function(response) { ... }"
 }
 
-模板变量：{{baseUrl}} -> key 的 base_url，{{apiKey}} -> key 的 api_key
+模板变量：{{baseUrl}} -> key 的 base_url，{{apiKey}} -> key 的 api_key，{{date}} -> 当前日期 YYYY-MM-DD
 
 后端负责发送 HTTP 请求并尝试在本地执行 JS extractor。
 extractor 执行优先使用 Node.js 子进程，不可用时回退到内置 dukpy 或标记失败。
@@ -192,12 +192,13 @@ def _execute_extractor(extractor_js: str, raw_response: dict) -> dict | None:
 
 
 def _render_template(template: str, key: dict) -> str:
-    """渲染模板变量 {{baseUrl}} 和 {{apiKey}}"""
+    """渲染模板变量 {{baseUrl}}、{{apiKey}} 和 {{date}}"""
     result = template
     base_url = (key.get("base_url") or "").strip().rstrip("/")
     api_key = key.get("api_key", "") or ""
     result = result.replace("{{baseUrl}}", base_url)
     result = result.replace("{{apiKey}}", api_key)
+    result = result.replace("{{date}}", datetime.now().strftime("%Y-%m-%d"))
     return result
 
 

@@ -83,7 +83,7 @@
   <div>
     <label class="block text-xs text-gray-400 mb-1">查询脚本</label>
     <p class="text-[11px] text-gray-500 mb-1">
-      模板变量 <code>{{ "{{baseUrl}}" }}</code> <code>{{ "{{apiKey}}" }}</code>，extractor 在浏览器沙箱执行
+      模板变量 <code>{{ "{{baseUrl}}" }}</code> <code>{{ "{{apiKey}}" }}</code> <code>{{ "{{date}}" }}</code>，extractor 在浏览器沙箱执行
     </p>
     <textarea id="usage-script" rows="14" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 font-mono focus:outline-none focus:border-indigo-500 placeholder-gray-600 whitespace-pre-wrap" spellcheck="false"></textarea>
   </div>
@@ -521,7 +521,7 @@ function refreshProviderModels() {
 var USAGE_SCRIPTS = {
   openai: {
     "request": {
-      "url": "{{baseUrl}}/v1/usage",
+      "url": "{{baseUrl}}/v1/usage?date={{date}}",
       "method": "GET",
       "headers": {"Authorization": "Bearer {{apiKey}}"}
     },
