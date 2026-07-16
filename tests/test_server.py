@@ -3274,12 +3274,9 @@ async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(mo
     plugin._query_result_cache = OrderedDict()
     plugin._embedding_cache_revision = None
     plugin._embedding_cache_documents = []
-    plugin._embedding_cache_matrix = None
-    plugin._embedding_cache_norms = None
     plugin._bm25_cache_revision = None
     plugin._bm25_cache_documents = []
     plugin._bm25_cache_stats = None
-    plugin._numpy_available = False
 
     class FakeStore:
         def stats(self):
@@ -3357,12 +3354,9 @@ async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(m
     plugin._query_result_cache = OrderedDict()
     plugin._embedding_cache_revision = None
     plugin._embedding_cache_documents = []
-    plugin._embedding_cache_matrix = None
-    plugin._embedding_cache_norms = None
     plugin._bm25_cache_revision = None
     plugin._bm25_cache_documents = []
     plugin._bm25_cache_stats = None
-    plugin._numpy_available = False
 
     captured = {}
 

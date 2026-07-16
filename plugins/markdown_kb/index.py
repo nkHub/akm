@@ -27,9 +27,15 @@ from typing import Any
 
 import httpx
 try:
+    # 优先从插件内置 _vendor 加载 jieba3，无需用户预装
+    import sys as _vendor_sys
+    _vendor_sys.path.insert(0, str(Path(__file__).resolve().parent / "_vendor"))
     from jieba3 import jieba3 as Jieba3Tokenizer
-except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
-    Jieba3Tokenizer = None
+except Exception:
+    try:
+        from jieba3 import jieba3 as Jieba3Tokenizer
+    except Exception:  # pragma: no cover - 运行环境未安装依赖时自动回退
+        Jieba3Tokenizer = None
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 
@@ -294,7 +300,7 @@ class SqliteKbIndexStore(IndexStore):
     检索路径采用“sqlite-vec 优先、Python 回退兜底”：
     1. 如果当前运行时能够加载 sqlite-vec，则第一阶段粗召回优先在 SQLite 内完成；
     2. 同时继续保留 `embedding_json`，便于在 vec 不可用、维度不一致或测试环境下
-       自动回退到 NumPy / Python 余弦计算；
+       自动回退到 Python 余弦计算；
     3. 这样既能把 workspace 过滤前推到 SQL 层，也不会把插件可用性强绑到某个单一
        本地 Python 发行版上。
     """
@@ -376,7 +382,7 @@ class SqliteKbIndexStore(IndexStore):
         1. vec0 的维度在建表时固定，因此 embedding 维度变化时必须整表重建；
         2. 当前 `replace_all()` 本来就是全量替换，直接 drop/recreate 最简单稳定；
         3. 如果当前运行时无法加载 sqlite-vec，则这里只做温和跳过，继续保留 JSON
-           向量与 Python/NumPy 回退路径，避免因为本地环境差异直接让重建失败。
+           向量与 Python 回退路径，避免因为本地环境差异直接让重建失败。
         """
         if not self._vec_runtime_available:
             return
@@ -1348,12 +1354,9 @@ class Plugin(PluginBase):
         self._store = self._create_index_store()
         self._embedding_cache_revision = None
         self._embedding_cache_documents = []
-        self._embedding_cache_matrix = None
-        self._embedding_cache_norms = None
         self._bm25_cache_revision = None
         self._bm25_cache_documents = []
         self._bm25_cache_stats = None
-        self._numpy_available = None
         self._jieba3_warned_unavailable = False
         self._jieba3_small_tokenizer = None
         self._jieba3_small_tokenizer_failed = False
@@ -1522,7 +1525,7 @@ class Plugin(PluginBase):
         当前默认固定使用 SQLite `kb.db` backend。
 
         说明：
-        1. 当前主路径是 `kb.db + sqlite-vec 优先粗召回 + Python/NumPy 自动回退`；
+         1. 当前主路径是 `kb.db + sqlite-vec 优先粗召回 + Python 自动回退`；
         2. `VectorLiteDbIndexStore` 仍保留在代码里，作为更早期骨架的参考；
         3. 对外依然不暴露“后端切换”配置，避免出现“能配但其实不会生效”的伪配置。
         """
@@ -3527,7 +3530,7 @@ class Plugin(PluginBase):
         """优先使用 sqlite-vec 完成第一阶段候选召回。
 
         返回空列表表示“当前这次请求没有走成 sqlite-vec”，调用方会自动退回原有
-        的全量文档 + Python/NumPy 相似度计算路径。
+        的全量文档 + Python 相似度计算路径。
         """
         if not documents:
             return []
@@ -3565,8 +3568,6 @@ class Plugin(PluginBase):
         """在索引写操作后清空内存向量缓存。"""
         self._embedding_cache_revision = None
         self._embedding_cache_documents = []
-        self._embedding_cache_matrix = None
-        self._embedding_cache_norms = None
         self._bm25_cache_revision = None
         self._bm25_cache_documents = []
         self._bm25_cache_stats = None
@@ -3788,52 +3789,7 @@ class Plugin(PluginBase):
         documents = list(snapshot.get("documents", []))
         self._embedding_cache_documents = documents
         self._embedding_cache_revision = revision
-        self._rebuild_numpy_cache(documents)
         return documents
-
-    def _rebuild_numpy_cache(self, documents: list[dict]) -> None:
-        """根据当前文档集合重建 NumPy 检索缓存。
-
-        如果当前环境还没有安装 `numpy`，则保持回退路径，不让主流程中断。
-        """
-        np = self._import_numpy_optional()
-        if np is None or not documents:
-            self._embedding_cache_matrix = None
-            self._embedding_cache_norms = None
-            return
-
-        embeddings = [item.get("embedding") or [] for item in documents]
-        if not embeddings:
-            self._embedding_cache_matrix = None
-            self._embedding_cache_norms = None
-            return
-
-        dims = {len(vector) for vector in embeddings if isinstance(vector, list)}
-        if len(dims) != 1 or 0 in dims:
-            # 说明索引里混入了不同 embedding 维度的数据，常见于：
-            # 1. 历史上换过 embedding 模型；
-            # 2. 没有做一次完整 rebuild，旧 chunk 仍保留旧向量。
-            # 这时不能再走矩阵化路径，否则 NumPy 会因为 ragged array 直接抛异常。
-            # 这里选择温和回退到逐条余弦计算，让 query 至少可用；
-            # 用户后续执行一次全量重建后，会自动恢复 NumPy 快路径。
-            self.logger.warning(
-                "[markdown_kb] 检测到索引中 embedding 维度不一致，已回退到逐条计算；建议执行一次全量重建。dims=%s",
-                sorted(dims),
-            )
-            self._embedding_cache_matrix = None
-            self._embedding_cache_norms = None
-            return
-
-        matrix = np.asarray(embeddings, dtype=np.float32)
-        if matrix.ndim != 2 or matrix.size == 0:
-            self._embedding_cache_matrix = None
-            self._embedding_cache_norms = None
-            return
-
-        norms = np.linalg.norm(matrix, axis=1)
-        norms[norms == 0] = 1.0
-        self._embedding_cache_matrix = matrix
-        self._embedding_cache_norms = norms
 
     def _score_documents(
         self,
@@ -3913,30 +3869,7 @@ class Plugin(PluginBase):
                 )
             return scored
 
-        np = self._import_numpy_optional()
         keyword_scores = self._score_keywords(question, documents)
-        if np is not None and self._embedding_cache_matrix is not None and self._embedding_cache_norms is not None:
-            query = np.asarray(query_vector, dtype=np.float32)
-            if query.ndim == 1 and query.size == self._embedding_cache_matrix.shape[1]:
-                query_norm = np.linalg.norm(query)
-                if query_norm == 0:
-                    query_norm = 1.0
-                scores = self._embedding_cache_matrix.dot(query) / (self._embedding_cache_norms * query_norm)
-                return [
-                    self._build_scored_hit(
-                        item,
-                        float(scores[idx]),
-                        keyword_scores[idx],
-                        semantic_weight,
-                        keyword_weight,
-                        memory_weight=memory_weight,
-                        memory_score=_get_memory(str(item.get("id") or "")),
-                        category_multiplier=_get_category_multiplier(str(item.get("categories") or "")),
-                        parent_bonus=_get_parent_bonus(str(item.get("id") or "")),
-                    )
-                    for idx, item in enumerate(documents)
-                ]
-
         scored = []
         for idx, item in enumerate(documents):
             embedding = item.get("embedding") or []
@@ -4207,37 +4140,16 @@ class Plugin(PluginBase):
             for score in raw_scores
         ]
 
-    def _import_numpy_optional(self):
-        """按需导入 NumPy。
-
-        说明：
-        1. 当前代码已经把 numpy 记入项目依赖；
-        2. 但为了兼容尚未重新安装依赖的本地环境，这里仍然做一次温和回退；
-        3. 一旦成功导入，会缓存结果，避免每次 query 重复 import。
-        """
-        if self._numpy_available is False:
-            return None
-        if self._numpy_available is True:
-            import numpy as np
-            return np
-        try:
-            import numpy as np
-            self._numpy_available = True
-            return np
-        except Exception:
-            self._numpy_available = False
-            return None
-
     def _vector_compute_backend_label(self) -> str:
         """返回当前向量计算后端标签，便于状态页展示。"""
-        return "numpy" if self._import_numpy_optional() is not None else "python"
+        return "python"
 
     def _vector_retrieval_backend_label(self) -> str:
         """返回当前第一阶段向量召回后端标签。
 
         这里区分“向量召回”和“向量计算”两个概念：
-        - `vector_retrieval_backend` 表示第一阶段粗召回到底走 sqlite-vec 还是 Python/NumPy；
-        - `vector_compute_backend` 仍表示 Python 回退链路内部用的是 NumPy 还是纯 Python。
+        - `vector_retrieval_backend` 表示第一阶段粗召回到底走 sqlite-vec 还是 Python；
+        - `vector_compute_backend` 始终为 python。
         """
         stats = self._store.stats()
         if bool(stats.get("vec_enabled")):
