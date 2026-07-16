@@ -56,6 +56,77 @@ class PluginManager:
 
     # ── 插件加载 ──
 
+    def _list_zip_builtin_plugins(self) -> set[str]:
+        """在 py2app zip 包中列出内置插件目录名，返回插件名称集合"""
+        import zipfile
+
+        path_str = str(self._builtin_dir)
+        zip_path = None
+        for parent in Path(path_str).parents:
+            if parent.suffix == '.zip' and parent.exists():
+                zip_path = parent
+                break
+
+        if not zip_path:
+            return set()
+
+        try:
+            inner_prefix = str(self._builtin_dir.relative_to(zip_path)) + '/'
+        except ValueError:
+            return set()
+
+        plugin_names = set()
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for name in zf.namelist():
+                if not name.startswith(inner_prefix):
+                    continue
+                relative = name[len(inner_prefix):]
+                parts = relative.split('/')
+                if len(parts) >= 1 and parts[0] and not parts[0].startswith('_'):
+                    plugin_names.add(parts[0])
+
+        return {n for n in plugin_names if n not in ("__pycache__",)}
+
+    def _load_plugin_from_zip(self, plugin_name: str, source: str) -> None:
+        """从 py2app zip 包中提取内置插件到临时目录并加载"""
+        import tempfile
+
+        path_str = str(self._builtin_dir)
+        zip_path = None
+        for parent in Path(path_str).parents:
+            if parent.suffix == '.zip' and parent.exists():
+                zip_path = parent
+                break
+
+        if not zip_path:
+            logger.warning(f"[PluginManager] 无法找到 zip 文件，跳过内置插件: {plugin_name}")
+            return
+
+        try:
+            inner_prefix = str(self._builtin_dir.relative_to(zip_path))
+        except ValueError:
+            return
+
+        zip_plugin_dir = f"{inner_prefix}/{plugin_name}"
+
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                if (f"{zip_plugin_dir}/plugin.json" not in zf.namelist()
+                        or f"{zip_plugin_dir}/index.py" not in zf.namelist()):
+                    return
+
+                tmp_root = Path(tempfile.mkdtemp(prefix=f"akm_plugin_{plugin_name}_"))
+                for z_info in zf.infolist():
+                    if z_info.filename.startswith(f"{zip_plugin_dir}/"):
+                        target = tmp_root / z_info.filename
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        zf.extract(z_info, tmp_root)
+
+                plugin_dir = tmp_root / inner_prefix / plugin_name
+                self._load_plugin(plugin_dir, source)
+        except Exception as e:
+            logger.warning(f"[PluginManager] 从 zip 加载插件失败 {plugin_name}: {e}")
+
     def _load_plugin(self, plugin_dir: Path, source: str) -> Optional[PluginBase]:
         """从目录加载单个插件
 
@@ -165,15 +236,26 @@ class PluginManager:
         self.db = db
 
         # ── 1. 加载内置插件 (akm/plugins/ 子目录) ──
-        for entry in sorted(self._builtin_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            if entry.name.startswith("__"):
-                continue
-            # 跳过非插件目录（base.py, models.py 等文件所在目录就是 akm/plugins/ 本身）
-            if entry.name in ("base.py", "models.py", "plugin_manager.py", "__pycache__"):
-                continue
-            self._load_plugin(entry, "builtin")
+        # py2app 打包后 akm/plugins/ 在 python312.zip 内，iterdir() 会抛 NotADirectoryError
+        try:
+            builtin_entries = sorted(self._builtin_dir.iterdir())
+            use_zip_loading = False
+        except NotADirectoryError:
+            builtin_entries = self._list_zip_builtin_plugins()
+            use_zip_loading = True
+
+        for entry in builtin_entries:
+            if use_zip_loading:
+                # 从 zip 包中提取插件到临时目录再加载
+                self._load_plugin_from_zip(entry, "builtin")
+            else:
+                if not entry.is_dir():
+                    continue
+                if entry.name.startswith("__"):
+                    continue
+                if entry.name in ("base.py", "models.py", "plugin_manager.py", "__pycache__"):
+                    continue
+                self._load_plugin(entry, "builtin")
 
         # ── 2. 加载项目本地插件 (项目根目录 plugins/ 子目录) ──
         if self._project_dir.exists():

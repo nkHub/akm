@@ -177,14 +177,22 @@ _CONV_WARNING_LABELS = {
     "responses_parallel_tool_calls_not_mapped": "parallel_tool_calls 未映射",
 }
 
-# 静态文件
-_static_dir = os.path.join(os.path.dirname(__file__), "static")
+# 静态文件与模板目录 — 兼容 py2app zip 打包
+# py2app 打包后 __file__ 在 python312.zip 内，而模板/静态文件在外部 Resources/ 目录
+if '.zip/' in __file__:
+    _zip_idx = __file__.find('.zip/')
+    _resources_root = os.path.dirname(os.path.dirname(__file__[:_zip_idx + 4]))
+    _static_dir = os.path.join(_resources_root, 'static')
+    _tpl_dir = os.path.join(_resources_root, 'templates')
+else:
+    _static_dir = os.path.join(os.path.dirname(__file__), "static")
+    _tpl_dir = os.path.join(os.path.dirname(__file__), "templates")
+
 if os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 # 简易模板引擎 — 读取模板文件并做变量替换
 import re as _re
-_tpl_dir = os.path.join(os.path.dirname(__file__), "templates")
 
 
 def _build_trace_headers(request: Request) -> tuple[dict, str]:
