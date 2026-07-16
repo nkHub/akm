@@ -37,7 +37,17 @@ from akm.config import load_config
 
 from akm.plugins import PluginBase
 
-from akm.plugins.markdown_kb import session_scanner
+import os as _os
+import sys as _sys
+import importlib.util as _importlib_util
+
+_dir = _os.path.dirname(_os.path.abspath(__file__))
+_session_scanner_spec = _importlib_util.spec_from_file_location(
+    "markdown_kb_session_scanner", _os.path.join(_dir, "session_scanner.py")
+)
+session_scanner = _importlib_util.module_from_spec(_session_scanner_spec)
+_sys.modules["markdown_kb_session_scanner"] = session_scanner
+_session_scanner_spec.loader.exec_module(session_scanner)
 
 
 router = APIRouter()
@@ -1504,8 +1514,7 @@ class Plugin(PluginBase):
         bindings = self._load_file_bindings()
         if safe_name in bindings:
             return self._normalize_workspace_root(bindings.get(safe_name) or "")
-        settings = settings or self._settings()
-        return self._normalize_workspace_root(settings.get("document_workspace_root") or "")
+        return ""
 
     def _create_index_store(self) -> IndexStore:
         """创建当前使用的索引 backend。
@@ -2817,7 +2826,7 @@ class Plugin(PluginBase):
         return {
             "embedding_model": str(cfg.get("embedding_model") or "text-embedding-3-small").strip() or "text-embedding-3-small",
             "reranker_model": str(cfg.get("reranker_model") or "").strip(),
-            "chat_model": str(cfg.get("chat_model") or "gpt-5.4-mini").strip() or "gpt-5.4-mini",
+            "chat_model": str(cfg.get("chat_model") or "").strip(),
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "top_k": top_k,
@@ -2825,7 +2834,6 @@ class Plugin(PluginBase):
             "keyword_weight": keyword_weight,
             "memory_weight": memory_weight,
             "score_threshold": min(1.0, max(0.0, _safe_float(cfg.get("score_threshold"), 0.7))),
-            "document_workspace_root": self._normalize_workspace_root(cfg.get("document_workspace_root") or ""),
             # 记忆系统配置
             "memory_enabled": bool(cfg.get("memory_enabled", True)),
             "memory_boost": _safe_float(cfg.get("memory_boost"), 0.15),

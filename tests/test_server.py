@@ -22,7 +22,7 @@ from akm.server import app, lifespan, _build_runtime_debug_payload, _default_ima
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_injects_hits_for_chat_request(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -61,7 +61,7 @@ async def test_markdown_kb_on_request_injects_hits_for_chat_request(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -89,7 +89,7 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -122,7 +122,7 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_handles_messages_system_injection(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -158,7 +158,7 @@ async def test_markdown_kb_on_request_handles_messages_system_injection(monkeypa
 
 
 def test_markdown_kb_extracts_project_context_from_opencode_message_text():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     request = {
@@ -178,7 +178,7 @@ def test_markdown_kb_extracts_project_context_from_opencode_message_text():
 
 
 def test_markdown_kb_extracts_project_context_from_codex_environment_context_text():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     request = {
@@ -202,7 +202,7 @@ def test_markdown_kb_extracts_project_context_from_codex_environment_context_tex
 
 
 def test_markdown_kb_extracts_project_context_from_claude_system_reminder_text():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     request = {
@@ -225,7 +225,7 @@ def test_markdown_kb_extracts_project_context_from_claude_system_reminder_text()
 
 
 def test_markdown_kb_prefer_project_hits_keeps_matching_project_documents():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     hits = [
@@ -245,7 +245,7 @@ def test_markdown_kb_prefer_project_hits_keeps_matching_project_documents():
 
 
 def test_markdown_kb_prefer_project_hits_falls_back_when_no_match():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     hits = [
@@ -261,38 +261,9 @@ def test_markdown_kb_prefer_project_hits_falls_back_when_no_match():
     assert filtered == hits
 
 
-def test_markdown_kb_settings_include_document_workspace_root():
-    from akm.plugins.markdown_kb.index import Plugin
-
-    plugin = Plugin()
-    plugin.config = {
-        "document_workspace_root": "/Users/nk/Desktop/ccs/",
-    }
-
-    settings = plugin._settings()
-    assert settings["document_workspace_root"] == "/Users/nk/Desktop/ccs"
-
-
-def test_markdown_kb_chunk_metadata_carries_document_workspace_root(tmp_path):
-    from akm.plugins.markdown_kb.index import Plugin
-
-    plugin = Plugin()
-    path = tmp_path / "AI Key Manager.md"
-    path.write_text("# Title\n\nBody", "utf-8")
-
-    chunks = plugin._chunk_markdown_file(path, {
-        "chunk_size": 800,
-        "chunk_overlap": 120,
-        "document_workspace_root": "/Users/nk/Desktop/ccs/",
-    })
-
-    assert chunks
-    assert chunks[0]["workspace_root"] == "/Users/nk/Desktop/ccs"
-
-
 def test_markdown_kb_chunking_builtin_tree(monkeypatch, tmp_path):
     """验证内置标题树切片器：按标题拆分为独立 chunk。"""
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     path = tmp_path / "guide.md"
@@ -408,7 +379,7 @@ async def test_markdown_kb_rebuild_file_persists_bound_workspace(monkeypatch):
 
 
 def test_markdown_kb_with_workspace_searches_public_and_current_workspace_documents():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     documents = [
@@ -429,7 +400,7 @@ def test_markdown_kb_with_workspace_searches_public_and_current_workspace_docume
 
 
 def test_markdown_kb_without_workspace_only_searches_unbound_documents():
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     documents = [
@@ -448,7 +419,7 @@ def test_markdown_kb_without_workspace_only_searches_unbound_documents():
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_injects_realistic_project_context(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -492,7 +463,7 @@ async def test_markdown_kb_on_request_injects_realistic_project_context(monkeypa
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_with_workspace_uses_public_and_current_workspace_hits(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -541,7 +512,7 @@ async def test_markdown_kb_on_request_with_workspace_uses_public_and_current_wor
 
 @pytest.mark.asyncio
 async def test_markdown_kb_on_request_without_workspace_only_uses_unbound_documents(monkeypatch):
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.config = {
@@ -2370,8 +2341,8 @@ async def test_plugin_config_api_roundtrip():
 
 
 @pytest.mark.asyncio
-async def test_markdown_kb_builtin_plugin_loads_disabled_by_default(monkeypatch):
-    """内置 markdown_kb 插件应能被加载，且首次默认关闭。"""
+async def test_markdown_kb_plugin_loads_disabled_by_default(monkeypatch):
+    """markdown_kb 插件应能被加载，且首次默认关闭。"""
     from fastapi import FastAPI
     from akm.plugins.plugin_manager import PluginManager
 
@@ -2387,7 +2358,7 @@ async def test_markdown_kb_builtin_plugin_loads_disabled_by_default(monkeypatch)
 
     plugin = pm.plugins.get("markdown_kb")
     assert plugin is not None
-    assert plugin.builtin is True
+    assert plugin.builtin is False
     assert plugin.enabled is False
     assert plugin.meta.category == "app"
 
@@ -3238,7 +3209,7 @@ async def test_markdown_kb_query_falls_back_when_index_contains_mixed_embedding_
 
 def test_markdown_kb_tokenize_keywords_prefers_jieba3_small_for_cjk_segments(monkeypatch):
     """中文分词在 jieba3 small 可用时应优先使用自然词粒度。"""
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.logger = logging.getLogger("test.markdown_kb.jieba3")
@@ -3253,7 +3224,7 @@ def test_markdown_kb_tokenize_keywords_prefers_jieba3_small_for_cjk_segments(mon
             assert text == "参考考试大纲生成复习计划"
             return ["参考", "考试大纲", "生成", "复习计划"]
 
-    monkeypatch.setattr("akm.plugins.markdown_kb.index.Jieba3Tokenizer", DummyJieba3Tokenizer)
+    monkeypatch.setattr("plugins.markdown_kb.index.Jieba3Tokenizer", DummyJieba3Tokenizer)
 
     tokens = plugin._tokenize_keywords("参考考试大纲生成复习计划")
     assert "参考考试大纲生成复习计划" in tokens
@@ -3265,14 +3236,14 @@ def test_markdown_kb_tokenize_keywords_prefers_jieba3_small_for_cjk_segments(mon
 
 def test_markdown_kb_tokenize_keywords_falls_back_to_sliding_windows_when_jieba3_unavailable(monkeypatch):
     """当 jieba3 不可用时，应继续使用原有 2~4 字滑窗分词。"""
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.logger = logging.getLogger("test.markdown_kb.jieba3.fallback")
     plugin._jieba3_warned_unavailable = False
     plugin._jieba3_small_tokenizer = None
 
-    monkeypatch.setattr("akm.plugins.markdown_kb.index.Jieba3Tokenizer", None)
+    monkeypatch.setattr("plugins.markdown_kb.index.Jieba3Tokenizer", None)
 
     tokens = plugin._tokenize_keywords("参考考试大纲生成复习计划")
     assert "参考考试大纲生成复习计划" in tokens
@@ -3285,7 +3256,7 @@ def test_markdown_kb_tokenize_keywords_falls_back_to_sliding_windows_when_jieba3
 @pytest.mark.asyncio
 async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(monkeypatch):
     """当 sqlite-vec 可用时，第一阶段候选应优先来自 store 侧向量召回。"""
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.name = "markdown_kb"
@@ -3344,7 +3315,7 @@ async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(mo
         def read_memory_map(self, chunk_ids):
             return {}
 
-        def update_memory(self, upserts):
+        def update_memory(self, upserts, cap=1.0):
             pass
 
         def cleanup_expired_memory(self):
@@ -3368,7 +3339,7 @@ async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(mo
 @pytest.mark.asyncio
 async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(monkeypatch):
     """sqlite-vec 召回应在 SQL 层拿到 workspace 过滤条件。"""
-    from akm.plugins.markdown_kb.index import Plugin
+    from plugins.markdown_kb.index import Plugin
 
     plugin = Plugin()
     plugin.name = "markdown_kb"
@@ -3429,7 +3400,7 @@ async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(m
         def read_memory_map(self, chunk_ids):
             return {}
 
-        def update_memory(self, upserts):
+        def update_memory(self, upserts, cap=1.0):
             pass
 
         def cleanup_expired_memory(self):
@@ -3463,7 +3434,7 @@ async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(m
 
 def test_sqlite_kb_index_store_marks_vec_enabled_when_runtime_and_dimensions_are_ready(monkeypatch, tmp_path):
     """store 在运行时可用且 embedding 维度一致时，应把 vec 状态写入元数据。"""
-    from akm.plugins.markdown_kb.index import SqliteKbIndexStore
+    from plugins.markdown_kb.index import SqliteKbIndexStore
 
     class DummySqliteVec:
         @staticmethod

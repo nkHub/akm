@@ -1,8 +1,36 @@
 """ResponsesAdapter 和 MessagesAdapter 单元测试"""
 import json
+import os as _os
+import sys as _sys
+import importlib.util as _importlib_util
 from pathlib import Path
 import pytest
 from akm.agent import get_agent_profile
+
+# protocol_converter 已从内置移至项目本地 plugins/，子模块需通过 importlib 动态加载
+_plugin_dir = _os.path.dirname(_os.path.abspath(__file__))
+
+def _load_module(name: str):
+    module_name = f"akm.plugins.protocol_converter.{name}"
+    if module_name in _sys.modules:
+        return _sys.modules[module_name]
+    py_path = _os.path.join(_plugin_dir, f"{name}.py")
+    spec = _importlib_util.spec_from_file_location(f"akm_plugin_pc_test_{name}", py_path)
+    module = _importlib_util.module_from_spec(spec)
+    _sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+# 按依赖顺序加载
+_load_module("_ir")
+_load_module("_messages_codec")
+_load_module("_warnings")
+_load_module("_messages_stream")
+_load_module("_chat")
+_load_module("_responses")
+_load_module("_messages")
+_load_module("index")
+
 from akm.plugins.protocol_converter._responses import ResponsesAdapter
 from akm.plugins.protocol_converter._messages import MessagesAdapter
 from akm.plugins.protocol_converter._chat import ChatAdapter

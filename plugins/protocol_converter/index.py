@@ -30,19 +30,39 @@ class Plugin(PluginBase):
     """
 
     async def on_load(self):
-        """加载三个适配器模块（使用 importlib 从插件目录动态导入）"""
+        """加载适配器模块（使用 importlib 从插件目录动态导入）
+
+        按依赖顺序加载，并为每个子模块注册 akm.plugins.protocol_converter.{name} 别名，
+        保证子模块之间的 from akm.plugins.protocol_converter.xxx import yyy 能透明解析。
+        """
         plugin_dir = self._static_dir.parent  # views 的父目录即插件根目录
-        for name in ("_responses", "_messages", "_chat"):
+
+        def _load_module(name: str):
             py_path = plugin_dir / f"{name}.py"
-            if py_path.exists():
-                spec = importlib.util.spec_from_file_location(
-                    f"akm_plugin_protocol_converter_{name}", str(py_path)
-                )
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    sys.modules[f"akm_plugin_protocol_converter_{name}"] = module
-                    spec.loader.exec_module(module)
-                    setattr(self, name, module)
+            if not py_path.exists():
+                return None
+            spec = importlib.util.spec_from_file_location(
+                f"akm_plugin_protocol_converter_{name}", str(py_path)
+            )
+            if spec is None or spec.loader is None:
+                return None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[f"akm_plugin_protocol_converter_{name}"] = module
+            sys.modules[f"akm.plugins.protocol_converter.{name}"] = module
+            spec.loader.exec_module(module)
+            setattr(self, name, module)
+            return module
+
+        # 1. 无依赖层
+        _load_module("_ir")
+        _load_module("_messages_codec")
+        _load_module("_warnings")
+        # 2. 仅依赖无依赖层
+        _load_module("_messages_stream")
+        _load_module("_chat")
+        # 3. 依赖上层
+        _load_module("_responses")
+        _load_module("_messages")
 
         # 默认适配器（兜底）
         self._responses_adapter = self._responses.ResponsesAdapter() if hasattr(self, "_responses") else None

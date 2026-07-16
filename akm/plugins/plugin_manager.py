@@ -194,7 +194,7 @@ class PluginManager:
         plugin_states = cfg.get("plugin_states", {})
         changed = False
         for name, plugin in self.plugins.items():
-            if name not in plugin_states and plugin.builtin:
+            if name not in plugin_states:
                 plugin.enabled = bool(plugin.meta.default_enabled)
                 plugin_states[name] = bool(plugin.meta.default_enabled)
                 changed = True

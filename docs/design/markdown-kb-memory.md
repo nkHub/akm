@@ -509,7 +509,7 @@ quotes(array[string], ...)
 
 ## 六、架构分层
 
-**核心原则：优先只改插件内部。** 所有功能优先实现在 `akm/plugins/markdown_kb/` 内，仅在插件内部确实无法获取所需数据时，才向外扩展 hooks、CLI 入口或 API 路由。
+**核心原则：优先只改插件内部。** 所有功能优先实现在 `plugins/markdown_kb/` 内，仅在插件内部确实无法获取所需数据时，才向外扩展 hooks、CLI 入口或 API 路由。
 
 客户端 hooks 只管事件入口和触发，核心逻辑全部在服务端插件内统一处理。
 
@@ -528,7 +528,7 @@ quotes(array[string], ...)
 └───────────────────────────┬────────────────────────┘
                             │
 ┌───────────────────────────┴────────────────────────┐
-│  akm/plugins/markdown_kb/     ← 两种客户端共用       │
+│  plugins/markdown_kb/     ← 两种客户端共用       │
 │                                                     │
 │  session_scanner.py          ← 新增                  │
 │    parse_codex_jsonl()        Codex JSONL 解析       │
