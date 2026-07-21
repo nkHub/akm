@@ -180,6 +180,11 @@ async def _handle_upstream_error(
             action = hook_result.get("action")
             if action is not None:
                 return action
+        # PluginManager 对 on_upstream_error 的标准返回值就是首个非空
+        # 字符串动作。此前这里只读取 dict，导致 error_handler、第三方
+        # fallback_router 等插件即使已返回策略，仍被后面的硬编码兜底覆盖。
+        if isinstance(hook_result, str):
+            return hook_result
 
     # ── 内置兜底策略（无 error_handler 插件或插件返回 None 时生效）──
     max_retries = MAX_RETRIES_PER_KEY
@@ -227,6 +232,7 @@ async def forward_request(
     tries = 0
     tried_aliases: set[str] = set()
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
+    selection_skip_reason = ""
 
     async def _emit_on_response_meta(meta: dict):
         """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。"""
@@ -243,6 +249,12 @@ async def forward_request(
 
     # ── 插件 hook: on_request（模型名映射等预处理）──
     if plugin_manager:
+        # 请求类插件只接收一个 request 参数。把接口类型和客户端标识放入
+        # 仅限本地生命周期的命名空间，供 prompt_profiles 等策略按协议或
+        # 调用方匹配；随后会被 forwardable_body 统一剥离，绝不发送给上游。
+        body.setdefault("__akm_api_path__", api_path)
+        if original_user_agent:
+            body.setdefault("__akm_client_user_agent__", original_user_agent)
         hook_result = await plugin_manager.run_hook("on_request", request=body)
         if isinstance(hook_result, dict) and "on_request_block" in hook_result:
             blocked = hook_result["on_request_block"] or {}
@@ -294,11 +306,16 @@ async def forward_request(
                 use_fallback = True
                 continue
             # 兜底也无可用 key
-            err_msg = _diagnose_no_key(model, tried_aliases)
+            if selection_skip_reason:
+                err_msg = selection_skip_reason
+                status_code = 429
+            else:
+                err_msg = _diagnose_no_key(model, tried_aliases)
+                status_code = 502 if tried_aliases else 503
             await _emit_on_response_meta({
                 "ok": False,
                 "phase": "select_key",
-                "status_code": 502 if tried_aliases else 503,
+                "status_code": status_code,
                 "key_alias": "",
                 "provider": "",
                 "model": model,
@@ -307,7 +324,7 @@ async def forward_request(
                 "api_path": api_path,
             })
             return {
-                "status_code": 502 if tried_aliases else 503,
+                "status_code": status_code,
                 "body": "",
                 "key_alias": "",
                 "provider": "",
@@ -329,6 +346,13 @@ async def forward_request(
             result = await plugin_manager.run_hook(
                 "on_key_selected", model=model, key=key, request=body
             )
+            if isinstance(result, dict) and "on_key_selected_skip" in result:
+                skipped = result["on_key_selected_skip"] or {}
+                selection_skip_reason = str(
+                    skipped.get("error", "当前可用 Key 均已达到配额上限")
+                    or "当前可用 Key 均已达到配额上限"
+                )
+                continue
             if isinstance(result, dict) and "key" in result:
                 key = result["key"]
 
@@ -389,7 +413,14 @@ async def forward_request(
         multipart_files = body.get("__akm_form_files__") if is_multipart_request else None
 
         # ── 上游请求模式跟随客户端：流式接口按需走 SSE，其他接口直接请求普通响应 ──
-        upstream_body = adapter.convert_request(body) if adapter else dict(body)
+        # 插件会在请求对象上保存仅供本地生命周期使用的上下文，例如数据过滤
+        # 插件的反向映射和模型降级历史。这些字段绝不能进入上游请求或审计的
+        # “实际转发请求体”，否则既会泄露内部实现，也可能触发供应商参数校验。
+        forwardable_body = {
+            field: value for field, value in body.items()
+            if not str(field).startswith("__akm_")
+        }
+        upstream_body = adapter.convert_request(forwardable_body) if adapter else dict(forwardable_body)
 
         if is_multipart_request:
             # multipart 由 httpx 自动生成 boundary；若保留 application/json 或裸 multipart/form-data，
@@ -605,13 +636,23 @@ async def forward_request(
 
         # 当前 key 彻底失败，日志回调记录失败尝试
 
+        # fallback_router 在 on_upstream_error 中只改写本次请求的模型并返回
+        # fallback。这里重新从请求上下文取模型，使下一轮从目标模型重新选 Key；
+        # 已尝试集合按模型隔离，避免原模型的失败 Key 错误排除目标模型候选。
+        next_model = str(body.get("model", model) or model)
+        if next_model != model:
+            model = next_model
+            tried_aliases.clear()
+            use_fallback = False
+            selection_skip_reason = ""
+
         # 当前 key 彻底失败，日志回调记录失败尝试
         if log_callback:
             log_callback({
                 "provider": key["provider"],
                 "key_alias": key["alias"],
                 "model": model,
-                "request_body": json.dumps(body, ensure_ascii=False),
+                "request_body": json.dumps(forwardable_body, ensure_ascii=False),
                 "response_body": "",
                 "status_code": 0,
                 "latency_ms": 0,

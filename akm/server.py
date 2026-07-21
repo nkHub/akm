@@ -2188,6 +2188,53 @@ async def _handle_ai_request(request: Request, api_path: str):
                 security_action = ""
                 security_reason = ""
                 security_changed = False
+                # ── 可逆占位符还原（data_filter_guard 请求脱敏后的响应还原，并发隔离） ──
+                _pm = getattr(request.app.state, "plugin_manager", None)
+                _dfg = _pm.plugins.get("data_filter_guard") if _pm else None
+                _rev_map = body.get("__akm_reverse_map__") if (isinstance(body, dict) and _dfg and _dfg.enabled) else None
+                _rev_state = _dfg.reverse_stream_state() if _rev_map else None
+                # 流式安全保护默认关闭。用户显式开启后，先在有限内存中完整
+                # 缓冲 SSE 再统一扫描，避免危险模式在流尾命中时前半段已经被
+                # 客户端消费；超过上限时退为增量扫描并在命中处立即终止。
+                _stream_guard_active = bool(_dfg and _dfg.is_stream_guard_active())
+                _stream_guard_buffering = bool(
+                    _stream_guard_active and _dfg.stream_guard_requires_buffering()
+                )
+                _stream_guard_limit = _dfg.stream_guard_buffer_max_bytes() if _stream_guard_buffering else 0
+                _stream_guard_buffer = bytearray()
+                _stream_guard_state = _dfg.create_stream_guard_state() if _stream_guard_active else None
+                _stream_guard_overflow = False
+                _stream_guard_blocked = False
+
+                def _guard_stream_chunk(chunk: bytes) -> tuple[list[bytes], bool]:
+                    """处理已完成占位符还原的流式片段，返回可输出内容与终止标记。"""
+                    nonlocal _stream_guard_overflow, _stream_guard_blocked
+                    nonlocal security_action, security_reason, security_changed
+                    if not _stream_guard_active:
+                        return [chunk], False
+
+                    if _stream_guard_buffering and not _stream_guard_overflow:
+                        if len(_stream_guard_buffer) + len(chunk) <= _stream_guard_limit:
+                            _stream_guard_buffer.extend(chunk)
+                            return [], False
+                        _stream_guard_overflow = True
+                        chunk = bytes(_stream_guard_buffer) + chunk
+                        _stream_guard_buffer.clear()
+
+                    payload_text = chunk.decode("utf-8", errors="replace")
+                    state, blocked, reason, action = _dfg.inspect_stream_chunk(
+                        api_path, payload_text, _stream_guard_state
+                    )
+                    _stream_guard_state.update(state)
+                    if action:
+                        security_action = action
+                        security_reason = reason
+                    if not blocked:
+                        return [chunk], False
+
+                    _stream_guard_blocked = True
+                    security_changed = True
+                    return [_dfg._build_safe_stream_payload(api_path).encode("utf-8")], True
 
                 async def _emit_stream_response_meta(status: int, latency: int, body_str: str):
                     """在流式请求真正结束时统一触发 on_response 生命周期。"""
@@ -2223,14 +2270,58 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if adapter:
                         async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
                             chunk = line.encode("utf-8") if isinstance(line, str) else line
-                            capture.append(chunk)
-                            usage_tracker.append(chunk)
-                            yield chunk
+                            if _rev_state is not None:
+                                text = chunk.decode("utf-8", errors="replace")
+                                processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
+                                if not processed:
+                                    continue
+                                chunk = processed.encode("utf-8")
+                            guarded_chunks, stop_stream = _guard_stream_chunk(chunk)
+                            for guarded_chunk in guarded_chunks:
+                                capture.append(guarded_chunk)
+                                usage_tracker.append(guarded_chunk)
+                                yield guarded_chunk
+                            if stop_stream:
+                                break
                     else:
                         async for chunk in resp.aiter_bytes():
-                            capture.append(chunk)
-                            usage_tracker.append(chunk)
-                            yield chunk
+                            if _rev_state is not None:
+                                text = chunk.decode("utf-8", errors="replace")
+                                processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
+                                if not processed:
+                                    continue
+                                chunk = processed.encode("utf-8")
+                            guarded_chunks, stop_stream = _guard_stream_chunk(chunk)
+                            for guarded_chunk in guarded_chunks:
+                                capture.append(guarded_chunk)
+                                usage_tracker.append(guarded_chunk)
+                                yield guarded_chunk
+                            if stop_stream:
+                                break
+                    # ── 刷新反向还原缓冲（流结束时） ──
+                    if _rev_state is not None and not _stream_guard_blocked:
+                        pending = _dfg.reverse_stream_flush(_rev_state, reverse_map=_rev_map)
+                        if pending:
+                            chunk = pending.encode("utf-8")
+                            guarded_chunks, _ = _guard_stream_chunk(chunk)
+                            for guarded_chunk in guarded_chunks:
+                                capture.append(guarded_chunk)
+                                usage_tracker.append(guarded_chunk)
+                                yield guarded_chunk
+                    if _stream_guard_buffering and not _stream_guard_overflow and not _stream_guard_blocked:
+                        protected, changed, reason, action = _dfg.protect_stream_payload(
+                            api_path,
+                            bytes(_stream_guard_buffer).decode("utf-8", errors="replace"),
+                        )
+                        if action:
+                            security_action = action
+                            security_reason = reason
+                        if changed:
+                            security_changed = True
+                        guarded_chunk = protected.encode("utf-8")
+                        capture.append(guarded_chunk)
+                        usage_tracker.append(guarded_chunk)
+                        yield guarded_chunk
                 except Exception as exc:
                     stream_error = f"上游连接中断: {exc}"
                     logger.warning(f"[{key_alias}] {provider} model={model} → {stream_error}")

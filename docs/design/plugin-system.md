@@ -487,8 +487,8 @@ request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C 
 | Hook | 输入 | 返回值 | 管道传递 |
 |------|------|--------|---------|
 | `on_request` | `request` | `request`（可修改后返回） | 前一个返回的 request → 下一个的输入 |
-| `on_key_selected` | `(model, key, request)` | `key`（可替换后返回） | 前一个返回的 key → 下一个的输入 |
-| `on_upstream_error` | `(request, response, key)` | `"retry"` / `"switch"` / `None` | 第一个非 None 返回值即为最终决策 |
+| `on_key_selected` | `(model, key, request)` | `key`，或 `{ "__akm_action__": "skip_key", "error": "..." }` | 默认替换当前 key；`skip_key` 排除当前 key 后重新选择 |
+| `on_upstream_error` | `(request, response, key)` | `"retry"` / `"switch"` / `"block"` / `"fallback"` / `None` | 第一个非 None 返回值即为最终决策；`fallback` 可改写 `request.model` 后重新选择 Key |
 | `on_response` | `(request, response)` | `None`（无状态传递） | 纯粹观察，按优先级依次执行 |
 
 `on_response` 当前由 proxy 传入的 `response` 为结构化元信息（并非 FastAPI Response 对象），常用字段如下：
@@ -513,7 +513,11 @@ request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C 
 
 对于 `on_response`，当前实现除“纯观察”外，也允许插件返回新的 `response` 元信息字典，用于最小范围内改写非流式响应结果。典型场景包括后处理标注、补充审计字段或做协议相关的二次整理；若插件需要附加安全/诊断信息，也可以通过 `x-akm-security` 与 `x-akm-flags` 写入审计头，供日志页展示和后续事件分析。
 
-> 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。
+> 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。插件若把仅供本地生命周期使用的上下文写入请求对象，字段名必须以 `__akm_` 开头；代理会在真正发送上游前剥离这些字段，防止内部状态泄露到供应商请求。
+
+当前 proxy 会为 `on_request` 插件补充 `__akm_api_path__`，并在客户端提供 `User-Agent` 时补充 `__akm_client_user_agent__`。这两个字段仅供本地策略匹配，例如 `prompt_profiles` 按接口或客户端选择提示词；它们同样不会进入上游请求。
+
+`on_request` 还可以返回 `{ "__akm_action__": "block", "status_code": 400, "error": "..." }` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；返回值中的 `security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
 
 **崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留其输入原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
 

@@ -1,0 +1,93 @@
+{
+  "name": "webhook_notifier",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "post",
+  "description": "Webhook 告警：上游失败、安全拦截或慢请求时异步发送去重通知",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 180,
+  "hooks": {
+    "on_response": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用通知",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不创建任何通知任务。"
+    },
+    {
+      "key": "webhook_url",
+      "label": "Webhook 地址",
+      "type": "text",
+      "default": "",
+      "description": "通知接收地址。仅支持 http:// 或 https://，为空时不发送。"
+    },
+    {
+      "key": "payload_format",
+      "label": "消息格式",
+      "type": "select",
+      "default": "generic",
+      "options": ["generic", "feishu", "wecom", "slack"],
+      "description": "generic={event,title,text,details}；飞书、企业微信和 Slack 使用各自的文本消息格式。"
+    },
+    {
+      "key": "notify_failures",
+      "label": "通知上游失败",
+      "type": "boolean",
+      "default": true,
+      "description": "通知选 Key、协议转换、连接、读取或上游 HTTP 失败。"
+    },
+    {
+      "key": "notify_security_events",
+      "label": "通知安全事件",
+      "type": "boolean",
+      "default": true,
+      "description": "通知 data_filter_guard 的 block、mask、warn 等安全事件。"
+    },
+    {
+      "key": "notify_audit_queue_drops",
+      "label": "通知审计队列丢弃",
+      "type": "boolean",
+      "default": true,
+      "description": "当健康监护中的 audit_queue_dropped 增长时发送通知。"
+    },
+    {
+      "key": "slow_request_threshold_ms",
+      "label": "慢请求阈值毫秒",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "成功请求耗时达到阈值时通知，0 表示关闭慢请求通知。"
+    },
+    {
+      "key": "cooldown_seconds",
+      "label": "相同告警冷却秒数",
+      "type": "number",
+      "default": 300,
+      "min": 0,
+      "max": 86400,
+      "description": "相同事件在冷却期内只发送一次，0 表示不去重。"
+    },
+    {
+      "key": "timeout_seconds",
+      "label": "Webhook 超时秒数",
+      "type": "number",
+      "default": 5,
+      "min": 1,
+      "max": 30,
+      "description": "通知失败不会影响代理主请求；超时后仅记录日志。"
+    },
+    {
+      "key": "max_pending_notifications",
+      "label": "最大待发送通知数",
+      "type": "number",
+      "default": 32,
+      "min": 1,
+      "max": 256,
+      "description": "通知端不可用时限制后台任务数量，超过上限的新通知将被丢弃并写入日志。"
+    }
+  ]
+}

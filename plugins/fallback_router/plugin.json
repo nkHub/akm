@@ -1,0 +1,52 @@
+{
+  "name": "fallback_router",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "handler",
+  "description": "模型失败降级：命中指定状态码或网络错误后改用备用模型并重新选 Key",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 10,
+  "hooks": {
+    "on_upstream_error": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用模型降级",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不会改写请求模型。"
+    },
+    {
+      "key": "rules",
+      "label": "降级规则",
+      "type": "text",
+      "default": "",
+      "description": "每行 source_model=>fallback_model，例如 gpt-5=>gpt-4.1。按声明顺序匹配。"
+    },
+    {
+      "key": "status_codes",
+      "label": "触发状态码",
+      "type": "text",
+      "default": "429,500,502,503,504",
+      "description": "逗号或换行分隔；命中其中任一上游 HTTP 状态码才允许降级。"
+    },
+    {
+      "key": "error_types",
+      "label": "触发网络错误",
+      "type": "text",
+      "default": "connect,timeout,read,chunk",
+      "description": "逗号或换行分隔；仅 status_code 为 0 时生效。"
+    },
+    {
+      "key": "max_fallbacks",
+      "label": "单请求最大降级次数",
+      "type": "number",
+      "default": 1,
+      "min": 1,
+      "max": 10,
+      "description": "用请求内历史记录阻止循环映射和无限降级。"
+    }
+  ]
+}
