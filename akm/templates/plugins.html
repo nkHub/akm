@@ -80,9 +80,9 @@ var DATA_FILTER_GUARD_TEMPLATES = {
     enabled: true,
     sensitive_fields: 'api_key,authorization,password,secret,token,access_token,refresh_token,cookie,set-cookie',
     regex_rules: [
-      'sk-[A-Za-z0-9_-]{12,}=>[API-KEY]',
-      '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}=>[EMAIL]',
-      '1[3-9]\\d{9}=>[PHONE]'
+      'sk-[A-Za-z0-9_-]{12,}',
+      '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}',
+      '1[3-9]\\d{9}'
     ].join('\n'),
     request_text_paths: 'messages[].content,input,instructions'
   },
@@ -261,11 +261,14 @@ function parseSimpleRulePairs(raw, separator) {
   var rows = [];
   String(raw || '').replace(/\r/g, '\n').split('\n').forEach(function(line){
     var item = line.trim();
-    if (!item || item.indexOf(separator) < 0) return;
-    var idx = item.indexOf(separator);
-    var left = item.slice(0, idx).trim();
-    var right = item.slice(idx + separator.length).trim();
-    if (left) rows.push({left:left, right:right});
+    if (!item) return;
+    if (item.indexOf(separator) >= 0) {
+      var idx = item.indexOf(separator);
+      var left = item.slice(0, idx).trim();
+      if (left) rows.push({left:left, right:''});
+    } else {
+      rows.push({left:item, right:''});
+    }
   });
   return rows;
 }
@@ -291,18 +294,14 @@ function parseResponseRuleRows(patternsRaw, actionsRaw) {
 
 function renderDataFilterRuleRow(type, row) {
   if (type === 'keyword') {
-    return '<div class="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="keyword">'
-      + '<input type="text" data-col="left" value="' + esc(row.left || '') + '" placeholder="原词" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
-      + '<span class="text-xs text-gray-500">=</span>'
-      + '<input type="text" data-col="right" value="' + esc(row.right || '') + '" placeholder="替换词" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+    return '<div class="grid grid-cols-[1fr_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="keyword">'
+      + '<input type="text" data-col="left" value="' + esc(row.left || '') + '" placeholder="关键词（命中后自动替换为可逆占位符）" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
       + '<button type="button" onclick="removeDataFilterRuleRow(this)" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>'
       + '</div>';
   }
   if (type === 'regex') {
-    return '<div class="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="regex">'
-      + '<input type="text" data-col="left" value="' + esc(row.left || '') + '" placeholder="正则" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
-      + '<span class="text-xs text-gray-500">=&gt;</span>'
-      + '<input type="text" data-col="right" value="' + esc(row.right || '') + '" placeholder="替换词" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
+    return '<div class="grid grid-cols-[1fr_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="regex">'
+      + '<input type="text" data-col="left" value="' + esc(row.left || '') + '" placeholder="正则（命中后自动替换为可逆占位符）" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
       + '<button type="button" onclick="removeDataFilterRuleRow(this)" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>'
       + '</div>';
   }
@@ -564,16 +563,14 @@ function syncDataFilterGuardEditors(pluginName) {
   var keywordLines = [];
   document.querySelectorAll('#dfg-keyword-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
     var left = (row.querySelector('[data-col="left"]') || {}).value || '';
-    var right = (row.querySelector('[data-col="right"]') || {}).value || '';
-    left = left.trim(); right = right.trim();
-    if (left) keywordLines.push(left + '=' + right);
+    left = left.trim();
+    if (left) keywordLines.push(left);
   });
   var regexLines = [];
   document.querySelectorAll('#dfg-regex-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
     var left = (row.querySelector('[data-col="left"]') || {}).value || '';
-    var right = (row.querySelector('[data-col="right"]') || {}).value || '';
-    left = left.trim(); right = right.trim();
-    if (left) regexLines.push(left + '=>' + right);
+    left = left.trim();
+    if (left) regexLines.push(left);
   });
   var responsePatterns = [];
   var responseActions = [];

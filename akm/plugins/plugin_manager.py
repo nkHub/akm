@@ -271,17 +271,27 @@ class PluginManager:
                 continue
             self._load_plugin(entry, "third_party")
 
-        # ── 3. 首次加载时按默认值初始化内置插件状态 ──
+        # ── 3. 首次加载时按默认值初始化插件状态 ──
         cfg = self._load_config_json()
         plugin_states = cfg.get("plugin_states", {})
+        plugin_configs = cfg.get("plugin_configs", {})
         changed = False
         for name, plugin in self.plugins.items():
             if name not in plugin_states:
-                plugin.enabled = bool(plugin.meta.default_enabled)
-                plugin_states[name] = bool(plugin.meta.default_enabled)
+                enabled = bool(plugin.meta.default_enabled)
+                # data_filter_guard 的早期配置页同时提供了“启用过滤”设置和
+                # 插件总开关。旧配置只保存前者时，插件会始终停在 Hook 之外，
+                # 用户看到“已启用”却没有任何实际效果。仅对这个历史配置做
+                # 一次兼容迁移，不改变其他插件的默认启停语义。
+                if name == "data_filter_guard":
+                    saved_config = plugin_configs.get(name, {})
+                    if isinstance(saved_config, dict) and saved_config.get("enabled") is True:
+                        enabled = True
+                plugin.enabled = enabled
+                plugin_states[name] = enabled
                 changed = True
                 logger.info(
-                    f"[PluginManager] 首次加载，按默认值设置内置插件: {name} -> {'启用' if plugin.enabled else '禁用'}"
+                    f"[PluginManager] 首次加载，设置插件状态: {name} -> {'启用' if plugin.enabled else '禁用'}"
                 )
 
         if changed:
@@ -334,7 +344,13 @@ class PluginManager:
                     if ret is not None and action is None:
                         action = ret
                 elif hook == "on_key_selected" and ret is not None:
-                    # on_key_selected: 返回的 key 替换当前 key
+                    # on_key_selected 默认返回替代 key。配额等策略插件还可
+                    # 返回 skip_key，让 proxy 排除当前 key 后继续选择下一个。
+                    # 立即停止该 Hook 管道，避免后续插件把已跳过的 key 计入
+                    # in-flight 等运行时状态。
+                    if isinstance(ret, dict) and ret.get("__akm_action__") == "skip_key":
+                        current["on_key_selected_skip"] = ret
+                        break
                     current["key"] = ret
                 elif hook == "on_request" and ret is not None:
                     # on_request: 默认返回新的 request；

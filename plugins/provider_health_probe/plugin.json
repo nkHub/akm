@@ -1,0 +1,17 @@
+{
+  "name": "provider_health_probe",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "app",
+  "description": "供应商健康探测：手动或定时复用 Key 连通性测试，提供脱敏状态快照 API",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 200,
+  "routes_prefix": "/api/provider-health",
+  "hooks": {},
+  "settings": [
+    {"key":"probe_interval_seconds","label":"定时探测间隔秒数","type":"number","default":0,"min":0,"max":86400,"description":"0 表示仅手动探测；大于 0 时按该间隔探测所有 active Key。"},
+    {"key":"max_concurrency","label":"最大并发探测数","type":"number","default":3,"min":1,"max":20,"description":"限制同时连接上游的探测任务数量，避免健康检查抢占正常流量。"},
+    {"key":"allow_protocol_fallback","label":"允许协议兼容探测","type":"boolean","default":false,"description":"开启后测试主协议失败时允许尝试供应商的其他兼容协议。"}
+  ]
+}

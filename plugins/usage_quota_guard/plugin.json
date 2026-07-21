@@ -1,0 +1,64 @@
+{
+  "name": "usage_quota_guard",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "matcher",
+  "description": "本地窗口配额：按 Key 和模型限制请求次数及实际响应 Token，用尽后自动跳过当前 Key",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 20,
+  "hooks": {
+    "on_key_selected": true,
+    "on_response": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用配额控制",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不限制任何请求。"
+    },
+    {
+      "key": "window_seconds",
+      "label": "统计窗口秒数",
+      "type": "number",
+      "default": 3600,
+      "min": 60,
+      "max": 86400,
+      "description": "请求数和 Token 用量按固定时间窗口累计；服务重启后当前窗口重新开始。"
+    },
+    {
+      "key": "max_requests_per_key",
+      "label": "单 Key 请求上限",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "窗口内单个 Key 允许的最大已选中请求数，0 表示不限制。"
+    },
+    {
+      "key": "max_requests_per_model",
+      "label": "单模型请求上限",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "窗口内同一模型允许的最大已选中请求数，0 表示不限制。"
+    },
+    {
+      "key": "max_tokens_per_key",
+      "label": "单 Key Token 上限",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "窗口内单个 Key 的已观测响应 Token 上限，0 表示不限制；当前请求完成后才会计入。"
+    },
+    {
+      "key": "max_tokens_per_model",
+      "label": "单模型 Token 上限",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "窗口内同一模型的已观测响应 Token 上限，0 表示不限制；当前请求完成后才会计入。"
+    }
+  ]
+}

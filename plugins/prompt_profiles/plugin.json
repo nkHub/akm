@@ -1,0 +1,29 @@
+{
+  "name": "prompt_profiles",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "提示词配置集：按模型、接口和客户端规则叠加注入 system prompt 或 instructions",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 120,
+  "hooks": {
+    "on_request": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用配置集",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不会注入任何提示词。"
+    },
+    {
+      "key": "profiles_json",
+      "label": "提示词配置集 JSON",
+      "type": "text",
+      "default": "[]",
+      "description": "JSON 数组。每项支持 name、enabled、models（通配符数组）、api_paths、client_patterns、position（before/after）、prompt；所有命中的配置按数组顺序叠加。"
+    }
+  ]
+}

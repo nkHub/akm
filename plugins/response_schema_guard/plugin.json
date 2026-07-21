@@ -1,0 +1,16 @@
+{
+  "name": "response_schema_guard",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "post",
+  "description": "结构化响应校验：校验调用方声明的 JSON 模式，失败时告警或返回协议兼容错误",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 60,
+  "hooks": {"on_response": true},
+  "settings": [
+    {"key":"enabled","label":"启用结构化校验","type":"boolean","default":true,"description":"仅处理调用方已经声明 JSON 输出格式的非流式成功响应。"},
+    {"key":"mode","label":"校验失败处理","type":"select","default":"block","options":["block","warn"],"description":"block 返回协议兼容的校验错误响应；warn 保留模型原始响应并记录安全事件。"},
+    {"key":"block_message","label":"校验失败提示","type":"text","default":"模型响应不符合调用方声明的 JSON 格式。","description":"block 模式返回给客户端的提示文本。"}
+  ]
+}
