@@ -155,6 +155,8 @@ def test_config_set_bool(monkeypatch):
 def test_plugin_list_enable_disable(monkeypatch):
     """插件列表和启停命令应基于 plugin manager 正常工作。"""
     _setup_tmp_env(monkeypatch)
+    # 避免命中本机已运行的旧服务；本用例覆盖「服务离线 → 只写配置」路径
+    monkeypatch.setattr("akm.cli._get_service_health", lambda _base: (False, "未运行"))
     runner = CliRunner()
 
     list_result = runner.invoke(main, ["plugin", "list"])
@@ -164,11 +166,11 @@ def test_plugin_list_enable_disable(monkeypatch):
 
     disable_result = runner.invoke(main, ["plugin", "disable", "error_handler"])
     assert disable_result.exit_code == 0
-    assert "状态已保存，重启 akm 后生效" in disable_result.output
+    assert "下次启动服务后生效" in disable_result.output
 
     enable_result = runner.invoke(main, ["plugin", "enable", "error_handler"])
     assert enable_result.exit_code == 0
-    assert "状态已保存，重启 akm 后生效" in enable_result.output
+    assert "下次启动服务后生效" in enable_result.output
 
 
 def test_plugin_config_get_and_set(monkeypatch):

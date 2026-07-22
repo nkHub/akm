@@ -1485,10 +1485,24 @@ async def api_stats(days: int = Query(default=1, ge=1, le=365)):
 def _get_stats(days: int) -> dict:
     """带缓存的统计查询"""
     from datetime import datetime, timezone, timedelta
+
+    from akm.cost_estimate import (
+        add_cost,
+        estimate_row_cost,
+        finalize_costs,
+        parse_pricing,
+    )
+
     tz = timezone(timedelta(hours=8))
     cfg = load_config()
     include_estimated_usage = bool(cfg.get("stats_include_estimated_usage", False))
-    cache_key = f"days={days}|estimated={1 if include_estimated_usage else 0}"
+    cost_enabled = bool(cfg.get("cost_stats_enabled", False))
+    cost_default_currency = "$"
+    cost_pricing_table = str(cfg.get("cost_pricing_table") or "")
+    cost_rules = parse_pricing(cost_pricing_table) if cost_enabled else []
+    # 单价表变更后缓存键变化，避免展示旧费用
+    cost_cache_sig = f"{1 if cost_enabled else 0}:{hash(cost_pricing_table)}"
+    cache_key = f"days={days}|estimated={1 if include_estimated_usage else 0}|cost={cost_cache_sig}"
     now = time.time()
     if cache_key in _stats_cache:
         ts, data = _stats_cache[cache_key]
@@ -1503,6 +1517,7 @@ def _get_stats(days: int) -> dict:
     day_offset = 1 - days
     rows = conn.execute(
         """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                  cache_creation_tokens,
                   provider, model, key_alias, timestamp, response_body, request_headers, status_code
            FROM audit_logs
            WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
@@ -1520,6 +1535,21 @@ def _get_stats(days: int) -> dict:
     by_model = {}
     by_key = {}
     daily = {}
+    global_costs: dict[str, float] = {}
+
+    def _ensure_bucket(store: dict, name: str) -> dict:
+        if name not in store:
+            store[name] = {
+                "prompt": 0,
+                "completion": 0,
+                "total": 0,
+                "cached": 0,
+                "requests": 0,
+                "cost": 0.0,
+                "currency": cost_default_currency,
+                "costs_by_currency": {},
+            }
+        return store[name]
 
     for row in rows:
         r = dict(row)
@@ -1533,6 +1563,7 @@ def _get_stats(days: int) -> dict:
         c = r.get("completion_tokens", 0) or 0
         t = r.get("total_tokens", 0) or 0
         cached = r.get("cached_tokens", 0) or 0
+        cache_creation = r.get("cache_creation_tokens", 0) or 0
         ignore_estimated_tokens = False
         try:
             headers_obj = json.loads(r.get("request_headers") or "{}")
@@ -1553,11 +1584,14 @@ def _get_stats(days: int) -> dict:
                     t = tokens.get("total_tokens", 0)
                 if "cached_tokens" in tokens:
                     cached = tokens.get("cached_tokens", 0)
+                if "cache_creation_tokens" in tokens:
+                    cache_creation = tokens.get("cache_creation_tokens", 0)
         if ignore_estimated_tokens:
             p = 0
             c = 0
             t = 0
             cached = 0
+            cache_creation = 0
 
         # 首页 requests 口径与 token 口径保持一致：
         # 1. 始终排除失败请求；
@@ -1583,41 +1617,59 @@ def _get_stats(days: int) -> dict:
         total_tokens += t
         total_cached += cached
 
-        # 按供应商
-        if provider not in by_provider:
-            by_provider[provider] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_provider[provider]["prompt"] += net_prompt
-        by_provider[provider]["completion"] += c
-        by_provider[provider]["total"] += t
-        by_provider[provider]["cached"] += cached
-        by_provider[provider]["requests"] += 1
+        row_cost = 0.0
+        row_currency = cost_default_currency
+        if cost_enabled:
+            row_cost, row_currency = estimate_row_cost(
+                model=str(model or ""),
+                prompt_tokens=int(p or 0),
+                completion_tokens=int(c or 0),
+                cached_tokens=int(cached or 0),
+                cache_creation_tokens=int(cache_creation or 0),
+                rules=cost_rules,
+            )
+            add_cost(global_costs, row_currency, row_cost)
 
-        # 按模型
-        if model not in by_model:
-            by_model[model] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_model[model]["prompt"] += net_prompt
-        by_model[model]["completion"] += c
-        by_model[model]["total"] += t
-        by_model[model]["cached"] += cached
-        by_model[model]["requests"] += 1
+        def _bump(bucket: dict):
+            bucket["prompt"] += net_prompt
+            bucket["completion"] += c
+            bucket["total"] += t
+            bucket["cached"] += cached
+            bucket["requests"] += 1
+            if cost_enabled:
+                add_cost(bucket["costs_by_currency"], row_currency, row_cost)
+                total_c, cur, cmap = finalize_costs(bucket["costs_by_currency"])
+                bucket["cost"] = total_c
+                bucket["currency"] = cur
+                bucket["costs_by_currency"] = cmap
 
-        # 按 key
-        if key_alias not in by_key:
-            by_key[key_alias] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        by_key[key_alias]["prompt"] += net_prompt
-        by_key[key_alias]["completion"] += c
-        by_key[key_alias]["total"] += t
-        by_key[key_alias]["cached"] += cached
-        by_key[key_alias]["requests"] += 1
+        _bump(_ensure_bucket(by_provider, provider))
+        _bump(_ensure_bucket(by_model, model))
+        _bump(_ensure_bucket(by_key, key_alias))
+        _bump(_ensure_bucket(daily, ts))
 
-        # 按天
-        if ts not in daily:
-            daily[ts] = {"prompt": 0, "completion": 0, "total": 0, "cached": 0, "requests": 0}
-        daily[ts]["prompt"] += net_prompt
-        daily[ts]["completion"] += c
-        daily[ts]["total"] += t
-        daily[ts]["cached"] += cached
-        daily[ts]["requests"] += 1
+    primary_cost, primary_currency, costs_map = finalize_costs(global_costs)
+    # 收尾：确保 daily 按日期排序，并去掉关闭费用时的多余字段
+    daily_sorted = {}
+    for day, item in sorted(daily.items()):
+        out = dict(item)
+        if not cost_enabled:
+            out.pop("cost", None)
+            out.pop("currency", None)
+            out.pop("costs_by_currency", None)
+        daily_sorted[day] = out
+
+    def _strip_cost_fields(store: dict) -> dict:
+        if cost_enabled:
+            return store
+        cleaned = {}
+        for name, item in store.items():
+            out = dict(item)
+            out.pop("cost", None)
+            out.pop("currency", None)
+            out.pop("costs_by_currency", None)
+            cleaned[name] = out
+        return cleaned
 
     result = {
         "total_requests": total_requests,
@@ -1625,11 +1677,17 @@ def _get_stats(days: int) -> dict:
         "total_completion_tokens": total_completion,
         "total_tokens": total_tokens,
         "total_cached_tokens": total_cached,
-        "by_provider": by_provider,
-        "by_model": by_model,
-        "by_key": by_key,
-        "daily": dict(sorted(daily.items())),
+        "cost_stats_enabled": cost_enabled,
+        "by_provider": _strip_cost_fields(by_provider),
+        "by_model": _strip_cost_fields(by_model),
+        "by_key": _strip_cost_fields(by_key),
+        "daily": daily_sorted,
     }
+    if cost_enabled:
+        result["total_cost"] = primary_cost
+        result["cost_currency"] = primary_currency
+        result["costs_by_currency"] = costs_map
+        result["cost_default_currency"] = cost_default_currency
     now_ts = time.time()
     result["cached_at"] = datetime.fromtimestamp(now_ts, tz).strftime("%Y-%m-%d %H:%M:%S")
     _stats_cache[cache_key] = (now_ts, result)
@@ -1649,8 +1707,13 @@ async def api_logs(
     days: int = Query(default=0, ge=0, le=365),
 ):
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
+    from akm.cost_estimate import estimate_row_cost, parse_pricing
+
     logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
     total = await count_logs_async(provider=provider, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
+    cfg = load_config()
+    cost_enabled = bool(cfg.get("cost_stats_enabled", False))
+    cost_rules = parse_pricing(str(cfg.get("cost_pricing_table") or "")) if cost_enabled else []
     # 为每条日志附加 token 用量信息（优先读列，兼容旧数据才解析 body）
     for log in logs:
         p = log.get("prompt_tokens", 0) or 0
@@ -1680,6 +1743,15 @@ async def api_logs(
         # 解析层已经把各类 usage 统一成可减 cached 的 prompt_tokens，
         # 因此前端只需要消费一个 net_prompt_tokens 即可。
         log["net_prompt_tokens"] = max(0, p - cached)
+        if cost_enabled:
+            log["estimated_cost"], log["cost_currency"] = estimate_row_cost(
+                model=str(log.get("model") or ""),
+                prompt_tokens=int(p or 0),
+                completion_tokens=int(c or 0),
+                cached_tokens=int(cached or 0),
+                cache_creation_tokens=int(cache_creation or 0),
+                rules=cost_rules,
+            )
 
         # 补充转换告警派生字段，前端可直接展示可读文本，避免重复解析逻辑
         conv_codes: list[str] = []
@@ -1695,7 +1767,7 @@ async def api_logs(
             conv_labels = []
         log["conv_warning_codes"] = conv_codes
         log["conv_warning_labels"] = conv_labels
-    return {"data": logs, "total": total}
+    return {"data": logs, "total": total, "cost_stats_enabled": cost_enabled}
 
 
 @app.get("/api/logs/size")
@@ -1836,9 +1908,9 @@ async def upload_plugin(file: UploadFile, request: Request):
 
 @app.post("/api/plugins/{name}/enable")
 async def enable_plugin(name: str, request: Request):
-    """启用插件"""
+    """启用插件（热生效：立即 on_load，无需重启）"""
     pm = request.app.state.plugin_manager
-    result = pm.toggle_plugin(name, True)
+    result = await pm.toggle_plugin(name, True, hot=True)
     if result.get("ok"):
         return result
     return JSONResponse(result, status_code=400)
@@ -1846,9 +1918,9 @@ async def enable_plugin(name: str, request: Request):
 
 @app.post("/api/plugins/{name}/disable")
 async def disable_plugin(name: str, request: Request):
-    """禁用插件"""
+    """禁用插件（热生效：立即 on_unload，无需重启）"""
     pm = request.app.state.plugin_manager
-    result = pm.toggle_plugin(name, False)
+    result = await pm.toggle_plugin(name, False, hot=True)
     if result.get("ok"):
         return result
     return JSONResponse(result, status_code=400)
@@ -1856,9 +1928,9 @@ async def disable_plugin(name: str, request: Request):
 
 @app.delete("/api/plugins/{name}")
 async def delete_plugin(name: str, request: Request):
-    """删除第三方插件"""
+    """删除第三方插件（热生效：先 on_unload 再删目录）"""
     pm = request.app.state.plugin_manager
-    result = pm.delete_plugin(name)
+    result = await pm.delete_plugin(name)
     if result.get("ok"):
         return result
     return JSONResponse(result, status_code=400)

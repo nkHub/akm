@@ -9,7 +9,8 @@
 <!-- 统计概览 -->
 <!-- 骨架屏 -->
 <div id="dashboard-skeleton">
-  <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+  <div id="skeleton-stats" class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+    <div id="sk-cost" class="hidden bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-12 mb-3"></div><div class="skeleton h-7 w-20"></div></div>
     <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-12 mb-3"></div><div class="skeleton h-7 w-20"></div></div>
     <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
     <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
@@ -35,6 +36,10 @@
 <!-- 真实内容（初始隐藏） -->
 <div id="dashboard-content" class="hidden">
 <div id="stats-cards" class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+  <div id="stat-cost-card" class="hidden bg-surface-light border border-border rounded-lg p-4">
+    <div class="text-xs text-gray-500 mb-1">总费用</div>
+    <div id="stat-cost" class="text-2xl font-semibold text-rose-400 token-number">-</div>
+  </div>
   <div class="bg-surface-light border border-border rounded-lg p-4">
     <div class="text-xs text-gray-500 mb-1">总请求</div>
     <div id="stat-requests" class="text-2xl font-semibold text-white token-number">-</div>
@@ -70,7 +75,7 @@
   <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">每日用量</div>
   <div class="">
     <table class="w-full text-sm table-fixed">
-      <thead><tr class="text-gray-500 text-xs"><th class="text-left px-4 py-2 font-medium w-28">日期</th><th class="text-right px-4 py-2 font-medium">请求</th><th class="text-right px-4 py-2 font-medium">总计</th><th class="text-right px-4 py-2 font-medium">输入</th><th class="text-right px-4 py-2 font-medium">输出</th><th class="text-right px-4 py-2 font-medium">缓存</th></tr></thead>
+      <thead><tr class="text-gray-500 text-xs"><th class="text-left px-4 py-2 font-medium w-28">日期</th><th class="text-right px-4 py-2 font-medium">请求</th><th id="th-daily-cost" class="hidden text-right px-4 py-2 font-medium">费用</th><th class="text-right px-4 py-2 font-medium">总计</th><th class="text-right px-4 py-2 font-medium">输入</th><th class="text-right px-4 py-2 font-medium">输出</th><th class="text-right px-4 py-2 font-medium">缓存</th></tr></thead>
       <tbody id="tbl-daily"></tbody>
     </table>
   </div>
@@ -86,6 +91,13 @@ function fmtNum(n) {
   if (n < 1000) return n.toString();
   if (n < 1000000) return (n / 1000).toFixed(2) + 'K';
   return (n / 1000000).toFixed(2) + 'M';
+}
+function fmtMoney(n) {
+  var v = Number(n || 0);
+  return Number.isFinite(v) ? v.toFixed(2) : '0.00';
+}
+function fmtCost(n, currency, costsByCurrency) {
+  return '$' + fmtMoney(n);
 }
 
 var _currentDays = 1;
@@ -131,6 +143,24 @@ async function loadDashboard() {
   try {
     var res = await fetch('/api/stats?days=' + _currentDays);
     var s = await res.json();
+    var costOn = s.cost_stats_enabled === true;
+    var cards = document.getElementById('stats-cards');
+    var skCost = document.getElementById('sk-cost');
+    var costCard = document.getElementById('stat-cost-card');
+    if (costOn) {
+      cards.className = 'grid grid-cols-2 lg:grid-cols-6 gap-4 mb-6';
+      document.getElementById('skeleton-stats').className = 'grid grid-cols-2 lg:grid-cols-6 gap-4 mb-6';
+      costCard.classList.remove('hidden');
+      if (skCost) skCost.classList.remove('hidden');
+      document.getElementById('stat-cost').textContent = fmtCost(
+        s.total_cost, s.cost_currency, s.costs_by_currency
+      );
+    } else {
+      cards.className = 'grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6';
+      document.getElementById('skeleton-stats').className = 'grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6';
+      costCard.classList.add('hidden');
+      if (skCost) skCost.classList.add('hidden');
+    }
     document.getElementById('stat-requests').textContent = s.total_requests.toLocaleString();
     document.getElementById('stat-total').textContent = fmtNum(s.total_tokens);
     document.getElementById('stat-prompt').textContent = fmtNum(s.total_prompt_tokens);
@@ -154,10 +184,15 @@ async function loadDashboard() {
 
     var dailyEntries = Object.entries(s.daily||{});
     document.getElementById('daily-section').classList.toggle('hidden', dailyEntries.length === 0);
+    var thCost = document.getElementById('th-daily-cost');
+    if (thCost) thCost.classList.toggle('hidden', !costOn);
     html = '';
     dailyEntries.forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
+      var costCell = costOn
+        ? '<td class="px-4 py-2 text-xs text-right text-rose-300">'+esc(fmtCost(v.cost, v.currency, v.costs_by_currency))+'</td>'
+        : '';
+      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td>'+costCell+'<td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
     document.getElementById('tbl-daily').innerHTML = html;
     // 数据加载完成，隐藏骨架屏

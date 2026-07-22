@@ -50,7 +50,7 @@
 | `true` | 在管理台显示菜单入口，提供 `views/` 目录，自动注册前端路由。插件列表中的 `converts` 仅在「插件已启用」时可点击进入页面，未启用时仅灰显展示。 | `plugin.json` + `index.py` + `views/index.html` |
 | `false` | 不显示菜单，可注册 API 路由、请求/响应 hook。插件列表不展示 `converts` 节点。 | `plugin.json` + `index.py` |
 
-> `has_menu` 默认为 `false`，不填即视为无需菜单入口。部分关键内置插件（如 model_matcher）标记为 `required: true`，不可禁用，保证核心链路至少有一个生效。
+> `has_menu` 默认为 `false`，不填即视为无需菜单入口。`default_enabled` 默认为 `true`，仅在首次加载且没有保存过启停状态时生效；`error_handler` 显式设为默认开启，用户已保存的关闭状态仍然优先。部分关键内置插件（如 model_matcher）标记为 `required: true`，不可禁用，保证核心链路至少有一个生效。
 
 当前实现里，有菜单插件的访问路径建议区分两层：
 
@@ -61,7 +61,7 @@
 
 对于插件配置交互，当前实现也已经统一成一条默认规则：只要插件声明了 `settings`，插件列表页就默认通过“配置”按钮打开弹窗编辑，不再在列表卡片里额外展开内联表单。这样可以避免同一个插件同时出现“弹窗配置”和“展开配置”两套入口。
 
-另外，setting schema 现在支持通过 `type="select" + options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉；`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `markdown_kb` 这类需要选择 embedding / rerank / chat 模型的插件，就不需要再把模型列表逻辑硬编码在公共模板里。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及三路混合召回权重 `semantic_weight / keyword_weight / memory_weight`。其中 `keyword_weight` 对应归一化后的 BM25 字面分，`memory_weight` 对应 chunk 记忆系统输出的记忆分；三路权重自动归一化到总和为 1。另外 `category_bonus` 用于分类加权，`memory_enabled` / `memory_boost` / `organize_interval_hours` 用于调节记忆行为。`markdown_kb` 近期还新增了三组记忆管理配置：`dedup_similarity_threshold`（默认 0.92，新 chunk 入库时按向量余弦相似度去重合并，相似度达标时不再新增而是 boost 已有 chunk 记忆值），`organize_cleanup_enabled`（默认 true，自动清理长时间未被检索的 `.learn.md` 文档），`organize_cleanup_memory_threshold`（默认 0.05，判定无价值记忆的阈值），`organize_cleanup_keep_days`（默认 7，未被检索的 learn 文档最低保活天数）。`markdown_kb` 现在使用内置标题树切片器，记录 `heading_path` 和 `categories`。当前 BM25 的中文 tokenization 也已经升级为"`jieba3` 的 `small` 模型优先、2~4 字滑窗回退"。`markdown_kb` 的测试页还会基于当前文件列表额外渲染一个去重后的 "Workspace 范围" 下拉：默认不选时继续按请求 `workspace` 过滤；如果显式选中某个 workspace，则会把该值写入 `workspace_root / working_directory`，让 query / ask 只在"公共文档 + 该 workspace 文档"范围内执行。当前 `markdown_kb` 的 `on_request` 也已接到三类文本入口。除显式检索外，`markdown_kb` 还新增了 `POST /api/markdown-kb/learn`（Hook 学习入库）和 `POST /api/markdown-kb/scan-sessions`（会话扫描归纳）两条写回接口。
+另外，setting schema 的 `type="select"` 会直接渲染 `options` 中声明的静态枚举值；也支持通过 `options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉。`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `rate_limit_guard` 的限流维度，或 `markdown_kb` 的 embedding / rerank / chat 模型选择，都不需要在插件前端重复实现选项渲染。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及三路混合召回权重 `semantic_weight / keyword_weight / memory_weight`。其中 `keyword_weight` 对应归一化后的 BM25 字面分，`memory_weight` 对应 chunk 记忆系统输出的记忆分；三路权重自动归一化到总和为 1。另外 `category_bonus` 用于分类加权，`memory_enabled` / `memory_boost` / `organize_interval_hours` 用于调节记忆行为。`markdown_kb` 近期还新增了三组记忆管理配置：`dedup_similarity_threshold`（默认 0.92，新 chunk 入库时按向量余弦相似度去重合并，相似度达标时不再新增而是 boost 已有 chunk 记忆值），`organize_cleanup_enabled`（默认 true，自动清理长时间未被检索的 `.learn.md` 文档），`organize_cleanup_memory_threshold`（默认 0.05，判定无价值记忆的阈值），`organize_cleanup_keep_days`（默认 7，未被检索的 learn 文档最低保活天数）。`markdown_kb` 现在使用内置标题树切片器，记录 `heading_path` 和 `categories`。当前 BM25 的中文 tokenization 也已经升级为"`jieba3` 的 `small` 模型优先、2~4 字滑窗回退"。`markdown_kb` 的测试页还会基于当前文件列表额外渲染一个去重后的 "Workspace 范围" 下拉：默认不选时继续按请求 `workspace` 过滤；如果显式选中某个 workspace，则会把该值写入 `workspace_root / working_directory`，让 query / ask 只在"公共文档 + 该 workspace 文档"范围内执行。当前 `markdown_kb` 的 `on_request` 也已接到三类文本入口。除显式检索外，`markdown_kb` 还新增了 `POST /api/markdown-kb/learn`（Hook 学习入库）和 `POST /api/markdown-kb/scan-sessions`（会话扫描归纳）两条写回接口。
 
 如果需要查看 `markdown_kb` 从“文档进入索引”到“query / ask / 自动注入主链路”的完整链路图，请优先参考 [docs/design/markdown-kb-plugin.md](/Users/nk/Desktop/ccs/docs/design/markdown-kb-plugin.md)；`README.md` 中也保留了一版面向使用者的高层总览图。
 
@@ -420,7 +420,9 @@ class PluginManager:
 
 ### 7.2 加载流程
 
-> **注意：插件启用/禁用/安装后需手动重启 akm 服务生效。** 不支持热重载。
+> **热启停（默认）**：管理台或 API 启用/禁用/安装/删除时，会立即调用 `on_load` / `on_unload`，hook 管道与侧边栏菜单即时生效，**无需重启**。  
+> **仍需重启的情况**：修改插件 `index.py` 源码、替换已加载文件、或需要拆除已注册的 FastAPI 路由/静态挂载（Starlette 限制，禁用后路由可能仍在，但 hook 与宿主页以 `enabled` 为准不再调度）。  
+> CLI `akm plugin enable/disable`：若本地服务在线则转发 API 热生效；服务未运行时只写 `config.json`，下次启动生效。
 
 ```
 PluginManager.load_all(app, db)
@@ -563,8 +565,8 @@ async def list_plugins(request: Request):
 @app.post("/api/plugins/{name}/enable")
 @app.post("/api/plugins/{name}/disable")
 async def toggle_plugin(name: str, request: Request):
-    """启用/禁用插件（required 插件不可禁用），需重启生效"""
-    return request.app.state.plugin_manager.toggle(name, enable=...)
+    """启用/禁用插件（required 插件不可禁用），热生效 on_load/on_unload"""
+    return await request.app.state.plugin_manager.toggle_plugin(name, enable=..., hot=True)
 
 @app.get("/api/plugin-menu")
 async def plugin_menu(request: Request):

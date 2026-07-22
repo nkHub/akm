@@ -2,13 +2,16 @@
 
 能力范围：
 1. 请求侧：递归脱敏敏感字段，对文本执行关键词/正则/代码敏感替换。
-   所有替换使用 ``<AKM-SEC:type@id/>`` 可逆占位符，建立反向映射表。
+   所有替换使用 ``<AKM-SEC:tag@seq:hash/>`` 可逆占位符，建立反向映射表。
 2. 响应侧：先反向还原占位符为原始值，再扫描高风险命令/脚本片段做拦截。
-3. 流式响应：前缀锚点检测 ``<AKM-SEC:``，按需缓冲后在输出前还原原始值。
+   非流式扫描覆盖 Chat / Responses / Anthropic Messages 可见文本。
+3. 流式响应：前缀锚点检测 ``<AKM-SEC:``，按需缓冲后在输出前还原原始值；
+   流式安全扫描默认有界完整缓冲，超限后增量扫描（mask 退化为 block）。
 
 说明：
 - 该插件默认关闭；用户可按需在插件页启用。
-- 请求 block 模式已改为“mask + 告警”，不再阻断请求。
+- 请求侧 code_secret 的 block 模式等同 mask + 告警，不阻断请求。
+- ``messages[].content`` 路径同时覆盖字符串 content 与 content blocks 子路径。
 """
 
 from akm.plugins import PluginBase
@@ -205,10 +208,14 @@ class Plugin(PluginBase):
         self._reverse_seq = 0
 
     def _make_placeholder(self, tag: str, original: str) -> str:
-        """生成 ``<AKM-SEC:tag@hash/>`` 占位符并建立反向映射。"""
+        """生成 ``<AKM-SEC:tag@seq:hash/>`` 占位符并建立反向映射。
+
+        序号保证同 tag / 同内容指纹下也不会互相覆盖；短 hash 仅便于日志辨认。
+        """
         self._reverse_seq += 1
+        safe_tag = re.sub(r"[^A-Za-z0-9_.-]", "_", str(tag or "x"))[:48] or "x"
         fprint = hashlib.md5(original.encode("utf-8")).hexdigest()[:6]
-        placeholder = f"<AKM-SEC:{tag}@{fprint}/>"
+        placeholder = f"<AKM-SEC:{safe_tag}@{self._reverse_seq}:{fprint}/>"
         self._reverse_map[placeholder] = original
         return placeholder
 
@@ -245,6 +252,13 @@ class Plugin(PluginBase):
         """创建流式还原缓冲状态。"""
         return {"pending": ""}
 
+    def _max_placeholder_pending(self, reverse_map: dict) -> int:
+        """未闭合占位符允许缓冲的最大长度；超出则视为假阳性前缀。"""
+        # 真实占位符形如 <AKM-SEC:tag@seq:hash/>，通常远小于 128；
+        # 这里按 map 内最长 key 与下限取 max，避免跨 chunk 截断时过早冲刷。
+        longest = max((len(k) for k in reverse_map), default=0)
+        return max(256, longest + 8)
+
     def reverse_stream_chunk(self, text: str, state: dict, reverse_map: dict | None = None) -> str:
         """流式 chunk 还原：基于 ``<AKM-SEC:`` 前缀做缓冲与反向替换。"""
         rmap = reverse_map if reverse_map is not None else self._reverse_map
@@ -253,23 +267,35 @@ class Plugin(PluginBase):
 
         state.setdefault("pending", "")
         full = state["pending"] + text
+        max_pending = self._max_placeholder_pending(rmap)
 
         last_open = full.rfind(_REVERSE_PREFIX)
         if last_open >= 0:
             close_idx = full.find(_REVERSE_SUFFIX, last_open)
             if close_idx < 0:
+                incomplete = full[last_open:]
                 if last_open > 0:
                     output = self._reverse_replace(full[:last_open], reverse_map=rmap)[0]
-                    state["pending"] = full[last_open:]
+                    # 未闭合前缀过长：不可能是本请求生成的占位符，直接放行
+                    if len(incomplete) > max_pending:
+                        state["pending"] = ""
+                        return output + incomplete
+                    state["pending"] = incomplete
                     return output
-                if len(full) > 128:
-                    output, _ = self._reverse_replace(full, reverse_map=rmap)
+                if len(full) > max_pending:
+                    # 假阳性前缀，整段按普通文本输出（无法匹配完整 key）
                     state["pending"] = ""
-                    return output
+                    return full
                 state["pending"] = full
                 return ""
-            output, _ = self._reverse_replace(full, reverse_map=rmap)
+            # 闭合点之后可能还有下一段未闭合前缀，递归处理剩余
+            closed_end = close_idx + len(_REVERSE_SUFFIX)
+            head = full[:closed_end]
+            tail = full[closed_end:]
+            output, _ = self._reverse_replace(head, reverse_map=rmap)
             state["pending"] = ""
+            if tail:
+                return output + self.reverse_stream_chunk(tail, state, reverse_map=rmap)
             return output
 
         if state["pending"]:
@@ -372,7 +398,7 @@ class Plugin(PluginBase):
             return fallback
 
     def _parse_keyword_sources(self, raw: str) -> list[tuple[str, str]]:
-        """解析关键词匹配源，支持 ``关键词#标签`` 格式（标签可选，默认 'keyword'）。"""
+        """解析关键词匹配源，支持 ``关键词#标签`` / ``关键词#@标签``（标签可选，默认 'keyword'）。"""
         sources = []
         for item in self._split_items(raw):
             if not item:
@@ -384,6 +410,8 @@ class Plugin(PluginBase):
                 continue
             if "#@" in item:
                 source, tag = item.split("#@", 1)
+            elif "#" in item:
+                source, tag = item.rsplit("#", 1)
             else:
                 source, tag = item, "keyword"
             source = source.strip()
@@ -420,13 +448,19 @@ class Plugin(PluginBase):
         return patterns
 
     def _compile_patterns(self, patterns: list[str]) -> list[re.Pattern]:
-        """编译响应拦截正则列表。"""
+        """编译响应拦截正则列表。
+
+        兼容历史默认值每行末尾多余逗号（JSON 多行字符串手误），避免规则整体失效。
+        """
         compiled = []
         for item in patterns:
+            pattern_text = str(item or "").strip().rstrip(",").strip()
+            if not pattern_text:
+                continue
             try:
-                compiled.append(re.compile(item))
+                compiled.append(re.compile(pattern_text))
             except re.error as exc:
-                self.logger.warning(f"[data_filter_guard] 忽略非法拦截正则: {item} ({exc})")
+                self.logger.warning(f"[data_filter_guard] 忽略非法拦截正则: {pattern_text} ({exc})")
         return compiled
 
     def _build_code_secret_rules(self, rule_set: str, enabled_groups: set[str]) -> list[dict]:
@@ -483,16 +517,34 @@ class Plugin(PluginBase):
         return key
 
     def _path_matches(self, path: str, candidates: set[str]) -> bool:
-        """判断路径是否命中指定候选集合。"""
+        """判断路径是否命中指定候选集合。
+
+        ``messages[].content`` 需同时覆盖：
+        - 字符串 content：``messages[0].content``
+        - 多模态 / Anthropic content blocks：``messages[0].content[0].text``
+        因此候选既匹配自身，也匹配以其为前缀的 ``.`` / ``[`` 子路径。
+        """
         if not candidates:
             return True
-        normalized = path.replace('.[', '[')
+        normalized = path.replace(".[", "[")
         generalized = re.sub(r"\[\d+\]", "[]", normalized)
-        for allowed in candidates:
-            candidate = allowed.replace('[]', '[0]')
-            if normalized == allowed or normalized == candidate or normalized.startswith(candidate + '.'):
+
+        def _is_prefix(parent: str, child: str) -> bool:
+            if not parent:
+                return False
+            if child == parent:
                 return True
-            if generalized == allowed or generalized.startswith(allowed + '.'):
+            # 避免 messages[].content 误匹配 messages[].content_type
+            return child.startswith(parent + ".") or child.startswith(parent + "[")
+
+        for allowed in candidates:
+            allowed_n = str(allowed or "").replace(".[", "[").strip()
+            if not allowed_n:
+                continue
+            candidate = allowed_n.replace("[]", "[0]")
+            if _is_prefix(allowed_n, normalized) or _is_prefix(allowed_n, generalized):
+                return True
+            if _is_prefix(candidate, normalized) or _is_prefix(candidate, generalized):
                 return True
         return False
 
@@ -568,16 +620,32 @@ class Plugin(PluginBase):
         return "".join(parts)
 
     def _apply_text_rules(self, text: str) -> str:
-        """依次应用关键词和正则替换规则，统一用可逆占位符。"""
+        """依次应用关键词和正则替换规则，统一用可逆占位符。
+
+        正则替换会跳过已生成的 ``<AKM-SEC:.../>`` 片段，避免二次匹配嵌套破坏映射。
+        """
         new_text = text
         for source, tag in self._keyword_rules:
-            if source in new_text:
+            if source and source in new_text:
+                # 已是占位符本体时不再替换
+                if source.startswith(_REVERSE_PREFIX) and source.endswith(_REVERSE_SUFFIX):
+                    continue
                 placeholder = self._make_placeholder(tag, source)
                 new_text = new_text.replace(source, placeholder)
         for pattern, tag in self._regex_rules:
-            def _repl(m, pat=pattern, t=tag):
-                placeholder = self._make_placeholder(t, m.group(0))
-                return placeholder
+            def _repl(m, t=tag):
+                matched = m.group(0)
+                # 防止规则匹配到占位符前缀/正文导致嵌套
+                if _REVERSE_PREFIX in matched or matched.startswith("AKM-SEC"):
+                    return matched
+                # 若命中落在已有占位符内部，保持原样
+                start = m.start()
+                left = new_text.rfind(_REVERSE_PREFIX, 0, start)
+                if left >= 0:
+                    right = new_text.find(_REVERSE_SUFFIX, left)
+                    if right >= 0 and left <= start <= right + len(_REVERSE_SUFFIX):
+                        return matched
+                return self._make_placeholder(t, matched)
             new_text = pattern.sub(_repl, new_text)
         return new_text
 
@@ -664,41 +732,79 @@ class Plugin(PluginBase):
         new_request, changed = self._mask_and_filter(request)
         if changed:
             self.logger.info("[data_filter_guard] 请求体已执行脱敏/过滤（可逆占位符）")
-            # 把反向映射表附到请求体上，确保并发请求各自独立还原
-            new_request["__akm_reverse_map__"] = dict(self._reverse_map)
+            # 仅在有可逆映射时附加；纯敏感字段 redact 不需要响应侧还原
+            if self._reverse_map:
+                new_request["__akm_reverse_map__"] = dict(self._reverse_map)
             return new_request
         return None
 
+    def _collect_content_texts(self, content) -> list[str]:
+        """从 OpenAI/Anthropic/Responses 风格 content 字段收集可见文本。"""
+        texts: list[str] = []
+        if isinstance(content, str):
+            if content:
+                texts.append(content)
+            return texts
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, str):
+                    if part:
+                        texts.append(part)
+                    continue
+                if not isinstance(part, dict):
+                    continue
+                for key in ("text", "content", "output_text", "refusal"):
+                    val = part.get(key)
+                    if isinstance(val, str) and val:
+                        texts.append(val)
+                    elif isinstance(val, list):
+                        texts.extend(self._collect_content_texts(val))
+        return texts
+
     def _extract_response_text(self, response_body: str) -> str:
-        """尽量从非流式 JSON 响应中提取可见文本，用于安全扫描。"""
+        """尽量从非流式 JSON 响应中提取可见文本，用于安全扫描。
+
+        覆盖：
+        - OpenAI Chat：choices[].message/delta.content
+        - OpenAI Responses：output[].content[].text
+        - Anthropic Messages：顶层 content[].text
+        """
         try:
             data = json.loads(response_body)
         except Exception:
             return response_body
 
-        texts = []
+        texts: list[str] = []
         if isinstance(data, dict):
+            # Anthropic Messages 非流式
+            if "content" in data:
+                texts.extend(self._collect_content_texts(data.get("content")))
+
             choices = data.get("choices")
             if isinstance(choices, list):
                 for choice in choices:
                     if not isinstance(choice, dict):
                         continue
                     message = choice.get("message")
-                    if isinstance(message, dict) and isinstance(message.get("content"), str):
-                        texts.append(message.get("content", ""))
+                    if isinstance(message, dict):
+                        texts.extend(self._collect_content_texts(message.get("content")))
+                        if isinstance(message.get("refusal"), str):
+                            texts.append(message.get("refusal", ""))
                     delta = choice.get("delta")
-                    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-                        texts.append(delta.get("content", ""))
+                    if isinstance(delta, dict):
+                        texts.extend(self._collect_content_texts(delta.get("content")))
+                    # 少数实现把文本放在 choice.text
+                    if isinstance(choice.get("text"), str):
+                        texts.append(choice.get("text", ""))
+
             output = data.get("output")
             if isinstance(output, list):
                 for item in output:
                     if not isinstance(item, dict):
                         continue
-                    content = item.get("content")
-                    if isinstance(content, list):
-                        for part in content:
-                            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                                texts.append(part.get("text", ""))
+                    texts.extend(self._collect_content_texts(item.get("content")))
+                    if isinstance(item.get("text"), str):
+                        texts.append(item.get("text", ""))
         return "\n".join(x for x in texts if x)
 
     def _make_safe_response_body(self, api_path: str) -> str:
@@ -847,8 +953,9 @@ class Plugin(PluginBase):
             api_path = response.get("api_path", "chat/completions")
             if action == "mask":
                 current_body = guarded.get("response_body", "")
-                masked_body, changed = self._mask_response_body(current_body)
-                if changed:
+                # 只替换当前命中规则，避免把其它应为 warn 的规则一并 mask
+                masked_body = pattern.sub(self._response_mask_replacement, current_body)
+                if masked_body != current_body:
                     guarded["response_body"] = masked_body
                     guarded["security_masked"] = True
                     guarded["security_action"] = "mask"
@@ -930,7 +1037,9 @@ class Plugin(PluginBase):
             if action == "warn":
                 return next_state, False, pattern.pattern, "warn"
             if action == "mask":
-                return next_state, False, pattern.pattern, "mask_requires_buffer"
+                # 增量扫描路径无法对已发出/当前 chunk 做局部替换（server 只认 blocked）。
+                # 为避免危险内容透传，溢出后的 mask 退化为 block。
+                return next_state, True, pattern.pattern, "blocked"
             return next_state, True, pattern.pattern, "blocked"
 
         return {
