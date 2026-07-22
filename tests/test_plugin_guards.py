@@ -74,6 +74,83 @@ async def test_data_filter_legacy_enabled_config_migrates_to_runtime_state(monke
 
 
 @pytest.mark.asyncio
+async def test_error_handler_is_enabled_by_default_without_overriding_saved_state(monkeypatch, tmp_path):
+    """错误处理插件首次加载默认开启，已有显式禁用状态必须继续生效。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config_path = tmp_path / ".akm" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", "utf-8")
+
+    manager = PluginManager()
+    await manager.load_all(FastAPI())
+
+    assert manager.plugins["error_handler"].enabled is True
+    saved = json.loads(config_path.read_text("utf-8"))
+    assert saved["plugin_states"]["error_handler"] is True
+
+    config_path.write_text(json.dumps({
+        "plugin_states": {"error_handler": False},
+    }), "utf-8")
+    manager = PluginManager()
+    await manager.load_all(FastAPI())
+
+    assert manager.plugins["error_handler"].enabled is False
+    saved = json.loads(config_path.read_text("utf-8"))
+    assert saved["plugin_states"]["error_handler"] is False
+
+
+@pytest.mark.asyncio
+async def test_plugin_hot_toggle_calls_lifecycle(monkeypatch, tmp_path):
+    """启用/禁用应热调用 on_load/on_unload，无需重启。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config_path = tmp_path / ".akm" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", "utf-8")
+
+    manager = PluginManager()
+    await manager.load_all(FastAPI())
+    name = "webhook_notifier"
+    plugin = manager.plugins[name]
+    assert plugin.enabled is False
+
+    loads = {"n": 0}
+    unloads = {"n": 0}
+    orig_load = plugin.on_load
+    orig_unload = plugin.on_unload
+
+    async def _load():
+        loads["n"] += 1
+        return await orig_load()
+
+    async def _unload():
+        unloads["n"] += 1
+        return await orig_unload()
+
+    plugin.on_load = _load  # type: ignore[method-assign]
+    plugin.on_unload = _unload  # type: ignore[method-assign]
+
+    en = await manager.toggle_plugin(name, True, hot=True)
+    assert en["ok"] is True and en["hot"] is True
+    assert plugin.enabled is True
+    assert loads["n"] == 1
+    saved = json.loads(config_path.read_text("utf-8"))
+    assert saved["plugin_states"][name] is True
+
+    dis = await manager.toggle_plugin(name, False, hot=True)
+    assert dis["ok"] is True and dis["hot"] is True
+    assert plugin.enabled is False
+    assert unloads["n"] == 1
+    saved = json.loads(config_path.read_text("utf-8"))
+    assert saved["plugin_states"][name] is False
+
+    # cold 路径只写配置
+    cold = await manager.toggle_plugin(name, True, hot=False)
+    assert cold["ok"] is True and cold["hot"] is False
+    assert plugin.enabled is True
+    assert loads["n"] == 1  # 未再 on_load
+
+
+@pytest.mark.asyncio
 async def test_data_filter_private_reverse_map_is_not_forwarded_upstream(monkeypatch):
     """反向映射仅供本地响应恢复使用，绝不能作为供应商请求参数发送。"""
     key = {
@@ -224,6 +301,162 @@ async def test_data_filter_stream_guard_blocks_complete_payload_before_output():
     assert changed is True
     assert action == "blocked"
     assert "[DONE]" in protected
+
+
+@pytest.mark.asyncio
+async def test_data_filter_default_response_patterns_match_without_trailing_commas():
+    """默认响应拦截正则不应因行尾逗号而失效。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    # 模拟历史配置：每行带尾逗号
+    plugin.config = {
+        "enabled": True,
+        "enable_response_guard": True,
+        "response_guard_mode": "block",
+        "response_block_patterns": (
+            "(?i)rm\\s+-rf\\s+/,"
+            "\n(?i)curl\\s+[^\\n|]+\\|\\s*(bash|sh),"
+            "\n(?i)os\\.system\\s*\\("
+        ),
+    }
+    await plugin.on_load()
+    plugin._reload_config()
+
+    body = json.dumps({"choices": [{"message": {"content": "please run rm -rf / now"}}]})
+    resp = await plugin.on_response({}, {"stream": False, "api_path": "chat/completions", "response_body": body})
+    assert resp["security_action"] == "block"
+    assert "数据安全插件拦截" in resp["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_data_filter_masks_anthropic_content_blocks_and_system():
+    """messages[].content 应覆盖 content blocks，system 路径也应可扫描。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {
+        "enabled": True,
+        "keyword_rules": "SECRET_TOKEN",
+        "request_text_paths": "messages[].content,input,instructions,system",
+        "enable_code_secret_guard": True,
+        "code_secret_guard_mode": "mask",
+        "code_secret_paths": "messages[].content,input,instructions,system",
+        "code_secret_rule_groups": "llm_keys",
+    }
+    await plugin.on_load()
+
+    secret_key = "sk-proj-" + ("A" * 48)
+    request = {
+        "system": "never leak SECRET_TOKEN",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"key={secret_key} and SECRET_TOKEN"},
+                ],
+            }
+        ],
+    }
+    out = await plugin.on_request(request)
+    assert out is not None
+    assert "SECRET_TOKEN" not in out["system"]
+    text = out["messages"][0]["content"][0]["text"]
+    assert secret_key not in text
+    assert "SECRET_TOKEN" not in text
+    assert "<AKM-SEC:" in text
+    assert out["__akm_reverse_map__"]
+
+
+@pytest.mark.asyncio
+async def test_data_filter_blocks_anthropic_nonstream_response():
+    """Anthropic Messages 非流式响应的 content[].text 必须参与安全扫描。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {
+        "enabled": True,
+        "enable_response_guard": True,
+        "response_guard_mode": "block",
+        "response_block_patterns": "(?i)rm\\s+-rf\\s+/",
+    }
+    await plugin.on_load()
+
+    body = json.dumps(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "run rm -rf / immediately"}],
+            "model": "claude",
+        }
+    )
+    resp = await plugin.on_response({}, {"stream": False, "api_path": "messages", "response_body": body})
+    assert resp["security_action"] == "block"
+    assert "msg_akm_security" in resp["response_body"] or "数据安全插件拦截" in resp["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_data_filter_placeholder_collision_and_stream_restore():
+    """占位符序号应避免碰撞覆盖；跨 chunk 未闭合占位符应能完整还原。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True, "keyword_rules": "ALPHA,BETA", "request_text_paths": ""}
+    await plugin.on_load()
+    plugin._reload_config()
+    plugin._reset_reverse_map()
+
+    p1 = plugin._make_placeholder("keyword", "ALPHA")
+    p2 = plugin._make_placeholder("keyword", "BETA")
+    assert p1 != p2
+    assert plugin._reverse_map[p1] == "ALPHA"
+    assert plugin._reverse_map[p2] == "BETA"
+
+    state = plugin.reverse_stream_state()
+    rmap = {p1: "ALPHA"}
+    # 在闭合后缀前切开
+    head, tail = p1[: len(p1) // 2], p1[len(p1) // 2 :]
+    out1 = plugin.reverse_stream_chunk(f"before {head}", state, reverse_map=rmap)
+    out2 = plugin.reverse_stream_chunk(f"{tail} after", state, reverse_map=rmap)
+    assert "ALPHA" in (out1 + out2)
+    assert "<AKM-SEC:" not in (out1 + out2)
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_mask_overflow_degrades_to_block():
+    """流式增量路径上 mask 应退化为 block，避免危险内容透传。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {
+        "enabled": True,
+        "enable_response_guard": True,
+        "enable_stream_response_guard": True,
+        "response_guard_mode": "mask",
+        "response_block_patterns": "(?i)rm\\s+-rf\\s+/",
+    }
+    await plugin.on_load()
+
+    state = plugin.create_stream_guard_state()
+    state, blocked, reason, action = plugin.inspect_stream_chunk(
+        "chat/completions", "please rm -rf / now", state
+    )
+    assert blocked is True
+    assert action == "blocked"
+    assert "rm" in reason.lower() or reason
+
+
+@pytest.mark.asyncio
+async def test_data_filter_redact_only_does_not_attach_empty_reverse_map():
+    """仅敏感字段 redact 且无文本替换时，不应附加空 reverse map。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {
+        "enabled": True,
+        "sensitive_fields": "password",
+        "keyword_rules": "",
+        "request_text_paths": "messages[].content",
+    }
+    await plugin.on_load()
+    out = await plugin.on_request({"password": "secret", "messages": [{"content": "hi"}]})
+    assert out["password"] == "[REDACTED]"
+    assert "__akm_reverse_map__" not in out
 
 
 @pytest.mark.asyncio

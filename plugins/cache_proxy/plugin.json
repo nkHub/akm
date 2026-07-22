@@ -1,0 +1,71 @@
+{
+  "name": "cache_proxy",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "本地响应缓存：对非流式、无工具调用的相同请求在 TTL 内短路返回，进程内内存缓存",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 210,
+  "hooks": {
+    "on_request": true,
+    "on_response": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用缓存",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不读写缓存。"
+    },
+    {
+      "key": "ttl_seconds",
+      "label": "缓存 TTL 秒",
+      "type": "number",
+      "default": 300,
+      "min": 1,
+      "max": 86400,
+      "description": "缓存条目存活时间；过期后下次请求重新走上游。"
+    },
+    {
+      "key": "max_entries",
+      "label": "最大缓存条数",
+      "type": "number",
+      "default": 256,
+      "min": 1,
+      "max": 10000,
+      "description": "超出时按最旧条目淘汰；服务重启后缓存清空。"
+    },
+    {
+      "key": "max_body_bytes",
+      "label": "单条最大响应字节",
+      "type": "number",
+      "default": 262144,
+      "min": 1024,
+      "max": 4194304,
+      "description": "超过该大小的响应不写入缓存，避免内存膨胀。"
+    },
+    {
+      "key": "skip_stream",
+      "label": "跳过流式请求",
+      "type": "boolean",
+      "default": true,
+      "description": "开启后 stream=true 的请求不参与缓存（推荐保持开启）。"
+    },
+    {
+      "key": "skip_tools",
+      "label": "跳过含工具请求",
+      "type": "boolean",
+      "default": true,
+      "description": "请求包含 tools / tool_choice / functions 时不缓存，避免工具会话错乱。"
+    },
+    {
+      "key": "include_models",
+      "label": "仅缓存模型（可选）",
+      "type": "text",
+      "default": "",
+      "description": "逗号/换行分隔模型名；留空表示不限制。支持尾部 * 通配。"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "name": "rate_limit_guard",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "本地限流：按全局/模型/用户限制 RPM、RPH 与并发；超限在转发前返回 429",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 15,
+  "hooks": {
+    "on_request": true,
+    "on_response": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用限流",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不限制任何请求。"
+    },
+    {
+      "key": "scope",
+      "label": "限流维度",
+      "type": "select",
+      "default": "global",
+      "options": ["global", "model", "user"],
+      "description": "global=进程全局；model=按请求 model；user=按请求体 user 字段（空则归为 anonymous）。"
+    },
+    {
+      "key": "max_requests_per_minute",
+      "label": "每分钟请求上限",
+      "type": "number",
+      "default": 60,
+      "min": 0,
+      "description": "固定 60 秒窗口内允许的最大请求数，0 表示不限制。"
+    },
+    {
+      "key": "max_requests_per_hour",
+      "label": "每小时请求上限",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "固定 3600 秒窗口内允许的最大请求数，0 表示不限制。"
+    },
+    {
+      "key": "max_concurrent",
+      "label": "最大并发",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "description": "同一限流键上允许的在途请求数，0 表示不限制；在响应结束后释放。"
+    },
+    {
+      "key": "block_message",
+      "label": "限流提示",
+      "type": "text",
+      "default": "请求过于频繁，已被本地限流插件拦截。",
+      "description": "返回给客户端的错误文案。"
+    }
+  ]
+}

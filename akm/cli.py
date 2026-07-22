@@ -559,9 +559,35 @@ def plugin_list():
 
 
 def _toggle_plugin(name: str, enable: bool):
-    """切换插件状态并输出统一提示，供 enable/disable 复用。"""
+    """切换插件状态并输出统一提示，供 enable/disable 复用。
+
+    优先打运行中的本地服务 API（热启停）；服务未运行时只写配置，下次启动生效。
+    """
+    base_url = _local_service_base_url()
+    service_ok, _ = _get_service_health(base_url)
+    if service_ok:
+        action = "enable" if enable else "disable"
+        url = f"{base_url.rstrip('/')}/api/plugins/{name}/{action}"
+        try:
+            with httpx.Client(timeout=8.0) as client:
+                resp = client.post(url)
+            try:
+                result = resp.json()
+            except json.JSONDecodeError as exc:
+                raise click.ClickException(
+                    _format_non_json_service_error(resp, f"插件{action}")
+                ) from exc
+            if not result.get("ok"):
+                raise click.ClickException(result.get("error") or "插件状态切换失败")
+            click.echo(result.get("message") or "状态已更新（服务热生效）")
+            return
+        except click.ClickException:
+            raise
+        except Exception as exc:
+            raise click.ClickException(f"调用本地服务失败: {exc}") from exc
+
     manager = _load_plugin_manager()
-    result = manager.toggle_plugin(name, enable)
+    result = asyncio.run(manager.toggle_plugin(name, enable, hot=False))
     if not result.get("ok"):
         raise click.ClickException(result.get("error") or "插件状态切换失败")
     click.echo(result.get("message") or "状态已保存")

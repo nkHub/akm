@@ -1859,6 +1859,75 @@ async def test_api_logs_adds_conv_warning_labels(monkeypatch):
     assert "include 未完整映射" in row["conv_warning_labels"]
 
 
+@pytest.mark.asyncio
+async def test_api_logs_adds_estimated_cost_when_enabled(monkeypatch):
+    """开启费用估算后，审计接口为每条日志附加固定美元费用。"""
+    async def fake_list_logs_async(**kwargs):
+        return [{
+            "model": "gpt-4",
+            "request_headers": "{}",
+            "response_body": "",
+            "prompt_tokens": 1_000_000,
+            "completion_tokens": 1_000_000,
+            "total_tokens": 2_000_000,
+            "cached_tokens": 400_000,
+            "cache_creation_tokens": 0,
+        }]
+
+    async def fake_count_logs_async(**kwargs):
+        return 1
+
+    monkeypatch.setattr("akm.server.list_logs_async", fake_list_logs_async)
+    monkeypatch.setattr("akm.server.count_logs_async", fake_count_logs_async)
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {"cost_stats_enabled": True, "cost_pricing_table": "gpt-4=1/0.1/2"},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cost_stats_enabled"] is True
+    assert data["data"][0]["estimated_cost"] == 2.64
+    assert data["data"][0]["cost_currency"] == "$"
+
+
+@pytest.mark.asyncio
+async def test_api_logs_omits_estimated_cost_when_disabled(monkeypatch):
+    """费用估算关闭时，审计接口不计算也不返回每条费用。"""
+    async def fake_list_logs_async(**kwargs):
+        return [{
+            "model": "gpt-4",
+            "request_headers": "{}",
+            "response_body": "",
+            "prompt_tokens": 1_000_000,
+            "completion_tokens": 1_000_000,
+            "total_tokens": 2_000_000,
+            "cached_tokens": 0,
+            "cache_creation_tokens": 0,
+        }]
+
+    async def fake_count_logs_async(**kwargs):
+        return 1
+
+    monkeypatch.setattr("akm.server.list_logs_async", fake_list_logs_async)
+    monkeypatch.setattr("akm.server.count_logs_async", fake_count_logs_async)
+    monkeypatch.setattr("akm.server.load_config", lambda: {"cost_stats_enabled": False})
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cost_stats_enabled"] is False
+    assert "estimated_cost" not in data["data"][0]
+    assert "cost_currency" not in data["data"][0]
+
+
 def test_extract_tokens_from_messages_sse_fallback():
     from akm.server import _extract_tokens
     sse = (
@@ -2063,6 +2132,55 @@ async def test_api_add_agent_persists_protocol_capability_fields(tmp_path, monke
     assert agents["vendorx"]["map_metadata_user_id_to_user"] is False
     assert agents["vendorx"]["responses_force_thinking_enabled"] is True
     assert agents["vendorx"]["responses_default_reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_api_stats_includes_cost_when_enabled(monkeypatch):
+    """开启费用统计后 /api/stats 返回总费用与每日费用。"""
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "cost_stats_enabled": True,
+            "cost_pricing_table": "gpt-4=1/0.1/2\n*=0.5/0.05/1",
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+    # 清缓存，避免被同进程其他 stats 测试污染
+    from akm import server as server_mod
+
+    server_mod._stats_cache.clear()
+    write_log({
+        "provider": "openai",
+        "key_alias": "k1",
+        "model": "gpt-4",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 10,
+        "error": "",
+        "request_headers": "{}",
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "total_tokens": 2_000_000,
+        "cached_tokens": 400_000,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cost_stats_enabled"] is True
+    assert data["total_cost"] == 2.64
+    assert data["cost_currency"] == "$"
+    assert data["costs_by_currency"]["$"] == 2.64
+    day_vals = list((data.get("daily") or {}).values())
+    assert day_vals
+    assert day_vals[0]["cost"] == 2.64
 
 
 @pytest.mark.asyncio

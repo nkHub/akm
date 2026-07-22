@@ -4,19 +4,19 @@
 
 ### 当前问题
 
-版本号 `0.1.0` 硬编码在 5 个位置，改版本需要同步修改，容易遗漏：
+版本号应以 `akm/__init__.py` 为唯一运行时来源；`pyproject.toml` 的包元数据也必须同步，避免 pip 安装包与应用显示版本不一致：
 
 | 文件 | 位置 | 作用 |
 |------|------|------|
-| `pyproject.toml` | `version = "0.1.0"` | pip 包版本 |
-| `setup.py` | `CFBundleVersion` / `CFBundleShortVersionString` | macOS .app 版本 |
-| `akm/cli.py` | `@click.version_option(version="0.1.0")` | CLI 版本号显示 |
-| `akm/server.py` | `FastAPI(version="0.1.0")` | API 服务版本 |
-| `akm/templates/about.html` | `<span>0.1.0</span>` | 关于页面展示 |
+| `akm/__init__.py` | `__version__` | 唯一运行时版本源 |
+| `pyproject.toml` | `version` | pip 包版本，发布时与运行时版本保持一致 |
+| `setup.py` | 读取 `akm/__init__.py` | macOS `.app` 版本 |
+| `akm/cli.py` | 导入 `__version__` | CLI 版本号显示 |
+| `akm/server.py` | 导入 `__version__` | API 服务版本 |
 
 ### 解决方案
 
-在 `akm/__init__.py` 中定义唯一版本源，各处引用：
+在 `akm/__init__.py` 中定义唯一运行时版本源，各处引用；发布时同步更新 `pyproject.toml`：
 
 ```python
 # akm/__init__.py
@@ -93,9 +93,9 @@ dist/AI Key Manager.app/
 # 创建 zip 分发包
 cd dist && zip -r "AI Key Manager-$(python -c 'from akm import __version__; print(__version__)').zip" "AI Key Manager.app"
 
-# 或创建 DMG（需要 create-dmg 工具）
+# 或使用发布脚本创建 arm64 DMG（需要 create-dmg 工具；脚本会重建 .app）
 brew install create-dmg
-create-dmg --volname "AI Key Manager" --volicon "../logo.icns" "AI Key Manager.dmg" "AI Key Manager.app/"
+./scripts/build_m1_dmg.sh
 ```
 
 ---

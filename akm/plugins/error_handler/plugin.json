@@ -5,6 +5,7 @@
   "category": "handler",
   "description": "上游错误处理：429 切换 key、402/401/403 禁用 key、5xx 指数退避重试",
   "builtin": true,
+  "default_enabled": true,
   "required": false,
   "hooks": {
     "on_upstream_error": true

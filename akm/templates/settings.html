@@ -91,6 +91,33 @@
     </div>
   </section>
 
+  <!-- 费用统计 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">费用统计</h3>
+    <div class="grid grid-cols-1 gap-4">
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">启用费用估算</h4>
+          <p class="text-xs text-gray-500 mt-0.5">开启后首页「总请求」左侧显示总费用，每日用量增加费用列。按本地单价表估算，不能替代供应商账单。</p>
+        </div>
+        <akm-switch id="cfg-cost-stats" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
+      <div class="bg-surface-light border border-border rounded-lg p-4">
+        <div class="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h4 class="text-sm font-semibold text-white">模型单价表</h4>
+            <p class="text-xs text-gray-500 mt-0.5">每行 <code class="text-indigo-300">model=输入/输入缓存/输出</code>（每 1M tokens，固定美元）。支持 <code class="text-indigo-300">#</code> 注释与尾部 <code class="text-indigo-300">*</code> 通配。</p>
+          </div>
+          <button onclick="saveCostPricing()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer shrink-0">保存单价表</button>
+        </div>
+        <textarea id="cost-pricing-table" rows="12"
+          class="w-full bg-surface border border-border rounded px-3 py-2 text-xs font-mono text-gray-200 focus:outline-none focus:border-indigo-500 leading-relaxed"
+          placeholder="gpt-5.4=2.5/0.25/15"></textarea>
+        <p id="cost-pricing-msg" class="text-xs mt-2 hidden"></p>
+      </div>
+    </div>
+  </section>
+
   <!-- 供应商代理 -->
   <section>
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">供应商代理</h3>
@@ -160,6 +187,7 @@
 var _autoOpen = true;
 var _logReqBody = false;
 var _logRespBody = false;
+var _costStatsEnabled = false;
 var _jsonViewerMaxTextLength = 600000;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -176,6 +204,9 @@ function loadConfig() {
     document.getElementById('json-max-len').value = _jsonViewerMaxTextLength;
     document.getElementById('retention-days').value = cfg.log_retention_days || 30;
     document.getElementById('server-port').value = cfg.server_port || 8800;
+    _costStatsEnabled = cfg.cost_stats_enabled === true;
+    updateCostStatsToggle();
+    document.getElementById('cost-pricing-table').value = cfg.cost_pricing_table || '';
     loadLogStats();
   }).catch(function(){
     loadLogStats();
@@ -218,6 +249,36 @@ function toggleLogResp() {
 
 function updateLogReqToggle() { _updateSwitch('cfg-log-req', _logReqBody); }
 function updateLogRespToggle() { _updateSwitch('cfg-log-resp', _logRespBody); }
+function updateCostStatsToggle() { _updateSwitch('cfg-cost-stats', _costStatsEnabled); }
+
+function toggleCostStats() {
+  _costStatsEnabled = !_costStatsEnabled;
+  updateCostStatsToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cost_stats_enabled: _costStatsEnabled})
+  });
+}
+
+function saveCostPricing() {
+  var table = document.getElementById('cost-pricing-table').value || '';
+  var msg = document.getElementById('cost-pricing-msg');
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cost_pricing_table: table})
+  }).then(function(){
+    msg.textContent = '已保存模型单价表（首页统计即时生效）';
+    msg.className = 'text-xs text-emerald-400 mt-2';
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
+  }).catch(function(){
+    msg.textContent = '保存失败，请稍后重试';
+    msg.className = 'text-xs text-red-400 mt-2';
+    msg.classList.remove('hidden');
+  });
+}
 function _updateSwitch(id, on) {
   var el = document.getElementById(id);
   if (!el) return;
@@ -456,6 +517,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (autoOpenEl) autoOpenEl.addEventListener('click', toggleAutoOpen);
   if (logReqEl) logReqEl.addEventListener('click', toggleLogReq);
   if (logRespEl) logRespEl.addEventListener('click', toggleLogResp);
+  var costStatsEl = document.getElementById('cfg-cost-stats');
+  if (costStatsEl) costStatsEl.addEventListener('click', toggleCostStats);
   loadConfig();
   loadAgents();
 });

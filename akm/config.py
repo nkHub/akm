@@ -3,6 +3,8 @@
 import json
 import os
 
+from akm.cost_estimate import DEFAULT_PRICING_TABLE
+
 CONFIG_DIR = os.path.expanduser("~/.akm")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
@@ -14,12 +16,35 @@ DEFAULTS = {
     "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
     "stream_capture_max_bytes": 262144,  # 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB）
     "stats_include_estimated_usage": False,  # 首页统计是否计入 estimated token，默认关闭更保守
+    "cost_stats_enabled": False,  # 首页费用估算开关（不能替代供应商账单）
+    "cost_pricing_table": DEFAULT_PRICING_TABLE,  # 模型单价表：model=输入/缓存/输出（每 1M tokens，固定美元）
     "json_viewer_max_text_length": 600000,  # JSON 查看器超长文本阈值（超过后仅允许下载原文）
     "image_supported_models": "gpt-image-2",  # 图片生成/编辑支持的模型列表（逗号分隔，首项作为默认值）
     "image_request_timeout_sec": 300,  # 图片生成/编辑请求超时（秒），默认比聊天接口更宽松
     "wake_recover_delay_sec": 8,  # 菜单栏应用在系统唤醒后等待网络/VPN恢复的秒数
     "use_native_user_agent": False,  # 是否透传客户端原始 User-Agent；默认继续使用 akm/<version>
 }
+
+
+def _normalize_cost_pricing_table(raw: object) -> str:
+    """将历史四段单价表转换为当前固定美元的三段格式。
+
+    旧版本把币种写在每一行末尾；现在币种固定为美元符号，保留前三个
+    价格字段即可。注释、空行及不符合旧格式的内容原样保留，让前端继续
+    展示并由单价解析器统一决定其是否有效。
+    """
+    lines = []
+    for line in str(raw or "").splitlines():
+        if "=" not in line:
+            lines.append(line)
+            continue
+        model, prices = line.split("=", 1)
+        parts = [part.strip() for part in prices.split("/")]
+        if len(parts) == 4:
+            lines.append(f"{model}={'/'.join(parts[:3])}")
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _ensure_dir() -> None:
@@ -40,6 +65,7 @@ def load_config() -> dict:
     # 合并默认值
     merged = dict(DEFAULTS)
     merged.update(data)
+    merged["cost_pricing_table"] = _normalize_cost_pricing_table(merged["cost_pricing_table"])
     return merged
 
 

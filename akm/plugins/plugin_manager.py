@@ -442,15 +442,59 @@ class PluginManager:
             # ── 复制到 ~/.akm/plugins/{name}/ ──
             shutil.copytree(plugin_root, dest)
 
+        # 首次安装：写入默认启停（与 load_all 一致）
+        cfg = self._load_config_json()
+        plugin_states = cfg.get("plugin_states", {})
+        if name not in plugin_states:
+            plugin_states[name] = bool(meta.default_enabled)
+            cfg["plugin_states"] = plugin_states
+            self._save_config_json(cfg)
+
+        # 运行中则立即加载，无需重启
+        if self.app is not None:
+            plugin = self._load_plugin(dest, "third_party")
+            if plugin is None:
+                return {
+                    "ok": True,
+                    "name": name,
+                    "message": (
+                        f"已安装到 ~/.akm/plugins/{name}/，"
+                        f"但即时加载失败（请检查日志或重启服务）"
+                    ),
+                    "hot": False,
+                }
+            if plugin.enabled:
+                plugin.config = self.get_config(name) or {}
+                try:
+                    await plugin.on_load()
+                except Exception as e:
+                    logger.error(f"[PluginManager] 安装后 on_load 失败 {name}: {e}")
+                    return {
+                        "ok": True,
+                        "name": name,
+                        "message": (
+                            f"已安装并注册 {name}，但 on_load 失败: {e}"
+                        ),
+                        "hot": False,
+                    }
+            return {
+                "ok": True,
+                "name": name,
+                "enabled": bool(plugin.enabled),
+                "message": f"已安装并加载 {name}（即时生效）",
+                "hot": True,
+            }
+
         return {
             "ok": True,
             "name": name,
-            "message": f"已安装到 ~/.akm/plugins/{name}/，重启 akm 后生效",
+            "message": f"已安装到 ~/.akm/plugins/{name}/，下次启动服务后生效",
+            "hot": False,
         }
 
     # ── 插件删除 ──
 
-    def delete_plugin(self, name: str) -> dict:
+    async def delete_plugin(self, name: str) -> dict:
         """删除本地/第三方插件目录（内置插件不可删除）"""
         if name not in self._plugin_sources:
             return {"ok": False, "error": "插件不存在"}
@@ -464,10 +508,17 @@ class PluginManager:
         else:
             dest = self._third_party_dir / name
 
+        plugin = self.plugins.get(name)
+        if plugin is not None and plugin.enabled:
+            try:
+                await plugin.on_unload()
+            except Exception as e:
+                logger.error(f"[PluginManager] 删除前 on_unload 失败 {name}: {e}")
+
         if dest.exists():
             shutil.rmtree(dest)
 
-        # 清除插件状态
+        # 清除插件状态（已注册的 FastAPI 路由无法安全移除，禁用后 hook/页面不再命中）
         self.plugins.pop(name, None)
         self._plugin_metas.pop(name, None)
         self._plugin_sources.pop(name, None)
@@ -476,14 +527,28 @@ class PluginManager:
         plugin_states = cfg.get("plugin_states", {})
         plugin_states.pop(name, None)
         cfg["plugin_states"] = plugin_states
+        plugin_configs = cfg.get("plugin_configs", {})
+        plugin_configs.pop(name, None)
+        cfg["plugin_configs"] = plugin_configs
         self._save_config_json(cfg)
 
-        return {"ok": True, "message": f"已删除 {name}"}
+        return {
+            "ok": True,
+            "message": f"已删除 {name}（即时生效；残留路由不会再被调度）",
+            "hot": True,
+        }
 
     # ── 启停管理 ──
 
-    def toggle_plugin(self, name: str, enable: bool) -> dict:
-        """切换插件启用/禁用状态，写入 config.json"""
+    async def toggle_plugin(self, name: str, enable: bool, *, hot: bool = True) -> dict:
+        """切换插件启用/禁用状态。
+
+        hot=True（默认，运行中的服务）：立即调用 on_load / on_unload，hook 与菜单即时生效。
+        hot=False：仅写 config（CLI 在服务未运行时使用），下次启动生效。
+
+        说明：已注册的 FastAPI 路由/静态挂载不会在禁用时拆除（Starlette 限制），
+        但 hook 管道与插件宿主页均以 enabled 为准，禁用后不再参与请求链路。
+        """
         if name not in self.plugins:
             return {"ok": False, "error": "插件不存在"}
 
@@ -494,6 +559,16 @@ class PluginManager:
                 "error": f"插件 '{name}' 是必需的，不可禁用",
             }
 
+        was_enabled = bool(plugin.enabled)
+        if was_enabled == bool(enable):
+            return {
+                "ok": True,
+                "name": name,
+                "enabled": enable,
+                "hot": hot,
+                "message": f"插件已是{'启用' if enable else '禁用'}状态",
+            }
+
         plugin.enabled = enable
         cfg = self._load_config_json()
         plugin_states = cfg.get("plugin_states", {})
@@ -501,11 +576,42 @@ class PluginManager:
         cfg["plugin_states"] = plugin_states
         self._save_config_json(cfg)
 
+        if not hot:
+            return {
+                "ok": True,
+                "name": name,
+                "enabled": enable,
+                "hot": False,
+                "message": "状态已保存，下次启动服务后生效",
+            }
+
+        try:
+            if enable:
+                plugin.config = self.get_config(name) or {}
+                await plugin.on_load()
+            else:
+                await plugin.on_unload()
+        except Exception as e:
+            # 回滚内存与配置，避免“配置已开但生命周期失败”
+            plugin.enabled = was_enabled
+            plugin_states[name] = was_enabled
+            cfg["plugin_states"] = plugin_states
+            self._save_config_json(cfg)
+            logger.error(
+                f"[PluginManager] {name} 热{'启用' if enable else '禁用'}失败: {e}"
+            )
+            return {
+                "ok": False,
+                "error": f"生命周期钩子失败: {e}",
+            }
+
+        action = "启用" if enable else "禁用"
         return {
             "ok": True,
             "name": name,
             "enabled": enable,
-            "message": "状态已保存，重启 akm 后生效",
+            "hot": True,
+            "message": f"已{action} {name}（即时生效）",
         }
 
     # ── 配置读写 ──
