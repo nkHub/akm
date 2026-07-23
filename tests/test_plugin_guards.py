@@ -358,17 +358,14 @@ async def test_data_filter_default_response_patterns_match_without_trailing_comm
 
 @pytest.mark.asyncio
 async def test_data_filter_masks_anthropic_content_blocks_and_system():
-    """messages[].content 应覆盖 content blocks，system 路径也应可扫描。"""
+    """messages[].content 应覆盖 content blocks，system 路径也应可扫描；默认正则可逆脱敏 sk。"""
     plugin = DataFilterGuard()
     plugin.logger = logging.getLogger("test.data_filter_guard")
     plugin.config = {
         "enabled": True,
         "keyword_rules": "SECRET_TOKEN",
         "request_text_paths": "messages[].content,input,instructions,system",
-        "enable_code_secret_guard": True,
-        "code_secret_guard_mode": "mask",
-        "code_secret_paths": "messages[].content,input,instructions,system",
-        "code_secret_rule_groups": "llm_keys",
+        # 不显式写 regex_rules → 使用 DEFAULT_REGEX_RULES（含 sk-proj）
     }
     await plugin.on_load()
 
@@ -392,25 +389,26 @@ async def test_data_filter_masks_anthropic_content_blocks_and_system():
     assert secret_key not in text
     assert "SECRET_TOKEN" not in text
     assert "<AKM-SEC:" in text
-    assert ctx.bag_get("data_filter_guard.reverse_map")
+    rmap = ctx.bag_get("data_filter_guard.reverse_map")
+    assert rmap
     assert "__akm_reverse_map__" not in out
+    restored, changed = plugin._reverse_replace(text, reverse_map=rmap)
+    assert changed is True
+    assert secret_key in restored
 
 
 @pytest.mark.asyncio
-async def test_data_filter_code_secret_paths_cover_tool_call_arguments():
-    """代码敏感默认应扫描 tool_calls 参数，且不依赖 request_text_paths。"""
+async def test_data_filter_request_text_paths_cover_tool_call_arguments():
+    """默认 request_text_paths 应覆盖 tool_calls 参数，用正则可逆脱敏。"""
     plugin = DataFilterGuard()
     plugin.logger = logging.getLogger("test.data_filter_guard")
     secret_key = "sk-proj-" + ("B" * 48)
     plugin.config = {
         "enabled": True,
-        # 关键词路径故意不含 tool_calls，验证 code_secret_paths 独立生效
-        "request_text_paths": "messages[].content",
+        # 显式包含 tool_calls 路径；关键词路径故意只写 content，验证路径门控
+        "request_text_paths": "messages[].tool_calls[].function.arguments",
         "keyword_rules": "SHOULD_NOT_TOUCH",
-        "enable_code_secret_guard": True,
-        "code_secret_guard_mode": "mask",
-        "code_secret_paths": "messages[].tool_calls[].function.arguments",
-        "code_secret_rule_groups": "llm_keys",
+        # 不显式写 regex_rules → 使用 DEFAULT_REGEX_RULES
     }
     await plugin.on_load()
 
@@ -435,12 +433,19 @@ async def test_data_filter_code_secret_paths_cover_tool_call_arguments():
     ctx = _ctx(request)
     out = await plugin.on_request(ctx)
     assert out is not None
+    # content 不在 request_text_paths 内，关键词与正则均不应处理
+    assert "SHOULD_NOT_TOUCH" in out["messages"][0]["content"]
     args = out["messages"][0]["tool_calls"][0]["function"]["arguments"]
     assert secret_key not in args
-    assert "SHOULD_NOT_TOUCH" in args  # 关键词路径未覆盖 tool_calls，不应被替换
+    # 关键词规则也只作用于 tool_calls 路径：arguments 内的 SHOULD_NOT_TOUCH 会被替换
+    assert "SHOULD_NOT_TOUCH" not in args
     assert "<AKM-SEC:" in args
-    assert ctx.bag_get("data_filter_guard.reverse_map")
+    rmap = ctx.bag_get("data_filter_guard.reverse_map")
+    assert rmap
     assert "__akm_reverse_map__" not in out
+    restored, changed = plugin._reverse_replace(args, reverse_map=rmap)
+    assert changed is True
+    assert secret_key in restored
 
 
 @pytest.mark.asyncio
@@ -496,6 +501,129 @@ async def test_data_filter_placeholder_collision_and_stream_restore():
     out2 = plugin.reverse_stream_chunk(f"{tail} after", state, reverse_map=rmap)
     assert "ALPHA" in (out1 + out2)
     assert "<AKM-SEC:" not in (out1 + out2)
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_restore_partial_prefix_across_chunks():
+    """前缀 ``<AKM-SEC:`` 被切到两个 chunk 时不得原样透传半截。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    placeholder = "<AKM-SEC:phone@1:abcdef/>"
+    rmap = {placeholder: "13012341234"}
+    state = plugin.reverse_stream_state()
+
+    # 前缀正中间切开：`<AKM` + `-SEC:phone@1:abcdef/> after`
+    out1 = plugin.reverse_stream_chunk("号码=<AKM", state, reverse_map=rmap)
+    out2 = plugin.reverse_stream_chunk("-SEC:phone@1:abcdef/> after", state, reverse_map=rmap)
+    joined = out1 + out2
+    assert "13012341234" in joined
+    assert "AKM-SEC" not in joined
+    assert out1 == "号码="  # 半截前缀必须压在 pending 里，不能先 yield
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_restore_sse_token_split_content():
+    """SSE 按 token 拆开 delta.content 时，应在字段级截流拼回后换回。
+
+    模拟真实上游：每个 chunk 一帧，content 分别为 ``<`` / ``AK`` / ``M-SEC:.../>``，
+    raw 帧间夹 JSON 外壳，纯文本扫描无法拼出连续占位符。
+    """
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    placeholder = "<AKM-SEC:phone@1:abcdef/>"
+    phone = "13012341234"
+    rmap = {placeholder: phone}
+    state = plugin.reverse_stream_state()
+
+    def _frame(content: str) -> str:
+        payload = json.dumps(
+            {"choices": [{"index": 0, "delta": {"content": content}}]},
+            ensure_ascii=False,
+        )
+        return f"data: {payload}\n\n"
+
+    # 单字符拆：短 content 以 < 开头 → 截流
+    out1 = plugin.reverse_stream_chunk(_frame("<"), state, reverse_map=rmap)
+    assert "AKM-SEC" not in out1
+    assert phone not in out1
+    # 本帧 content 应被置空或整帧可为空 content
+    if "data:" in out1:
+        assert '"content": ""' in out1 or '"content":""' in out1 or phone not in out1
+
+    out2 = plugin.reverse_stream_chunk(_frame("AKM-SEC:phone@1:abcdef/>"), state, reverse_map=rmap)
+    joined = out1 + out2
+    assert phone in joined
+    assert "AKM-SEC" not in joined
+    assert placeholder not in joined
+
+    # flush 不应再残留占位符
+    tail = plugin.reverse_stream_flush(state, reverse_map=rmap)
+    assert "AKM-SEC" not in tail
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_restore_sse_short_no_lt_passthrough():
+    """短 content 不以 < 开头/结尾时不得无故截流。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    placeholder = "<AKM-SEC:phone@1:abcdef/>"
+    rmap = {placeholder: "13012341234"}
+    state = plugin.reverse_stream_state()
+    payload = json.dumps(
+        {"choices": [{"delta": {"content": "你好"}}]},
+        ensure_ascii=False,
+    )
+    out = plugin.reverse_stream_chunk(f"data: {payload}\n\n", state, reverse_map=rmap)
+    assert "你好" in out
+    assert "data:" in out
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_restore_loose_close_without_slash():
+    """模型回显省略斜杠（``>`` 而非 ``/>``）时，流式仍应按指纹换回。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    placeholder = "<AKM-SEC:phone@1:abcdef/>"
+    rmap = {placeholder: "13012341234"}
+    # 宽松形态：无 /，tag 被改写，仅指纹一致
+    loose = "<AKM-SEC:rewritten@9:abcdef>"
+    state = plugin.reverse_stream_state()
+    out1 = plugin.reverse_stream_chunk(f"手机 {loose[:12]}", state, reverse_map=rmap)
+    out2 = plugin.reverse_stream_chunk(f"{loose[12:]} 结束", state, reverse_map=rmap)
+    joined = out1 + out2
+    assert "13012341234" in joined
+    assert "AKM-SEC" not in joined
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_restore_false_positive_still_restores_closed_key():
+    """未闭合噪声超限时，缓冲区内已闭合的完整占位符仍应被换回。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    placeholder = "<AKM-SEC:phone@1:abcdef/>"
+    rmap = {placeholder: "13012341234"}
+    # 完整 key 后跟超长未闭合假前缀，触发 max_pending 放行路径
+    noise = "<AKM-SEC:" + ("x" * 300)
+    state = plugin.reverse_stream_state()
+    out = plugin.reverse_stream_chunk(f"值={placeholder} 然后{noise}", state, reverse_map=rmap)
+    assert "13012341234" in out
+    # 完整 key 不得残留；假前缀可按原文放出
+    assert placeholder not in out
 
 
 @pytest.mark.asyncio
@@ -558,6 +686,54 @@ async def test_data_filter_reverse_handles_json_escape_and_chinese_tag():
 
 
 @pytest.mark.asyncio
+async def test_data_filter_reverse_handles_json_unicode_lt_escape():
+    """上游把 ``<`` 编成 ``\\u003c`` 时，整段与流式都应能换回。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    placeholder = "<AKM-SEC:t8098e2@1:2273f4/>"
+    phone = "13800138000"
+    rmap = {placeholder: phone}
+
+    # 常见 escapeHTML：``\\u003c`` + 字面 body + ``\\u003e``；或 ``/`` 也成 ``\\u002f``
+    u_ph = placeholder.replace("<", "\\u003c").replace(">", "\\u003e")
+    u_ph_slash = u_ph.replace("/", "\\u002f")
+    for sample in (u_ph, u_ph_slash):
+        restored, changed = plugin._reverse_replace(
+            f'{{"content":"{sample}"}}',
+            reverse_map=rmap,
+        )
+        assert changed is True
+        assert phone in restored
+        assert "AKM-SEC" not in restored
+        assert "\\u003c" not in restored
+
+    # 流式：完整 unicode 占位符在一个 chunk
+    state = plugin.reverse_stream_state()
+    out = plugin.reverse_stream_chunk(
+        f'data: {{"delta":"{u_ph}"}}\n\n',
+        state,
+        reverse_map=rmap,
+    )
+    assert phone in out
+    assert "AKM-SEC" not in out
+
+    # 流式：``\\u003c`` 被切到两个 chunk（``\\u00`` + ``3cAKM-SEC:...``）
+    state2 = plugin.reverse_stream_state()
+    out_a = plugin.reverse_stream_chunk("前缀\\u00", state2, reverse_map=rmap)
+    out_b = plugin.reverse_stream_chunk(
+        f"3cAKM-SEC:t8098e2@1:2273f4/\\u003e 后缀",
+        state2,
+        reverse_map=rmap,
+    )
+    joined = out_a + out_b
+    assert phone in joined
+    assert "AKM-SEC" not in joined
+
+
+@pytest.mark.asyncio
 async def test_data_filter_stream_mask_overflow_degrades_to_block():
     """流式增量路径上 mask 应退化为 block，避免危险内容透传。"""
     plugin = DataFilterGuard()
@@ -581,22 +757,30 @@ async def test_data_filter_stream_mask_overflow_degrades_to_block():
 
 
 @pytest.mark.asyncio
-async def test_data_filter_redact_only_does_not_attach_empty_reverse_map():
-    """仅敏感字段 redact 且无文本替换时，不应附加空 reverse map。"""
+async def test_data_filter_sensitive_field_uses_reversible_placeholder():
+    """敏感字段名命中后应替换为可逆占位符，并挂载 reverse_map。"""
     plugin = DataFilterGuard()
     plugin.logger = logging.getLogger("test.data_filter_guard")
     plugin.config = {
         "enabled": True,
         "sensitive_fields": "password",
         "keyword_rules": "",
+        "regex_rules": "",  # 显式关闭默认正则，只测敏感字段
         "request_text_paths": "messages[].content",
     }
     await plugin.on_load()
     ctx = _ctx({"password": "secret", "messages": [{"content": "hi"}]})
     out = await plugin.on_request(ctx)
-    assert out["password"] == "[REDACTED]"
+    assert out is not None
+    assert out["password"].startswith("<AKM-SEC:")
+    assert out["password"].endswith("/>")
     assert "__akm_reverse_map__" not in out
-    assert not ctx.bag_get("data_filter_guard.reverse_map")
+    rmap = ctx.bag_get("data_filter_guard.reverse_map")
+    assert isinstance(rmap, dict) and rmap
+    assert rmap[out["password"]] == "secret"
+    restored, changed = plugin._reverse_replace(out["password"], reverse_map=rmap)
+    assert changed is True
+    assert restored == "secret"
 
 
 @pytest.mark.asyncio
