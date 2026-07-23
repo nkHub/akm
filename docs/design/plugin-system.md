@@ -572,6 +572,7 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 - **SSE 主路径**：按行解析 `data: {json}`，在 `delta.content` / `reasoning_content` / `text` / `thinking` 等字段上跨帧截流换回（模型按 token 拆开占位符时仍可拼回）。短 content（低于占位符长度量级）仅当以 `<` **开头或结尾**（或半截前缀 / `\\u`）时截流；长 content 先换回再截可能未闭合的尾部，安全前缀立刻 yield。
 - **纯文本兼容路径**：chunk 切在 `<AKM-SEC:` 中间时保留尾部重叠；完整前缀未闭合则缓冲至 `/>` / 宽松 `>` 或超限放行。
 - 假阳性超限放行前仍尝试精确+宽松换回；流结束 `reverse_stream_flush` 冲 content 缓冲与 pending（SSE 模式可合成最小 delta 帧）。
+- **流式响应安全扫描**：与上述字段级路径对齐——抽离 `_match_stream_rules` / `_stream_guard_ingest_*`，对 content 类字段按 `stream_guard_cache_chars` 做滑动窗口匹配，边 yield 边扫；规则命中即按 action 处理；流式 mask 统一退化为 block（无法回写已透传 chunk）。
 
 **崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留 ctx 原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
 

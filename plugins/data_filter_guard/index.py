@@ -7,10 +7,12 @@
    JWT/Bearer / 私钥头 / 数据库连接串 / 凭据赋值等）及邮箱、手机号，命中即可逆脱敏。
 2. 响应侧：先反向还原占位符为原始值，再扫描高风险命令/脚本片段做拦截。
    非流式扫描覆盖 Chat / Responses / Anthropic Messages 可见文本。
-3. 流式响应：对 SSE 在 ``delta.content`` / ``reasoning_content`` / ``text`` 等
-   字段上做跨帧 content 截流换回（模型按 token 拆开占位符时仍可拼回）；
-   纯文本 chunk 仍用前缀半截缓冲。完整占位符在 yield 前还原；流式安全扫描
-   默认有界完整缓冲，超限后增量扫描（mask 退化为 block）。
+    3. 流式响应：对 SSE 在 ``delta.content`` / ``reasoning_content`` / ``text`` 等
+    字段上做跨帧 content 截流换回（模型按 token 拆开占位符时仍可拼回）；
+    纯文本 chunk 仍用前缀半截缓冲。完整占位符在 yield 前还原；流式安全扫描
+    同样走字段级滑动窗口（``stream_guard_cache_chars``），边 yield 边扫；
+    命中 block/mask 均中断并返回安全载荷（增量路径 mask 退化为 block）。
+
 
 说明：
 - 该插件默认关闭；用户可按需在插件页启用。
@@ -64,7 +66,7 @@ _JSON_U_GT_RE = re.compile(r"\\u003[eE]")
 _JSON_U_SLASH_RE = re.compile(r"\\u002[fF]")
 # 流式半截 ``\\u`` + 0–3 位 hex（完整 ``\\u003c`` 为 4 位 hex，不匹配）
 _JSON_U_INCOMPLETE_TAIL_RE = re.compile(r"\\u[0-9a-fA-F]{0,3}$")
-# SSE JSON 中参与 content 级截流换回的字符串字段（值为 str 时才处理）
+# SSE JSON 中参与 content 级截流换回 / 流式安全扫描的字符串字段（值为 str 时才处理）
 _SSE_CONTENT_FIELD_KEYS = frozenset({
     "content",
     "reasoning_content",
@@ -813,7 +815,8 @@ class Plugin(PluginBase):
         self._enabled = cfg.get("enabled", True) is True
         self._enable_response_guard = cfg.get("enable_response_guard", True) is True
         self._enable_stream_response_guard = cfg.get("enable_stream_response_guard", False) is True
-        self._stream_guard_buffer_max_bytes = max(16384, int(cfg.get("stream_guard_buffer_max_bytes", 262144) or 262144))
+        # 流式安全扫描仅用字段级滑动窗口长度（对齐换回截流的「边下发边处理」），
+        # 不再做整段 SSE 完整缓冲。
         self._stream_guard_cache_chars = max(0, int(cfg.get("stream_guard_cache_chars", 2048) or 2048))
         self._response_guard_mode = str(cfg.get("response_guard_mode", "block") or "block").strip().lower()
         self._response_rule_actions = self._parse_rule_actions(cfg.get("response_rule_actions", "") or "")
@@ -1326,7 +1329,7 @@ class Plugin(PluginBase):
         if not self._enable_response_guard:
             return response
 
-        # 流式响应的安全扫描在 protect_stream_payload / inspect_stream_chunk 中处理
+        # 流式响应的安全扫描在 inspect_stream_chunk 中边下发边处理
         if is_stream:
             return response
 
@@ -1365,42 +1368,178 @@ class Plugin(PluginBase):
         return response
 
     # ── 流式响应安全方法（供 proxy/server 调用） ─────────────────
+    #
+    # 扫描策略对齐请求侧脱敏的「SSE 字段级」路径：
+    # 1. 优先解析 data JSON 中的 content / text 等字段，只对可见文本做规则匹配；
+    # 2. 抽离统一的流式匹配方法，规则命中即按 action 处理；
+    # 3. 仅增量字段级滑动窗口（stream_guard_cache_chars）；mask 在流式路径退化为 block。
+
+    def _find_rule_match(
+        self,
+        text: str,
+        pattern: re.Pattern,
+        matched_patterns: set | None = None,
+    ) -> re.Match | None:
+        """在文本中查找第一条有效规则命中（跳过本帧已记录的 pattern）。"""
+        if not text:
+            return None
+        if matched_patterns is not None and pattern.pattern in matched_patterns:
+            return None
+        return pattern.search(text)
+
+    def _match_stream_rules(
+        self,
+        scan_texts: list[str],
+        matched_patterns: set | None = None,
+    ) -> tuple[re.Pattern | None, str, re.Match | None]:
+        """对多段扫描文本统一做规则匹配。
+
+        返回 ``(命中 pattern, 动作, match 对象)``；未命中时 pattern 为 None、动作为空串。
+        """
+        for scan_text in scan_texts:
+            if not scan_text:
+                continue
+            for pattern in self._response_block_patterns:
+                match = self._find_rule_match(scan_text, pattern, matched_patterns)
+                if match is None:
+                    continue
+                action = self._resolve_rule_action(pattern)
+                return pattern, action, match
+        return None, "", None
+
+    @staticmethod
+    def _is_stream_content_field_key(key: str, value) -> bool:
+        """判断 JSON 键值是否属于流式可见 content 字段。"""
+        if not isinstance(value, str):
+            return False
+        # Responses: {"type":"response.output_text.delta","delta":"..."} 仅 str delta 视为 content
+        return key in _SSE_CONTENT_FIELD_KEYS or key == "delta"
+
+    def _trim_stream_guard_buf(self, text: str, cache_limit: int) -> str:
+        """将字段/纯文本扫描缓冲裁到缓存上限（保留尾部以覆盖跨 chunk 命中）。"""
+        if cache_limit <= 0:
+            return ""
+        if len(text) <= cache_limit:
+            return text
+        return text[-cache_limit:]
+
+    def _stream_guard_ingest_plain(self, text: str, state: dict) -> list[str]:
+        """纯文本路径：与 tail 拼接后返回本帧扫描窗口，并更新 tail。"""
+        cache_limit = max(
+            0,
+            int(state.get("cache_limit", self._stream_guard_cache_chars) or self._stream_guard_cache_chars),
+        )
+        tail = str(state.get("tail", "") or "")
+        scan_text = tail + (text or "")
+        state["tail"] = self._trim_stream_guard_buf(scan_text, cache_limit)
+        return [scan_text] if scan_text else []
+
+    def _stream_guard_append_field(self, state: dict, field_key: str, piece: str) -> str:
+        """向字段级缓冲追加文本，返回本帧用于规则匹配的扫描窗口。"""
+        cache_limit = max(
+            0,
+            int(state.get("cache_limit", self._stream_guard_cache_chars) or self._stream_guard_cache_chars),
+        )
+        bufs: dict = state.setdefault("content_bufs", {})
+        prev = str(bufs.get(field_key, "") or "")
+        full = prev + (piece if piece is not None else "")
+        bufs[field_key] = self._trim_stream_guard_buf(full, cache_limit)
+        return full
+
+    def _stream_guard_ingest_json_fields(self, obj, state: dict, out: list[str]) -> None:
+        """递归摄入 JSON content 字段到缓冲，并收集扫描窗口。"""
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if self._is_stream_content_field_key(key, value):
+                    if value:
+                        out.append(self._stream_guard_append_field(state, key, value))
+                elif isinstance(value, (dict, list)):
+                    self._stream_guard_ingest_json_fields(value, state, out)
+        elif isinstance(obj, list):
+            for item in obj:
+                self._stream_guard_ingest_json_fields(item, state, out)
+
+    def _stream_guard_ingest_sse_line(self, line: str, state: dict, out: list[str]) -> None:
+        """处理单行 SSE：解析 data JSON 后做字段级摄入。"""
+        if not line.startswith("data:"):
+            return
+        payload = line[5:]
+        if payload.startswith(" "):
+            payload = payload[1:]
+        if not payload or payload == "[DONE]":
+            return
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # 非 JSON data 行：按纯文本并入 tail，避免漏扫
+            out.extend(self._stream_guard_ingest_plain(payload, state))
+            return
+        if isinstance(obj, (dict, list)):
+            self._stream_guard_ingest_json_fields(obj, state, out)
+        elif isinstance(obj, str) and obj:
+            out.append(self._stream_guard_append_field(state, "content", obj))
+
+    def _stream_guard_ingest_sse(self, text: str, state: dict) -> list[str]:
+        """SSE 路径：按行边界拆帧，在 content 字段上做跨帧字段级扫描缓冲。"""
+        state["sse_mode"] = True
+        state.setdefault("line_buf", "")
+        buf = (state.get("line_buf") or "") + (text or "")
+        out: list[str] = []
+        if not buf:
+            return out
+        while True:
+            idx = buf.find("\n")
+            if idx < 0:
+                state["line_buf"] = buf
+                break
+            line = buf[:idx]
+            buf = buf[idx + 1 :]
+            self._stream_guard_ingest_sse_line(line.rstrip("\r"), state, out)
+        return out
+
+    def _stream_guard_ingest_chunk(self, text: str, state: dict) -> list[str]:
+        """摄入流式 chunk，返回本帧待扫描文本列表（字段级优先，纯文本兜底）。
+
+        与 ``reverse_stream_chunk`` 相同：能识别 SSE 时只扫 content 类字段，
+        避免整段 SSE/JSON 外壳参与匹配；纯文本路径保留 tail 滑动窗口。
+        """
+        if self._looks_like_sse(text or "", state):
+            return self._stream_guard_ingest_sse(text or "", state)
+        return self._stream_guard_ingest_plain(text or "", state)
 
     def is_stream_guard_active(self) -> bool:
         """判断是否启用了流式响应安全保护。"""
         self._reload_config()
         return self._enabled and self._enable_response_guard and self._enable_stream_response_guard
 
-    def stream_guard_requires_buffering(self) -> bool:
-        """判断当前流式响应保护是否需要先完成整段缓冲。
-
-        安全规则在流尾才命中时，若此前内容已透传，block 只能中断后续输出而
-        不能真正阻止危险片段抵达客户端。因此只要用户显式开启流式保护，就在
-        配置的有界上限内先完成整段扫描；超限时才退为增量扫描并尽早中断。
-        """
-        self._reload_config()
-        return self.is_stream_guard_active()
-
-    def stream_guard_buffer_max_bytes(self) -> int:
-        """返回整段缓冲模式允许占用的最大字节数。"""
-        self._reload_config()
-        return max(self._stream_guard_buffer_max_bytes, 16384)
-
     def create_stream_guard_state(self) -> dict:
-        """创建流式增量扫描状态。"""
+        """创建流式增量扫描状态（字段级缓冲 + 纯文本 tail）。
+
+        ``cache_limit`` 来自 ``stream_guard_cache_chars``，与换回截流一样只保留
+        跨 chunk 所需的最近字符，不做整段 SSE 完整缓冲。
+        """
         self._reload_config()
         return {
             "tail": "",
+            "line_buf": "",
+            "content_bufs": {},
             "matched_patterns": set(),
             "cache_limit": self._stream_guard_cache_chars,
+            "sse_mode": False,
         }
 
     def inspect_stream_chunk(self, api_path: str, payload_text: str, state: dict) -> tuple[dict, bool, str, str]:
-        """基于滑动窗口对流式 chunk 做增量安全扫描。
+        """基于字段级滑动窗口对流式 chunk 做增量安全扫描。
+
+        匹配方式对齐请求脱敏 / 换回截流的字段级路径：
+        - SSE：按行解析 data JSON，只对 content / text / delta 等字段累计扫描；
+        - 纯文本：tail + chunk 滑动窗口；
+        - 窗口长度由 ``stream_guard_cache_chars`` 约束；
+        - 规则命中即按 action 处理（warn 仅记录；block/mask 均中断，mask 退化为 block）。
 
         返回值：
         - 新状态
-        - 是否需要改写当前输出（仅 block 会返回 True）
+        - 是否需要改写当前输出（block/mask 退化为 blocked 时为 True）
         - 命中规则原因
         - 动作（warn / blocked / ""）
         """
@@ -1411,53 +1550,26 @@ class Plugin(PluginBase):
         matched_patterns = state.get("matched_patterns")
         if not isinstance(matched_patterns, set):
             matched_patterns = set(matched_patterns or [])
+            state["matched_patterns"] = matched_patterns
 
-        tail = str(state.get("tail", "") or "")
-        cache_limit = max(0, int(state.get("cache_limit", self._stream_guard_cache_chars) or self._stream_guard_cache_chars))
-        scan_text = tail + payload_text
+        cache_limit = max(
+            0,
+            int(state.get("cache_limit", self._stream_guard_cache_chars) or self._stream_guard_cache_chars),
+        )
+        state.setdefault("cache_limit", cache_limit)
+        state.setdefault("content_bufs", {})
+        state.setdefault("line_buf", "")
+        state.setdefault("tail", "")
+        state.setdefault("sse_mode", False)
 
-        for pattern in self._response_block_patterns:
-            if pattern.pattern in matched_patterns:
-                continue
-            if not pattern.search(scan_text):
-                continue
+        scan_texts = self._stream_guard_ingest_chunk(payload_text or "", state)
+        pattern, action, _match = self._match_stream_rules(scan_texts, matched_patterns)
+        if pattern is None:
+            return state, False, "", ""
 
-            action = self._resolve_rule_action(pattern)
-            matched_patterns.add(pattern.pattern)
-            next_state = {
-                "tail": scan_text[-cache_limit:] if cache_limit > 0 else "",
-                "matched_patterns": matched_patterns,
-                "cache_limit": cache_limit,
-            }
-            if action == "warn":
-                return next_state, False, pattern.pattern, "warn"
-            if action == "mask":
-                # 增量扫描路径无法对已发出/当前 chunk 做局部替换（server 只认 blocked）。
-                # 为避免危险内容透传，溢出后的 mask 退化为 block。
-                return next_state, True, pattern.pattern, "blocked"
-            return next_state, True, pattern.pattern, "blocked"
-
-        return {
-            "tail": scan_text[-cache_limit:] if cache_limit > 0 else "",
-            "matched_patterns": matched_patterns,
-            "cache_limit": cache_limit,
-        }, False, "", ""
-
-    def protect_stream_payload(self, api_path: str, payload_text: str) -> tuple[str, bool, str, str]:
-        """对客户端侧 SSE 文本做安全处理。"""
-        self._reload_config()
-        if not self._enabled or not self._enable_response_guard or not self._enable_stream_response_guard:
-            return payload_text, False, "", ""
-
-        for pattern in self._response_block_patterns:
-            if not pattern.search(payload_text):
-                continue
-            action = self._resolve_rule_action(pattern)
-            if action == "warn":
-                return payload_text, False, pattern.pattern, "warn"
-            if action == "mask":
-                replaced = pattern.sub(self._response_mask_replacement, payload_text)
-                if replaced != payload_text:
-                    return replaced, True, pattern.pattern, "masked"
-            return self._build_safe_stream_payload(api_path), True, pattern.pattern, "blocked"
-        return payload_text, False, "", ""
+        matched_patterns.add(pattern.pattern)
+        state["matched_patterns"] = matched_patterns
+        if action == "warn":
+            return state, False, pattern.pattern, "warn"
+        # 流式已边下发边扫：无法回写已透传 chunk 做字段级 mask，mask 统一退化为 block
+        return state, True, pattern.pattern, "blocked"

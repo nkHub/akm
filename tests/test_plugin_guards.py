@@ -307,8 +307,8 @@ async def test_fallback_router_changes_model_and_proxy_reselects_key(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_data_filter_stream_guard_blocks_complete_payload_before_output():
-    """流式保护在有界完整缓冲后应返回协议兼容的安全 SSE 内容。"""
+async def test_data_filter_stream_guard_blocks_on_incremental_scan():
+    """流式保护按字段级滑动窗口增量扫描，命中 block 后应可生成协议兼容安全载荷。"""
     plugin = DataFilterGuard()
     plugin.logger = logging.getLogger("test.data_filter_guard")
     plugin.config = {
@@ -320,13 +320,21 @@ async def test_data_filter_stream_guard_blocks_complete_payload_before_output():
     }
     await plugin.on_load()
 
-    assert plugin.stream_guard_requires_buffering() is True
-    protected, changed, _reason, action = plugin.protect_stream_payload(
-        "chat/completions", "data: dangerous rm -rf / command\n\n"
+    assert plugin.is_stream_guard_active() is True
+    assert not hasattr(plugin, "stream_guard_requires_buffering")
+    assert not hasattr(plugin, "protect_stream_payload")
+
+    state = plugin.create_stream_guard_state()
+    state, blocked, reason, action = plugin.inspect_stream_chunk(
+        "chat/completions",
+        "data: " + json.dumps({"choices": [{"delta": {"content": "dangerous rm -rf / command"}}]}) + "\n\n",
+        state,
     )
-    assert changed is True
+    assert blocked is True
     assert action == "blocked"
-    assert "[DONE]" in protected
+    assert reason
+    safe = plugin._build_safe_stream_payload("chat/completions")
+    assert "[DONE]" in safe
 
 
 @pytest.mark.asyncio
@@ -734,8 +742,8 @@ async def test_data_filter_reverse_handles_json_unicode_lt_escape():
 
 
 @pytest.mark.asyncio
-async def test_data_filter_stream_mask_overflow_degrades_to_block():
-    """流式增量路径上 mask 应退化为 block，避免危险内容透传。"""
+async def test_data_filter_stream_mask_degrades_to_block():
+    """流式路径上 mask 应退化为 block（边下发边扫无法回写已透传 chunk）。"""
     plugin = DataFilterGuard()
     plugin.logger = logging.getLogger("test.data_filter_guard")
     plugin.config = {
@@ -754,6 +762,79 @@ async def test_data_filter_stream_mask_overflow_degrades_to_block():
     assert blocked is True
     assert action == "blocked"
     assert "rm" in reason.lower() or reason
+
+
+@pytest.mark.asyncio
+async def test_data_filter_stream_guard_field_level_sse():
+    """流式安全扫描应按 content 字段匹配，不因中文邻接而跳过。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {
+        "enabled": True,
+        "enable_response_guard": True,
+        "enable_stream_response_guard": True,
+        "response_guard_mode": "block",
+        "response_block_patterns": "(?i)rm\\s+-rf\\s+/",
+    }
+    await plugin.on_load()
+
+    # 1) SSE content 字段命中应拦截
+    dangerous = json.dumps(
+        {"choices": [{"index": 0, "delta": {"content": "please rm -rf / now"}}]},
+        ensure_ascii=False,
+    )
+    state = plugin.create_stream_guard_state()
+    state, blocked, reason, action = plugin.inspect_stream_chunk(
+        "chat/completions", f"data: {dangerous}\n\n", state
+    )
+    assert blocked is True
+    assert action == "blocked"
+    assert reason
+
+    # 2) 仅出现在 JSON 键名/外壳、content 为空时不应误拦
+    shell_only = json.dumps(
+        {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        ensure_ascii=False,
+    )
+    state2 = plugin.create_stream_guard_state()
+    state2, blocked2, _reason2, action2 = plugin.inspect_stream_chunk(
+        "chat/completions", f"data: {shell_only}\n\n", state2
+    )
+    assert blocked2 is False
+    assert action2 == ""
+
+    # 3) 中文叙述夹杂危险命令仍应拦截（不做中文邻接跳过）
+    cjk_wrapped = json.dumps(
+        {"choices": [{"index": 0, "delta": {"content": "执行rm -rf /命令"}}]},
+        ensure_ascii=False,
+    )
+    state3 = plugin.create_stream_guard_state()
+    state3, blocked3, _reason3, action3 = plugin.inspect_stream_chunk(
+        "chat/completions", f"data: {cjk_wrapped}\n\n", state3
+    )
+    assert blocked3 is True
+    assert action3 == "blocked"
+
+    # 4) 跨 chunk 字段级滑动窗口：危险片段拆到两帧仍应命中
+    state4 = plugin.create_stream_guard_state()
+    chunk_a = json.dumps(
+        {"choices": [{"index": 0, "delta": {"content": "please rm -r"}}]},
+        ensure_ascii=False,
+    )
+    chunk_b = json.dumps(
+        {"choices": [{"index": 0, "delta": {"content": "f / now"}}]},
+        ensure_ascii=False,
+    )
+    state4, blocked4a, _r4a, action4a = plugin.inspect_stream_chunk(
+        "chat/completions", f"data: {chunk_a}\n\n", state4
+    )
+    assert blocked4a is False
+    assert action4a == ""
+    state4, blocked4b, _r4b, action4b = plugin.inspect_stream_chunk(
+        "chat/completions", f"data: {chunk_b}\n\n", state4
+    )
+    assert blocked4b is True
+    assert action4b == "blocked"
 
 
 @pytest.mark.asyncio

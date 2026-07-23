@@ -2303,33 +2303,18 @@ async def _handle_ai_request(request: Request, api_path: str):
                     else None
                 )
                 _rev_state = _dfg.reverse_stream_state() if _rev_map else None
-                # 流式安全保护默认关闭。用户显式开启后，先在有限内存中完整
-                # 缓冲 SSE 再统一扫描，避免危险模式在流尾命中时前半段已经被
-                # 客户端消费；超过上限时退为增量扫描并在命中处立即终止。
+                # 流式安全保护默认关闭。开启后边 yield 边做字段级滑动窗口扫描
+                # （stream_guard_cache_chars），与占位符换回截流同思路；命中即中断。
                 _stream_guard_active = bool(_dfg and _dfg.is_stream_guard_active())
-                _stream_guard_buffering = bool(
-                    _stream_guard_active and _dfg.stream_guard_requires_buffering()
-                )
-                _stream_guard_limit = _dfg.stream_guard_buffer_max_bytes() if _stream_guard_buffering else 0
-                _stream_guard_buffer = bytearray()
                 _stream_guard_state = _dfg.create_stream_guard_state() if _stream_guard_active else None
-                _stream_guard_overflow = False
                 _stream_guard_blocked = False
 
                 def _guard_stream_chunk(chunk: bytes) -> tuple[list[bytes], bool]:
                     """处理已完成占位符还原的流式片段，返回可输出内容与终止标记。"""
-                    nonlocal _stream_guard_overflow, _stream_guard_blocked
+                    nonlocal _stream_guard_blocked
                     nonlocal security_action, security_reason, security_changed
                     if not _stream_guard_active:
                         return [chunk], False
-
-                    if _stream_guard_buffering and not _stream_guard_overflow:
-                        if len(_stream_guard_buffer) + len(chunk) <= _stream_guard_limit:
-                            _stream_guard_buffer.extend(chunk)
-                            return [], False
-                        _stream_guard_overflow = True
-                        chunk = bytes(_stream_guard_buffer) + chunk
-                        _stream_guard_buffer.clear()
 
                     payload_text = chunk.decode("utf-8", errors="replace")
                     state, blocked, reason, action = _dfg.inspect_stream_chunk(
@@ -2423,20 +2408,6 @@ async def _handle_ai_request(request: Request, api_path: str):
                                 capture.append(guarded_chunk)
                                 usage_tracker.append(guarded_chunk)
                                 yield guarded_chunk
-                    if _stream_guard_buffering and not _stream_guard_overflow and not _stream_guard_blocked:
-                        protected, changed, reason, action = _dfg.protect_stream_payload(
-                            api_path,
-                            bytes(_stream_guard_buffer).decode("utf-8", errors="replace"),
-                        )
-                        if action:
-                            security_action = action
-                            security_reason = reason
-                        if changed:
-                            security_changed = True
-                        guarded_chunk = protected.encode("utf-8")
-                        capture.append(guarded_chunk)
-                        usage_tracker.append(guarded_chunk)
-                        yield guarded_chunk
                 except Exception as exc:
                     stream_error = f"上游连接中断: {exc}"
                     logger.warning(f"[{key_alias}] {provider} model={model} → {stream_error}")
