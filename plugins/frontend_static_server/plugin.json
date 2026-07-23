@@ -1,0 +1,41 @@
+{
+  "name": "frontend_static_server",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "app",
+  "description": "托管 Vue、React 等前端构建产物，支持自定义访问路径和 SPA History 路由回退",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 200,
+  "hooks": {},
+  "settings": [
+    {
+      "key": "build_dir",
+      "label": "构建产物目录",
+      "type": "string",
+      "default": "",
+      "description": "Vue/React 打包后的 dist 或 build 目录。支持绝对路径和以启动目录为基准的相对路径。"
+    },
+    {
+      "key": "route_prefix",
+      "label": "访问路径",
+      "type": "string",
+      "default": "/web",
+      "description": "站点挂载路径，例如 /web 或 /console。不能使用 /、/api、/v1、/admin、/health、/debug。修改目录或路径后需要重启服务。"
+    },
+    {
+      "key": "static_dir",
+      "label": "独立静态资源目录",
+      "type": "string",
+      "default": "",
+      "description": "可选。目录中的文件会挂载到“访问路径/static”，例如 /web/static/logo.png。留空时仅使用构建产物目录内的资源。"
+    },
+    {
+      "key": "spa_fallback",
+      "label": "启用 SPA 路由回退",
+      "type": "boolean",
+      "default": true,
+      "description": "Vue Router 或 React Router 的 History 模式下，将不存在的无扩展名路径返回 index.html。"
+    }
+  ]
+}

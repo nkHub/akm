@@ -14,6 +14,7 @@ DEFAULT_PRICING_TABLE = (
     "gpt-5.4-mini=0.75/0.075/4.5\n"
     "gpt-5.4=2.5/0.25/15\n"
     "gpt-5.5=5/0.5/30\n"
+    "gpt-5.6-luna=1/0.1/6\n"
     "gpt-5.6-terra=2.5/0.25/15\n"
     "gpt-5.6-sol=5/0.5/30\n"
     "# DeepSeek\n"
@@ -23,7 +24,7 @@ DEFAULT_PRICING_TABLE = (
     "# Moonshot Kimi\n"
     "kimi-k3=3/0.3/15\n"
     "# fallback\n"
-    "*=1/0.5/3"
+    "*=0/0/0"
 )
 
 
