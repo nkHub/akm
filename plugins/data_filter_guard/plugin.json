@@ -3,7 +3,7 @@
   "version": "0.1.2",
   "has_menu": false,
   "category": "filter",
-  "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与有界流式响应高风险内容拦截",
+  "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截",
   "builtin": false,
   "default_enabled": false,
   "required": false,
@@ -67,30 +67,21 @@
       "label": "启用流式响应拦截",
       "type": "boolean",
       "default": false,
-      "description": "对流式 SSE 输出做安全扫描。默认在 stream_guard_buffer_max_bytes 内完整缓冲后扫描；超限改增量扫描。block/mask 在增量路径均会中断并返回安全载荷"
+      "description": "对流式 SSE 输出做字段级滑动窗口安全扫描（对齐换回截流：只扫 content/text/delta 等可见字段，边 yield 边扫）。窗口长度见 stream_guard_cache_chars；block/mask 命中均中断并返回安全载荷（mask 退化为 block）"
     },
     {
       "key": "stream_guard_cache_chars",
       "label": "流式扫描缓存长度",
       "type": "number",
       "default": 2048,
-      "description": "增量扫描时保留的最近字符数，用于覆盖跨 chunk 命中并减少重复扫描"
-    },
-    {
-      "key": "stream_guard_buffer_max_bytes",
-      "label": "流式安全缓冲上限",
-      "type": "number",
-      "default": 262144,
-      "min": 16384,
-      "max": 4194304,
-      "description": "开启流式响应拦截后，先完整缓冲并扫描的最大字节数；超过后改为增量扫描，避免无限占用内存"
+      "description": "流式安全扫描时每个 content 字段（及纯文本 tail）保留的最近字符数，用于跨 chunk 字段级命中；与占位符换回截流同思路，不做整段完整缓冲"
     },
     {
       "key": "response_guard_mode",
       "label": "响应防护模式",
       "type": "string",
       "default": "block",
-      "description": "可选值：block（整条拦截）/ mask（替换命中片段）/ warn（仅告警不改写）。流式增量溢出后 mask 退化为 block"
+      "description": "可选值：block（整条拦截）/ mask（替换命中片段）/ warn（仅告警不改写）。非流式 mask 替换正文；流式 mask 因已边下发边扫，统一退化为 block"
     },
     {
       "key": "response_block_patterns",

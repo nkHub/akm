@@ -41,7 +41,7 @@
 ### 安全与策略
 
 - **`data_filter_guard`**  
-  请求侧敏感字段名/关键词/正则（均用可逆 `<AKM-SEC:.../>`，已移除固定 `[REDACTED]`）；默认 `regex_rules` 已并入原代码敏感分组（LLM Key、VCS、云厂商、ChatOps、JWT/Bearer、私钥、连接串、凭据赋值）及邮箱/手机号。默认 `request_text_paths` 覆盖对话正文、system/input/instructions 与 Chat `tool_calls` 参数。响应侧非流式与有界流式安全扫描，可 mask 或 block。可逆映射进 bag `data_filter_guard.reverse_map`，流式由 `request_context` 回传，在 yield 前增量还原：SSE 字段级 content 截流（短片段以 `<` 开头/结尾才缓冲）+ 纯文本半截前缀缓冲。插件总开关仍默认关闭。
+  请求侧敏感字段名/关键词/正则（均用可逆 `<AKM-SEC:.../>`，已移除固定 `[REDACTED]`）；默认 `regex_rules` 已并入原代码敏感分组（LLM Key、VCS、云厂商、ChatOps、JWT/Bearer、私钥、连接串、凭据赋值）及邮箱/手机号。默认 `request_text_paths` 覆盖对话正文、system/input/instructions 与 Chat `tool_calls` 参数。响应侧非流式可 mask/block；流式走字段级滑动窗口（`stream_guard_cache_chars`）边下发边扫，mask 退化为 block。可逆映射进 bag `data_filter_guard.reverse_map`，流式由 `request_context` 回传，在 yield 前增量还原：SSE 字段级 content 截流（短片段以 `<` 开头/结尾才缓冲）+ 纯文本半截前缀缓冲。插件总开关仍默认关闭。
 - **`tool_policy_guard`**  
   约束 tools 声明与续接里的工具调用参数（白名单/黑名单/危险正则）。保护的是进入代理的工具协议，**不能**替代客户端本机工具沙箱。
 
