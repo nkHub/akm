@@ -40,6 +40,7 @@ def test_add_and_get_key(setup):
     assert key["priority"] == 0
     assert key["models"] == "*"
     assert key["provider_models"] == []
+    assert key["usage_query_interval_m"] == 0
 
 
 def test_add_duplicate_key_raises(setup):

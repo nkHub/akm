@@ -666,6 +666,7 @@ class PluginManager:
                 "hooks": meta.hooks,
                 "settings": [s.model_dump() for s in meta.settings],
                 "converts": meta.converts,
+                "site_path": getattr(plugin, "site_path", ""),
             })
         return result
 

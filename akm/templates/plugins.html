@@ -841,6 +841,10 @@ function renderPluginList(plugins) {
       } else if (p.has_menu) {
         convertsInfo = '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400" title="插件未启用，无法进入页面">打开</span>';
       }
+      var siteLink = '';
+      if (p.name === 'frontend_static_server' && p.enabled && p.site_path) {
+        siteLink = '<a href="' + esc(p.site_path) + '" target="_blank" rel="noopener noreferrer" class="inline-flex h-5 w-5 items-center justify-center text-gray-400 hover:text-white transition-colors" title="在新标签页打开站点" aria-label="在新标签页打开站点">&#8599;</a>';
+      }
 
       html += '<div class="bg-surface-light border border-border rounded-lg p-4 h-full">';
       html += '<div class="flex items-start justify-between gap-3 h-full">';
@@ -852,9 +856,10 @@ function renderPluginList(plugins) {
       html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
       if (p.settings && p.settings.length) {
         html += '<button type="button" onclick="openPluginConfigModal(\'' + esc(p.name) + '\')" class="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:text-indigo-200 hover:border-indigo-400 cursor-pointer">配置</button>';
-      }
-      html += convertsInfo;
-      html += '</div>';
+       }
+       html += convertsInfo;
+       html += siteLink;
+       html += '</div>';
       html += '<span id="plugin-config-msg-' + esc(p.name) + '" class="text-xs text-gray-500"></span>';
       if (p.description) {
         html += '<p class="text-xs text-gray-500 line-clamp-2">' + esc(p.description) + '</p>';

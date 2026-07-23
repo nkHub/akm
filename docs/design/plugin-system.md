@@ -31,6 +31,8 @@
 
 一个插件可以注册多个 hook，跨多个 category。`category` 字段仅用于管理界面分类展示。
 
+项目本地的 `frontend_static_server` 是不带管理台菜单的 `app` 插件。它在启用时从 `build_dir` 配置读取 Vue、React 等前端构建目录，并按 `route_prefix`（默认 `/web`）直接挂载静态站点。可选的 `static_dir` 可指定独立静态资源目录，目录内容挂载到 `<route_prefix>/static`，并优先于站点的 SPA 路由处理。为支持 Vue Router / React Router 的 History 模式，开启 `spa_fallback` 后仅当不存在的请求路径没有扩展名时回退到 `index.html`；缺失的 JS、CSS、图片等带扩展名资源仍返回 404。成功挂载且插件启用时，插件管理卡片展示一个在新标签页访问当前挂载路径的箭头；配置保存但服务尚未重启时，箭头继续指向旧的已挂载路径。挂载路径不能是根路径，也不能占用 `/api`、`/v1`、`/admin`、`/health`、`/debug` 及其子路径。路由由 FastAPI 在启用时注册，因此修改构建目录、独立静态资源目录或挂载路径必须重启服务后生效。
+
 ## 二、来源与优先级
 
 | 来源 | 路径 | 说明 |
