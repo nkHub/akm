@@ -123,8 +123,9 @@ class Plugin(PluginBase):
         while len(self._cache) > max_entries:
             self._cache.popitem(last=False)
 
-    async def on_request(self, request) -> dict | None:
-        """缓存命中则短路返回；未命中则在请求上记录 cache key 供响应写入。"""
+    async def on_request(self, ctx) -> dict | None:
+        """缓存命中则短路返回；未命中则在 bag 记录 cache key 供响应写入。"""
+        request = ctx.request
         if not isinstance(request, dict):
             return None
         cfg = self._settings()
@@ -150,27 +151,29 @@ class Plugin(PluginBase):
                     marked = json.dumps(data, ensure_ascii=False)
             except (TypeError, ValueError, json.JSONDecodeError):
                 marked = body
-            return {
-                "__akm_action__": "block",
-                "status_code": int(hit.get("status_code", 200) or 200),
-                "body": marked,
-                "error": "cache_hit",
-                "security_action": "cache_hit",
-                "security_reason": f"cache_proxy:{key[:12]}",
-            }
+            return ctx.set_block(
+                status_code=int(hit.get("status_code", 200) or 200),
+                body=marked,
+                error="cache_hit",
+                security_action="cache_hit",
+                security_reason=f"cache_proxy:{key[:12]}",
+            )
 
-        request["__akm_cache_key__"] = key
-        request["__akm_cache_eligible__"] = True
-        return request
+        # 跨阶段状态进 bag，不污染业务 request
+        ctx.bag_set("cache_proxy.cache_key", key)
+        ctx.bag_set("cache_proxy.eligible", True)
+        return None
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         """成功非流式响应写入缓存。"""
+        request = ctx.request
+        response = ctx.response
         if not isinstance(request, dict) or not isinstance(response, dict):
             return None
         cfg = self._settings()
         if not cfg["enabled"]:
             return None
-        if not request.get("__akm_cache_eligible__"):
+        if not ctx.bag_get("cache_proxy.eligible"):
             return None
         if not response.get("ok"):
             return None
@@ -186,7 +189,7 @@ class Plugin(PluginBase):
         if len(body.encode("utf-8")) > cfg["max_body_bytes"]:
             return None
 
-        key = str(request.get("__akm_cache_key__") or "")
+        key = str(ctx.bag_get("cache_proxy.cache_key") or "")
         if not key:
             return None
         self._put(

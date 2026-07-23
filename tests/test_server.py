@@ -17,7 +17,13 @@ from akm.audit import AuditLogQueue, write_log, list_logs
 from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
 from akm.health import HealthMonitor
 from akm.key_pool import get_key
+from akm.plugins.context import RequestContext
 from akm.server import app, lifespan, _build_runtime_debug_payload, _default_image_generation_model, _image_supported_models_from_config
+
+
+def _ctx(request: dict | None = None, **kwargs) -> RequestContext:
+    """构造单次请求级上下文（测试辅助；直接持有 request 引用，不 clone）。"""
+    return RequestContext(request if isinstance(request, dict) else {}, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -52,7 +58,7 @@ async def test_markdown_kb_on_request_injects_hits_for_chat_request(monkeypatch)
             {"role": "user", "content": "请根据知识库回答"}
         ],
     }
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is not None
     assert out["model"] == "gpt-4o-mini"
     assert out["messages"][0]["role"] == "system"
@@ -81,7 +87,7 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
             {"role": "user", "content": "请根据知识库回答"}
         ],
     }
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is request
     assert out["model"] == "gpt-4o-mini"
     assert out["messages"][0]["role"] == "user"
@@ -113,7 +119,7 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
         "input": "给我答案",
         "instructions": "你是一个助手。",
     }
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is not None
     assert out["model"] == "gpt-4.1"
     assert "Knowledge base content" in out["instructions"]
@@ -150,7 +156,7 @@ async def test_markdown_kb_on_request_handles_messages_system_injection(monkeypa
             {"role": "user", "content": "请结合知识库回答"}
         ],
     }
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is not None
     assert out["model"] == "claude-sonnet-4"
     assert "Knowledge base content" in out["system"]
@@ -452,7 +458,7 @@ async def test_markdown_kb_on_request_injects_realistic_project_context(monkeypa
         ],
     }
 
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is not None
     assert out["messages"][0]["role"] == "system"
     assert "workspace_root: /Users/nk/Desktop/ccs" in out["messages"][0]["content"]
@@ -502,7 +508,7 @@ async def test_markdown_kb_on_request_with_workspace_uses_public_and_current_wor
         ],
     }
 
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is not None
     assert out["messages"][0]["role"] == "system"
     assert "public.md" in out["messages"][0]["content"]
@@ -546,7 +552,7 @@ async def test_markdown_kb_on_request_without_workspace_only_uses_unbound_docume
         ],
     }
 
-    out = await plugin.on_request(request)
+    out = await plugin.on_request(_ctx(request))
     assert out is not None
     assert out["messages"][0]["role"] == "system"
     assert "public.md" in out["messages"][0]["content"]
@@ -602,8 +608,9 @@ async def test_markdown_kb_runs_after_model_matcher_for_plain_aliases(monkeypatc
         "model": "default-chat",
         "messages": [{"role": "user", "content": "根据知识库回答"}],
     }
+    # run_hook 现返回 RequestContext；request 字段在 ctx.request
     out = await pm.run_hook("on_request", request=body)
-    request_out = out["request"]
+    request_out = out.request
     assert request_out["model"] == "gpt-4o-mini"
     assert request_out["messages"][0]["role"] == "system"
     assert "Injected docs" in request_out["messages"][0]["content"]
@@ -1150,10 +1157,17 @@ async def test_streaming_response_emits_on_response_only_after_stream_finishes(m
             self.events = []
             self.plugins = {}
 
-        async def run_hook(self, hook, **kwargs):
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            # server 流式结束走 on_response(ctx=stream_ctx, response=meta)
             if hook == "on_response":
-                self.events.append(kwargs)
-            return kwargs
+                response = kwargs.get("response")
+                if response is None and ctx is not None:
+                    response = getattr(ctx, "response", None)
+                self.events.append({"response": response, "ctx": ctx})
+                if ctx is not None and isinstance(response, dict):
+                    ctx.response = response
+                    return ctx
+            return ctx if ctx is not None else kwargs
 
     pm = DummyPM()
     app.state.plugin_manager = pm
@@ -1193,6 +1207,103 @@ async def test_streaming_response_emits_on_response_only_after_stream_finishes(m
     assert meta["ok"] is True
     assert meta["stream"] is True
     assert meta["key_alias"] == "stream-key"
+
+
+@pytest.mark.asyncio
+async def test_stream_restores_placeholder_from_local_request_reverse_map(monkeypatch):
+    """流式还原必须使用 proxy 回传的 request_context.bag，不能读入口原始 body。
+
+    回归：on_request 脱敏后 reverse_map 写入 bag；proxy 回传 request_context。
+    若 server 仍只读入口 body，OpenCode 等流式客户端会看到未还原占位符。
+    同时保留 local_request + 遗留 __akm_reverse_map__ 的兼容路径。
+    """
+    from plugins.data_filter_guard.index import Plugin as DataFilterGuard
+
+    placeholder = "<AKM-SEC:phone@1:deadbe/>"
+    original = "15012341234"
+    reverse_map = {placeholder: original}
+
+    class DummyResp:
+        async def aiter_bytes(self):
+            # 模拟模型回显占位符（与真实脱敏后上游回传一致）
+            payload = json.dumps(
+                {"choices": [{"delta": {"content": f"手机号是{placeholder}"}}]},
+                ensure_ascii=False,
+            )
+            yield f"data: {payload}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            return None
+
+    plugin = DataFilterGuard()
+    plugin.enabled = True
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+
+    class DummyPM:
+        def __init__(self):
+            self.plugins = {"data_filter_guard": plugin}
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if ctx is not None and "response" in kwargs and isinstance(kwargs.get("response"), dict):
+                ctx.response = kwargs["response"]
+            return ctx if ctx is not None else kwargs
+
+    app.state.plugin_manager = DummyPM()
+
+    async def mock_forward(
+        body,
+        client,
+        log_callback=None,
+        api_path="chat/completions",
+        plugin_manager=None,
+        request_timeout=None,
+        original_user_agent="",
+    ):
+        # 入口 body 故意不含 reverse map；map 只挂在 request_context.bag
+        assert "__akm_reverse_map__" not in body
+        stream_ctx = RequestContext(dict(body), api_path=api_path)
+        stream_ctx.bag_set("data_filter_guard.reverse_map", reverse_map)
+        return {
+            "stream": True,
+            "status_code": 200,
+            "response": DummyResp(),
+            "adapter": None,
+            "request_context": stream_ctx,
+            "local_request": stream_ctx.request,  # 兼容字段，不含 reverse_map
+            "key_alias": "stream-key",
+            "provider": "openai",
+            "model": "gpt-4",
+        }
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server.write_log_async", AsyncMock())
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {"log_request_body": False, "log_response_body": False, "stream_capture_max_bytes": 262144},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-4",
+                "messages": [{"role": "user", "content": "手机号"}],
+                "stream": True,
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            chunks = []
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+
+    joined = "".join(chunks)
+    assert original in joined
+    assert placeholder not in joined
+    assert "AKM-SEC" not in joined
 
 
 @pytest.mark.asyncio

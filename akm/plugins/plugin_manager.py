@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .models import PluginMeta
 from .base import PluginBase
+from .context import RequestContext
 
 logger = logging.getLogger("akm.plugin_manager")
 
@@ -314,56 +315,125 @@ class PluginManager:
 
     # ── Hook 管道执行 ──
 
-    async def run_hook(self, hook: str, **kwargs):
-        """管道执行 hook：按 priority 从小到大，前一个返回值传给下一个
+    async def run_hook(self, hook: str, ctx: RequestContext | None = None, **kwargs):
+        """管道执行 hook：按 priority 从小到大，共享同一 RequestContext。
 
         Args:
             hook: hook 名称（on_request / on_key_selected / on_upstream_error / on_response）
-            **kwargs: 传递给 hook 的关键字参数
+            ctx: 请求级上下文；proxy/server 应始终传入同一实例。
+                 若缺省则从 kwargs 中的 request 等字段临时构造（兼容旧测试）。
+            **kwargs: 额外参数：
+                - on_upstream_error: status_code / error_type / attempt / key
+                - on_key_selected: model / key（写入 ctx）
+                - on_response: response（写入 ctx.response）
 
         Returns:
-            管道末端的状态（对 on_upstream_error 返回第一个非 None 的 action）
+            - on_upstream_error: 第一个非 None 的动作字符串
+            - 其它 hook: 始终返回同一个 RequestContext
         """
-        # 筛选注册了该 hook 的已启用插件
+        # 兼容：旧调用方只传 request=... 时补齐 RequestContext
+        if ctx is None:
+            request = kwargs.get("request")
+            if not isinstance(request, dict):
+                request = {}
+            ctx = RequestContext(
+                request,
+                api_path=str(kwargs.get("api_path", "") or request.get("__akm_api_path__", "") or ""),
+                client_user_agent=str(
+                    kwargs.get("client_user_agent", "")
+                    or request.get("__akm_client_user_agent__", "")
+                    or ""
+                ),
+            )
+        if "response" in kwargs and isinstance(kwargs.get("response"), dict):
+            ctx.response = kwargs["response"]
+        if "key" in kwargs and isinstance(kwargs.get("key"), dict):
+            ctx.key = kwargs["key"]
+        if "model" in kwargs and kwargs.get("model") is not None:
+            ctx.model = str(kwargs.get("model") or ctx.model)
+
         candidates = [
             p for p in self.plugins.values()
             if p.enabled and p.meta.hooks.get(hook)
         ]
-        # 按 priority 升序
         candidates.sort(key=lambda p: p.meta.priority)
 
-        current = kwargs
-        action = None  # 仅 on_upstream_error 使用
+        upstream_action = None  # 仅 on_upstream_error 使用
 
         for plugin in candidates:
             try:
-                ret = await getattr(plugin, hook)(**current)
-
                 if hook == "on_upstream_error":
-                    # on_upstream_error: 第一个非 None 即为最终决策
-                    if ret is not None and action is None:
-                        action = ret
-                elif hook == "on_key_selected" and ret is not None:
-                    # on_key_selected 默认返回替代 key。配额等策略插件还可
-                    # 返回 skip_key，让 proxy 排除当前 key 后继续选择下一个。
-                    # 立即停止该 Hook 管道，避免后续插件把已跳过的 key 计入
-                    # in-flight 等运行时状态。
-                    if isinstance(ret, dict) and ret.get("__akm_action__") == "skip_key":
-                        current["on_key_selected_skip"] = ret
+                    ret = await plugin.on_upstream_error(
+                        ctx,
+                        status_code=int(kwargs.get("status_code", 0) or 0),
+                        error_type=str(kwargs.get("error_type", "http") or "http"),
+                        attempt=int(kwargs.get("attempt", 0) or 0),
+                        key=kwargs.get("key") if kwargs.get("key") is not None else ctx.key,
+                    )
+                    # 第一个非 None 即为最终决策
+                    if ret is not None and upstream_action is None:
+                        upstream_action = ret
+                    continue
+
+                if hook == "on_key_selected":
+                    # 每轮选 Key 前清除上一轮 skip 标记
+                    if ctx.is_skip_key:
+                        ctx.clear_action()
+                    ret = await plugin.on_key_selected(ctx)
+                    if ctx.is_skip_key:
+                        # 立即停止管道，避免后续插件把已跳过的 key 计入 in-flight
                         break
-                    current["key"] = ret
-                elif hook == "on_request" and ret is not None:
-                    # on_request: 默认返回新的 request；
-                    # 对少数需要“在转发前直接阻断请求”的插件，允许显式返回控制结构。
-                    if isinstance(ret, dict) and ret.get("__akm_action__") == "block":
-                        current["on_request_block"] = ret
-                    else:
-                        current["request"] = ret
-                elif hook == "on_response" and ret is not None:
-                    # on_response: 允许插件在结构化元信息基础上补充/改写响应数据。
-                    # 这样像“数据安全插件”这类能力可以在不侵入 proxy 主流程的前提下，
-                    # 对非流式正文做拦截或替换。
-                    current["response"] = ret
+                    # 兼容：插件仍可通过返回 dict 替换 key；
+                    # 或返回带 type/__akm_action__ 的 skip 结构。
+                    if isinstance(ret, dict):
+                        if ret.get("type") == "skip_key" or ret.get("__akm_action__") == "skip_key":
+                            if not ctx.is_skip_key:
+                                ctx.set_skip_key(
+                                    error=str(ret.get("error", "") or ""),
+                                    security_action=str(ret.get("security_action", "quota") or "quota"),
+                                )
+                            break
+                        # 返回值视为替代 key
+                        ctx.key = ret
+                    continue
+
+                if hook == "on_request":
+                    ret = await plugin.on_request(ctx)
+                    # 插件可直接 ctx.set_block；也可返回控制结构（兼容旧写法）
+                    if isinstance(ret, dict) and (
+                        ret.get("type") == "block" or ret.get("__akm_action__") == "block"
+                    ):
+                        if not ctx.is_block:
+                            ctx.set_block(
+                                status_code=int(ret.get("status_code", 400) or 400),
+                                error=str(ret.get("error", "") or ""),
+                                body=ret.get("body"),
+                                security_action=str(ret.get("security_action", "block") or "block"),
+                                security_reason=str(ret.get("security_reason", "") or ""),
+                            )
+                        break
+                    # 返回新 request dict 时替换引用（in-place 改写则 ret 为 None 或原对象）
+                    if isinstance(ret, dict) and ret is not ctx.request:
+                        # 排除误把 block 结构当 request 的情况已在上面处理
+                        if "type" not in ret and "__akm_action__" not in ret:
+                            ctx.set_request(ret)
+                    elif ret is None:
+                        # in-place 改写后同步 model
+                        ctx.sync_model_from_request()
+                    continue
+
+                if hook == "on_response":
+                    ret = await plugin.on_response(ctx)
+                    if isinstance(ret, dict):
+                        ctx.response = ret
+                    continue
+
+                # 未知 hook：尽力以 ctx 调用
+                ret = await getattr(plugin, hook)(ctx)
+                if ret is not None:
+                    logger.debug(
+                        f"[PluginManager] {plugin.name}.{hook} 返回了非标准值: {type(ret)}"
+                    )
 
             except Exception as e:
                 logger.error(
@@ -372,8 +442,8 @@ class PluginManager:
                 continue
 
         if hook == "on_upstream_error":
-            return action
-        return current
+            return upstream_action
+        return ctx
 
     # ── 转换器查询 ──
 

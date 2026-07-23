@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from unittest.mock import AsyncMock, MagicMock
 
+from akm.plugins.context import RequestContext
 from akm.plugins.plugin_manager import PluginManager
 from akm.proxy import forward_request
 from plugins.data_filter_guard.index import Plugin as DataFilterGuard
@@ -21,6 +22,11 @@ from plugins.prompt_profiles.index import Plugin as PromptProfiles
 from plugins.tool_policy_guard.index import Plugin as ToolPolicyGuard
 from plugins.response_schema_guard.index import Plugin as ResponseSchemaGuard
 from plugins.provider_health_probe.index import Plugin as ProviderHealthProbe
+
+
+def _ctx(request: dict | None = None, **kwargs) -> RequestContext:
+    """构造单次请求级上下文（直接持有 request 引用，不 clone）。"""
+    return RequestContext(request if isinstance(request, dict) else {}, **kwargs)
 
 
 class FakeResponse:
@@ -167,12 +173,12 @@ async def test_data_filter_private_reverse_map_is_not_forwarded_upstream(monkeyp
         def get_converter(self, *_args):
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_request":
-                changed = dict(kwargs["request"])
-                changed["__akm_reverse_map__"] = {"<AKM-SEC:x@1/>": "secret"}
-                return {"request": changed}
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            # reverse_map 走请求级 bag，不得写入 request 以免误发上游
+            if hook == "on_request" and ctx is not None:
+                ctx.bag_set("data_filter_guard.reverse_map", {"<AKM-SEC:x@1/>": "secret"})
+                return ctx
+            return ctx if ctx is not None else kwargs
 
     result = await forward_request(
         {"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
@@ -182,6 +188,8 @@ async def test_data_filter_private_reverse_map_is_not_forwarded_upstream(monkeyp
 
     assert result["status_code"] == 200
     assert "__akm_reverse_map__" not in sent_bodies[0]
+    # bag 中的 reverse_map 也不应出现在上游 JSON
+    assert "data_filter_guard.reverse_map" not in json.dumps(sent_bodies[0])
 
 
 @pytest.mark.asyncio
@@ -197,9 +205,15 @@ async def test_usage_quota_guard_skips_key_after_request_or_token_limit():
     await plugin.on_load()
     key = {"alias": "quota-key"}
 
-    assert await plugin.on_key_selected("gpt-4", key, {}) is None
-    skipped = await plugin.on_key_selected("gpt-4", key, {})
-    assert skipped["__akm_action__"] == "skip_key"
+    ctx1 = _ctx({"model": "gpt-4"})
+    ctx1.key = key
+    ctx1.model = "gpt-4"
+    assert await plugin.on_key_selected(ctx1) is None
+    ctx2 = _ctx({"model": "gpt-4"})
+    ctx2.key = key
+    ctx2.model = "gpt-4"
+    skipped = await plugin.on_key_selected(ctx2)
+    assert skipped["type"] == "skip_key"
     assert "请求数" in skipped["error"]
 
     token_plugin = UsageQuotaGuard()
@@ -209,18 +223,23 @@ async def test_usage_quota_guard_skips_key_after_request_or_token_limit():
         "max_tokens_per_key": 5,
     }
     await token_plugin.on_load()
-    assert await token_plugin.on_key_selected("gpt-4", key, {}) is None
-    await token_plugin.on_response(
-        {},
-        {
-            "ok": True,
-            "key_alias": "quota-key",
-            "model": "gpt-4",
-            "response_body": '{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}',
-        },
-    )
-    skipped = await token_plugin.on_key_selected("gpt-4", key, {})
-    assert skipped["__akm_action__"] == "skip_key"
+    ctx3 = _ctx({"model": "gpt-4"})
+    ctx3.key = key
+    ctx3.model = "gpt-4"
+    assert await token_plugin.on_key_selected(ctx3) is None
+    ctx_resp = _ctx({"model": "gpt-4"})
+    ctx_resp.response = {
+        "ok": True,
+        "key_alias": "quota-key",
+        "model": "gpt-4",
+        "response_body": '{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}',
+    }
+    await token_plugin.on_response(ctx_resp)
+    ctx4 = _ctx({"model": "gpt-4"})
+    ctx4.key = key
+    ctx4.model = "gpt-4"
+    skipped = await token_plugin.on_key_selected(ctx4)
+    assert skipped["type"] == "skip_key"
     assert "Token" in skipped["error"]
 
 
@@ -263,10 +282,16 @@ async def test_fallback_router_changes_model_and_proxy_reselects_key(monkeypatch
         def get_converter(self, *_args):
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_upstream_error":
-                return await router.on_upstream_error(**kwargs)
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_upstream_error" and ctx is not None:
+                return await router.on_upstream_error(
+                    ctx,
+                    status_code=int(kwargs.get("status_code", 0) or 0),
+                    error_type=str(kwargs.get("error_type", "http") or "http"),
+                    attempt=int(kwargs.get("attempt", 0) or 0),
+                    key=kwargs.get("key"),
+                )
+            return ctx if ctx is not None else kwargs
 
     result = await forward_request(
         {"model": "gpt-primary", "messages": [{"role": "user", "content": "hello"}]},
@@ -277,6 +302,7 @@ async def test_fallback_router_changes_model_and_proxy_reselects_key(monkeypatch
     assert result["status_code"] == 200
     assert picked_models == ["gpt-primary", "gpt-fallback"]
     assert sent_bodies[1]["model"] == "gpt-fallback"
+    # fallback 历史只在 bag，不得出现在上游请求体
     assert "__akm_fallback_history__" not in sent_bodies[1]
 
 
@@ -323,7 +349,9 @@ async def test_data_filter_default_response_patterns_match_without_trailing_comm
     plugin._reload_config()
 
     body = json.dumps({"choices": [{"message": {"content": "please run rm -rf / now"}}]})
-    resp = await plugin.on_response({}, {"stream": False, "api_path": "chat/completions", "response_body": body})
+    ctx = _ctx({})
+    ctx.response = {"stream": False, "api_path": "chat/completions", "response_body": body}
+    resp = await plugin.on_response(ctx)
     assert resp["security_action"] == "block"
     assert "数据安全插件拦截" in resp["response_body"]
 
@@ -356,14 +384,63 @@ async def test_data_filter_masks_anthropic_content_blocks_and_system():
             }
         ],
     }
-    out = await plugin.on_request(request)
+    ctx = _ctx(request)
+    out = await plugin.on_request(ctx)
     assert out is not None
     assert "SECRET_TOKEN" not in out["system"]
     text = out["messages"][0]["content"][0]["text"]
     assert secret_key not in text
     assert "SECRET_TOKEN" not in text
     assert "<AKM-SEC:" in text
-    assert out["__akm_reverse_map__"]
+    assert ctx.bag_get("data_filter_guard.reverse_map")
+    assert "__akm_reverse_map__" not in out
+
+
+@pytest.mark.asyncio
+async def test_data_filter_code_secret_paths_cover_tool_call_arguments():
+    """代码敏感默认应扫描 tool_calls 参数，且不依赖 request_text_paths。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    secret_key = "sk-proj-" + ("B" * 48)
+    plugin.config = {
+        "enabled": True,
+        # 关键词路径故意不含 tool_calls，验证 code_secret_paths 独立生效
+        "request_text_paths": "messages[].content",
+        "keyword_rules": "SHOULD_NOT_TOUCH",
+        "enable_code_secret_guard": True,
+        "code_secret_guard_mode": "mask",
+        "code_secret_paths": "messages[].tool_calls[].function.arguments",
+        "code_secret_rule_groups": "llm_keys",
+    }
+    await plugin.on_load()
+
+    request = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "SHOULD_NOT_TOUCH stays if outside keyword path only",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "run",
+                            "arguments": json.dumps({"token": secret_key, "note": "SHOULD_NOT_TOUCH"}),
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    ctx = _ctx(request)
+    out = await plugin.on_request(ctx)
+    assert out is not None
+    args = out["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert secret_key not in args
+    assert "SHOULD_NOT_TOUCH" in args  # 关键词路径未覆盖 tool_calls，不应被替换
+    assert "<AKM-SEC:" in args
+    assert ctx.bag_get("data_filter_guard.reverse_map")
+    assert "__akm_reverse_map__" not in out
 
 
 @pytest.mark.asyncio
@@ -388,7 +465,9 @@ async def test_data_filter_blocks_anthropic_nonstream_response():
             "model": "claude",
         }
     )
-    resp = await plugin.on_response({}, {"stream": False, "api_path": "messages", "response_body": body})
+    ctx = _ctx({})
+    ctx.response = {"stream": False, "api_path": "messages", "response_body": body}
+    resp = await plugin.on_response(ctx)
     assert resp["security_action"] == "block"
     assert "msg_akm_security" in resp["response_body"] or "数据安全插件拦截" in resp["response_body"]
 
@@ -417,6 +496,65 @@ async def test_data_filter_placeholder_collision_and_stream_restore():
     out2 = plugin.reverse_stream_chunk(f"{tail} after", state, reverse_map=rmap)
     assert "ALPHA" in (out1 + out2)
     assert "<AKM-SEC:" not in (out1 + out2)
+
+
+@pytest.mark.asyncio
+async def test_data_filter_reverse_handles_json_escape_and_chinese_tag():
+    """JSON 转义斜杠与中文标签占位符应能在响应侧完整还原。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.config = {
+        "enabled": True,
+        "regex_rules": r"(?<!\d)(1[3-9]\d{9})(?!\d)#@手机号",
+        "request_text_paths": "messages[].content",
+    }
+    await plugin.on_load()
+
+    phone = "13012341234"
+    ctx = _ctx({
+        "messages": [{"role": "user", "content": f"我的手机号是：{phone}"}],
+    })
+    out = await plugin.on_request(ctx)
+    assert out is not None
+    content = out["messages"][0]["content"]
+    assert phone not in content
+    assert "<AKM-SEC:" in content
+    # 中文标签不得塌缩成无辨识度的全下划线
+    assert "<AKM-SEC:___@" not in content
+    rmap = ctx.bag_get("data_filter_guard.reverse_map")
+    assert isinstance(rmap, dict) and rmap
+    assert "__akm_reverse_map__" not in out
+    placeholder = next(iter(rmap))
+    assert rmap[placeholder] == phone
+
+    # JSON 常见转义：/ → \/
+    escaped = placeholder.replace("/", r"\/")
+    restored, changed = plugin._reverse_replace(
+        f"你之前发的手机号是 {escaped}",
+        reverse_map=rmap,
+    )
+    assert changed is True
+    assert phone in restored
+    assert "AKM-SEC" not in restored
+
+    # 模型轻微改写 tag，仅保留指纹时仍应能还原
+    import re as _re
+    m = _re.search(r":([0-9a-fA-F]{6})/>", placeholder)
+    assert m is not None
+    loose = f"<AKM-SEC:rewritten@9:{m.group(1)}/>"
+    restored2, changed2 = plugin._reverse_replace(f"号码={loose}", reverse_map=rmap)
+    assert changed2 is True
+    assert phone in restored2
+
+    # 流式：JSON 转义闭合跨 chunk
+    state = plugin.reverse_stream_state()
+    mid = placeholder.replace("/>", r"\/")
+    # mid 形如 <AKM-SEC:...\/  再补 >
+    head, tail = mid, ">"
+    out1 = plugin.reverse_stream_chunk(f"手机号是{head}", state, reverse_map=rmap)
+    out2 = plugin.reverse_stream_chunk(tail, state, reverse_map=rmap)
+    assert phone in (out1 + out2)
+    assert "AKM-SEC" not in (out1 + out2)
 
 
 @pytest.mark.asyncio
@@ -454,9 +592,11 @@ async def test_data_filter_redact_only_does_not_attach_empty_reverse_map():
         "request_text_paths": "messages[].content",
     }
     await plugin.on_load()
-    out = await plugin.on_request({"password": "secret", "messages": [{"content": "hi"}]})
+    ctx = _ctx({"password": "secret", "messages": [{"content": "hi"}]})
+    out = await plugin.on_request(ctx)
     assert out["password"] == "[REDACTED]"
     assert "__akm_reverse_map__" not in out
+    assert not ctx.bag_get("data_filter_guard.reverse_map")
 
 
 @pytest.mark.asyncio
@@ -488,8 +628,10 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
         "api_path": "responses",
         "error": "upstream unavailable",
     }
-    await plugin.on_response({}, event)
-    await plugin.on_response({}, event)
+    ctx_fail = _ctx({})
+    ctx_fail.response = event
+    await plugin.on_response(ctx_fail)
+    await plugin.on_response(ctx_fail)
     await asyncio.sleep(0)
 
     assert len(sent) == 1
@@ -500,7 +642,9 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
     plugin.app = SimpleNamespace(
         state=SimpleNamespace(health_monitor=SimpleNamespace(audit_queue_dropped=2))
     )
-    await plugin.on_response({}, {"ok": True, "model": "gpt-5", "key_alias": "primary"})
+    ctx_ok = _ctx({})
+    ctx_ok.response = {"ok": True, "model": "gpt-5", "key_alias": "primary"}
+    await plugin.on_response(ctx_ok)
     await asyncio.sleep(0)
     assert sent[1][1]["event"] == "audit_drop"
     assert sent[1][1]["details"]["audit_queue_dropped"] == 2
@@ -508,7 +652,7 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prompt_profiles_match_protocol_model_and_client_without_leaking_context():
-    """配置集应按条件叠加注入，并保持内部匹配上下文只在本地请求对象中存在。"""
+    """配置集应按条件叠加注入；api_path/client 走 RequestContext，不污染 request。"""
     plugin = PromptProfiles()
     plugin.logger = logging.getLogger("test.prompt_profiles")
     plugin.config = {
@@ -538,17 +682,17 @@ async def test_prompt_profiles_match_protocol_model_and_client_without_leaking_c
     request = {
         "model": "gpt-5",
         "instructions": "Existing instruction.",
-        "__akm_api_path__": "responses",
-        "__akm_client_user_agent__": "Codex CLI/1.0",
     }
+    ctx = _ctx(request, api_path="responses", client_user_agent="Codex CLI/1.0")
 
-    changed = await plugin.on_request(request)
+    changed = await plugin.on_request(ctx)
 
     assert changed is request
     assert request["instructions"] == (
         "Always answer in Chinese.\n\nExisting instruction.\n\nReturn a focused diff."
     )
-    assert request["__akm_api_path__"] == "responses"
+    assert "__akm_api_path__" not in request
+    assert ctx.api_path == "responses"
 
 
 @pytest.mark.asyncio
@@ -566,10 +710,10 @@ async def test_prompt_profiles_uses_anthropic_system_instead_of_system_message()
     request = {
         "model": "claude-3",
         "messages": [{"role": "user", "content": "hello"}],
-        "__akm_api_path__": "messages",
     }
+    ctx = _ctx(request, api_path="messages")
 
-    await plugin.on_request(request)
+    await plugin.on_request(ctx)
 
     assert request["system"] == "Be concise."
     assert request["messages"] == [{"role": "user", "content": "hello"}]
@@ -602,11 +746,11 @@ async def test_proxy_passes_prompt_profile_context_and_strips_it_before_upstream
         def get_converter(self, *_args):
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_request":
-                changed = await profile.on_request(kwargs["request"])
-                return {"request": changed or kwargs["request"]}
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                await profile.on_request(ctx)
+                return ctx
+            return ctx if ctx is not None else kwargs
 
     result = await forward_request(
         {"model": "gpt-5", "messages": [{"role": "user", "content": "hello"}]},
@@ -631,17 +775,17 @@ async def test_tool_policy_guard_blocks_denied_tool_and_dangerous_continuation()
         "deny_tool_names": "bash",
         "deny_argument_patterns": "(?i)rm\\s+-rf\\s+/",
     }
-    blocked_name = await plugin.on_request({
+    blocked_name = await plugin.on_request(_ctx({
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
-    })
-    assert blocked_name["__akm_action__"] == "block"
+    }))
+    assert blocked_name["type"] == "block"
     assert "黑名单" in blocked_name["security_reason"]
 
     plugin.config["deny_tool_names"] = ""
-    blocked_args = await plugin.on_request({
+    blocked_args = await plugin.on_request(_ctx({
         "messages": [{"role": "assistant", "tool_calls": [{"function": {"name": "run", "arguments": "rm -rf /"}}]}],
-    })
-    assert blocked_args["__akm_action__"] == "block"
+    }))
+    assert blocked_args["type"] == "block"
     assert "参数命中" in blocked_args["security_reason"]
 
 
@@ -668,8 +812,10 @@ async def test_response_schema_guard_blocks_invalid_declared_json_schema():
         "api_path": "chat/completions",
         "response_body": '{"choices":[{"message":{"content":"{\\"answer\\": 42}"}}]}',
     }
+    ctx = _ctx(request)
+    ctx.response = response
 
-    guarded = await plugin.on_response(request, response)
+    guarded = await plugin.on_response(ctx)
 
     assert guarded["security_action"] == "schema_block"
     assert "$.answer 应为 string" == guarded["security_reason"]

@@ -167,7 +167,7 @@ class Plugin(PluginBase):
         if self._aliases:
             self.logger.info(f"[model_matcher] 加载别名表: {self._aliases}")
 
-    async def on_request(self, request) -> dict | None:
+    async def on_request(self, ctx) -> dict | None:
         """请求预处理：模型别名映射
 
         将请求 body 中的 model 字段按 aliases 配置替换。
@@ -176,6 +176,10 @@ class Plugin(PluginBase):
         """
         # 重新解析别名（热更新，无需重启）
         self._parse_aliases()
+
+        request = ctx.request
+        if not isinstance(request, dict):
+            return None
 
         changed = False
 
@@ -207,7 +211,10 @@ class Plugin(PluginBase):
                 changed = True
                 self.logger.info("[model_matcher] 自动设置 tool_choice=required (gpt/codex + tools)")
 
-        return request if changed else None
+        if changed:
+            ctx.sync_model_from_request()
+            return request
+        return None
 
     def _is_tool_task_intent(self, request: dict) -> bool:
         """判断请求是否属于“明确需要工具执行”的任务意图。
@@ -262,7 +269,7 @@ class Plugin(PluginBase):
         )
         return any(k in text for k in tool_intent_keywords)
 
-    async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
+    async def on_key_selected(self, ctx) -> dict | None:
         """Key 选择后回调：可在此实现自定义路由策略
 
         默认行为：返回 None（不修改选中的 key）
@@ -274,6 +281,8 @@ class Plugin(PluginBase):
         max_inflight = int(cfg.get("max_inflight_per_key", 3))
         slow_threshold_sec = float(cfg.get("slow_inflight_threshold_sec", 8))
 
+        key = ctx.key if isinstance(ctx.key, dict) else {}
+        model = str(ctx.model or "")
         current_alias = str(key.get("alias", ""))
         now = time.time()
         current_count = int(self._inflight_counts.get(current_alias, 0))
@@ -325,8 +334,9 @@ class Plugin(PluginBase):
 
         return key
 
-    async def on_response(self, request, response) -> None:
+    async def on_response(self, ctx) -> None:
         """请求完成生命周期回调：回收 in-flight 计数，避免并发统计累积失真。"""
+        response = ctx.response
         if not isinstance(response, dict):
             return
         alias = str(response.get("key_alias", "") or "")

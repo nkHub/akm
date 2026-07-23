@@ -310,20 +310,18 @@ async def test_forward_request_can_be_blocked_by_on_request_plugin(monkeypatch):
     }))
 
     class DummyPM:
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_request":
-                return {
-                    "request": kwargs["request"],
-                    "on_request_block": {
-                        "__akm_action__": "block",
-                        "status_code": 400,
-                        "error": "blocked by guard",
-                        "security_action": "block",
-                        "security_reason": "request_code_secret:messages[0].content",
-                        "body": '{"error":"blocked by guard"}',
-                    },
-                }
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                # 阻断走 ctx.set_block，不再返回 on_request_block/__akm_action__
+                ctx.set_block(
+                    status_code=400,
+                    error="blocked by guard",
+                    security_action="block",
+                    security_reason="request_code_secret:messages[0].content",
+                    body='{"error":"blocked by guard"}',
+                )
+                return ctx
+            return ctx if ctx is not None else kwargs
 
     result = await forward_request(
         body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
@@ -347,12 +345,13 @@ async def test_forward_request_uses_redacted_payload_returned_by_on_request_plug
         def get_converter(self, from_fmt, to_fmt):
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_request":
-                req = dict(kwargs["request"])
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                req = dict(ctx.request)
                 req["messages"] = [{"role": "user", "content": "token=[GITHUB-TOKEN]"}]
-                return {"request": req}
-            return kwargs
+                ctx.set_request(req)
+                return ctx
+            return ctx if ctx is not None else kwargs
 
     mock_client = AsyncMock()
     send_calls = _make_send_mock(
@@ -406,8 +405,8 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
                 return DummyChatToMsg()
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
         "alias": "k1",
@@ -484,8 +483,8 @@ async def test_forward_chained_adapter_receives_provider_context(monkeypatch):
                 return self.second
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
         "alias": "k1",
@@ -540,8 +539,8 @@ async def test_forward_messages_converter_receives_provider_context(monkeypatch)
                 return self.adapter
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
         "alias": "k1",
@@ -627,8 +626,8 @@ async def test_forward_rerank_request_does_not_inject_stream_or_conversion(monke
         def get_converter(self, from_fmt, to_fmt):
             raise AssertionError("rerank 不应尝试获取协议转换器")
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     mock_client = AsyncMock()
     send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"results":[{"index":0,"relevance_score":0.8}],"model":"rerank-v1"}')])
@@ -659,8 +658,8 @@ async def test_forward_image_generations_request_does_not_inject_stream_or_conve
         def get_converter(self, from_fmt, to_fmt):
             raise AssertionError("images/generations 不应尝试获取协议转换器")
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     mock_client = AsyncMock()
     send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
@@ -716,8 +715,8 @@ async def test_forward_image_generations_request_honors_custom_request_timeout(m
         def get_converter(self, from_fmt, to_fmt):
             raise AssertionError("images/generations 不应尝试获取协议转换器")
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     mock_client = AsyncMock()
     send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
@@ -747,8 +746,8 @@ async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatc
         def get_converter(self, from_fmt, to_fmt):
             raise AssertionError("images/edits 不应尝试获取协议转换器")
 
-        async def run_hook(self, hook, **kwargs):
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
 
     mock_client = AsyncMock()
     send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
@@ -805,10 +804,14 @@ async def test_forward_emits_on_response_meta_for_failure_and_success(monkeypatc
         def get_converter(self, from_fmt, to_fmt):
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_response":
-                self.events.append(kwargs)
-            return kwargs
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            # 对齐 PluginManager：先把 kwargs["response"] 写入 ctx
+            if ctx is not None and "response" in kwargs and isinstance(kwargs.get("response"), dict):
+                ctx.response = kwargs["response"]
+            if hook == "on_response" and ctx is not None:
+                self.events.append({"response": ctx.response, "request": ctx.request})
+                return ctx
+            return ctx if ctx is not None else kwargs
 
     pm = DummyPM()
 
@@ -856,12 +859,16 @@ async def test_forward_allows_on_response_to_rewrite_non_stream_body(monkeypatch
         def get_converter(self, from_fmt, to_fmt):
             return None
 
-        async def run_hook(self, hook, **kwargs):
-            if hook == "on_response" and kwargs["response"].get("ok"):
-                resp = dict(kwargs["response"])
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            # 对齐 PluginManager：先把 kwargs["response"] 写入 ctx
+            if ctx is not None and "response" in kwargs and isinstance(kwargs.get("response"), dict):
+                ctx.response = kwargs["response"]
+            if hook == "on_response" and ctx is not None and isinstance(ctx.response, dict) and ctx.response.get("ok"):
+                resp = dict(ctx.response)
                 resp["response_body"] = '{"choices":[{"message":{"content":"blocked"}}]}'
-                return {"request": kwargs["request"], "response": resp}
-            return kwargs
+                ctx.response = resp
+                return ctx
+            return ctx if ctx is not None else kwargs
 
     mock_client = AsyncMock()
     _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')])
@@ -892,10 +899,10 @@ async def test_forward_streaming_does_not_emit_on_response_before_stream_end(mon
         def get_converter(self, from_fmt, to_fmt):
             return None
 
-        async def run_hook(self, hook, **kwargs):
+        async def run_hook(self, hook, ctx=None, **kwargs):
             if hook == "on_response":
-                self.events.append(kwargs)
-            return kwargs
+                self.events.append({"response": getattr(ctx, "response", None)})
+            return ctx if ctx is not None else kwargs
 
     pm = DummyPM()
     mock_client = AsyncMock()
@@ -910,6 +917,49 @@ async def test_forward_streaming_does_not_emit_on_response_before_stream_end(mon
     assert result["status_code"] == 200
     assert result["stream"] is True
     assert pm.events == []
+
+
+@pytest.mark.asyncio
+async def test_forward_streaming_returns_local_request_with_reverse_map(monkeypatch):
+    """流式成功返回必须携带 request_context（bag reverse_map）与兼容 local_request。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1", "provider": "openai", "api_key": "sk-a",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                # 模拟 data_filter_guard：改写 request，reverse_map 进 bag
+                changed = dict(ctx.request)
+                changed["messages"] = [{"role": "user", "content": "<AKM-SEC:x@1:abc123/>"}]
+                ctx.set_request(changed)
+                ctx.bag_set("data_filter_guard.reverse_map", {"<AKM-SEC:x@1:abc123/>": "secret"})
+                return ctx
+            return ctx if ctx is not None else kwargs
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeChunkedStreamResponse(200, [b"data: one\n\n", b"data: [DONE]\n\n"])])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "secret"}], "stream": True},
+        client=mock_client,
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["stream"] is True
+    stream_ctx = result["request_context"]
+    assert stream_ctx.bag_get("data_filter_guard.reverse_map") == {"<AKM-SEC:x@1:abc123/>": "secret"}
+    local = result["local_request"]
+    assert isinstance(local, dict)
+    assert local["messages"][0]["content"] == "<AKM-SEC:x@1:abc123/>"
+    # reverse_map 不在 request 上，上游/日志也不得带私有字段
+    assert "__akm_reverse_map__" not in local
+    assert "__akm_reverse_map__" not in result["request_body_for_log"]
 
 
 @pytest.mark.asyncio

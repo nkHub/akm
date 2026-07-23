@@ -12,12 +12,29 @@
 - 该插件默认关闭；用户可按需在插件页启用。
 - 请求侧 code_secret 的 block 模式等同 mask + 告警，不阻断请求。
 - ``messages[].content`` 路径同时覆盖字符串 content 与 content blocks 子路径。
+- 代码敏感扫描路径独立于关键词/正则的 ``request_text_paths``，二者可分别配置。
+- 响应还原兼容：精确匹配、JSON 转义 ``\\/``、中文标签规整为 ``t``+指纹，
+  以及模型轻微改写 tag 后按 6 位内容指纹的宽松匹配。
 """
 
 from akm.plugins import PluginBase
 import hashlib
 import json
 import re
+
+
+# 默认代码敏感扫描路径：对话正文 + 系统/指令 + Chat 续接工具参数
+# - messages[].content：覆盖字符串 content 与 content[].text / content[].input 等子路径
+# - input / instructions：Responses API
+# - system：Anthropic Messages
+# - messages[].tool_calls[].function.arguments：Chat 客户端续接中的工具参数（密钥常经此泄漏）
+DEFAULT_CODE_SECRET_PATHS = (
+    "messages[].content,input,instructions,system,"
+    "messages[].tool_calls[].function.arguments"
+)
+
+# 默认关键词/正则文本处理路径（与代码敏感路径对齐主文本字段，不含 tool 参数以免误伤结构化 JSON）
+DEFAULT_REQUEST_TEXT_PATHS = "messages[].content,input,instructions,system"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -195,6 +212,12 @@ DEFAULT_CODE_SECRET_GROUP_SELECTION = "llm_keys,vcs_tokens,cloud_keys,chatops_to
 # 可逆占位符前缀 — ``<AKM-SEC:`` 在自然语言中极低概率出现，检测准确
 _REVERSE_PREFIX = "<AKM-SEC:"
 _REVERSE_SUFFIX = "/>"
+# JSON 序列化常见把 ``/`` 写成 ``\/``，闭合后缀也需兼容
+_REVERSE_SUFFIX_JSON_ESC = r"\/>"
+# 宽松匹配：兼容空白、可选 JSON 转义斜杠、可选结尾 ``>`` 前空白
+_PLACEHOLDER_LOOSE_RE = re.compile(
+    r"<AKM-SEC:([A-Za-z0-9_.-]{1,48})@(\d+):([0-9a-fA-F]{6})\s*\\?/?>"
+)
 
 
 class Plugin(PluginBase):
@@ -205,30 +228,91 @@ class Plugin(PluginBase):
     def _reset_reverse_map(self):
         """每个请求开始时重置反向映射表和占位符序号。"""
         self._reverse_map: dict[str, str] = {}
+        # 指纹索引：hash → original，用于模型轻微改写占位符时的宽松还原
+        self._reverse_by_fingerprint: dict[str, str] = {}
         self._reverse_seq = 0
+
+    @staticmethod
+    def _safe_placeholder_tag(tag: str) -> str:
+        """把标签规整为占位符可用的 ASCII 片段。
+
+        中文等非 ASCII 标签若直接替换成 ``_``，会得到无辨识度的 ``___``，
+        既不利于日志排查，也容易被模型在回显时弄乱。全非 ASCII 时改为
+        ``t`` + 原标签 md5 前 6 位，保证稳定可读。
+        """
+        raw = str(tag or "x").strip() or "x"
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", raw)[:48] or "x"
+        # 仅有下划线/点/横线、没有字母数字时，用指纹标签兜底
+        if not re.search(r"[A-Za-z0-9]", safe):
+            safe = "t" + hashlib.md5(raw.encode("utf-8")).hexdigest()[:6]
+        return safe
+
+    @staticmethod
+    def _placeholder_variants(placeholder: str) -> list[str]:
+        """生成占位符在响应文本中可能出现的变体（含 JSON 转义 ``/``）。"""
+        variants = [placeholder]
+        # 标准 JSON 对 ``/`` 的可选转义：``/>`` → ``\/>``
+        if "/" in placeholder:
+            escaped = placeholder.replace("/", r"\/")
+            if escaped != placeholder:
+                variants.append(escaped)
+        return variants
 
     def _make_placeholder(self, tag: str, original: str) -> str:
         """生成 ``<AKM-SEC:tag@seq:hash/>`` 占位符并建立反向映射。
 
-        序号保证同 tag / 同内容指纹下也不会互相覆盖；短 hash 仅便于日志辨认。
+        序号保证同 tag / 同内容指纹下也不会互相覆盖；短 hash 仅便于日志辨认，
+        并作为响应侧宽松还原的辅助索引。
         """
         self._reverse_seq += 1
-        safe_tag = re.sub(r"[^A-Za-z0-9_.-]", "_", str(tag or "x"))[:48] or "x"
+        safe_tag = self._safe_placeholder_tag(tag)
         fprint = hashlib.md5(original.encode("utf-8")).hexdigest()[:6]
         placeholder = f"<AKM-SEC:{safe_tag}@{self._reverse_seq}:{fprint}/>"
         self._reverse_map[placeholder] = original
+        # 同指纹后写覆盖：同一敏感值多次命中时还原到同一原文即可
+        self._reverse_by_fingerprint[fprint] = original
         return placeholder
 
     def _reverse_replace(self, text: str, reverse_map: dict | None = None) -> tuple[str, bool]:
-        """扫描 ``<AKM-SEC:`` 前缀做反向替换。可传入请求级 map 支持并发隔离。"""
+        """扫描 ``<AKM-SEC:`` 前缀做反向替换。可传入请求级 map 支持并发隔离。
+
+        兼容三类回显形态：
+        1. 精确占位符；
+        2. JSON 转义斜杠 ``\\/``；
+        3. 模型轻微改写 tag/空白后，仍带相同 6 位指纹的宽松匹配。
+        """
         rmap = reverse_map if reverse_map is not None else self._reverse_map
         if not rmap or _REVERSE_PREFIX not in text:
             return text, False
         changed = False
         for placeholder, original in rmap.items():
-            if placeholder in text:
-                text = text.replace(placeholder, original)
+            for variant in self._placeholder_variants(placeholder):
+                if variant in text:
+                    text = text.replace(variant, original)
+                    changed = True
+
+        # 宽松还原：按指纹从 map 反查；仅在精确/转义变体都未命中时启用
+        if _REVERSE_PREFIX in text:
+            # 从当前 reverse_map 重建指纹表，避免并发请求读到实例级脏索引
+            fp_index: dict[str, str] = {}
+            for placeholder, original in rmap.items():
+                m = _PLACEHOLDER_LOOSE_RE.search(placeholder)
+                if m:
+                    fp_index[m.group(3).lower()] = original
+            if not fp_index and reverse_map is None:
+                fp_index = dict(getattr(self, "_reverse_by_fingerprint", {}) or {})
+
+            def _loose_repl(match: re.Match) -> str:
+                nonlocal changed
+                fprint = match.group(3).lower()
+                original = fp_index.get(fprint)
+                if original is None:
+                    return match.group(0)
                 changed = True
+                return original
+
+            text = _PLACEHOLDER_LOOSE_RE.sub(_loose_repl, text)
+
         return text, changed
 
     def is_reverse_map_active(self, reverse_map: dict | None = None) -> bool:
@@ -255,9 +339,32 @@ class Plugin(PluginBase):
     def _max_placeholder_pending(self, reverse_map: dict) -> int:
         """未闭合占位符允许缓冲的最大长度；超出则视为假阳性前缀。"""
         # 真实占位符形如 <AKM-SEC:tag@seq:hash/>，通常远小于 128；
-        # 这里按 map 内最长 key 与下限取 max，避免跨 chunk 截断时过早冲刷。
+        # JSON 转义会多若干反斜杠，这里按 map 内最长 key 与下限取 max。
         longest = max((len(k) for k in reverse_map), default=0)
-        return max(256, longest + 8)
+        return max(256, longest + 16)
+
+    @staticmethod
+    def _find_placeholder_close(text: str, start: int) -> tuple[int, int] | None:
+        """在 ``start`` 之后查找占位符闭合位置。
+
+        返回 ``(close_start, close_end)``：close_start 为 ``/`` 或 ``\\/`` 起点，
+        close_end 为 ``>`` 之后的下标。同时兼容 ``/>`` 与 JSON 转义 ``\\/>``。
+        """
+        # 优先找未转义闭合；若 JSON 写了 \\/，``/>`` 仍是 ``\\/>`` 的后缀子串，
+        # 但为了 closed_end 覆盖完整转义，需要单独识别 ``\\/>``。
+        esc_idx = text.find(_REVERSE_SUFFIX_JSON_ESC, start)
+        plain_idx = text.find(_REVERSE_SUFFIX, start)
+        candidates: list[tuple[int, int]] = []
+        if esc_idx >= 0:
+            candidates.append((esc_idx, esc_idx + len(_REVERSE_SUFFIX_JSON_ESC)))
+        if plain_idx >= 0:
+            # 若 plain 命中的其实是 esc 的后半段，以更长的 esc 为准
+            if esc_idx < 0 or plain_idx < esc_idx or plain_idx > esc_idx:
+                candidates.append((plain_idx, plain_idx + len(_REVERSE_SUFFIX)))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0]
 
     def reverse_stream_chunk(self, text: str, state: dict, reverse_map: dict | None = None) -> str:
         """流式 chunk 还原：基于 ``<AKM-SEC:`` 前缀做缓冲与反向替换。"""
@@ -271,8 +378,8 @@ class Plugin(PluginBase):
 
         last_open = full.rfind(_REVERSE_PREFIX)
         if last_open >= 0:
-            close_idx = full.find(_REVERSE_SUFFIX, last_open)
-            if close_idx < 0:
+            close_span = self._find_placeholder_close(full, last_open)
+            if close_span is None:
                 incomplete = full[last_open:]
                 if last_open > 0:
                     output = self._reverse_replace(full[:last_open], reverse_map=rmap)[0]
@@ -289,7 +396,7 @@ class Plugin(PluginBase):
                 state["pending"] = full
                 return ""
             # 闭合点之后可能还有下一段未闭合前缀，递归处理剩余
-            closed_end = close_idx + len(_REVERSE_SUFFIX)
+            _close_start, closed_end = close_span
             head = full[:closed_end]
             tail = full[closed_end:]
             output, _ = self._reverse_replace(head, reverse_map=rmap)
@@ -333,7 +440,9 @@ class Plugin(PluginBase):
         self._redact_replacement = str(cfg.get("redact_replacement", "[REDACTED]") or "[REDACTED]")
         self._keyword_rules = self._parse_keyword_sources(cfg.get("keyword_rules", "") or "")
         self._regex_rules = self._parse_regex_patterns(cfg.get("regex_rules", "") or "")
-        self._request_text_paths = set(self._split_items(cfg.get("request_text_paths", "") or ""))
+        # 留空表示处理所有字符串；缺省键时使用内置默认路径集合
+        raw_text_paths = cfg.get("request_text_paths", DEFAULT_REQUEST_TEXT_PATHS)
+        self._request_text_paths = set(self._split_items(raw_text_paths if raw_text_paths is not None else ""))
         self._recent_message_scan_limit = max(0, int(cfg.get("recent_message_scan_limit", 5) or 5))
         self._enabled = cfg.get("enabled", True) is True
         self._enable_code_secret_guard = cfg.get("enable_code_secret_guard", False) is True
@@ -346,7 +455,9 @@ class Plugin(PluginBase):
             cfg.get("code_secret_confidence_threshold", 85),
             85.0,
         ) / 100.0
-        self._code_secret_paths = set(self._split_items(cfg.get("code_secret_paths", "") or ""))
+        # 代码敏感路径与关键词路径独立；缺省键时使用扩展后的默认集合
+        raw_secret_paths = cfg.get("code_secret_paths", DEFAULT_CODE_SECRET_PATHS)
+        self._code_secret_paths = set(self._split_items(raw_secret_paths if raw_secret_paths is not None else ""))
         self._code_secret_rule_groups = set(
             self._split_items(cfg.get("code_secret_rule_groups", DEFAULT_CODE_SECRET_GROUP_SELECTION) or DEFAULT_CODE_SECRET_GROUP_SELECTION)
         )
@@ -649,16 +760,24 @@ class Plugin(PluginBase):
             new_text = pattern.sub(_repl, new_text)
         return new_text
 
-    def _apply_request_text_guards(self, text: str, path: str) -> tuple[str, bool]:
-        """对请求字符串统一执行文本替换与代码敏感识别。
+    def _apply_request_text_guards(
+        self,
+        text: str,
+        path: str,
+        *,
+        apply_text_rules: bool = True,
+        apply_code_secret: bool = True,
+    ) -> tuple[str, bool]:
+        """对请求字符串执行文本替换与/或代码敏感识别。
 
-        - 关键词/正则替换：可逆占位符。
-        - 代码敏感识别：warn 仅告警不改写；mask/block 统一用可逆占位符替换并告警。
+        - 关键词/正则替换：可逆占位符（由 ``request_text_paths`` 门控）。
+        - 代码敏感识别：warn 仅告警不改写；mask/block 统一用可逆占位符替换并告警
+          （由 ``code_secret_paths`` 门控，与关键词路径相互独立）。
         - block 不再阻断请求，改为等同 mask + 告警。
         """
-        new_text = self._apply_text_rules(text)
+        new_text = self._apply_text_rules(text) if apply_text_rules else text
 
-        if not self._enable_code_secret_guard:
+        if not apply_code_secret or not self._enable_code_secret_guard:
             return new_text, new_text != text
         if not self._path_matches(path, self._code_secret_paths):
             return new_text, new_text != text
@@ -713,28 +832,45 @@ class Plugin(PluginBase):
             return result, changed
 
         if isinstance(value, str):
-            if not self._path_matches(path, self._request_text_paths):
+            # 关键词/正则与代码敏感使用独立路径门控：
+            # 仅在 code_secret_paths 命中、request_text_paths 未命中时，仍应执行密钥扫描。
+            apply_text = self._path_matches(path, self._request_text_paths)
+            apply_secret = self._enable_code_secret_guard and self._path_matches(path, self._code_secret_paths)
+            if not apply_text and not apply_secret:
                 return value, False
-            new_text, changed = self._apply_request_text_guards(value, path)
+            new_text, changed = self._apply_request_text_guards(
+                value,
+                path,
+                apply_text_rules=apply_text,
+                apply_code_secret=apply_secret,
+            )
             return new_text, changed
 
         return value, False
 
     # ── on_request / on_response ─────────────────────────────
 
-    async def on_request(self, request) -> dict | None:
-        """请求预处理：建立反向映射表，对请求体执行脱敏替换。"""
+    async def on_request(self, ctx) -> dict | None:
+        """请求预处理：建立反向映射表，对请求体执行脱敏替换。
+
+        可逆映射写入 ``ctx.bag['data_filter_guard.reverse_map']``，
+        不再污染业务 request，避免转发层遗漏剥离或下游插件丢字段。
+        """
         self._reload_config()
         self._reset_reverse_map()
         if not self._enabled:
             return None
 
+        request = ctx.request
+        if not isinstance(request, dict):
+            return None
+
         new_request, changed = self._mask_and_filter(request)
+        if self._reverse_map:
+            # 请求级 bag：同一 ctx 贯穿 on_response / 流式还原，并发隔离
+            ctx.bag_set("data_filter_guard.reverse_map", dict(self._reverse_map))
         if changed:
             self.logger.info("[data_filter_guard] 请求体已执行脱敏/过滤（可逆占位符）")
-            # 仅在有可逆映射时附加；纯敏感字段 redact 不需要响应侧还原
-            if self._reverse_map:
-                new_request["__akm_reverse_map__"] = dict(self._reverse_map)
             return new_request
         return None
 
@@ -909,16 +1045,20 @@ class Plugin(PluginBase):
                 updated = replaced
         return updated, changed
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         """响应处理：先反向还原占位符为原始值，再做安全扫描拦截。"""
         self._reload_config()
         if not self._enabled:
             return None
+        response = ctx.response
         if not isinstance(response, dict):
             return None
 
-        # ── 反向还原占位符（从请求体读取映射表，并发隔离） ──
-        rev_map = request.get("__akm_reverse_map__") if isinstance(request, dict) else None
+        # ── 反向还原占位符（优先 bag，兼容遗留 request 字段） ──
+        rev_map = ctx.bag_get("data_filter_guard.reverse_map")
+        if not isinstance(rev_map, dict) or not rev_map:
+            request = ctx.request
+            rev_map = request.get("__akm_reverse_map__") if isinstance(request, dict) else None
         response_body = response.get("response_body")
         if isinstance(response_body, str) and response_body and rev_map:
             restored, reverted = self._reverse_replace(response_body, reverse_map=rev_map)

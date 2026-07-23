@@ -1,7 +1,20 @@
 import pytest
 from unittest.mock import AsyncMock
 
+from akm.plugins.context import RequestContext
 from akm.plugins.model_matcher.index import Plugin
+
+
+def _ctx(request: dict | None = None, *, key: dict | None = None, **kwargs) -> RequestContext:
+    """构造 model_matcher 测试用请求上下文。
+
+    注意：直接持有传入的 request 引用（不 clone），与生产侧
+    RequestContext 行为一致，便于断言 in-place 改写。
+    """
+    ctx = RequestContext(request if isinstance(request, dict) else {}, **kwargs)
+    if key is not None:
+        ctx.key = key
+    return ctx
 
 
 @pytest.mark.asyncio
@@ -15,9 +28,11 @@ async def test_model_matcher_applies_explicit_alias():
         "model": "gpt-4",
         "messages": [{"role": "user", "content": "hi"}],
     }
-    out = await plugin.on_request(req)
+    ctx = _ctx(req)
+    out = await plugin.on_request(ctx)
     assert out is req
     assert req["model"] == "gpt-4.1"
+    assert ctx.model == "gpt-4.1"
 
 
 @pytest.mark.asyncio
@@ -31,7 +46,7 @@ async def test_model_matcher_keeps_request_when_no_aliases_configured():
         "model": "gpt-4",
         "messages": [{"role": "user", "content": "hi"}],
     }
-    out = await plugin.on_request(req)
+    out = await plugin.on_request(_ctx(req))
     assert out is None
     assert req["model"] == "gpt-4"
 
@@ -48,7 +63,7 @@ async def test_model_matcher_sets_required_tool_choice_for_gpt_when_enabled():
         "messages": [{"role": "user", "content": "请运行测试并修复失败"}],
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
     }
-    out = await plugin.on_request(req)
+    out = await plugin.on_request(_ctx(req))
     assert out["tool_choice"] == "required"
 
 
@@ -65,7 +80,7 @@ async def test_model_matcher_does_not_override_explicit_tool_choice():
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
         "tool_choice": "auto",
     }
-    out = await plugin.on_request(req)
+    out = await plugin.on_request(_ctx(req))
     assert out is None
     assert req["tool_choice"] == "auto"
 
@@ -82,7 +97,7 @@ async def test_model_matcher_respects_disable_flag_for_tool_choice_policy():
         "messages": [{"role": "user", "content": "请运行测试并修复失败"}],
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
     }
-    out = await plugin.on_request(req)
+    out = await plugin.on_request(_ctx(req))
     assert out is None
     assert "tool_choice" not in req
 
@@ -99,7 +114,7 @@ async def test_model_matcher_does_not_force_tool_choice_for_small_talk():
         "messages": [{"role": "user", "content": "你好"}],
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
     }
-    out = await plugin.on_request(req)
+    out = await plugin.on_request(_ctx(req))
     assert out is None
     assert "tool_choice" not in req
 
@@ -123,11 +138,11 @@ async def test_model_matcher_bypass_switches_to_alternate_key(monkeypatch):
         AsyncMock(return_value={"alias": "k2", "provider": "openai"}),
     )
 
-    out = await plugin.on_key_selected(
-        model="gpt-5",
+    ctx = _ctx(
+        {"model": "gpt-5"},
         key={"alias": "k1", "provider": "openai"},
-        request={"model": "gpt-5"},
     )
+    out = await plugin.on_key_selected(ctx)
     assert out["alias"] == "k2"
     assert plugin._inflight_counts["k2"] == 1
 
@@ -150,11 +165,11 @@ async def test_model_matcher_bypass_falls_back_when_no_alternate(monkeypatch):
         AsyncMock(return_value=None),
     )
 
-    out = await plugin.on_key_selected(
-        model="gpt-5",
+    ctx = _ctx(
+        {"model": "gpt-5"},
         key={"alias": "k1", "provider": "openai"},
-        request={"model": "gpt-5"},
     )
+    out = await plugin.on_key_selected(ctx)
     assert out["alias"] == "k1"
     # 仍应正常登记 in-flight
     assert plugin._inflight_counts["k1"] >= 1
@@ -170,10 +185,12 @@ async def test_model_matcher_on_response_recycles_inflight_count():
     plugin._inflight_counts["k1"] = 2
     plugin._inflight_oldest_ts["k1"] = 123.0
 
-    await plugin.on_response({}, {"key_alias": "k1"})
+    ctx = _ctx({})
+    ctx.response = {"key_alias": "k1"}
+    await plugin.on_response(ctx)
     assert plugin._inflight_counts["k1"] == 1
 
-    await plugin.on_response({}, {"key_alias": "k1"})
+    await plugin.on_response(ctx)
     assert "k1" not in plugin._inflight_counts
     assert "k1" not in plugin._inflight_oldest_ts
 
@@ -211,11 +228,11 @@ async def test_model_matcher_smart_bypass_picks_best_scored_candidate(monkeypatc
 
     monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
 
-    out = await plugin.on_key_selected(
-        model="gpt-5",
+    ctx = _ctx(
+        {"model": "gpt-5"},
         key={"alias": "k1", "provider": "openai"},
-        request={"model": "gpt-5"},
     )
+    out = await plugin.on_key_selected(ctx)
     assert out["alias"] == "k3"
 
 
@@ -248,9 +265,9 @@ async def test_model_matcher_smart_bypass_keeps_current_when_improve_not_enough(
 
     monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
 
-    out = await plugin.on_key_selected(
-        model="gpt-5",
+    ctx = _ctx(
+        {"model": "gpt-5"},
         key={"alias": "k1", "provider": "openai"},
-        request={"model": "gpt-5"},
     )
+    out = await plugin.on_key_selected(ctx)
     assert out["alias"] == "k1"

@@ -78,8 +78,9 @@ class Plugin(PluginBase):
                     return f"工具 {name or '?'} 的参数命中规则 {pattern.pattern}"
         return ""
 
-    async def on_request(self, request) -> dict | None:
-        """命中 block 时返回 PluginManager 识别的本地阻断控制结构。"""
+    async def on_request(self, ctx) -> dict | None:
+        """命中 block 时通过 ctx.set_block 阻断请求。"""
+        request = ctx.request
         if not isinstance(request, dict):
             return None
         cfg = self._settings()
@@ -92,11 +93,10 @@ class Plugin(PluginBase):
             self.logger.warning("[tool_policy_guard] %s", reason)
             return None
         self.logger.warning("[tool_policy_guard] 已阻断: %s", reason)
-        return {
-            "__akm_action__": "block",
-            "status_code": 400,
-            "error": cfg["message"],
-            "security_action": "tool_policy_block",
-            "security_reason": reason,
-            "body": json.dumps({"error": cfg["message"], "reason": reason}, ensure_ascii=False),
-        }
+        return ctx.set_block(
+            status_code=400,
+            error=cfg["message"],
+            security_action="tool_policy_block",
+            security_reason=reason,
+            body=json.dumps({"error": cfg["message"], "reason": reason}, ensure_ascii=False),
+        )

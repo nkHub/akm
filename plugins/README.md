@@ -2,8 +2,7 @@
 
 本目录存放 AKM / ccs 的**项目本地插件**（非内置核心）。它们默认大多关闭，在管理台「插件」页启用并配置后生效。
 
-数据与状态默认只在**当前进程内存**中，服务重启会清空（除非插件另行说明）。插件不得把仅本地字段（`__akm_*`）发往上游——转发层会剥离这些字段。
-
+数据与状态默认只在**当前进程内存**中，服务重启会清空（除非插件另行说明）。跨 hook 状态写在请求级 `RequestContext.bag`（约定键 `{plugin}.{field}`），业务 request 与 bag 分离；multipart 等传输字段若仍用 `__akm_*` 前缀，转发层会在发往上游前剥离。
 ## 一览
 
 | 插件 | 类别 | 默认 | 一句话 |
@@ -42,31 +41,28 @@
 ### 安全与策略
 
 - **`data_filter_guard`**  
-  请求侧脱敏/关键词/正则/代码敏感扫描；响应侧非流式与有界流式安全扫描，可 mask 或 block。占位符形如 `<AKM-SEC:tag@seq:hash/>`。默认关闭。
-
+  请求侧脱敏/关键词/正则/代码敏感扫描；响应侧非流式与有界流式安全扫描，可 mask 或 block。关键词路径与代码敏感路径相互独立，后者默认额外覆盖 Chat `tool_calls` 参数。占位符形如 `<AKM-SEC:tag@seq:hash/>`；可逆映射进 bag `data_filter_guard.reverse_map`，流式由 `request_context` 回传还原。默认关闭。
 - **`tool_policy_guard`**  
   约束 tools 声明与续接里的工具调用参数（白名单/黑名单/危险正则）。保护的是进入代理的工具协议，**不能**替代客户端本机工具沙箱。
 
 - **`rate_limit_guard`**  
-  进程内固定窗口限流：每分钟请求数、每小时请求数、最大并发。维度可选全局 / 模型 / 用户（请求体 `user`）。超限在转发前返回 **HTTP 429**，不消耗上游。  
+  进程内固定窗口限流：每分钟请求数、每小时请求数、最大并发。维度可选全局 / 模型 / 用户（请求体 `user`）。超限时 `ctx.set_block` 返回 **HTTP 429**，不消耗上游；并发槽记在 bag `rate_limit_guard.slot`，`on_response` 释放。  
   与 `usage_quota_guard` 不同：后者偏「配额用尽后跳过 Key」，本插件偏「入口 QPS/并发闸门」。
-
 - **`response_schema_guard`**  
   仅当请求声明了 `json_object` / `json_schema` 时，校验非流式响应是否符合常见 Schema 子集；可告警或返回错误。
 
 ### 稳定性与容量
 
 - **`usage_quota_guard`**  
-  按 Key、模型在固定时间窗口内限制请求次数和**已观测** Token。超额时 `skip_key` 换其他 Key。Token 仅来自响应里可解析的 usage，**不是**供应商账单。
+  按 Key、模型在固定时间窗口内限制请求次数和**已观测** Token。超额时 `ctx.set_skip_key` 换其他 Key。Token 仅来自响应里可解析的 usage，**不是**供应商账单。
 
 - **`fallback_router`**  
-  配置 `source_model => fallback_model` 与触发状态码/网络错误；命中后改模型并重新选 Key，带防循环限制。
+  配置 `source_model => fallback_model` 与触发状态码/网络错误；命中后改模型并重新选 Key；尝试历史在 bag `fallback_router.history` 防循环。
 
 - **`cache_proxy`**  
   对**非流式、默认不含 tools** 的请求，用规范化请求体做 SHA256 键，进程内缓存成功响应。TTL / 条数 / 单条大小可配。  
-  命中时短路返回缓存正文（元信息为本地 cache_hit，不再打上游）。流式与工具会话默认跳过，避免语义错乱。  
+  命中时 `ctx.set_block` 短路返回缓存正文（元信息为本地 cache_hit，不再打上游）；未命中时 bag 记 `cache_proxy.cache_key` / `eligible` 供 `on_response` 写入。流式与工具会话默认跳过，避免语义错乱。  
   **注意**：仅适合幂等、确定性较高的补全场景；不要对带副作用或强随机输出的请求开缓存。
-
 ### 观测与运维
 
 - **`webhook_notifier`**  
@@ -99,4 +95,13 @@
 3. `rate_limit_guard` 与 `usage_quota_guard` 可同时开：一个管入口速率，一个管 Key/模型配额。  
 4. 修改配置后以管理台保存为准；多数插件热读配置，无需改代码。启用/禁用/安装/删除默认热生效（`on_load`/`on_unload`），改插件源码仍需重启服务。
 
-更完整的 Hook 字段与生命周期见仓库文档：`docs/design/plugin-system.md`。
+### 请求级 bag 约定（速查）
+
+| bag 键 | 插件 | 用途 |
+|--------|------|------|
+| `data_filter_guard.reverse_map` | data_filter_guard | 可逆占位符 → 原文 |
+| `cache_proxy.cache_key` / `cache_proxy.eligible` | cache_proxy | 缓存键 / 是否可写 |
+| `rate_limit_guard.slot` | rate_limit_guard | 并发槽位 |
+| `fallback_router.history` | fallback_router | 本请求已尝试模型 |
+
+Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `ctx.set_skip_key`。更完整说明见 `docs/design/plugin-system.md` §8。

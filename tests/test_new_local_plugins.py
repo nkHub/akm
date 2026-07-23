@@ -5,8 +5,14 @@ import logging
 
 import pytest
 
+from akm.plugins.context import RequestContext
 from plugins.cache_proxy.index import Plugin as CacheProxy
 from plugins.rate_limit_guard.index import Plugin as RateLimitGuard
+
+
+def _ctx(request: dict | None = None, **kwargs) -> RequestContext:
+    """构造单次请求级上下文（直接持有 request 引用，不 clone）。"""
+    return RequestContext(request if isinstance(request, dict) else {}, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -23,10 +29,10 @@ async def test_rate_limit_guard_blocks_after_rpm():
     await plugin.on_load()
 
     req = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
-    assert await plugin.on_request(dict(req)) is None
-    assert await plugin.on_request(dict(req)) is None
-    blocked = await plugin.on_request(dict(req))
-    assert blocked["__akm_action__"] == "block"
+    assert await plugin.on_request(_ctx(req)) is None
+    assert await plugin.on_request(_ctx(req)) is None
+    blocked = await plugin.on_request(_ctx(req))
+    assert blocked["type"] == "block"
     assert blocked["status_code"] == 429
     assert blocked["security_action"] == "rate_limit"
     assert "rate_limit" in blocked["body"]
@@ -45,24 +51,27 @@ async def test_rate_limit_guard_concurrent_slot_release():
     await plugin.on_load()
 
     req1 = {"model": "gpt-a", "messages": []}
-    first = await plugin.on_request(req1)
-    assert first is req1
-    assert req1["__akm_rate_limit_slot__"] == "model:gpt-a"
+    ctx1 = _ctx(req1)
+    first = await plugin.on_request(ctx1)
+    assert first is None
+    assert ctx1.bag_get("rate_limit_guard.slot") == "model:gpt-a"
 
-    blocked = await plugin.on_request({"model": "gpt-a", "messages": []})
-    assert blocked["__akm_action__"] == "block"
+    blocked = await plugin.on_request(_ctx({"model": "gpt-a", "messages": []}))
+    assert blocked["type"] == "block"
 
     # 其它模型有独立并发槽
     other = {"model": "gpt-b", "messages": []}
-    other_ret = await plugin.on_request(other)
-    assert other_ret is other
+    ctx_other = _ctx(other)
+    other_ret = await plugin.on_request(ctx_other)
+    assert other_ret is None
 
     # 释放 gpt-a 后可再进
-    await plugin.on_response(req1, {"ok": True})
+    await plugin.on_response(ctx1)
     again = {"model": "gpt-a", "messages": []}
-    again_ret = await plugin.on_request(again)
-    assert again_ret is again
-    assert again_ret.get("__akm_action__") != "block"
+    ctx_again = _ctx(again)
+    again_ret = await plugin.on_request(ctx_again)
+    assert again_ret is None
+    assert not ctx_again.is_block
 
 
 @pytest.mark.asyncio
@@ -79,14 +88,14 @@ async def test_rate_limit_guard_rpm_uses_configured_scope():
     }
     await plugin.on_load()
 
-    assert await plugin.on_request({"model": "gpt-a"}) is None
-    assert (await plugin.on_request({"model": "gpt-a"}))["__akm_action__"] == "block"
-    assert await plugin.on_request({"model": "gpt-b"}) is None
+    assert await plugin.on_request(_ctx({"model": "gpt-a"})) is None
+    assert (await plugin.on_request(_ctx({"model": "gpt-a"})))["type"] == "block"
+    assert await plugin.on_request(_ctx({"model": "gpt-b"})) is None
 
     plugin.config["scope"] = "user"
-    assert await plugin.on_request({"model": "gpt-a", "user": "alice"}) is None
-    assert (await plugin.on_request({"model": "gpt-b", "user": "alice"}))["__akm_action__"] == "block"
-    assert await plugin.on_request({"model": "gpt-a", "user": "bob"}) is None
+    assert await plugin.on_request(_ctx({"model": "gpt-a", "user": "alice"})) is None
+    assert (await plugin.on_request(_ctx({"model": "gpt-b", "user": "alice"})))["type"] == "block"
+    assert await plugin.on_request(_ctx({"model": "gpt-a", "user": "bob"})) is None
 
 
 @pytest.mark.asyncio
@@ -109,9 +118,11 @@ async def test_cache_proxy_hit_and_skip_tools_stream():
         "temperature": 0,
     }
     # 首次未命中，标记 eligible
-    marked = await plugin.on_request(dict(request))
-    assert marked["__akm_cache_eligible__"] is True
-    key = marked["__akm_cache_key__"]
+    ctx_mark = _ctx(request)
+    marked = await plugin.on_request(ctx_mark)
+    assert marked is None
+    assert ctx_mark.bag_get("cache_proxy.eligible") is True
+    key = ctx_mark.bag_get("cache_proxy.cache_key")
 
     body = json.dumps(
         {
@@ -119,28 +130,29 @@ async def test_cache_proxy_hit_and_skip_tools_stream():
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
     )
-    await plugin.on_response(
-        marked,
-        {
-            "ok": True,
-            "stream": False,
-            "status_code": 200,
-            "response_body": body,
-            "model": "gpt-4",
-            "api_path": "chat/completions",
-        },
-    )
+    ctx_mark.response = {
+        "ok": True,
+        "stream": False,
+        "status_code": 200,
+        "response_body": body,
+        "model": "gpt-4",
+        "api_path": "chat/completions",
+    }
+    await plugin.on_response(ctx_mark)
 
-    hit = await plugin.on_request(dict(request))
-    assert hit["__akm_action__"] == "block"
+    ctx_hit = _ctx(request)
+    hit = await plugin.on_request(ctx_hit)
+    assert hit["type"] == "block"
     assert hit["security_action"] == "cache_hit"
     assert "cached-answer" in hit["body"]
     assert "HIT" in hit["body"]
     assert key[:8] in hit["security_reason"] or True
 
     # stream / tools 跳过
-    assert await plugin.on_request({**request, "stream": True}) is None
-    assert await plugin.on_request({**request, "tools": [{"type": "function", "function": {"name": "x"}}]}) is None
+    assert await plugin.on_request(_ctx({**request, "stream": True})) is None
+    assert await plugin.on_request(
+        _ctx({**request, "tools": [{"type": "function", "function": {"name": "x"}}]})
+    ) is None
 
 
 def test_cost_estimate_parse_strict_three_part_only():

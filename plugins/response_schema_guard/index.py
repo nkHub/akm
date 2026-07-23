@@ -79,8 +79,10 @@ class Plugin(PluginBase):
             return json.dumps({"type":"error","error":{"type":"invalid_response_schema","message":message}}, ensure_ascii=False)
         return json.dumps({"error":{"message":message,"type":"invalid_response_schema"}}, ensure_ascii=False)
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         """校验非流式成功响应；安全插件已改写的结果保持优先级，不再覆盖。"""
+        request = ctx.request
+        response = ctx.response
         cfg = self.config or {}
         if cfg.get("enabled", True) is not True or not isinstance(request, dict) or not isinstance(response, dict):
             return None

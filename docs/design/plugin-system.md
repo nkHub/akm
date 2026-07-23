@@ -61,7 +61,7 @@
 
 这样做的目的是在不强迫每个插件都重写为 AKM 模板语法的前提下，仍然保留统一后台导航与页面结构。
 
-对于插件配置交互，当前实现也已经统一成一条默认规则：只要插件声明了 `settings`，插件列表页就默认通过“配置”按钮打开弹窗编辑，不再在列表卡片里额外展开内联表单。这样可以避免同一个插件同时出现“弹窗配置”和“展开配置”两套入口。
+对于插件配置交互，当前实现也已经统一成一条默认规则：只要插件声明了 `settings`，插件列表页就默认通过“配置”按钮打开弹窗编辑，不再在列表卡片里额外展开内联表单。这样可以避免同一个插件同时出现“弹窗配置”和“展开配置”两套入口。部分插件在弹窗内使用结构化编辑器：`model_matcher`、`error_handler`，以及 `data_filter_guard`（关键词/正则行编辑 + 响应风险规则行；保存时从行控件同步到 `keyword_rules` / `regex_rules` / `response_block_patterns`，避免误清空）。
 
 另外，setting schema 的 `type="select"` 会直接渲染 `options` 中声明的静态枚举值；也支持通过 `options_source="/v1/models"` 声明一个基于当前模型列表的动态下拉。`allow_empty_option` 与 `empty_option_label` 可控制是否允许空值和空值文案。这样像 `rate_limit_guard` 的限流维度，或 `markdown_kb` 的 embedding / rerank / chat 模型选择，都不需要在插件前端重复实现选项渲染。当前 `markdown_kb` 还额外使用了普通 number setting 来表达检索调优项：`top_k`（默认 `4`、最大 `10`）、`score_threshold`（`0~1`，默认 `0.7`）以及三路混合召回权重 `semantic_weight / keyword_weight / memory_weight`。其中 `keyword_weight` 对应归一化后的 BM25 字面分，`memory_weight` 对应 chunk 记忆系统输出的记忆分；三路权重自动归一化到总和为 1。另外 `category_bonus` 用于分类加权，`memory_enabled` / `memory_boost` / `organize_interval_hours` 用于调节记忆行为。`markdown_kb` 近期还新增了三组记忆管理配置：`dedup_similarity_threshold`（默认 0.92，新 chunk 入库时按向量余弦相似度去重合并，相似度达标时不再新增而是 boost 已有 chunk 记忆值），`organize_cleanup_enabled`（默认 true，自动清理长时间未被检索的 `.learn.md` 文档），`organize_cleanup_memory_threshold`（默认 0.05，判定无价值记忆的阈值），`organize_cleanup_keep_days`（默认 7，未被检索的 learn 文档最低保活天数）。`markdown_kb` 现在使用内置标题树切片器，记录 `heading_path` 和 `categories`。当前 BM25 的中文 tokenization 也已经升级为"`jieba3` 的 `small` 模型优先、2~4 字滑窗回退"。`markdown_kb` 的测试页还会基于当前文件列表额外渲染一个去重后的 "Workspace 范围" 下拉：默认不选时继续按请求 `workspace` 过滤；如果显式选中某个 workspace，则会把该值写入 `workspace_root / working_directory`，让 query / ask 只在"公共文档 + 该 workspace 文档"范围内执行。当前 `markdown_kb` 的 `on_request` 也已接到三类文本入口。除显式检索外，`markdown_kb` 还新增了 `POST /api/markdown-kb/learn`（Hook 学习入库）和 `POST /api/markdown-kb/scan-sessions`（会话扫描归纳）两条写回接口。
 
@@ -264,7 +264,7 @@ akm/
 
 ```python
 # index.py — Plugin 类中
-async def on_request(self, request):
+async def on_request(self, ctx):
     if self.config.get("enable_cache"):
         ...
 
@@ -316,26 +316,41 @@ class PluginBase:
         """插件卸载时调用，可做清理操作"""
         pass
 
-    # ——— 可重写的 hook 方法 ———
-    async def on_request(self, request) -> dict | None:
+    # ——— 可重写的 hook 方法（均接收请求级 RequestContext） ———
+    async def on_request(self, ctx: "RequestContext"):
         """请求到达时调用（需在 plugin.json 中声明 hooks.on_request: true）
-        
-        返回 dict 则替换请求体（如模型名映射）
+
+        - 直接改写 ctx.request（in-place）或返回新的 request dict；
+        - 跨阶段状态写入 ctx.bag（约定键 ``{plugin}.{field}``）；
+        - 需要阻断时调用 ctx.set_block(...)
         """
         pass
 
-    async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
-        """Key 被匹配后调用，可修改 key 或用另一个 key 替换
-        返回 None 表示不修改，返回 dict 替换当前 key
+    async def on_key_selected(self, ctx: "RequestContext"):
+        """Key 被匹配后调用。
+
+        - 读取 ctx.model / ctx.key / ctx.request；
+        - 返回替代 key dict，或调用 ctx.set_skip_key(...) 跳过当前 Key
         """
         pass
 
-    async def on_upstream_error(self, request, response, key) -> str | None:
-        """上游返回错误时调用，返回 "retry" 重试 / "switch" 切换 key / None 继续默认处理"""
+    async def on_upstream_error(
+        self,
+        ctx: "RequestContext",
+        status_code: int = 0,
+        error_type: str = "http",
+        attempt: int = 0,
+        key: dict | None = None,
+    ) -> str | None:
+        """上游返回错误时调用，返回 "retry" / "switch" / "block" / "fallback" / None"""
         pass
 
-    async def on_response(self, request, response) -> None:
-        """响应返回后调用（需在 plugin.json 中声明 hooks.on_response: true）"""
+    async def on_response(self, ctx: "RequestContext"):
+        """响应返回后调用（需在 plugin.json 中声明 hooks.on_response: true）
+
+        - 读取 ctx.request / ctx.response / ctx.bag；
+        - 可返回改写后的 response dict
+        """
         pass
 
     # ——— 辅助属性 ———
@@ -448,19 +463,18 @@ PluginManager.load_all(app, db)
 
 | Hook | 触发点 | 参数 | 用途 |
 |------|--------|------|------|
-| `on_request` | proxy 转发请求之前 | `request: Request` | 请求日志、参数校验、请求改写（含模型名映射） |
-| `on_key_selected` | 根据 model 匹配到 key 之后 | `model, key, request` | 模型匹配插件修改 key 选择结果 |
-| `on_upstream_error` | 上游返回错误（非 2xx） | `request, response, key` | 错误处理插件决定是否重试、切换模型 |
-| `on_response` | proxy 每次上游尝试结束后（成功/失败） | `request: dict, response: dict` | 响应日志、并发回收、告警通知 |
+| `on_request` | proxy 转发请求之前 | `ctx: RequestContext` | 请求日志、参数校验、请求改写（含模型名映射） |
+| `on_key_selected` | 根据 model 匹配到 key 之后 | `ctx: RequestContext`（含 model/key/request） | 模型匹配插件修改 key 选择结果 |
+| `on_upstream_error` | 上游返回错误（非 2xx） | `ctx` + `status_code/error_type/attempt/key` | 错误处理插件决定是否重试、切换模型 |
+| `on_response` | proxy 每次上游尝试结束后（成功/失败） | `ctx: RequestContext`（含 request/response/bag） | 响应日志、并发回收、告警通知、脱敏还原 |
 
 ### 8.2 约定
 
-插件在 `Plugin` 类中重写 `on_request` / `on_response` 方法，同时在 `plugin.json` 的 `hooks` 中声明为 `true`。PluginManager 在对应时机自动调用：
+插件在 `Plugin` 类中重写 `on_request` / `on_response` 等方法，同时在 `plugin.json` 的 `hooks` 中声明为 `true`。PluginManager 在对应时机自动调用，**同一请求生命周期内共享同一个 `RequestContext` 实例**（引用传递，非 clone）：
 
 ```python
 # index.py
-from plugins.base import PluginBase
-from fastapi import Request
+from akm.plugins import PluginBase
 
 class Plugin(PluginBase):
     """请求日志插件"""
@@ -469,33 +483,64 @@ class Plugin(PluginBase):
         super().__init__()
         self._total = 0
 
-    async def on_request(self, request):
+    async def on_request(self, ctx):
         self._total += 1
-        self.logger.info(f"[#{self._total}] {request.method} {request.url.path}")
+        model = ctx.request.get("model", "")
+        self.logger.info(f"[#{self._total}] model={model} path={ctx.api_path}")
 
-    async def on_response(self, request, response):
-        self.logger.info(f"[#{self._total}] done")
+    async def on_response(self, ctx):
+        self.logger.info(f"[#{self._total}] done ok={ctx.response and ctx.response.get('ok')}")
 ```
 
-### 8.3 执行顺序与状态传递
+### 8.3 RequestContext 与 bag
 
-同一 hook 的多个插件按 `priority` 从小到大依次执行（越小越优先），形成**管道链**：
+`RequestContext`（`akm/plugins/context.py`）是单次转发生命周期的共享状态容器：
+
+| 字段 / 方法 | 说明 |
+|-------------|------|
+| `request` | 业务请求体 dict（引用，插件可 in-place 改写） |
+| `response` | 结构化响应元信息 dict（见下表） |
+| `api_path` | 客户端入口路径，如 `chat/completions` |
+| `client_user_agent` | 原始 User-Agent，供策略插件匹配客户端 |
+| `model` / `key` | 当前模型与已选 Key |
+| `bag` | 插件共享袋；约定键名 `{plugin_name}.{field}` |
+| `action` | 管道控制结构：`block` / `skip_key` |
+| `set_request(dict)` | 替换业务请求体引用 |
+| `bag_get` / `bag_set` / `bag_pop` | 读写跨阶段状态 |
+| `set_block(...)` | 标记 on_request 阻断，proxy 直接返回客户端 |
+| `set_skip_key(...)` | 标记 on_key_selected 跳过当前 Key |
+| `forwardable_request()` | 生成可发往上游的请求体：剥离所有 `__akm_*` 本地字段 |
+
+**bag 约定键（示例）**：
+
+| 键 | 插件 | 用途 |
+|----|------|------|
+| `data_filter_guard.reverse_map` | data_filter_guard | 可逆占位符 → 原文映射（响应/流式还原） |
+| `cache_proxy.cache_key` / `cache_proxy.eligible` | cache_proxy | 缓存键与是否可写缓存 |
+| `rate_limit_guard.slot` | rate_limit_guard | 并发槽位，on_response 释放 |
+| `fallback_router.history` | fallback_router | 本请求已尝试的模型列表，防循环 |
+
+> **禁止**把跨阶段状态塞进 `request` 的 `__akm_*` 字段作为主路径（multipart 等传输字段可仍用 `__akm_*`，由 `forwardable_request()` 统一剥离）。网关元数据（`api_path` / `client_user_agent`）直接挂在 ctx 上，不再写入 body。
+
+### 8.4 执行顺序与状态传递
+
+同一 hook 的多个插件按 `priority` 从小到大依次执行（越小越优先），形成**管道链**，共享同一 `ctx`：
 
 ```
-request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (priority=100)] → 下一环节
-              ↓ 可改写 request              ↓ 基于 A 的输出继续处理       ↓ 最终处理
+ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (priority=100)] → 下一环节
+         ↓ 可改写 ctx.request / bag        ↓ 基于 A 的 bag 继续处理       ↓ 最终处理
 ```
 
-每个 hook 的返回值作为下一个同类型 hook 的输入：
+| Hook | 输入 | 返回值 / 控制 | 管道传递 |
+|------|------|---------------|---------|
+| `on_request` | `ctx` | 返回新 request dict 则 `ctx.set_request`；或 `ctx.set_block(...)` | 同一 ctx 传给下一个；block 后立即停止管道 |
+| `on_key_selected` | `ctx`（含 model/key） | 返回替代 key dict；或 `ctx.set_skip_key(...)` | skip_key 后立即停止本轮管道，proxy 重选 Key |
+| `on_upstream_error` | `ctx` + 错误参数 | `"retry"` / `"switch"` / `"block"` / `"fallback"` / `None` | 第一个非 None 动作即为最终决策；`fallback` 可改写 `ctx.request.model` 后重选 Key |
+| `on_response` | `ctx`（含 response） | 返回新 response dict 则写回 `ctx.response` | 同一 ctx 按优先级依次执行 |
 
-| Hook | 输入 | 返回值 | 管道传递 |
-|------|------|--------|---------|
-| `on_request` | `request` | `request`（可修改后返回） | 前一个返回的 request → 下一个的输入 |
-| `on_key_selected` | `(model, key, request)` | `key`，或 `{ "__akm_action__": "skip_key", "error": "..." }` | 默认替换当前 key；`skip_key` 排除当前 key 后重新选择 |
-| `on_upstream_error` | `(request, response, key)` | `"retry"` / `"switch"` / `"block"` / `"fallback"` / `None` | 第一个非 None 返回值即为最终决策；`fallback` 可改写 `request.model` 后重新选择 Key |
-| `on_response` | `(request, response)` | `None`（无状态传递） | 纯粹观察，按优先级依次执行 |
+兼容：`run_hook` 仍识别旧式返回 `{ "type": "block" }` / `{ "__akm_action__": "block" }` 与 `skip_key` 结构，并映射到 `ctx.set_block` / `ctx.set_skip_key`。
 
-`on_response` 当前由 proxy 传入的 `response` 为结构化元信息（并非 FastAPI Response 对象），常用字段如下：
+`on_response` 当前由 proxy 写入的 `ctx.response` 为结构化元信息（并非 FastAPI Response 对象），常用字段如下：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -517,15 +562,16 @@ request → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C 
 
 对于 `on_response`，当前实现除“纯观察”外，也允许插件返回新的 `response` 元信息字典，用于最小范围内改写非流式响应结果。典型场景包括后处理标注、补充审计字段或做协议相关的二次整理；若插件需要附加安全/诊断信息，也可以通过 `x-akm-security` 与 `x-akm-flags` 写入审计头，供日志页展示和后续事件分析。
 
-> 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。插件若把仅供本地生命周期使用的上下文写入请求对象，字段名必须以 `__akm_` 开头；代理会在真正发送上游前剥离这些字段，防止内部状态泄露到供应商请求。
+> 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。
 
-当前 proxy 会为 `on_request` 插件补充 `__akm_api_path__`，并在客户端提供 `User-Agent` 时补充 `__akm_client_user_agent__`。这两个字段仅供本地策略匹配，例如 `prompt_profiles` 按接口或客户端选择提示词；它们同样不会进入上游请求。
+`on_request` 通过 `ctx.set_block(status_code=400, error="...", security_action=..., security_reason=...)` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；`security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
 
-`on_request` 还可以返回 `{ "__akm_action__": "block", "status_code": 400, "error": "..." }` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；返回值中的 `security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
+**流式还原**：proxy 成功流式返回时附带 `request_context`（同一 `RequestContext`）与兼容字段 `local_request=ctx.request`。server 优先从 `request_context.bag_get("data_filter_guard.reverse_map")` 取映射做增量还原；兼容旧路径上 request 内 `__akm_reverse_map__`。
 
-**崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留其输入原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
+**崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留 ctx 原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
 
-### 8.4 matcher 并发/慢 key 旁路策略（model_matcher）
+
+### 8.5 matcher 并发/慢 key 旁路策略（model_matcher）
 
 `model_matcher` 内置了一个默认关闭的保守策略，用于缓解单 key 拥塞：
 
@@ -590,40 +636,46 @@ async def plugin_save_config(name: str, request: Request):
 async def plugin_metas(request: Request):
     return request.app.state.plugin_manager.get_plugin_metas()
 
-# AI 请求端点注入 hook（管道模式：状态逐插件传递）
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    pm = request.app.state.plugin_manager
-    request = await pm.run_hook("on_request", request=request)  # ← 前一个改写后的 request 传给下一个
-    result = await _handle_ai_request(request, "chat/completions")
-    await pm.run_hook("on_response", request=request, response=result)
-    return result
+# proxy 入口：为每次转发创建 RequestContext，全生命周期共享
+from akm.plugins.context import RequestContext
 
-@app.post("/v1/responses")
-async def responses(request: Request):
-    pm = request.app.state.plugin_manager
-    request = await pm.run_hook("on_request", request=request)
-    result = await _handle_ai_request(request, "responses")
-    await pm.run_hook("on_response", request=request, response=result)
-    return result
+ctx = RequestContext(body, api_path=api_path, client_user_agent=ua)
+ctx = await pm.run_hook("on_request", ctx=ctx)
+if ctx.is_block:
+    return block_response(ctx.action)
 
-# run_hook 内部实现（管道）
-async def run_hook(self, hook: str, **kwargs):
-    """按 priority 从小到大依次执行，前一个返回值传给下一个"""
-    plugins = sorted(
-        [p for p in self.plugins.values() if p.enabled and p.meta.hooks.get(hook)],
-        key=lambda p: p.meta.priority
-    )
-    result = kwargs
-    for plugin in plugins:
-        try:
-            ret = await getattr(plugin, hook)(**result)
-            if ret is not None:
-                # 将返回值合并到 kwargs，传给下一个插件
-                result = {**result, **self._unwrap_hook_result(hook, ret)}
-        except Exception as e:
-            self.logger.error(f"[{plugin.meta.name}] hook {hook} 异常: {e}")
-    return result
+# 选 Key 后
+ctx.key = selected_key
+ctx = await pm.run_hook("on_key_selected", ctx=ctx)
+if ctx.is_skip_key:
+    ...  # 排除当前 key 后重选
+
+# 上游错误
+action = await pm.run_hook(
+    "on_upstream_error", ctx=ctx,
+    status_code=status, error_type=etype, attempt=n, key=ctx.key,
+)
+
+# 每次尝试结束
+ctx.response = meta  # 结构化元信息（可含 response_body）
+ctx = await pm.run_hook("on_response", ctx=ctx)
+
+# 发往上游前剥离本地字段
+forwardable = ctx.forwardable_request()
+
+# 流式成功返回：回传 request_context 供 server 做 bag 还原
+return {
+    "stream": True,
+    "request_context": ctx,
+    "local_request": ctx.request,  # 兼容旧字段
+    ...
+}
+
+# run_hook：共享同一 ctx；on_upstream_error 返回动作字符串，其余返回 ctx
+async def run_hook(self, hook: str, ctx: RequestContext | None = None, **kwargs):
+    """按 priority 从小到大依次执行，共享 RequestContext"""
+    ...
+    return upstream_action if hook == "on_upstream_error" else ctx
 ```
 
 ### 9.2 前端集成
@@ -756,28 +808,26 @@ class Plugin(PluginBase):
 **plugins/request_logger/index.py**
 ```python
 from datetime import datetime
-from plugins.base import PluginBase
+from akm.plugins import PluginBase
 
 class Plugin(PluginBase):
     """请求日志插件 — 通过 hook 拦截请求/响应"""
 
     def __init__(self):
         super().__init__()
-        self._start_times = {}  # request_id → 开始时间
+        self._start_times = {}  # id(ctx) → 开始时间
 
-    async def on_request(self, request):
+    async def on_request(self, ctx):
         if self.config.get("enable_stats"):
-            rid = id(request)
-            self._start_times[rid] = datetime.now()
-            self.logger.info(f"→ {request.method} {request.url.path}")
+            self._start_times[id(ctx)] = datetime.now()
+            self.logger.info(f"→ model={ctx.model} path={ctx.api_path}")
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         if self.config.get("enable_stats"):
-            rid = id(request)
-            start = self._start_times.pop(rid, None)
+            start = self._start_times.pop(id(ctx), None)
             if start:
                 elapsed = (datetime.now() - start).total_seconds()
-                self.logger.info(f"← {request.url.path} ({elapsed:.2f}s)")
+                self.logger.info(f"← {ctx.api_path} ({elapsed:.2f}s)")
 ```
 
 ## 十一、安全考虑

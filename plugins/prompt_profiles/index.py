@@ -95,13 +95,15 @@ class Plugin(PluginBase):
             return True
         return False
 
-    async def on_request(self, request) -> dict | None:
+    async def on_request(self, ctx) -> dict | None:
         """依次注入所有匹配 profile，并保持未匹配请求原样。"""
+        request = ctx.request
         if (self.config or {}).get("enabled", True) is not True or not isinstance(request, dict):
             return None
-        model = str(request.get("model", "") or "")
-        api_path = str(request.get("__akm_api_path__", "") or "")
-        client = str(request.get("__akm_client_user_agent__", "") or "")
+        model = str(request.get("model", "") or ctx.model or "")
+        # 网关元数据优先从 RequestContext 读取，不再依赖 request 内 __akm_* 字段
+        api_path = str(ctx.api_path or "")
+        client = str(ctx.client_user_agent or "")
         matched_names = []
         for index, profile in enumerate(self._profiles()):
             if not self._matches(profile, model, api_path, client):

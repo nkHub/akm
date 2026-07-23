@@ -78,8 +78,8 @@ class Plugin(PluginBase):
         self._windows[key] = self._windows.get(key, 0) + 1
         return self._windows[key]
 
-    def _block(self, message: str, reason: str) -> dict:
-        """构造 on_request 阻断结构。"""
+    def _block(self, ctx, message: str, reason: str) -> dict:
+        """构造 on_request 阻断结构并写入 ctx.action。"""
         body = json.dumps(
             {
                 "error": {
@@ -91,17 +91,17 @@ class Plugin(PluginBase):
             },
             ensure_ascii=False,
         )
-        return {
-            "__akm_action__": "block",
-            "status_code": 429,
-            "error": message,
-            "body": body,
-            "security_action": "rate_limit",
-            "security_reason": reason,
-        }
+        return ctx.set_block(
+            status_code=429,
+            error=message,
+            body=body,
+            security_action="rate_limit",
+            security_reason=reason,
+        )
 
-    async def on_request(self, request) -> dict | None:
+    async def on_request(self, ctx) -> dict | None:
         """检查 RPM/RPH/并发；通过则预占并发与窗口计数。"""
+        request = ctx.request
         if not isinstance(request, dict):
             return None
         cfg = self._settings()
@@ -115,15 +115,15 @@ class Plugin(PluginBase):
         if cfg["max_rpm"]:
             current = self._window_count(scope_key, "minute", 60)
             if current >= cfg["max_rpm"]:
-                return self._block(cfg["block_message"], f"rpm:{cfg['max_rpm']}")
+                return self._block(ctx, cfg["block_message"], f"rpm:{cfg['max_rpm']}")
         if cfg["max_rph"]:
             current = self._window_count(scope_key, "hour", 3600)
             if current >= cfg["max_rph"]:
-                return self._block(cfg["block_message"], f"rph:{cfg['max_rph']}")
+                return self._block(ctx, cfg["block_message"], f"rph:{cfg['max_rph']}")
         if cfg["max_concurrent"]:
             inflight = self._inflight.get(scope_key, 0)
             if inflight >= cfg["max_concurrent"]:
-                return self._block(cfg["block_message"], f"concurrent:{cfg['max_concurrent']}")
+                return self._block(ctx, cfg["block_message"], f"concurrent:{cfg['max_concurrent']}")
 
         if cfg["max_rpm"]:
             self._bump_window(scope_key, "minute", 60)
@@ -131,15 +131,13 @@ class Plugin(PluginBase):
             self._bump_window(scope_key, "hour", 3600)
         if cfg["max_concurrent"]:
             self._inflight[scope_key] = self._inflight.get(scope_key, 0) + 1
-            request["__akm_rate_limit_slot__"] = scope_key
-            return request
+            # 并发槽位记在 bag，on_response 释放
+            ctx.bag_set("rate_limit_guard.slot", scope_key)
         return None
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         """释放并发槽位（无论成功失败）。"""
-        if not isinstance(request, dict):
-            return None
-        slot = request.get("__akm_rate_limit_slot__")
+        slot = ctx.bag_get("rate_limit_guard.slot")
         if not slot:
             return None
         current = self._inflight.get(slot, 0) - 1

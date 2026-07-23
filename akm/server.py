@@ -2248,6 +2248,28 @@ async def _handle_ai_request(request: Request, api_path: str):
             key_alias = result["key_alias"]
             provider = result["provider"]
             model = result["model"]
+            # 请求级上下文：插件 bag（如 reverse_map）与改写后的 request 都在 ctx 上。
+            # 优先使用 proxy 回传的 request_context；旧路径回退 local_request。
+            stream_ctx = result.get("request_context")
+            if stream_ctx is None:
+                stream_request = (
+                    result.get("local_request")
+                    if isinstance(result.get("local_request"), dict)
+                    else body
+                )
+                from akm.plugins.context import RequestContext as _RequestContext
+
+                stream_ctx = _RequestContext(
+                    stream_request if isinstance(stream_request, dict) else body,
+                    api_path=api_path,
+                    client_user_agent=str(getattr(request, "headers", {}).get("user-agent", "") or ""),
+                )
+                # 兼容旧插件把 reverse_map 塞进 request 的路径
+                if isinstance(stream_request, dict):
+                    legacy_map = stream_request.get("__akm_reverse_map__")
+                    if isinstance(legacy_map, dict) and legacy_map:
+                        stream_ctx.bag_set("data_filter_guard.reverse_map", legacy_map)
+            stream_request = stream_ctx.request if stream_ctx is not None else body
 
             if monitor is not None:
                 monitor.stream_started()
@@ -2263,7 +2285,23 @@ async def _handle_ai_request(request: Request, api_path: str):
                 # ── 可逆占位符还原（data_filter_guard 请求脱敏后的响应还原，并发隔离） ──
                 _pm = getattr(request.app.state, "plugin_manager", None)
                 _dfg = _pm.plugins.get("data_filter_guard") if _pm else None
-                _rev_map = body.get("__akm_reverse_map__") if (isinstance(body, dict) and _dfg and _dfg.enabled) else None
+                _raw_rev = (
+                    stream_ctx.bag_get("data_filter_guard.reverse_map")
+                    if stream_ctx is not None
+                    else None
+                )
+                # 兼容：仍可读 request 上的遗留字段
+                if not isinstance(_raw_rev, dict) or not _raw_rev:
+                    _raw_rev = (
+                        stream_request.get("__akm_reverse_map__")
+                        if isinstance(stream_request, dict)
+                        else None
+                    )
+                _rev_map = (
+                    _raw_rev
+                    if (isinstance(_raw_rev, dict) and _raw_rev and _dfg and _dfg.enabled)
+                    else None
+                )
                 _rev_state = _dfg.reverse_stream_state() if _rev_map else None
                 # 流式安全保护默认关闭。用户显式开启后，先在有限内存中完整
                 # 缓冲 SSE 再统一扫描，避免危险模式在流尾命中时前半段已经被
@@ -2331,7 +2369,12 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if security_reason:
                         meta["security_reason"] = security_reason
                     try:
-                        hook_result = await current_pm.run_hook("on_response", request=body, response=meta)
+                        # 必须传入同一 request_context，才能读到 bag 中的 reverse_map
+                        hook_result = await current_pm.run_hook(
+                            "on_response", ctx=stream_ctx, response=meta
+                        )
+                        if hasattr(hook_result, "response") and isinstance(hook_result.response, dict):
+                            return hook_result.response
                         if isinstance(hook_result, dict) and isinstance(hook_result.get("response"), dict):
                             return hook_result["response"]
                     except Exception:

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter
 
 if TYPE_CHECKING:
+    from .context import RequestContext
     from .models import PluginMeta
 
 
@@ -20,8 +21,8 @@ class PluginBase:
                 # 插件初始化逻辑
                 pass
 
-            async def on_request(self, request) -> dict | None:
-                # 改写请求
+            async def on_request(self, ctx):
+                # 改写 ctx.request，或 ctx.set_block(...) 阻断
                 pass
     """
 
@@ -52,22 +53,42 @@ class PluginBase:
         """插件卸载回调（应用关闭前调用），可在此清理资源"""
         pass
 
-    # ── Hook 方法（子类按需重写） ──
+    # ── Hook 方法（子类按需重写；均接收请求级 RequestContext） ──
 
-    async def on_request(self, request) -> dict | None:
-        """请求到达回调。返回 dict 可改写请求数据（如注入参数/模型名映射）"""
+    async def on_request(self, ctx: "RequestContext"):
+        """请求到达回调。
+
+        - 直接改写 ``ctx.request``（in-place）或返回新的 request dict；
+        - 跨阶段状态写入 ``ctx.bag``（约定键 ``{plugin}.{field}``）；
+        - 需要阻断时调用 ``ctx.set_block(...)``。
+        """
         pass
 
-    async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
-        """Key 匹配后回调。返回 dict 可替换 key"""
+    async def on_key_selected(self, ctx: "RequestContext"):
+        """Key 匹配后回调。
+
+        - 读取 ``ctx.model`` / ``ctx.key`` / ``ctx.request``；
+        - 返回替代 key dict，或调用 ``ctx.set_skip_key(...)`` 跳过当前 Key。
+        """
         pass
 
-    async def on_upstream_error(self, request, response, key) -> str | None:
-        """上游错误回调。返回 "retry" / "switch" / None"""
+    async def on_upstream_error(
+        self,
+        ctx: "RequestContext",
+        status_code: int = 0,
+        error_type: str = "http",
+        attempt: int = 0,
+        key: dict | None = None,
+    ) -> str | None:
+        """上游错误回调。返回 ``\"retry\"`` / ``\"switch\"`` / ``\"block\"`` / ``\"fallback\"`` / None"""
         pass
 
-    async def on_response(self, request, response) -> None:
-        """响应返回回调（纯观察，无状态传递）"""
+    async def on_response(self, ctx: "RequestContext"):
+        """响应返回回调。
+
+        - 读取 ``ctx.request`` / ``ctx.response`` / ``ctx.bag``；
+        - 可返回改写后的 response dict（如脱敏还原、安全拦截）。
+        """
         pass
 
     # ── 转换方法（converter 类插件重写） ──

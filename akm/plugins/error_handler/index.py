@@ -35,7 +35,7 @@ class Plugin(PluginBase):
 
     async def on_upstream_error(
         self,
-        request: dict,
+        ctx,
         status_code: int = 0,
         error_type: str = "http",
         attempt: int = 0,
@@ -44,7 +44,7 @@ class Plugin(PluginBase):
         """根据错误类型决定重试策略
 
         Args:
-            request: 原始请求体（可检查 model 等信息做差异化处理）
+            ctx: 请求级上下文（可读 ctx.request / ctx.model）
             status_code: HTTP 状态码，连接错误时为 0
             error_type: 错误类型 — "http" / "connect" / "timeout" / "chunk"
             attempt: 当前 key 已重试次数（0-based）

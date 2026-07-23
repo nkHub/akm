@@ -118,8 +118,9 @@ class Plugin(PluginBase):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         """按事件类型和冷却窗口决定是否发送通知。"""
+        response = ctx.response
         if not isinstance(response, dict):
             return None
         cfg = self._settings()
