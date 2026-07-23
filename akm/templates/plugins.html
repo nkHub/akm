@@ -554,35 +554,47 @@ function removeDataFilterRuleRow(btn) {
 }
 
 function syncDataFilterGuardEditors(pluginName) {
+  // 仅在结构化行编辑器存在时同步；否则会把通用 textarea 的规则覆盖成空串
+  var keywordHost = document.getElementById('dfg-keyword-rows-' + pluginName);
+  var regexHost = document.getElementById('dfg-regex-rows-' + pluginName);
+  var responseHost = document.getElementById('dfg-response-rows-' + pluginName);
+  if (!keywordHost && !regexHost && !responseHost) return;
+
   var keywordLines = [];
-  document.querySelectorAll('#dfg-keyword-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
-    var left = (row.querySelector('[data-col="left"]') || {}).value || '';
-    left = left.trim();
-    if (left) keywordLines.push(left);
-  });
+  if (keywordHost) {
+    keywordHost.querySelectorAll('.data-filter-row').forEach(function(row){
+      var left = (row.querySelector('[data-col="left"]') || {}).value || '';
+      left = left.trim();
+      if (left) keywordLines.push(left);
+    });
+  }
   var regexLines = [];
-  document.querySelectorAll('#dfg-regex-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
-    var left = (row.querySelector('[data-col="left"]') || {}).value || '';
-    left = left.trim();
-    if (left) regexLines.push(left);
-  });
+  if (regexHost) {
+    regexHost.querySelectorAll('.data-filter-row').forEach(function(row){
+      var left = (row.querySelector('[data-col="left"]') || {}).value || '';
+      left = left.trim();
+      if (left) regexLines.push(left);
+    });
+  }
   var responsePatterns = [];
   var responseActions = [];
-  document.querySelectorAll('#dfg-response-rows-' + pluginName + ' .data-filter-row').forEach(function(row){
-    var pattern = ((row.querySelector('[data-col="pattern"]') || {}).value || '').trim();
-    var action = ((row.querySelector('[data-col="action"]') || {}).value || 'default').trim();
-    if (!pattern) return;
-    responsePatterns.push(pattern);
-    if (action && action !== 'default') responseActions.push(pattern + '=>' + action);
-  });
+  if (responseHost) {
+    responseHost.querySelectorAll('.data-filter-row').forEach(function(row){
+      var pattern = ((row.querySelector('[data-col="pattern"]') || {}).value || '').trim();
+      var action = ((row.querySelector('[data-col="action"]') || {}).value || 'default').trim();
+      if (!pattern) return;
+      responsePatterns.push(pattern);
+      if (action && action !== 'default') responseActions.push(pattern + '=>' + action);
+    });
+  }
   var keywordNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="keyword_rules"]');
   var regexNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="regex_rules"]');
   var patternNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="response_block_patterns"]');
   var actionNode = document.querySelector('[data-plugin="' + pluginName + '"][data-key="response_rule_actions"]');
-  if (keywordNode) keywordNode.value = keywordLines.join('\n');
-  if (regexNode) regexNode.value = regexLines.join('\n');
-  if (patternNode) patternNode.value = responsePatterns.join('\n');
-  if (actionNode) actionNode.value = responseActions.join('\n');
+  if (keywordHost && keywordNode) keywordNode.value = keywordLines.join('\n');
+  if (regexHost && regexNode) regexNode.value = regexLines.join('\n');
+  if (responseHost && patternNode) patternNode.value = responsePatterns.join('\n');
+  if (responseHost && actionNode) actionNode.value = responseActions.join('\n');
 }
 
 function getPluginConfigMessageNode(name) {
@@ -597,6 +609,39 @@ function renderPluginConfigModalBody(plugin) {
   if (!plugin) return '';
   if (plugin.name === 'model_matcher') return renderModelMatcherStructuredEditor(plugin);
   if (plugin.name === 'error_handler') return renderErrorHandlerStructuredEditor(plugin);
+  // data_filter_guard 必须用结构化编辑器：保存时 syncDataFilterGuardEditors 依赖
+  // #dfg-regex-rows-* / #dfg-keyword-rows-* 行控件；若走通用表单会把规则同步成空串
+  if (plugin.name === 'data_filter_guard') {
+    var html = '<div id="dfg-structured-' + esc(plugin.name) + '">' + renderDataFilterStructuredEditor(plugin) + '</div>';
+    // 结构化区域未覆盖的配置项（enabled / 扫描条数 / 大小写 / 流式缓冲上限等）走通用表单
+    if (plugin.settings && plugin.settings.length) {
+      html += '<div class="mt-4 grid grid-cols-1 gap-3">';
+      plugin.settings.forEach(function(def){
+        if (DATA_FILTER_STRUCTURED_KEYS[def.key]) return;
+        var value = getSettingValue(def, plugin.config ? plugin.config[def.key] : undefined);
+        html += '<label class="block">';
+        if (def.type === 'boolean') {
+          html += '<div class="flex items-center justify-between gap-3">';
+          html += '<span class="text-xs text-gray-300 leading-5">' + esc(def.label || def.key) + '</span>';
+          html += '<input data-plugin="' + esc(plugin.name) + '" data-key="' + esc(def.key) + '" data-type="boolean" type="checkbox" class="shrink-0" ' + (value ? 'checked' : '') + '>';
+          html += '</div>';
+        } else if (def.type === 'number') {
+          html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+          html += '<input data-plugin="' + esc(plugin.name) + '" data-key="' + esc(def.key) + '" data-type="number" type="number" value="' + esc(value) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+        } else if (def.type === 'text') {
+          html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+          html += '<textarea data-plugin="' + esc(plugin.name) + '" data-key="' + esc(def.key) + '" data-type="text" rows="2" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(value || '') + '</textarea>';
+        } else {
+          html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
+          html += '<input data-plugin="' + esc(plugin.name) + '" data-key="' + esc(def.key) + '" data-type="string" type="text" value="' + esc(value || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
+        }
+        if (def.description) html += '<div class="text-[11px] text-gray-500 mt-1">' + esc(def.description) + '</div>';
+        html += '</label>';
+      });
+      html += '</div>';
+    }
+    return html;
+  }
   return renderPluginSettingsFormBody(plugin);
 }
 
@@ -795,7 +840,8 @@ function savePluginConfig(name) {
         if (_activePluginConfigModal === name) closePluginConfigModal();
         loadPlugins();
       } else {
-        msg.textContent = '保存失败';
+        var err = (res.body && (res.body.error || res.body.detail)) || '';
+        msg.textContent = err ? ('保存失败: ' + err) : '保存失败';
         msg.className = 'text-xs text-red-400';
       }
     }).catch(function(){

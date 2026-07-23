@@ -22,7 +22,7 @@ class Plugin(PluginBase):
         self._cached_text = (self.config or {}).get("prompt_text", "") or ""
         self._cached_position = (self.config or {}).get("position", "before") or "before"
 
-    async def on_request(self, request) -> dict | None:
+    async def on_request(self, ctx) -> dict | None:
         """请求预处理：注入附加提示词
 
         1. 如果 body 中有 instructions 字段（Responses 格式），
@@ -32,6 +32,9 @@ class Plugin(PluginBase):
         3. 如果 prompt_text 为空，跳过不做任何处理。
         """
         self._refresh_config()
+        request = ctx.request
+        if not isinstance(request, dict):
+            return None
 
         text = self._cached_text
         if not text:

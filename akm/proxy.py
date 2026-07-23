@@ -14,6 +14,7 @@ from akm.key_pool import (
 )
 from akm.db import get_connection
 from akm.agent import BUILTIN_AGENTS, get_agent
+from akm.plugins.context import RequestContext
 
 
 class _ChainedAdapter:
@@ -157,7 +158,7 @@ def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
 
 async def _handle_upstream_error(
     plugin_manager,
-    body: dict,
+    ctx: RequestContext,
     status_code: int,
     error_type: str,
     attempt: int,
@@ -165,12 +166,12 @@ async def _handle_upstream_error(
 ) -> str | None:
     """调用 on_upstream_error hook，无插件可用时返回内置兜底策略
 
-    返回值: "retry" / "switch" / "block" / None
+    返回值: "retry" / "switch" / "block" / "fallback" / None
     """
     if plugin_manager:
         hook_result = await plugin_manager.run_hook(
             "on_upstream_error",
-            request=body,
+            ctx=ctx,
             status_code=status_code,
             error_type=error_type,
             attempt=attempt,
@@ -234,12 +235,22 @@ async def forward_request(
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
     selection_skip_reason = ""
 
+    # 请求级上下文：业务 body 与插件状态分离，贯穿本次 forward 全生命周期
+    ctx = RequestContext(
+        body if isinstance(body, dict) else {},
+        api_path=api_path,
+        client_user_agent=original_user_agent or "",
+    )
+    model = ctx.model or model
+
     async def _emit_on_response_meta(meta: dict):
         """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。"""
         if not plugin_manager:
             return meta
         try:
-            result = await plugin_manager.run_hook("on_response", request=body, response=meta)
+            result = await plugin_manager.run_hook("on_response", ctx=ctx, response=meta)
+            if isinstance(result, RequestContext) and isinstance(result.response, dict):
+                return result.response
             if isinstance(result, dict) and "response" in result:
                 return result["response"]
         except Exception:
@@ -249,15 +260,11 @@ async def forward_request(
 
     # ── 插件 hook: on_request（模型名映射等预处理）──
     if plugin_manager:
-        # 请求类插件只接收一个 request 参数。把接口类型和客户端标识放入
-        # 仅限本地生命周期的命名空间，供 prompt_profiles 等策略按协议或
-        # 调用方匹配；随后会被 forwardable_body 统一剥离，绝不发送给上游。
-        body.setdefault("__akm_api_path__", api_path)
-        if original_user_agent:
-            body.setdefault("__akm_client_user_agent__", original_user_agent)
-        hook_result = await plugin_manager.run_hook("on_request", request=body)
-        if isinstance(hook_result, dict) and "on_request_block" in hook_result:
-            blocked = hook_result["on_request_block"] or {}
+        await plugin_manager.run_hook("on_request", ctx=ctx)
+        body = ctx.request
+        model = ctx.model or model
+        if ctx.is_block:
+            blocked = ctx.action or {}
             status_code = int(blocked.get("status_code", 400) or 400)
             error = str(blocked.get("error", "请求命中安全策略，已被拦截") or "请求命中安全策略，已被拦截")
             response_body = blocked.get("body")
@@ -288,10 +295,8 @@ async def forward_request(
                 "latency_ms": 0,
                 "security_action": security_action,
                 "security_reason": security_reason,
+                "request_context": ctx,
             }
-        if isinstance(hook_result, dict) and "request" in hook_result:
-            body = hook_result["request"]
-            model = body.get("model", model)
 
     while tries < MAX_KEY_TRIES:
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
@@ -343,18 +348,19 @@ async def forward_request(
 
         # ── 插件 hook: on_key_selected（模型匹配后二次调整）──
         if plugin_manager:
-            result = await plugin_manager.run_hook(
-                "on_key_selected", model=model, key=key, request=body
-            )
-            if isinstance(result, dict) and "on_key_selected_skip" in result:
-                skipped = result["on_key_selected_skip"] or {}
+            ctx.key = key
+            ctx.model = model
+            await plugin_manager.run_hook("on_key_selected", ctx=ctx, model=model, key=key)
+            if ctx.is_skip_key:
+                skipped = ctx.action or {}
                 selection_skip_reason = str(
                     skipped.get("error", "当前可用 Key 均已达到配额上限")
                     or "当前可用 Key 均已达到配额上限"
                 )
+                ctx.clear_action()
                 continue
-            if isinstance(result, dict) and "key" in result:
-                key = result["key"]
+            if isinstance(ctx.key, dict):
+                key = ctx.key
 
         agent = get_agent(key.get("provider", "openai"))
 
@@ -408,18 +414,15 @@ async def forward_request(
         if adapter and hasattr(adapter, "set_request_context"):
             adapter.set_request_context(provider=key.get("provider", ""))
 
+        body = ctx.request
         is_multipart_request = bool(body.get("__akm_multipart__"))
         multipart_fields = body.get("__akm_form_fields__") if is_multipart_request else None
         multipart_files = body.get("__akm_form_files__") if is_multipart_request else None
 
         # ── 上游请求模式跟随客户端：流式接口按需走 SSE，其他接口直接请求普通响应 ──
-        # 插件会在请求对象上保存仅供本地生命周期使用的上下文，例如数据过滤
-        # 插件的反向映射和模型降级历史。这些字段绝不能进入上游请求或审计的
-        # “实际转发请求体”，否则既会泄露内部实现，也可能触发供应商参数校验。
-        forwardable_body = {
-            field: value for field, value in body.items()
-            if not str(field).startswith("__akm_")
-        }
+        # 插件跨阶段状态已迁入 RequestContext.bag，不再挂在 body 上。
+        # 仍剥离遗留 __akm_* 字段，防止 multipart 传输标记或旧插件字段误入上游。
+        forwardable_body = ctx.forwardable_request()
         upstream_body = adapter.convert_request(forwardable_body) if adapter else dict(forwardable_body)
 
         if is_multipart_request:
@@ -478,7 +481,7 @@ async def forward_request(
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
                 action = await _handle_upstream_error(
-                    plugin_manager, body, 0, error_type, attempt, key
+                    plugin_manager, ctx, 0, error_type, attempt, key
                 )
                 await _emit_on_response_meta({
                     "ok": False,
@@ -523,7 +526,7 @@ async def forward_request(
 
             if is_error:
                 action = await _handle_upstream_error(
-                    plugin_manager, body, resp.status_code, "http", attempt, key
+                    plugin_manager, ctx, resp.status_code, "http", attempt, key
                 )
                 last_error = f"{resp.status_code} (key: {key['alias']})"
                 if action == "block":
@@ -559,12 +562,17 @@ async def forward_request(
                 # 中的 StreamingResponse 生成器退出后再统一触发 on_response，
                 # 否则像 model_matcher 这类依赖该生命周期回收 in-flight 计数的
                 # 插件会过早减计数，导致并发判断失真，慢请求积压时表现为整服卡住。
+                #
+                # request_context 必须回传：插件 bag（如 reverse_map）与改写后的
+                # request 都在 ctx 上；server 侧不能读入口原始 body。
                 return {
                     "stream": True,
                     "status_code": 200,
                     "response": resp,
                     "adapter": adapter,  # 非 None 时 server.py 会用转换器包装
                     "request_body_for_log": forwarded_request_body,
+                    "request_context": ctx,
+                    "local_request": ctx.request,  # 兼容旧测试/调用方
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
@@ -575,7 +583,7 @@ async def forward_request(
                 resp_body = (await resp.aread()).decode("utf-8", errors="replace")
             except Exception as e:
                 action = await _handle_upstream_error(
-                    plugin_manager, body, 0, "read", attempt, key
+                    plugin_manager, ctx, 0, "read", attempt, key
                 )
                 last_error = f"读取非流式响应失败: {e}"
                 await resp.aclose()
@@ -636,10 +644,11 @@ async def forward_request(
 
         # 当前 key 彻底失败，日志回调记录失败尝试
 
-        # fallback_router 在 on_upstream_error 中只改写本次请求的模型并返回
-        # fallback。这里重新从请求上下文取模型，使下一轮从目标模型重新选 Key；
-        # 已尝试集合按模型隔离，避免原模型的失败 Key 错误排除目标模型候选。
-        next_model = str(body.get("model", model) or model)
+        # fallback_router 在 on_upstream_error 中改写 ctx.request.model 并返回
+        # fallback。这里从 ctx 同步模型，使下一轮从目标模型重新选 Key。
+        ctx.sync_model_from_request()
+        body = ctx.request
+        next_model = str(ctx.model or model)
         if next_model != model:
             model = next_model
             tried_aliases.clear()

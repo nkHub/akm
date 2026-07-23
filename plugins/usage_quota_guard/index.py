@@ -42,34 +42,34 @@ class Plugin(PluginBase):
             (scope, identifier, window_id), {"requests": 0, "tokens": 0}
         )
 
-    def _quota_error(self, scope_label: str, limit: int, metric: str) -> dict:
+    def _quota_error(self, ctx, scope_label: str, limit: int, metric: str) -> dict:
         """形成统一的跳过控制结构，供 proxy 尝试同模型的其他 Key。"""
-        return {
-            "__akm_action__": "skip_key",
-            "error": f"{scope_label}{metric}已达到当前窗口上限 ({limit})，已跳过该 Key",
-            "security_action": "quota",
-        }
+        return ctx.set_skip_key(
+            error=f"{scope_label}{metric}已达到当前窗口上限 ({limit})，已跳过该 Key",
+            security_action="quota",
+        )
 
-    async def on_key_selected(self, model: str, key: dict, request) -> dict | None:
+    async def on_key_selected(self, ctx) -> dict | None:
         """检查并预留请求次数；达到上限时让代理重新选择另一个 Key。"""
         cfg = self._settings()
         if not cfg["enabled"]:
             return None
 
+        key = ctx.key if isinstance(ctx.key, dict) else {}
         window_id = int(time.time() // cfg["window_seconds"])
-        alias = str((key or {}).get("alias", "") or "")
-        model_name = str(model or "")
+        alias = str(key.get("alias", "") or "")
+        model_name = str(ctx.model or "")
         key_bucket = self._bucket("key", alias, window_id)
         model_bucket = self._bucket("model", model_name, window_id)
 
         if cfg["max_requests_per_key"] and key_bucket["requests"] >= cfg["max_requests_per_key"]:
-            return self._quota_error(f"Key {alias} 的", cfg["max_requests_per_key"], "请求数")
+            return self._quota_error(ctx, f"Key {alias} 的", cfg["max_requests_per_key"], "请求数")
         if cfg["max_requests_per_model"] and model_bucket["requests"] >= cfg["max_requests_per_model"]:
-            return self._quota_error(f"模型 {model_name} 的", cfg["max_requests_per_model"], "请求数")
+            return self._quota_error(ctx, f"模型 {model_name} 的", cfg["max_requests_per_model"], "请求数")
         if cfg["max_tokens_per_key"] and key_bucket["tokens"] >= cfg["max_tokens_per_key"]:
-            return self._quota_error(f"Key {alias} 的", cfg["max_tokens_per_key"], "Token")
+            return self._quota_error(ctx, f"Key {alias} 的", cfg["max_tokens_per_key"], "Token")
         if cfg["max_tokens_per_model"] and model_bucket["tokens"] >= cfg["max_tokens_per_model"]:
-            return self._quota_error(f"模型 {model_name} 的", cfg["max_tokens_per_model"], "Token")
+            return self._quota_error(ctx, f"模型 {model_name} 的", cfg["max_tokens_per_model"], "Token")
 
         # 在真正发送前预留请求次数，避免并发请求同时通过同一额度检查。
         key_bucket["requests"] += 1
@@ -117,8 +117,9 @@ class Plugin(PluginBase):
             collect_usage(payload.get("message") if isinstance(payload, dict) else None)
         return max(candidates, default=0)
 
-    async def on_response(self, request, response):
+    async def on_response(self, ctx):
         """响应结束后把成功请求的实际 Token 计入对应窗口。"""
+        response = ctx.response
         cfg = self._settings()
         if not cfg["enabled"] or not isinstance(response, dict) or not response.get("ok"):
             return None

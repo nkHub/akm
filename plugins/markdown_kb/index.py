@@ -4447,7 +4447,7 @@ class Plugin(PluginBase):
         request["instructions"] = injection_text if not original else injection_text + "\n\n原始系统要求：\n" + original
         return request
 
-    async def on_request(self, request) -> dict | None:
+    async def on_request(self, ctx) -> dict | None:
         """为三类文本请求执行按需知识库注入。
 
         当前规则：
@@ -4458,6 +4458,7 @@ class Plugin(PluginBase):
         5. 没命中、抽不到问题或检索失败时都直接透传。
         """
         self._ensure_runtime_ready()
+        request = ctx.request
         if not isinstance(request, dict):
             return None
 
