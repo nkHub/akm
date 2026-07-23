@@ -1,229 +1,140 @@
 """数据安全插件。
 
 能力范围：
-1. 请求侧：递归脱敏敏感字段，对文本执行关键词/正则/代码敏感替换。
-   所有替换使用 ``<AKM-SEC:tag@seq:hash/>`` 可逆占位符，建立反向映射表。
+1. 请求侧：递归处理敏感字段名、关键词/正则替换。
+   敏感字段与文本规则统一使用 ``<AKM-SEC:tag@seq:hash/>`` 可逆占位符，建立反向映射表。
+   默认 ``regex_rules`` 已并入原代码敏感分组（LLM Key / VCS / 云厂商 / ChatOps /
+   JWT/Bearer / 私钥头 / 数据库连接串 / 凭据赋值等）及邮箱、手机号，命中即可逆脱敏。
 2. 响应侧：先反向还原占位符为原始值，再扫描高风险命令/脚本片段做拦截。
    非流式扫描覆盖 Chat / Responses / Anthropic Messages 可见文本。
-3. 流式响应：前缀锚点检测 ``<AKM-SEC:``，按需缓冲后在输出前还原原始值；
-   流式安全扫描默认有界完整缓冲，超限后增量扫描（mask 退化为 block）。
+3. 流式响应：对 SSE 在 ``delta.content`` / ``reasoning_content`` / ``text`` 等
+   字段上做跨帧 content 截流换回（模型按 token 拆开占位符时仍可拼回）；
+   纯文本 chunk 仍用前缀半截缓冲。完整占位符在 yield 前还原；流式安全扫描
+   默认有界完整缓冲，超限后增量扫描（mask 退化为 block）。
 
 说明：
 - 该插件默认关闭；用户可按需在插件页启用。
-- 请求侧 code_secret 的 block 模式等同 mask + 告警，不阻断请求。
 - ``messages[].content`` 路径同时覆盖字符串 content 与 content blocks 子路径。
-- 代码敏感扫描路径独立于关键词/正则的 ``request_text_paths``，二者可分别配置。
-- 响应还原兼容：精确匹配、JSON 转义 ``\\/``、中文标签规整为 ``t``+指纹，
-  以及模型轻微改写 tag 后按 6 位内容指纹的宽松匹配。
+- 默认 ``request_text_paths`` 覆盖对话正文、system/instructions/input，以及 Chat
+  续接 ``messages[].tool_calls[].function.arguments``（原代码敏感扫描范围）。
+- 响应还原兼容：精确匹配、JSON 转义 ``\\/``、JSON unicode ``\\u003c``/``\\u003e``/
+  ``\\u002f``、中文标签规整为 ``t``+指纹，以及模型轻微改写 tag 后按 6 位内容指纹的宽松匹配。
 """
 
 from akm.plugins import PluginBase
 import hashlib
 import json
+import logging
+import os
 import re
+from datetime import datetime, timezone
 
 
-# 默认代码敏感扫描路径：对话正文 + 系统/指令 + Chat 续接工具参数
+# 默认请求文本扫描路径：对话正文 + 系统/指令 + Chat 续接工具参数
 # - messages[].content：覆盖字符串 content 与 content[].text / content[].input 等子路径
 # - input / instructions：Responses API
 # - system：Anthropic Messages
 # - messages[].tool_calls[].function.arguments：Chat 客户端续接中的工具参数（密钥常经此泄漏）
-DEFAULT_CODE_SECRET_PATHS = (
+DEFAULT_REQUEST_TEXT_PATHS = (
     "messages[].content,input,instructions,system,"
     "messages[].tool_calls[].function.arguments"
 )
 
-# 默认关键词/正则文本处理路径（与代码敏感路径对齐主文本字段，不含 tool 参数以免误伤结构化 JSON）
-DEFAULT_REQUEST_TEXT_PATHS = "messages[].content,input,instructions,system"
-
-
-# ═══════════════════════════════════════════════════════════════
-# 代码敏感规则库
-# ═══════════════════════════════════════════════════════════════
-
-DEFAULT_CODE_SECRET_RULE_GROUPS = {
-    "llm_keys": {
-        "openai_project_key": {
-            "pattern": r"\bsk-proj-[A-Za-z0-9_-]{40,}\b",
-            "secret_type": "api_key",
-            "subtype": "openai_project",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "openai_api_key": {
-            "pattern": r"\bsk-[A-Za-z0-9_-]{24,}\b",
-            "secret_type": "api_key",
-            "subtype": "openai",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "anthropic_api_key": {
-            "pattern": r"\bsk-ant-[A-Za-z0-9_-]{48,}\b",
-            "secret_type": "api_key",
-            "subtype": "anthropic",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-    },
-    "vcs_tokens": {
-        "github_token": {
-            "pattern": r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
-            "secret_type": "token",
-            "subtype": "github",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "github_fine_grained_token": {
-            "pattern": r"\bgithub_pat_[0-9A-Za-z_]{40,}\b",
-            "secret_type": "token",
-            "subtype": "github_fine_grained",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "gitlab_token": {
-            "pattern": r"\bglpat-[0-9A-Za-z_-]{20,}\b",
-            "secret_type": "token",
-            "subtype": "gitlab",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "github_oauth_token": {
-            "pattern": r"\bgho_[0-9A-Za-z]{20,}\b",
-            "secret_type": "token",
-            "subtype": "github_oauth",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-    },
-    "cloud_keys": {
-        "aws_access_key": {
-            "pattern": r"\bAKIA[0-9A-Z]{16}\b",
-            "secret_type": "api_key",
-            "subtype": "aws_access_key",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "google_api_key": {
-            "pattern": r"\bAIza[0-9A-Za-z\-_]{35}\b",
-            "secret_type": "api_key",
-            "subtype": "google",
-            "severity": "high",
-            "confidence": 0.9,
-        },
-        "sendgrid_api_key": {
-            "pattern": r"\bSG\.[0-9A-Za-z\-_]{16,}\.[0-9A-Za-z\-_]{16,}\b",
-            "secret_type": "api_key",
-            "subtype": "sendgrid",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "mailgun_api_key": {
-            "pattern": r"\bkey-[0-9A-Za-z]{32}\b",
-            "secret_type": "api_key",
-            "subtype": "mailgun",
-            "severity": "high",
-            "confidence": 0.9,
-        },
-        "aws_secret_assignment": {
-            "pattern": r"(?i)\baws_secret[_-]?key\b\s*[:=]\s*(?:['\"][A-Za-z0-9/+=]{40}['\"]|[A-Za-z0-9/+=]{40})",
-            "secret_type": "api_key",
-            "subtype": "aws_secret_key",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-        "heroku_api_key": {
-            "pattern": r"\bheroku_api_key\b\s*[:=]\s*(?:['\"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}['\"]?)",
-            "secret_type": "api_key",
-            "subtype": "heroku",
-            "severity": "high",
-            "confidence": 0.9,
-        },
-    },
-    "chatops_tokens": {
-        "slack_token": {
-            "pattern": r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b",
-            "secret_type": "token",
-            "subtype": "slack",
-            "severity": "high",
-            "confidence": 0.9,
-        },
-        "slack_webhook": {
-            "pattern": r"https://hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+",
-            "secret_type": "webhook",
-            "subtype": "slack",
-            "severity": "high",
-            "confidence": 0.95,
-        },
-    },
-    "auth_tokens": {
-        "jwt_token": {
-            "pattern": r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
-            "secret_type": "token",
-            "subtype": "jwt",
-            "severity": "medium",
-            "confidence": 0.75,
-        },
-        "bearer_token": {
-            "pattern": r"(?i)\bBearer\s+[A-Za-z0-9._\-]{16,}\b",
-            "secret_type": "token",
-            "subtype": "bearer",
-            "severity": "high",
-            "confidence": 0.85,
-        },
-    },
-    "private_keys": {
-        "private_key": {
-            "pattern": r"-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----",
-            "secret_type": "private_key",
-            "subtype": "private_key",
-            "severity": "critical",
-            "confidence": 0.99,
-        },
-    },
-    "db_urls": {
-        "connection_string": {
-            "pattern": r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s]+",
-            "secret_type": "connection_string",
-            "subtype": "database_url",
-            "severity": "high",
-            "confidence": 0.9,
-        },
-        "password_in_url": {
-            "pattern": r"://[^:\s]+:[^@\s]+@[^\s/$,]+",
-            "secret_type": "credential",
-            "subtype": "password_in_url",
-            "severity": "high",
-            "confidence": 0.9,
-        },
-    },
-    "credential_assignments": {
-        "generic_secret_assignment": {
-            "pattern": r"(?i)\b(?:api_key|apikey|secret_key|secret|password|passwd|pwd|token|access_token|refresh_token|database_url)\b\s*[:=]\s*(?:['\"][^'\"]{8,}['\"]|[^\s{}\[\]\",;<>]{8,})",
-            "secret_type": "credential",
-            "subtype": "assignment",
-            "severity": "medium",
-            "confidence": 0.7,
-        },
-    },
-}
-
-DEFAULT_CODE_SECRET_GROUP_SELECTION = "llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens,private_keys,db_urls"
+# 默认可逆正则：邮箱/手机号 + 原代码敏感分组全部规则
+# （llm_keys / vcs_tokens / cloud_keys / chatops_tokens / auth_tokens /
+#  private_keys / db_urls / credential_assignments）。更具体的 sk-proj / sk-ant
+# 写在通用 sk- 之前，避免宽匹配抢占。
+DEFAULT_REGEX_RULES = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}#@email\n(?<!\\d)(1[3-9]\\d{9})(?!\\d)#@手机号\n\\bsk-proj-[A-Za-z0-9_-]{40,}\\b#@openai_project\n\\bsk-ant-[A-Za-z0-9_-]{48,}\\b#@anthropic\n\\bsk-[A-Za-z0-9_-]{24,}\\b#@openai\n\\bgh[pousr]_[A-Za-z0-9]{20,}\\b#@github\n\\bgithub_pat_[0-9A-Za-z_]{40,}\\b#@github_fine_grained\n\\bglpat-[0-9A-Za-z_-]{20,}\\b#@gitlab\n\\bgho_[0-9A-Za-z]{20,}\\b#@github_oauth\n\\bAKIA[0-9A-Z]{16}\\b#@aws_access_key\n\\bAIza[0-9A-Za-z\\-_]{35}\\b#@google\n\\bSG\\.[0-9A-Za-z\\-_]{16,}\\.[0-9A-Za-z\\-_]{16,}\\b#@sendgrid\n\\bkey-[0-9A-Za-z]{32}\\b#@mailgun\n(?i)\\baws_secret[_-]?key\\b\\s*[:=]\\s*(?:[\'\\"][A-Za-z0-9/+=]{40}[\'\\"]|[A-Za-z0-9/+=]{40})#@aws_secret_key\n\\bheroku_api_key\\b\\s*[:=]\\s*(?:[\'\\"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[\'\\"]?)#@heroku\n\\bxox[baprs]-[0-9A-Za-z-]{10,}\\b#@slack\nhttps://hooks\\.slack\\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+#@slack_webhook\n\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b#@jwt\n(?i)\\bBearer\\s+[A-Za-z0-9._\\-]{16,}\\b#@bearer\n-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----#@private_key\n(?i)\\b(?:postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis):\\/\\/[^\\s]+#@database_url\n://[^:\\s]+:[^@\\s]+@[^\\s/$,]+#@password_in_url\n(?i)\\b(?:api_key|apikey|secret_key|secret|password|passwd|pwd|token|access_token|refresh_token|database_url)\\b\\s*[:=]\\s*(?:[\'\\"][^\'\\"]{8,}[\'\\"]|[^\\s{}\\[\\]\\",;<>]{8,})#@assignment'
 
 # 可逆占位符前缀 — ``<AKM-SEC:`` 在自然语言中极低概率出现，检测准确
 _REVERSE_PREFIX = "<AKM-SEC:"
 _REVERSE_SUFFIX = "/>"
 # JSON 序列化常见把 ``/`` 写成 ``\/``，闭合后缀也需兼容
 _REVERSE_SUFFIX_JSON_ESC = r"\/>"
+# 部分上游/SDK 会把 ``<`` ``>`` ``/`` 编成 JSON unicode 转义，字面扫描不到 ``<AKM-SEC:``
+# 例：``\u003cAKM-SEC:tag@1:abcdef/\u003e`` 或 ``\u003cAKM-SEC:tag@1:abcdef\u002f\u003e``
+_REVERSE_PREFIX_JSON_U = "\\u003cAKM-SEC:"
 # 宽松匹配：兼容空白、可选 JSON 转义斜杠、可选结尾 ``>`` 前空白
 _PLACEHOLDER_LOOSE_RE = re.compile(
     r"<AKM-SEC:([A-Za-z0-9_.-]{1,48})@(\d+):([0-9a-fA-F]{6})\s*\\?/?>"
 )
+# 仅解码占位符相关字符的 ``\u00XX``（大小写 hex），避免全文 unicode_escape 破坏其它内容
+_JSON_U_LT_RE = re.compile(r"\\u003[cC]")
+_JSON_U_GT_RE = re.compile(r"\\u003[eE]")
+_JSON_U_SLASH_RE = re.compile(r"\\u002[fF]")
+# 流式半截 ``\\u`` + 0–3 位 hex（完整 ``\\u003c`` 为 4 位 hex，不匹配）
+_JSON_U_INCOMPLETE_TAIL_RE = re.compile(r"\\u[0-9a-fA-F]{0,3}$")
+# SSE JSON 中参与 content 级截流换回的字符串字段（值为 str 时才处理）
+_SSE_CONTENT_FIELD_KEYS = frozenset({
+    "content",
+    "reasoning_content",
+    "text",
+    "thinking",
+})
 
 
 class Plugin(PluginBase):
     """数据安全插件 — 可逆占位符 + 响应安全拦截。"""
 
+    # 换回诊断日志文件：打包 App 下 uvicorn 仅 warning，info 不会进控制台，
+    # 因此把换回链路单独落到 ~/.akm，方便本地 tail 排查。
+    _DIAG_LOG_PATH = os.path.expanduser("~/.akm/data_filter_guard.log")
+    _file_logger_ready = False
+
     # ── 占位符/反向映射 ──────────────────────────────────────
+
+    def _ensure_diag_file_logger(self) -> None:
+        """给插件 logger 挂载本地文件 Handler（幂等）。"""
+        if self._file_logger_ready:
+            return
+        log = self.logger
+        if log is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._DIAG_LOG_PATH), exist_ok=True)
+            # 避免重复挂载同一文件
+            for h in list(log.handlers):
+                if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == self._DIAG_LOG_PATH:
+                    self._file_logger_ready = True
+                    return
+            handler = logging.FileHandler(self._DIAG_LOG_PATH, encoding="utf-8")
+            handler.setLevel(logging.INFO)
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+            )
+            # 打包环境 root 可能是 WARNING，插件自身拉到 INFO 才能写出换回诊断
+            log.setLevel(logging.INFO)
+            log.addHandler(handler)
+            self._file_logger_ready = True
+            log.info(
+                "[data_filter_guard] 换回诊断日志已启用: %s",
+                self._DIAG_LOG_PATH,
+            )
+        except Exception:
+            # 文件日志失败不影响主链路
+            pass
+
+    def _diag(self, level: str, msg: str, *args) -> None:
+        """写换回诊断：同时走 logger 与直接 append 文件（双保险）。"""
+        self._ensure_diag_file_logger()
+        text = msg % args if args else msg
+        try:
+            log = self.logger
+            if log is not None:
+                if level == "warning":
+                    log.warning(text)
+                else:
+                    log.info(text)
+        except Exception:
+            pass
+        # 直接落盘：不依赖 handler 是否被 uvicorn 清掉
+        try:
+            os.makedirs(os.path.dirname(self._DIAG_LOG_PATH), exist_ok=True)
+            ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+            with open(self._DIAG_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{ts} {level.upper()} {text}\n")
+        except Exception:
+            pass
 
     def _reset_reverse_map(self):
         """每个请求开始时重置反向映射表和占位符序号。"""
@@ -248,14 +159,46 @@ class Plugin(PluginBase):
         return safe
 
     @staticmethod
+    def _normalize_json_placeholder_escapes(text: str) -> str:
+        """把响应中的 JSON unicode 转义占位符字符还原为字面 ``<>/``。
+
+        仅处理 ``\\u003c`` / ``\\u003e`` / ``\\u002f``（大小写 hex），不做全文
+        unicode_escape，避免误伤其它 ``\\uXXXX`` 内容。
+        """
+        if not text or "\\u" not in text:
+            return text
+        out = _JSON_U_LT_RE.sub("<", text)
+        out = _JSON_U_GT_RE.sub(">", out)
+        out = _JSON_U_SLASH_RE.sub("/", out)
+        return out
+
+    @staticmethod
+    def _text_has_placeholder_anchor(text: str) -> bool:
+        """是否含可逆占位符锚点（字面 ``<AKM-SEC:`` 或 JSON ``\\u003cAKM-SEC:``）。"""
+        if not text:
+            return False
+        if _REVERSE_PREFIX in text:
+            return True
+        # ``\\u003cAKM-SEC:``（hex 大小写由正则覆盖）
+        return bool(_JSON_U_LT_RE.search(text) and "AKM-SEC:" in text)
+
+    @staticmethod
     def _placeholder_variants(placeholder: str) -> list[str]:
-        """生成占位符在响应文本中可能出现的变体（含 JSON 转义 ``/``）。"""
+        """生成占位符在响应文本中可能出现的变体（含 JSON 转义）。"""
         variants = [placeholder]
         # 标准 JSON 对 ``/`` 的可选转义：``/>`` → ``\/>``
         if "/" in placeholder:
             escaped = placeholder.replace("/", r"\/")
             if escaped != placeholder:
                 variants.append(escaped)
+        # JSON unicode 转义 ``<`` / ``>`` / ``/``（部分 SDK 默认 escapeHTML）
+        # 例：``\u003cAKM-SEC:tag@1:abcdef/\u003e``、``\u003c...\u002f\u003e``
+        u_lt = placeholder.replace("<", "\\u003c").replace(">", "\\u003e")
+        if u_lt != placeholder:
+            variants.append(u_lt)
+            variants.append(u_lt.replace("/", "\\u002f"))
+            # 混合：只转义 ``<`` ``>``，``/`` 仍字面或 ``\/``
+            variants.append(u_lt.replace("/", r"\/"))
         return variants
 
     def _make_placeholder(self, tag: str, original: str) -> str:
@@ -273,25 +216,72 @@ class Plugin(PluginBase):
         self._reverse_by_fingerprint[fprint] = original
         return placeholder
 
-    def _reverse_replace(self, text: str, reverse_map: dict | None = None) -> tuple[str, bool]:
+    def _reverse_map_summary(self, reverse_map: dict | None) -> str:
+        """生成 reverse_map 诊断摘要（只含占位符与原文长度，不落敏感明文）。"""
+        if not isinstance(reverse_map, dict) or not reverse_map:
+            return "empty"
+        items = []
+        for placeholder, original in list(reverse_map.items())[:8]:
+            items.append(f"{placeholder}→len={len(str(original or ''))}")
+        more = "" if len(reverse_map) <= 8 else f" …(+{len(reverse_map) - 8})"
+        return f"count={len(reverse_map)} [{'; '.join(items)}{more}]"
+
+    def _reverse_replace(
+        self,
+        text: str,
+        reverse_map: dict | None = None,
+        *,
+        log: bool = True,
+    ) -> tuple[str, bool]:
         """扫描 ``<AKM-SEC:`` 前缀做反向替换。可传入请求级 map 支持并发隔离。
 
-        兼容三类回显形态：
+        兼容四类回显形态：
         1. 精确占位符；
         2. JSON 转义斜杠 ``\\/``；
-        3. 模型轻微改写 tag/空白后，仍带相同 6 位指纹的宽松匹配。
+        3. JSON unicode 转义 ``\\u003c`` / ``\\u003e`` / ``\\u002f``（部分上游 escapeHTML）；
+        4. 模型轻微改写 tag/空白后，仍带相同 6 位指纹的宽松匹配。
+
+        ``log=False`` 用于流式中间片段：避免每个无前缀 chunk 刷诊断日志。
         """
         rmap = reverse_map if reverse_map is not None else self._reverse_map
-        if not rmap or _REVERSE_PREFIX not in text:
+        # 先把 ``\\u003cAKM-SEC:...`` 规范成字面 ``<AKM-SEC:...``，后续路径统一
+        if text:
+            normalized = self._normalize_json_placeholder_escapes(text)
+            text = normalized
+        has_prefix = self._text_has_placeholder_anchor(text)
+        if not rmap:
+            if has_prefix and log:
+                self._diag(
+                    "warning",
+                    "[data_filter_guard] 换回跳过: reverse_map 为空，但文本含 %s 前缀 body_len=%s",
+                    _REVERSE_PREFIX,
+                    len(text),
+                )
             return text, False
+        if not has_prefix:
+            if log:
+                self._diag(
+                    "info",
+                    "[data_filter_guard] 换回跳过: 文本无占位符前缀 map=%s body_len=%s",
+                    self._reverse_map_summary(rmap),
+                    len(text or ""),
+                )
+            return text, False
+
         changed = False
+        exact_hits = 0
         for placeholder, original in rmap.items():
             for variant in self._placeholder_variants(placeholder):
                 if variant in text:
                     text = text.replace(variant, original)
                     changed = True
+                    exact_hits += 1
+            # normalize 之后字面 key 是主路径；再扫一遍防 residual unicode 变体
+            # （variants 已含 unicode 形态，此处仅保证 normalize 后字面能命中）
 
         # 宽松还原：按指纹从 map 反查；仅在精确/转义变体都未命中时启用
+        loose_hits = 0
+        loose_misses = 0
         if _REVERSE_PREFIX in text:
             # 从当前 reverse_map 重建指纹表，避免并发请求读到实例级脏索引
             fp_index: dict[str, str] = {}
@@ -303,16 +293,41 @@ class Plugin(PluginBase):
                 fp_index = dict(getattr(self, "_reverse_by_fingerprint", {}) or {})
 
             def _loose_repl(match: re.Match) -> str:
-                nonlocal changed
+                nonlocal changed, loose_hits, loose_misses
                 fprint = match.group(3).lower()
                 original = fp_index.get(fprint)
                 if original is None:
+                    loose_misses += 1
                     return match.group(0)
                 changed = True
+                loose_hits += 1
                 return original
 
             text = _PLACEHOLDER_LOOSE_RE.sub(_loose_repl, text)
 
+        remaining = text.count(_REVERSE_PREFIX) if text else 0
+        if log:
+            self._diag(
+                "info",
+                "[data_filter_guard] 换回结果: exact=%s loose_hit=%s loose_miss=%s remaining_prefix=%s "
+                "changed=%s map=%s body_len=%s",
+                exact_hits,
+                loose_hits,
+                loose_misses,
+                remaining,
+                changed,
+                self._reverse_map_summary(rmap),
+                len(text or ""),
+            )
+            if remaining > 0:
+                # 截取首个残留前缀附近片段，便于对照模型改写形态
+                idx = text.find(_REVERSE_PREFIX)
+                snippet = text[max(0, idx - 16) : idx + 96].replace("\n", "\\n")
+                self._diag(
+                    "warning",
+                    "[data_filter_guard] 换回残留占位符: snippet=%r",
+                    snippet,
+                )
         return text, changed
 
     def is_reverse_map_active(self, reverse_map: dict | None = None) -> bool:
@@ -320,21 +335,86 @@ class Plugin(PluginBase):
         rmap = reverse_map if reverse_map is not None else self._reverse_map
         return bool(rmap)
 
-    def reverse_stream_flush(self, state: dict, reverse_map: dict | None = None) -> str:
-        """强制刷新流式还原缓冲。"""
-        rmap = reverse_map if reverse_map is not None else self._reverse_map
-        if not rmap:
-            return ""
-        pending = state.get("pending", "")
-        if not pending:
-            return ""
-        output, _ = self._reverse_replace(pending, reverse_map=rmap)
-        state["pending"] = ""
-        return output
-
     def reverse_stream_state(self) -> dict:
-        """创建流式还原缓冲状态。"""
-        return {"pending": ""}
+        """创建流式还原缓冲状态。
+
+        - ``pending``：纯文本路径的半截前缀缓冲
+        - ``line_buf``：不完整 SSE 行
+        - ``content_bufs``：各 content 字段跨帧字符缓冲（字段级截流）
+        - ``sse_mode``：是否已进入 SSE 解析路径（flush 时决定是否合成 data 帧）
+        """
+        return {
+            "pending": "",
+            "line_buf": "",
+            "content_bufs": {},
+            "sse_mode": False,
+        }
+
+    def reverse_stream_flush(self, state: dict, reverse_map: dict | None = None) -> str:
+        """强制刷新流式还原缓冲（流结束时调用）。"""
+        rmap = reverse_map if reverse_map is not None else self._reverse_map
+        parts: list[str] = []
+
+        # 1) 未完成的 SSE 行按整行处理（可能继续写入 content_bufs）
+        line_buf = state.get("line_buf") or ""
+        if line_buf:
+            state["line_buf"] = ""
+            if rmap:
+                parts.append(self._reverse_sse_line(line_buf.rstrip("\r"), state, rmap))
+            else:
+                parts.append(line_buf)
+
+        if not rmap:
+            state["pending"] = ""
+            state["content_bufs"] = {}
+            return "".join(parts)
+
+        # 2) content 字段级残留：换回后，SSE 模式合成最小 delta 帧，避免裸文本破坏 SSE
+        content_bufs = state.get("content_bufs") or {}
+        residual_contents: list[str] = []
+        for field_key, buf in list(content_bufs.items()):
+            if not buf:
+                continue
+            restored, _ = self._reverse_replace(buf, reverse_map=rmap, log=True)
+            if restored:
+                residual_contents.append(restored)
+            content_bufs[field_key] = ""
+        state["content_bufs"] = {}
+        if residual_contents:
+            joined = "".join(residual_contents)
+            self._diag(
+                "info",
+                "[data_filter_guard] 流式换回 flush content_buf: len=%s map=%s sse=%s",
+                len(joined),
+                self._reverse_map_summary(rmap),
+                bool(state.get("sse_mode")),
+            )
+            if state.get("sse_mode"):
+                payload = json.dumps(
+                    {"choices": [{"index": 0, "delta": {"content": joined}}]},
+                    ensure_ascii=False,
+                )
+                parts.append(f"data: {payload}\n\n")
+            else:
+                parts.append(joined)
+
+        # 3) 纯文本 pending
+        pending = state.get("pending", "")
+        if pending:
+            self._diag(
+                "info",
+                "[data_filter_guard] 流式换回 flush: pending_len=%s map=%s",
+                len(pending),
+                self._reverse_map_summary(rmap),
+            )
+            output, _ = self._reverse_replace(pending, reverse_map=rmap, log=True)
+            state["pending"] = ""
+            if output:
+                parts.append(output)
+        else:
+            state["pending"] = ""
+
+        return "".join(parts)
 
     def _max_placeholder_pending(self, reverse_map: dict) -> int:
         """未闭合占位符允许缓冲的最大长度；超出则视为假阳性前缀。"""
@@ -343,15 +423,45 @@ class Plugin(PluginBase):
         longest = max((len(k) for k in reverse_map), default=0)
         return max(256, longest + 16)
 
+    def _content_hold_threshold(self, reverse_map: dict) -> int:
+        """content 字段「短/长」分界：与典型占位符长度对齐。
+
+        短于该阈值时按「是否以 ``<`` 开头或结尾」决定是否截流；
+        达到或超过则先换回再截可能未闭合的尾部。
+        """
+        longest = max((len(k) for k in reverse_map), default=0)
+        return max(longest + 8, 32)
+
+    @staticmethod
+    def _suffix_overlap_len(text: str, prefix: str) -> int:
+        """计算 ``text`` 尾部与 ``prefix`` 头部的最长重叠长度。
+
+        用于 SSE 把 ``<AKM-SEC:`` 切到两个 chunk 时，保留可能成为完整前缀的尾部。
+        例：text 以 ``<AKM`` 结尾 → 返回 5，下一 chunk 以 ``-SEC:...`` 开头时可拼回。
+        """
+        if not text or not prefix:
+            return 0
+        max_n = min(len(text), len(prefix) - 1)
+        for n in range(max_n, 0, -1):
+            if text.endswith(prefix[:n]):
+                return n
+        return 0
+
     @staticmethod
     def _find_placeholder_close(text: str, start: int) -> tuple[int, int] | None:
-        """在 ``start`` 之后查找占位符闭合位置。
+        """在 ``start`` 处的占位符前缀之后查找闭合位置。
 
-        返回 ``(close_start, close_end)``：close_start 为 ``/`` 或 ``\\/`` 起点，
-        close_end 为 ``>`` 之后的下标。同时兼容 ``/>`` 与 JSON 转义 ``\\/>``。
+        优先用宽松正则（兼容 ``/>`` / ``\\/>`` / 仅 ``>`` 以及轻微改写 tag）；
+        再回退到字面 ``/>`` / ``\\/>`` 扫描，避免未完整形态时过早放行。
+
+        返回 ``(close_start, close_end)``：close_end 为闭合 ``>`` 之后的下标。
         """
-        # 优先找未转义闭合；若 JSON 写了 \\/，``/>`` 仍是 ``\\/>`` 的后缀子串，
-        # 但为了 closed_end 覆盖完整转义，需要单独识别 ``\\/>``。
+        # 1) 宽松完整占位符：与 _reverse_replace 的 loose 规则对齐
+        m = _PLACEHOLDER_LOOSE_RE.match(text, start)
+        if m:
+            return m.start(), m.end()
+
+        # 2) 字面闭合：完整 ``/>`` 或 JSON 转义 ``\\/>``
         esc_idx = text.find(_REVERSE_SUFFIX_JSON_ESC, start)
         plain_idx = text.find(_REVERSE_SUFFIX, start)
         candidates: list[tuple[int, int]] = []
@@ -366,14 +476,255 @@ class Plugin(PluginBase):
         candidates.sort(key=lambda item: item[0])
         return candidates[0]
 
+    @staticmethod
+    def _short_content_should_hold(text: str) -> bool:
+        """短 content 是否需要截流：以 ``<`` 开头或结尾，或半截前缀 / ``\\u`` 转义。"""
+        if not text:
+            return False
+        # 用户约定：短片段仅在以 < 开头或结尾时才缓存
+        if text.startswith("<") or text.endswith("<"):
+            return True
+        # 整段是 ``<AKM-SEC:`` 的真前缀（如 ``<A``、``<AKM``）
+        if _REVERSE_PREFIX.startswith(text):
+            return True
+        # JSON unicode 半截：``\\u`` / ``\\u0`` / ``\\u00`` / ``\\u003``
+        if text.startswith("\\u") or _JSON_U_INCOMPLETE_TAIL_RE.search(text):
+            return True
+        if text.startswith("\\u003") or text.startswith("\\u003c"):
+            return True
+        return False
+
+    def _content_tail_hold_len(self, text: str, reverse_map: dict) -> int:
+        """长 content 换回后，尾部仍可能被截断的长度（需继续缓存）。"""
+        if not text:
+            return 0
+        # 未闭合的完整前缀
+        last_open = text.rfind(_REVERSE_PREFIX)
+        if last_open >= 0 and self._find_placeholder_close(text, last_open) is None:
+            return len(text) - last_open
+        # 尾部与 ``<AKM-SEC:`` 重叠
+        overlap = self._suffix_overlap_len(text, _REVERSE_PREFIX)
+        if overlap:
+            return overlap
+        # 以 < 结尾（下一帧可能接 AKM-SEC）
+        if text.endswith("<"):
+            return 1
+        # 半截 ``\\u00..``
+        u_tail = _JSON_U_INCOMPLETE_TAIL_RE.search(text)
+        if u_tail:
+            return len(u_tail.group(0))
+        return 0
+
+    def _gate_content_stream(
+        self,
+        piece: str,
+        state: dict,
+        reverse_map: dict,
+        field_key: str = "content",
+    ) -> str | None:
+        """content 字段级截流换回。
+
+        规则：
+        1. 与已缓存字符拼接后，若长度 **短于** 占位符量级阈值：
+           - 仅当以 ``<`` **开头或结尾**（或半截前缀 / ``\\u``）时截流，本帧不输出该字段；
+           - 否则直接换回并放行。
+        2. 达到或超过阈值：先整段换回，再截可能未闭合的尾部继续缓存，安全前缀立刻放行。
+
+        返回：
+        - ``str``：本帧应写入 JSON 字段的文本（可为 ``""``）
+        - ``None``：本帧该字段应置空（内容仍在 ``content_bufs`` 中）
+        """
+        bufs: dict = state.setdefault("content_bufs", {})
+        prev = bufs.get(field_key, "") or ""
+        full = prev + (piece if piece is not None else "")
+        if not full:
+            bufs[field_key] = ""
+            return ""
+
+        full = self._normalize_json_placeholder_escapes(full)
+        threshold = self._content_hold_threshold(reverse_map)
+        is_short = len(full) < threshold
+
+        # 短/长共用：先换回，再按尾部是否可能截断决定截流
+        restored, changed = self._reverse_replace(
+            full, reverse_map=reverse_map, log=not is_short
+        )
+        hold = self._content_tail_hold_len(restored, reverse_map)
+        max_hold = self._max_placeholder_pending(reverse_map)
+
+        if hold > max_hold:
+            # 假阳性超长：整段放行（已换回）
+            bufs[field_key] = ""
+            self._diag(
+                "warning",
+                "[data_filter_guard] content 截流: 尾部超限放行 field=%s hold=%s",
+                field_key,
+                hold,
+            )
+            return restored
+
+        if hold > 0:
+            if hold >= len(restored):
+                # 整段仍是未闭合前缀：继续截流，本帧 content 置空
+                bufs[field_key] = restored
+                return None
+            bufs[field_key] = restored[-hold:]
+            return restored[:-hold]
+
+        # 换回后已干净
+        if is_short and (not changed) and self._short_content_should_hold(full):
+            # 短片段、未命中 map，但以 < 开头或结尾 / 半截前缀：截流等下一帧
+            bufs[field_key] = full
+            return None
+
+        bufs[field_key] = ""
+        return restored
+
+    def _rewrite_json_content_fields(self, obj, state: dict, reverse_map: dict) -> bool:
+        """递归改写 SSE JSON 中的 content 类字符串字段。返回是否有改动。"""
+        changed = False
+        if isinstance(obj, dict):
+            for key, value in list(obj.items()):
+                # Responses: {"type":"response.output_text.delta","delta":"..." }
+                # 仅当 delta 值为 str 时按 content 流处理，避免误伤 delta 对象
+                is_content_key = key in _SSE_CONTENT_FIELD_KEYS or (
+                    key == "delta" and isinstance(value, str)
+                )
+                if is_content_key and isinstance(value, str):
+                    emitted = self._gate_content_stream(
+                        value, state, reverse_map, field_key=key
+                    )
+                    if emitted is None:
+                        if value != "":
+                            obj[key] = ""
+                            changed = True
+                    elif emitted != value:
+                        obj[key] = emitted
+                        changed = True
+                elif isinstance(value, (dict, list)):
+                    if self._rewrite_json_content_fields(value, state, reverse_map):
+                        changed = True
+        elif isinstance(obj, list):
+            for item in obj:
+                if self._rewrite_json_content_fields(item, state, reverse_map):
+                    changed = True
+        return changed
+
+    def _reverse_sse_line(self, line: str, state: dict, reverse_map: dict) -> str:
+        """处理单行 SSE（不含尾部 ``\\n``）。非 data JSON 原样返回。"""
+        if not line.startswith("data:"):
+            return line
+        payload = line[5:]
+        if payload.startswith(" "):
+            payload = payload[1:]
+        if not payload or payload == "[DONE]":
+            return line
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return line
+        if not isinstance(obj, (dict, list)):
+            return line
+        changed = self._rewrite_json_content_fields(obj, state, reverse_map)
+        # 即使本帧 content 被截流置空，也重序列化，保证客户端不收到半截占位符
+        if not changed:
+            # 仍可能有 content_bufs 在累计；若字段被置空也算 changed
+            return line
+        try:
+            new_payload = json.dumps(obj, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return line
+        return f"data: {new_payload}"
+
+    def _reverse_sse_stream_chunk(self, text: str, state: dict, reverse_map: dict) -> str:
+        """按 SSE 行边界拆帧，在 content 字段上做跨帧截流换回。"""
+        state["sse_mode"] = True
+        state.setdefault("line_buf", "")
+        buf = (state.get("line_buf") or "") + (text or "")
+        if not buf:
+            return ""
+        out: list[str] = []
+        while True:
+            idx = buf.find("\n")
+            if idx < 0:
+                state["line_buf"] = buf
+                break
+            line = buf[:idx]
+            buf = buf[idx + 1 :]
+            # 保留 \\r 语义：处理时去掉，写出时用 \\n 结尾（与上游 \\n 或 \\r\\n 兼容）
+            out.append(self._reverse_sse_line(line.rstrip("\r"), state, reverse_map))
+            out.append("\n")
+        return "".join(out)
+
+    @staticmethod
+    def _looks_like_sse(text: str, state: dict) -> bool:
+        """判断当前 chunk 是否应按 SSE 路径处理。"""
+        if state.get("sse_mode") or state.get("line_buf"):
+            return True
+        if not text:
+            return False
+        sample = text.lstrip()
+        return sample.startswith("data:") or sample.startswith("event:") or "\ndata:" in text
+
     def reverse_stream_chunk(self, text: str, state: dict, reverse_map: dict | None = None) -> str:
-        """流式 chunk 还原：基于 ``<AKM-SEC:`` 前缀做缓冲与反向替换。"""
+        """流式 chunk 还原：SSE content 字段级截流 + 纯文本前缀半截缓冲。
+
+        SSE 路径（模型按 token 拆 ``delta.content`` 时的主路径）：
+        1. 按行解析 ``data: {json}``，只改写 content / reasoning_content / text 等字段；
+        2. 短 content（低于占位符长度量级）：仅当以 ``<`` **开头或结尾** 时截流缓存；
+        3. 长 content：先换回，再把可能被截断的尾部继续缓存，安全前缀立刻下发；
+        4. 换回后的文本写回 JSON 再 yield（截流式放行，非整段憋完）。
+
+        纯文本路径：保留跨 chunk 半截 ``<AKM-SEC:`` / ``\\u003c`` 缓冲（兼容测试与非 SSE）。
+        """
         rmap = reverse_map if reverse_map is not None else self._reverse_map
         if not rmap:
+            if text and self._text_has_placeholder_anchor(text):
+                if not state.get("_logged_empty_map"):
+                    state["_logged_empty_map"] = True
+                    self._diag(
+                        "warning",
+                        "[data_filter_guard] 流式换回跳过: reverse_map 为空但 chunk 含占位符前缀 chunk_len=%s",
+                        len(text),
+                    )
             return text
 
+        if not state.get("_logged_stream_map"):
+            state["_logged_stream_map"] = True
+            self._diag(
+                "info",
+                "[data_filter_guard] 流式换回已启用: map=%s first_chunk_len=%s has_prefix=%s sse_hint=%s",
+                self._reverse_map_summary(rmap),
+                len(text or ""),
+                self._text_has_placeholder_anchor(text or ""),
+                self._looks_like_sse(text or "", state),
+            )
+
+        # ── SSE：字段级 content 截流 ──
+        if self._looks_like_sse(text or "", state):
+            return self._reverse_sse_stream_chunk(text or "", state, rmap)
+
+        # ── 纯文本：前缀半截缓冲 ──
+        return self._reverse_plain_stream_chunk(text or "", state, rmap)
+
+    def _reverse_plain_stream_chunk(self, text: str, state: dict, rmap: dict) -> str:
+        """纯文本流式还原：前缀半截缓冲 + 完整占位符反向替换。"""
         state.setdefault("pending", "")
-        full = state["pending"] + text
+        full = state["pending"] + (text or "")
+        if not full:
+            return ""
+        # 尾部半截 ``\\u`` / ``\\u0`` / ``\\u00`` / ``\\u003``：压 pending，等下一 chunk 补齐
+        u_tail = _JSON_U_INCOMPLETE_TAIL_RE.search(full)
+        if u_tail:
+            incomplete_u = u_tail.group(0)
+            safe = full[: -len(incomplete_u)]
+            state["pending"] = incomplete_u
+            if safe:
+                safe = self._normalize_json_placeholder_escapes(safe)
+                return self._reverse_replace(safe, reverse_map=rmap, log=False)[0]
+            return ""
+        # 规范 JSON unicode 转义后，后续只处理字面 ``<AKM-SEC:``
+        full = self._normalize_json_placeholder_escapes(full)
         max_pending = self._max_placeholder_pending(rmap)
 
         last_open = full.rfind(_REVERSE_PREFIX)
@@ -381,36 +732,45 @@ class Plugin(PluginBase):
             close_span = self._find_placeholder_close(full, last_open)
             if close_span is None:
                 incomplete = full[last_open:]
-                if last_open > 0:
-                    output = self._reverse_replace(full[:last_open], reverse_map=rmap)[0]
-                    # 未闭合前缀过长：不可能是本请求生成的占位符，直接放行
-                    if len(incomplete) > max_pending:
-                        state["pending"] = ""
-                        return output + incomplete
-                    state["pending"] = incomplete
-                    return output
-                if len(full) > max_pending:
-                    # 假阳性前缀，整段按普通文本输出（无法匹配完整 key）
+                head = full[:last_open]
+                output = (
+                    self._reverse_replace(head, reverse_map=rmap, log=True)[0]
+                    if head
+                    else ""
+                )
+                if len(incomplete) > max_pending:
                     state["pending"] = ""
-                    return full
-                state["pending"] = full
-                return ""
-            # 闭合点之后可能还有下一段未闭合前缀，递归处理剩余
+                    released, _ = self._reverse_replace(incomplete, reverse_map=rmap, log=True)
+                    self._diag(
+                        "warning",
+                        "[data_filter_guard] 流式换回: 未闭合前缀过长，尝试换回后放行 pending_len=%s",
+                        len(incomplete),
+                    )
+                    return output + released
+                state["pending"] = incomplete
+                return output
+
             _close_start, closed_end = close_span
             head = full[:closed_end]
             tail = full[closed_end:]
-            output, _ = self._reverse_replace(head, reverse_map=rmap)
+            output, _ = self._reverse_replace(head, reverse_map=rmap, log=True)
             state["pending"] = ""
             if tail:
-                return output + self.reverse_stream_chunk(tail, state, reverse_map=rmap)
+                return output + self._reverse_plain_stream_chunk(tail, state, rmap)
             return output
+
+        overlap = self._suffix_overlap_len(full, _REVERSE_PREFIX)
+        if overlap > 0:
+            safe = full[:-overlap]
+            state["pending"] = full[-overlap:]
+            if safe:
+                return self._reverse_replace(safe, reverse_map=rmap, log=False)[0]
+            return ""
 
         if state["pending"]:
-            output, _ = self._reverse_replace(full, reverse_map=rmap)
             state["pending"] = ""
-            return output
-
-        return text
+            return self._reverse_replace(full, reverse_map=rmap, log=False)[0]
+        return full
 
     # ── 配置解析 ────────────────────────────────────────────
 
@@ -421,8 +781,10 @@ class Plugin(PluginBase):
         self._regex_rules = []
         self._request_text_paths = set()
         self._response_block_patterns = []
-        self._code_secret_rules = []
         self._reset_reverse_map()
+        # 启动时挂上本地诊断文件，避免打包环境 info 日志被丢弃
+        self._ensure_diag_file_logger()
+        self._diag("info", "[data_filter_guard] on_load 完成，换回诊断文件: %s", self._DIAG_LOG_PATH)
 
     def _reload_config(self):
         """从当前插件配置重新解析规则。"""
@@ -437,34 +799,18 @@ class Plugin(PluginBase):
             self._sensitive_fields = set(fields)
 
         self._process_keys_case_insensitive = case_insensitive
-        self._redact_replacement = str(cfg.get("redact_replacement", "[REDACTED]") or "[REDACTED]")
+        # redact_replacement 已废弃：敏感字段统一走可逆 <AKM-SEC:...>，不再使用固定脱敏文案
         self._keyword_rules = self._parse_keyword_sources(cfg.get("keyword_rules", "") or "")
-        self._regex_rules = self._parse_regex_patterns(cfg.get("regex_rules", "") or "")
-        # 留空表示处理所有字符串；缺省键时使用内置默认路径集合
+        # 缺省键时使用内置默认可逆正则（含原代码敏感分组）；显式空串表示用户关闭正则
+        raw_regex = cfg.get("regex_rules", DEFAULT_REGEX_RULES)
+        if raw_regex is None:
+            raw_regex = DEFAULT_REGEX_RULES
+        self._regex_rules = self._parse_regex_patterns(raw_regex if raw_regex is not None else "")
+        # 留空表示处理所有字符串；缺省键时使用内置默认路径集合（含 tool_calls 参数）
         raw_text_paths = cfg.get("request_text_paths", DEFAULT_REQUEST_TEXT_PATHS)
         self._request_text_paths = set(self._split_items(raw_text_paths if raw_text_paths is not None else ""))
-        self._recent_message_scan_limit = max(0, int(cfg.get("recent_message_scan_limit", 5) or 5))
+        # 已移除 recent_message_scan_limit：顶层 messages 始终扫描全部历史消息
         self._enabled = cfg.get("enabled", True) is True
-        self._enable_code_secret_guard = cfg.get("enable_code_secret_guard", False) is True
-        self._code_secret_guard_mode = str(cfg.get("code_secret_guard_mode", "warn") or "warn").strip().lower()
-        self._code_secret_mask_replacement = str(
-            cfg.get("code_secret_mask_replacement", "[CODE-SECRET]") or "[CODE-SECRET]"
-        )
-        self._code_secret_max_text_length = max(0, int(cfg.get("code_secret_max_text_length", 8000) or 8000))
-        self._code_secret_confidence_threshold = self._safe_float(
-            cfg.get("code_secret_confidence_threshold", 85),
-            85.0,
-        ) / 100.0
-        # 代码敏感路径与关键词路径独立；缺省键时使用扩展后的默认集合
-        raw_secret_paths = cfg.get("code_secret_paths", DEFAULT_CODE_SECRET_PATHS)
-        self._code_secret_paths = set(self._split_items(raw_secret_paths if raw_secret_paths is not None else ""))
-        self._code_secret_rule_groups = set(
-            self._split_items(cfg.get("code_secret_rule_groups", DEFAULT_CODE_SECRET_GROUP_SELECTION) or DEFAULT_CODE_SECRET_GROUP_SELECTION)
-        )
-        self._code_secret_rules = self._build_code_secret_rules(
-            cfg.get("code_secret_rule_set", "default") or "default",
-            self._code_secret_rule_groups,
-        )
         self._enable_response_guard = cfg.get("enable_response_guard", True) is True
         self._enable_stream_response_guard = cfg.get("enable_stream_response_guard", False) is True
         self._stream_guard_buffer_max_bytes = max(16384, int(cfg.get("stream_guard_buffer_max_bytes", 262144) or 262144))
@@ -500,13 +846,6 @@ class Plugin(PluginBase):
             if item:
                 items.append(item)
         return items
-
-    def _safe_float(self, value, fallback: float) -> float:
-        """把配置值安全转成浮点数，避免非法输入破坏规则加载。"""
-        try:
-            return float(value)
-        except Exception:
-            return fallback
 
     def _parse_keyword_sources(self, raw: str) -> list[tuple[str, str]]:
         """解析关键词匹配源，支持 ``关键词#标签`` / ``关键词#@标签``（标签可选，默认 'keyword'）。"""
@@ -574,37 +913,6 @@ class Plugin(PluginBase):
                 self.logger.warning(f"[data_filter_guard] 忽略非法拦截正则: {pattern_text} ({exc})")
         return compiled
 
-    def _build_code_secret_rules(self, rule_set: str, enabled_groups: set[str]) -> list[dict]:
-        """构建轻量代码敏感规则列表。
-
-        这里不直接引入第三方扫描器，而是提炼一组高确定性的运行时规则：
-        - 优先覆盖 API Key、Token、私钥、连接串等开发场景高频泄漏项；
-        - 规则规模刻意控制在较小范围，避免把实时请求路径拖成完整仓库扫描器；
-        - 替换由调用方通过可逆占位符动态生成。
-        """
-        if str(rule_set).strip().lower() not in ("", "default"):
-            return []
-
-        rules = []
-        selected_groups = enabled_groups or set(DEFAULT_CODE_SECRET_RULE_GROUPS.keys())
-        for group_name, group_rules in DEFAULT_CODE_SECRET_RULE_GROUPS.items():
-            if group_name not in selected_groups:
-                continue
-            for rule_id, item in group_rules.items():
-                try:
-                    rules.append({
-                        "id": rule_id,
-                        "group": group_name,
-                        "pattern": re.compile(item["pattern"]),
-                        "secret_type": item["secret_type"],
-                        "subtype": item["subtype"],
-                        "severity": item["severity"],
-                        "confidence": float(item["confidence"]),
-                    })
-                except re.error as exc:
-                    self.logger.warning(f"[data_filter_guard] 忽略非法代码敏感规则: {rule_id} ({exc})")
-        return rules
-
     def _parse_rule_actions(self, raw: str) -> dict[str, str]:
         """解析单条响应规则的动作覆盖。"""
         actions = {}
@@ -618,8 +926,6 @@ class Plugin(PluginBase):
             if pattern_text and action in ("warn", "mask", "block"):
                 actions[pattern_text] = action
         return actions
-
-    # ── 请求处理 ────────────────────────────────────────────
 
     def _normalize_key(self, key: str) -> str:
         """按配置决定字段名是否大小写归一。"""
@@ -659,77 +965,6 @@ class Plugin(PluginBase):
                 return True
         return False
 
-    def _should_scan_message_item(self, path: str, idx: int, total: int) -> bool:
-        """判断 `messages` 列表中的当前项是否需要进入文本扫描。"""
-        if path != "messages":
-            return True
-        if self._recent_message_scan_limit <= 0:
-            return True
-        start = max(0, total - self._recent_message_scan_limit)
-        return idx >= start
-
-    def _is_top_level_messages_list(self, path: str) -> bool:
-        """判断当前列表节点是否为请求顶层 `messages`。"""
-        return path == "messages"
-
-    def _scan_code_secrets(self, text: str) -> list[dict]:
-        """扫描字符串中的代码类敏感信息并返回命中列表。"""
-        matches = []
-        if not text or not self._enable_code_secret_guard:
-            return matches
-        if self._code_secret_max_text_length > 0 and len(text) > self._code_secret_max_text_length:
-            return matches
-
-        for rule in self._code_secret_rules:
-            if rule["confidence"] < self._code_secret_confidence_threshold:
-                continue
-            for item in rule["pattern"].finditer(text):
-                matches.append({
-                    "id": rule["id"],
-                    "start": item.start(),
-                    "end": item.end(),
-                    "value": item.group(0),
-                    "secret_type": rule["secret_type"],
-                    "subtype": rule["subtype"],
-                    "severity": rule["severity"],
-                    "confidence": rule["confidence"],
-                })
-
-        if not matches:
-            return matches
-
-        # 消除重叠：置信度优先，其次命中长度优先
-        matches.sort(key=lambda m: (-m["confidence"], -(m["end"] - m["start"]), m["start"]))
-        selected = []
-        for match in matches:
-            overlapped = False
-            for existing in selected:
-                if not (match["end"] <= existing["start"] or match["start"] >= existing["end"]):
-                    overlapped = True
-                    break
-            if not overlapped:
-                selected.append(match)
-
-        selected.sort(key=lambda m: m["start"])
-        return selected
-
-    def _mask_code_secrets_with_placeholders(self, text: str, matches: list[dict]) -> str:
-        """用可逆占位符替换命中片段。"""
-        if not matches:
-            return text
-        parts = []
-        cursor = 0
-        for match in matches:
-            parts.append(text[cursor:match["start"]])
-            placeholder = self._make_placeholder(
-                f"secret_{match['subtype']}",
-                match["value"],
-            )
-            parts.append(placeholder)
-            cursor = match["end"]
-        parts.append(text[cursor:])
-        return "".join(parts)
-
     def _apply_text_rules(self, text: str) -> str:
         """依次应用关键词和正则替换规则，统一用可逆占位符。
 
@@ -760,43 +995,28 @@ class Plugin(PluginBase):
             new_text = pattern.sub(_repl, new_text)
         return new_text
 
-    def _apply_request_text_guards(
-        self,
-        text: str,
-        path: str,
-        *,
-        apply_text_rules: bool = True,
-        apply_code_secret: bool = True,
-    ) -> tuple[str, bool]:
-        """对请求字符串执行文本替换与/或代码敏感识别。
+    def _apply_request_text_guards(self, text: str) -> tuple[str, bool]:
+        """对请求字符串执行关键词/正则可逆替换（由 ``request_text_paths`` 门控）。
 
-        - 关键词/正则替换：可逆占位符（由 ``request_text_paths`` 门控）。
-        - 代码敏感识别：warn 仅告警不改写；mask/block 统一用可逆占位符替换并告警
-          （由 ``code_secret_paths`` 门控，与关键词路径相互独立）。
-        - block 不再阻断请求，改为等同 mask + 告警。
+        原代码敏感规则已并入默认 ``regex_rules``，统一走可逆占位符 + reverse_map 换回。
         """
-        new_text = self._apply_text_rules(text) if apply_text_rules else text
+        new_text = self._apply_text_rules(text)
+        return new_text, new_text != text
 
-        if not apply_code_secret or not self._enable_code_secret_guard:
-            return new_text, new_text != text
-        if not self._path_matches(path, self._code_secret_paths):
-            return new_text, new_text != text
+    @staticmethod
+    def _sensitive_value_to_text(raw_val) -> str:
+        """把敏感字段值规整为可写入 reverse_map 的文本。
 
-        matches = self._scan_code_secrets(new_text)
-        if not matches:
-            return new_text, new_text != text
-
-        summary = ", ".join(f"{m['secret_type']}.{m['subtype']}" for m in matches[:5])
-
-        if self._code_secret_guard_mode == "warn":
-            self.logger.warning(f"[data_filter_guard] 请求体命中代码敏感规则(仅告警): {summary}")
-            return new_text, new_text != text
-
-        # mask 与 block 统一：替换为可逆占位符并告警
-        mode_label = self._code_secret_guard_mode.upper()
-        self.logger.warning(f"[data_filter_guard] 请求体命中代码敏感规则({mode_label}): {summary}")
-        masked = self._mask_code_secrets_with_placeholders(new_text, matches)
-        return masked, True
+        字符串原样使用；dict/list 等用 JSON 序列化，失败时退回 ``str()``，
+        以便占位符还原时仍能得到可读明文（结构类型在请求体中会变为字符串，
+        与旧版整字段替换为固定脱敏文案的行为一致）。
+        """
+        if isinstance(raw_val, str):
+            return raw_val
+        try:
+            return json.dumps(raw_val, ensure_ascii=False)
+        except Exception:
+            return str(raw_val)
 
     def _mask_and_filter(self, value, path: str = ""):
         """递归处理任意 JSON 风格数据，返回 (处理后数据, 是否发生改写)。"""
@@ -807,9 +1027,10 @@ class Plugin(PluginBase):
                 key = str(raw_key)
                 current_path = f"{path}.{key}" if path else key
                 if self._normalize_key(key) in self._sensitive_fields:
-                    # 敏感字段名命中 → 整个字段值替换为 [REDACTED]
-                    # 这类字段值 AI 不会在响应中引用，不需要可逆映射
-                    result[raw_key] = self._redact_replacement
+                    # 敏感字段名命中 → 整个字段值替换为可逆占位符（与关键词/正则一致）
+                    # 非字符串先序列化为文本再映射，保证响应侧能按占位符还原明文
+                    original = self._sensitive_value_to_text(raw_val)
+                    result[raw_key] = self._make_placeholder(key, original)
                     changed = True
                     continue
                 new_val, sub_changed = self._mask_and_filter(raw_val, current_path)
@@ -818,13 +1039,10 @@ class Plugin(PluginBase):
             return result, changed
 
         if isinstance(value, list):
+            # 列表节点（含顶层 messages）全部递归扫描，不再截断最近 N 条
             changed = False
             result = []
-            total = len(value)
             for idx, item in enumerate(value):
-                if self._is_top_level_messages_list(path) and not self._should_scan_message_item(path, idx, total):
-                    result.append(item)
-                    continue
                 current_path = f"{path}[{idx}]" if path else f"[{idx}]"
                 new_item, sub_changed = self._mask_and_filter(item, current_path)
                 result.append(new_item)
@@ -832,19 +1050,10 @@ class Plugin(PluginBase):
             return result, changed
 
         if isinstance(value, str):
-            # 关键词/正则与代码敏感使用独立路径门控：
-            # 仅在 code_secret_paths 命中、request_text_paths 未命中时，仍应执行密钥扫描。
-            apply_text = self._path_matches(path, self._request_text_paths)
-            apply_secret = self._enable_code_secret_guard and self._path_matches(path, self._code_secret_paths)
-            if not apply_text and not apply_secret:
+            # 关键词/正则（含原代码敏感默认规则）由 request_text_paths 统一门控
+            if not self._path_matches(path, self._request_text_paths):
                 return value, False
-            new_text, changed = self._apply_request_text_guards(
-                value,
-                path,
-                apply_text_rules=apply_text,
-                apply_code_secret=apply_secret,
-            )
-            return new_text, changed
+            return self._apply_request_text_guards(value)
 
         return value, False
 
@@ -868,9 +1077,22 @@ class Plugin(PluginBase):
         new_request, changed = self._mask_and_filter(request)
         if self._reverse_map:
             # 请求级 bag：同一 ctx 贯穿 on_response / 流式还原，并发隔离
-            ctx.bag_set("data_filter_guard.reverse_map", dict(self._reverse_map))
+            rev_copy = dict(self._reverse_map)
+            ctx.bag_set("data_filter_guard.reverse_map", rev_copy)
+            self._diag(
+                "info",
+                "[data_filter_guard] 已挂载 reverse_map 到 bag: %s changed=%s",
+                self._reverse_map_summary(rev_copy),
+                changed,
+            )
+        elif changed:
+            # 正常路径改写后应已写入 map；此处仅作诊断兜底
+            self._diag(
+                "info",
+                "[data_filter_guard] 请求已改写但 reverse_map 为空（异常：应检查占位符生成）",
+            )
         if changed:
-            self.logger.info("[data_filter_guard] 请求体已执行脱敏/过滤（可逆占位符）")
+            self._diag("info", "[data_filter_guard] 请求体已执行脱敏/过滤（可逆占位符）")
             return new_request
         return None
 
@@ -1055,24 +1277,57 @@ class Plugin(PluginBase):
             return None
 
         # ── 反向还原占位符（优先 bag，兼容遗留 request 字段） ──
+        map_source = "bag"
         rev_map = ctx.bag_get("data_filter_guard.reverse_map")
         if not isinstance(rev_map, dict) or not rev_map:
             request = ctx.request
             rev_map = request.get("__akm_reverse_map__") if isinstance(request, dict) else None
+            map_source = "request.__akm_reverse_map__" if rev_map else "none"
         response_body = response.get("response_body")
-        if isinstance(response_body, str) and response_body and rev_map:
+        body_is_str = isinstance(response_body, str)
+        body_len = len(response_body) if body_is_str else -1
+        # 含字面 ``<AKM-SEC:`` 或 JSON ``\\u003cAKM-SEC:``
+        has_prefix = body_is_str and self._text_has_placeholder_anchor(response_body or "")
+        is_stream = response.get("stream") is True
+        self._diag(
+            "info",
+            "[data_filter_guard] on_response 换回入口: stream=%s map_source=%s map=%s "
+            "body_is_str=%s body_len=%s has_prefix=%s",
+            is_stream,
+            map_source,
+            self._reverse_map_summary(rev_map if isinstance(rev_map, dict) else None),
+            body_is_str,
+            body_len,
+            has_prefix,
+        )
+        if body_is_str and response_body and isinstance(rev_map, dict) and rev_map:
             restored, reverted = self._reverse_replace(response_body, reverse_map=rev_map)
             if reverted:
                 response = dict(response)
                 response["response_body"] = restored
-                self.logger.info("[data_filter_guard] 响应体已反向还原占位符")
+                self._diag("info", "[data_filter_guard] 响应体已反向还原占位符")
+            else:
+                self._diag(
+                    "warning",
+                    "[data_filter_guard] 响应体未还原: 有 map 但 _reverse_replace 未命中 "
+                    "(stream=%s has_prefix=%s)",
+                    is_stream,
+                    has_prefix,
+                )
+        elif has_prefix and not (isinstance(rev_map, dict) and rev_map):
+            self._diag(
+                "warning",
+                "[data_filter_guard] 响应含占位符但 reverse_map 不可用: map_source=%s stream=%s",
+                map_source,
+                is_stream,
+            )
 
         # ── 响应安全拦截 ──
         if not self._enable_response_guard:
             return response
 
         # 流式响应的安全扫描在 protect_stream_payload / inspect_stream_chunk 中处理
-        if response.get("stream") is True:
+        if is_stream:
             return response
 
         scan_text = self._extract_response_text(response.get("response_body", ""))

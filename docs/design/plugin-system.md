@@ -566,7 +566,12 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 
 `on_request` 通过 `ctx.set_block(status_code=400, error="...", security_action=..., security_reason=...)` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；`security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
 
-**流式还原**：proxy 成功流式返回时附带 `request_context`（同一 `RequestContext`）与兼容字段 `local_request=ctx.request`。server 优先从 `request_context.bag_get("data_filter_guard.reverse_map")` 取映射做增量还原；兼容旧路径上 request 内 `__akm_reverse_map__`。
+**流式还原**：proxy 成功流式返回时附带 `request_context`（同一 `RequestContext`）与兼容字段 `local_request=ctx.request`。server 优先从 `request_context.bag_get("data_filter_guard.reverse_map")` 取映射，在 **yield 前** 调用 `reverse_stream_chunk` 做增量还原（`on_response` 只影响流结束后的审计 capture，不改已下发 chunk）。兼容旧路径上 request 内 `__akm_reverse_map__`。
+
+同请求可靠性要点（`data_filter_guard`）：
+- **SSE 主路径**：按行解析 `data: {json}`，在 `delta.content` / `reasoning_content` / `text` / `thinking` 等字段上跨帧截流换回（模型按 token 拆开占位符时仍可拼回）。短 content（低于占位符长度量级）仅当以 `<` **开头或结尾**（或半截前缀 / `\\u`）时截流；长 content 先换回再截可能未闭合的尾部，安全前缀立刻 yield。
+- **纯文本兼容路径**：chunk 切在 `<AKM-SEC:` 中间时保留尾部重叠；完整前缀未闭合则缓冲至 `/>` / 宽松 `>` 或超限放行。
+- 假阳性超限放行前仍尝试精确+宽松换回；流结束 `reverse_stream_flush` 冲 content 缓冲与 pending（SSE 模式可合成最小 delta 帧）。
 
 **崩溃隔离**：每个 hook 被 `try/except` 包裹，单个插件抛异常时跳过该插件（保留 ctx 原样传给下一个），不中断管道也不影响主链路。异常记录到日志。
 

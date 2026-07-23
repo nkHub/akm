@@ -1,9 +1,9 @@
 {
   "name": "data_filter_guard",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "has_menu": false,
   "category": "filter",
-  "description": "数据安全插件：请求脱敏、关键词/正则/代码敏感过滤、非流式与有界流式响应高风险内容拦截",
+  "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与有界流式响应高风险内容拦截",
   "builtin": false,
   "default_enabled": false,
   "required": false,
@@ -25,14 +25,7 @@
       "label": "敏感字段名",
       "type": "text",
       "default": "api_key,apikey,api-key,x-api-key,authorization,proxy-authorization,password,passwd,pwd,secret,client_secret,private_key,token,access_token,refresh_token,id_token,session_token,cookie,set-cookie",
-      "description": "递归扫描这些字段名；命中后将整个字段值替换为脱敏占位符，内置默认覆盖常见凭据字段，支持逗号或换行分隔"
-    },
-    {
-      "key": "redact_replacement",
-      "label": "脱敏占位符",
-      "type": "string",
-      "default": "[REDACTED]",
-      "description": "敏感字段命中后的替换文本"
+      "description": "递归扫描这些字段名；命中后将整个字段值替换为可逆占位符 <AKM-SEC:tag@seq:hash/>（与关键词/正则相同），响应侧可还原；支持逗号或换行分隔"
     },
     {
       "key": "keyword_rules",
@@ -45,78 +38,15 @@
       "key": "regex_rules",
       "label": "正则替换规则",
       "type": "text",
-      "default": "",
-      "description": "按行填写正则；命中后自动替换为可逆占位符。可选 `正则#@标签` 格式，如 `(?<!\\d)(1[3-9]\\d{9})(?!\\d)#@手机号`；中文标签会规整为 t+指纹，响应侧可按指纹宽松还原"
+      "default": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}#@email\n(?<!\\d)(1[3-9]\\d{9})(?!\\d)#@手机号\n\\bsk-proj-[A-Za-z0-9_-]{40,}\\b#@openai_project\n\\bsk-ant-[A-Za-z0-9_-]{48,}\\b#@anthropic\n\\bsk-[A-Za-z0-9_-]{24,}\\b#@openai\n\\bgh[pousr]_[A-Za-z0-9]{20,}\\b#@github\n\\bgithub_pat_[0-9A-Za-z_]{40,}\\b#@github_fine_grained\n\\bglpat-[0-9A-Za-z_-]{20,}\\b#@gitlab\n\\bgho_[0-9A-Za-z]{20,}\\b#@github_oauth\n\\bAKIA[0-9A-Z]{16}\\b#@aws_access_key\n\\bAIza[0-9A-Za-z\\-_]{35}\\b#@google\n\\bSG\\.[0-9A-Za-z\\-_]{16,}\\.[0-9A-Za-z\\-_]{16,}\\b#@sendgrid\n\\bkey-[0-9A-Za-z]{32}\\b#@mailgun\n(?i)\\baws_secret[_-]?key\\b\\s*[:=]\\s*(?:['\\\"][A-Za-z0-9/+=]{40}['\\\"]|[A-Za-z0-9/+=]{40})#@aws_secret_key\n\\bheroku_api_key\\b\\s*[:=]\\s*(?:['\\\"]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}['\\\"]?)#@heroku\n\\bxox[baprs]-[0-9A-Za-z-]{10,}\\b#@slack\nhttps://hooks\\.slack\\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+#@slack_webhook\n\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b#@jwt\n(?i)\\bBearer\\s+[A-Za-z0-9._\\-]{16,}\\b#@bearer\n-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----#@private_key\n(?i)\\b(?:postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis):\\/\\/[^\\s]+#@database_url\n://[^:\\s]+:[^@\\s]+@[^\\s/$,]+#@password_in_url\n(?i)\\b(?:api_key|apikey|secret_key|secret|password|passwd|pwd|token|access_token|refresh_token|database_url)\\b\\s*[:=]\\s*(?:['\\\"][^'\\\"]{8,}['\\\"]|[^\\s{}\\[\\]\\\",;<>]{8,})#@assignment",
+      "description": "按行填写正则；命中后自动替换为可逆占位符 <AKM-SEC:tag@seq:hash/>。可选 `正则#@标签`。默认已并入邮箱/手机号，以及原代码敏感分组规则（LLM Key、VCS Token、云厂商密钥、ChatOps、JWT/Bearer、私钥头、数据库连接串、凭据赋值），响应侧可按指纹宽松还原"
     },
     {
       "key": "request_text_paths",
       "label": "文本处理路径",
       "type": "text",
-      "default": "messages[].content,input,instructions,system",
-      "description": "仅对这些路径下的字符串做关键词/正则替换；messages[].content 同时覆盖字符串 content 与 content[].text 多模态/Anthropic blocks；与代码敏感扫描路径相互独立；留空表示处理所有字符串"
-    },
-    {
-      "key": "recent_message_scan_limit",
-      "label": "最近消息扫描条数",
-      "type": "number",
-      "default": 5,
-      "description": "对 messages[].content 仅扫描最近 N 条消息，默认 5；设为 0 表示扫描全部历史消息"
-    },
-    {
-      "key": "enable_code_secret_guard",
-      "label": "启用代码敏感识别",
-      "type": "boolean",
-      "default": false,
-      "description": "对开发场景常见的 API Key、Token、私钥、连接串等做轻量识别；默认关闭以避免误伤正常文本"
-    },
-    {
-      "key": "code_secret_guard_mode",
-      "label": "代码敏感处理模式",
-      "type": "string",
-      "default": "warn",
-      "description": "可选值：warn（仅告警）/ mask（可逆占位符替换）/ block（与 mask 相同：可逆替换并告警，不阻断请求）"
-    },
-    {
-      "key": "code_secret_paths",
-      "label": "代码敏感扫描路径",
-      "type": "text",
       "default": "messages[].content,input,instructions,system,messages[].tool_calls[].function.arguments",
-      "description": "仅对这些路径下的字符串执行代码敏感识别（与关键词/正则路径独立）；默认覆盖对话正文、Responses 的 input/instructions、Anthropic system，以及 Chat 续接中的 tool_calls 参数；messages[].content 同时覆盖 content[].text 等子路径；留空表示扫描所有字符串"
-    },
-    {
-      "key": "code_secret_max_text_length",
-      "label": "代码敏感最大文本长度",
-      "type": "number",
-      "default": 8000,
-      "description": "单段文本超过该长度时跳过代码敏感识别，防止超长 prompt 放大扫描成本"
-    },
-    {
-      "key": "code_secret_confidence_threshold",
-      "label": "代码敏感置信度阈值",
-      "type": "number",
-      "default": 85,
-      "description": "仅处理高于该阈值的内置规则命中，范围建议 0-100；默认 85 表示偏保守"
-    },
-    {
-      "key": "code_secret_mask_replacement",
-      "label": "代码敏感拦截占位符",
-      "type": "string",
-      "default": "[CODE-SECRET]",
-      "description": "兼容保留项。当前 mask/block 均使用可逆占位符替换，响应侧会还原；本字段不再参与替换"
-    },
-    {
-      "key": "code_secret_rule_set",
-      "label": "代码敏感规则集",
-      "type": "string",
-      "default": "default",
-      "description": "当前内置 default 规则集，覆盖 OpenAI/GitHub/AWS/Slack/JWT/私钥/连接串等高确定性开发凭据"
-    },
-    {
-      "key": "code_secret_rule_groups",
-      "label": "代码敏感规则分组",
-      "type": "text",
-      "default": "llm_keys,vcs_tokens,cloud_keys,chatops_tokens,auth_tokens,private_keys,db_urls",
-      "description": "按逗号或换行启用默认规则分组；可选 llm_keys、vcs_tokens、cloud_keys、chatops_tokens、auth_tokens、private_keys、db_urls、credential_assignments"
+      "description": "仅对这些路径下的字符串做关键词/正则替换；messages[].content 同时覆盖字符串 content 与 content[].text 多模态/Anthropic blocks；默认另含 Chat 续接 messages[].tool_calls[].function.arguments；留空表示处理所有字符串。顶层 messages 列表会扫描全部历史消息"
     },
     {
       "key": "process_keys_case_insensitive",
@@ -166,15 +96,15 @@
       "key": "response_block_patterns",
       "label": "响应拦截正则",
       "type": "text",
-      "default": "(?i)rm\\s+-rf\\s+/\n(?i)curl\\s+[^\\n|]+\\|\\s*(bash|sh)\n(?i)wget\\s+[^\\n|]+\\|\\s*(bash|sh)\n(?i)powershell\\s+-enc\\b\n(?i)eval\\s*\\(.*base64\n(?i)chmod\\s+\\+x\\s+.+&&\\s*\\./\n(?i)os\\.system\\s*\\(\n(?i)subprocess\\.(run|popen|call)\\s*\\(",
-      "description": "按行填写高风险正则（勿在行尾加逗号）；内置默认覆盖常见命令执行与脚本投递片段，命中后按响应防护模式处理"
+      "default": "(?i)rm\\s+-rf\\s+/\n(?i)curl\\s+[^\\n|]+\\|\\s*(bash|sh)\n(?i)wget\\s+[^\\n|]+\\|\\s*(bash|sh)\n(?i)powershell\\s+-enc\\b\n(?i)eval\\s*\\(.*base64\n(?i)chmod\\s+\\+x\\s+.+&&\\s*\\./\n(?i)os\\.system\\s*\\(\n(?i)subprocess\\.(run|popen|call)\\s*\\(\n(?i)ignore\\s+(all\\s+)?previous\\s+instructions\n(?i)reveal\\s+(the\\s+)?system\\s+prompt\n(?i)dump\\s+all\\s+secrets\n(?i)bypass\\s+safety",
+      "description": "按行填写高风险正则（勿在行尾加逗号）；默认已合并「命令执行风险」与「提示词注入」模板：常见命令执行/脚本投递 + 注入话术，命中后按响应防护模式或单条动作处理"
     },
     {
       "key": "response_rule_actions",
       "label": "响应规则动作",
       "type": "text",
-      "default": "",
-      "description": "按行填写 regex=>warn|mask|block；可对单条规则覆盖全局响应防护模式"
+      "default": "(?i)ignore\\s+(all\\s+)?previous\\s+instructions=>warn\n(?i)reveal\\s+(the\\s+)?system\\s+prompt=>warn\n(?i)dump\\s+all\\s+secrets=>block\n(?i)bypass\\s+safety=>warn",
+      "description": "按行填写 regex=>warn|mask|block；可对单条规则覆盖全局响应防护模式。默认已合并「提示词注入」模板动作（注入话术多为 warn，dump secrets 为 block）"
     },
     {
       "key": "response_mask_replacement",
