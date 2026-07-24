@@ -252,14 +252,14 @@ git status
 
 > 发布时以 `akm/__init__.py` 中的 `__version__` 为主版本源；若同时维护 `pyproject.toml` 的包元数据版本，两者也应保持一致。例如本次发布若版本号为 `0.1.14`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.14` 保持一致。
 
-2. **构建分发包（示例为 zip）**
+2. **构建分发包（Apple Silicon DMG）**
 
 ```bash
-# 清理并重新打包
-rm -rf build dist && python setup.py py2app
+# 清理旧产物、构建 .app 并生成版本化 arm64 DMG
+# 需要预先安装：brew install create-dmg
+./scripts/build_m1_dmg.sh
 
-# 生成 zip（文件名带版本号）
-cd dist && zip -r "AI Key Manager-$(python -c 'from akm import __version__; print(__version__)').zip" "AI Key Manager.app"
+# 产物：dist/AI Key Manager-${VERSION}-arm64.dmg
 ```
 
 3. **创建并推送版本标签**
@@ -277,7 +277,7 @@ git push origin v0.2.0
 
 ```bash
 gh release create v0.2.0 \
-  "dist/AI Key Manager-0.2.0.zip" \
+  "dist/AI Key Manager-0.2.0-arm64.dmg" \
   --title "v0.2.0" \
   --notes "- 新增功能 X\n- 修复问题 Y"
 ```
@@ -297,12 +297,12 @@ gh release list
 ```bash
 VER=$(python -c 'from akm import __version__; print(__version__)')
 TAG="v${VER}"
-ZIP="dist/AI Key Manager-${VER}.zip"
+DMG="dist/AI Key Manager-${VER}-arm64.dmg"
 
 git tag -a "$TAG" -m "release: $TAG"
 git push origin main && git push origin "$TAG"
 
-gh release create "$TAG" "$ZIP" --title "$TAG" --generate-notes
+gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes
 ```
 
 **优点**：无需托管额外文件，完全免费  

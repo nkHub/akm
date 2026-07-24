@@ -46,7 +46,7 @@ class PluginBase:
         self.builtin: bool = False         # 由 PluginManager 注入
         self.enabled: bool = True          # 由 PluginManager 注入
         self.app: FastAPI | None = None    # FastAPI 实例
-        self.db: Any = None                # 共享 SQLite 连接
+        self.db: Any = None                # 默认不注入连接；插件自行管理短生命周期数据库连接
         self.config: dict = {}             # ~/.akm/config.json 中该插件配置
         self.logger: logging.Logger = logging.getLogger("akm.plugin")
         self.notify: NotifyFn | None = None
@@ -57,8 +57,12 @@ class PluginBase:
 
     # ── 生命周期 ──
 
-    async def on_load(self):
-        """插件加载回调（路由注册后调用），可在此建表、初始化资源"""
+    async def on_load(self) -> bool | None:
+        """插件加载回调（路由注册后调用），可在此建表、初始化资源。
+
+        返回 ``False`` 表示配置或依赖不满足，管理器会保留插件为未就绪状态；
+        其他返回值均视为初始化成功，兼容既有未返回值的插件实现。
+        """
         pass
 
     async def on_unload(self):

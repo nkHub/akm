@@ -116,7 +116,8 @@ async def lifespan(app: FastAPI):
     conn.close()
     # 初始化插件管理器
     plugin_manager = PluginManager()
-    await plugin_manager.load_all(app, conn)
+    # 初始化连接已关闭，不能把它注入插件上下文；插件需自行获取短生命周期连接。
+    await plugin_manager.load_all(app)
     app.state.plugin_manager = plugin_manager
     health_monitor = HealthMonitor()
     app.state.health_monitor = health_monitor

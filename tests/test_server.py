@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 from collections import OrderedDict
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
@@ -20,10 +21,23 @@ from akm.key_pool import get_key
 from akm.plugins.context import RequestContext
 from akm.server import app, lifespan, _build_runtime_debug_payload, _default_image_generation_model, _image_supported_models_from_config
 
+if TYPE_CHECKING:
+    from plugins.markdown_kb.index import Plugin as MarkdownKbPlugin
+
 
 def _ctx(request: dict | None = None, **kwargs) -> RequestContext:
     """构造单次请求级上下文（测试辅助；直接持有 request 引用，不 clone）。"""
     return RequestContext(request if isinstance(request, dict) else {}, **kwargs)
+
+
+async def _initialize_plugin(plugin) -> None:
+    """模拟管理器的热加载路径，并同步插件的就绪状态。"""
+    plugin.runtime_ready = await plugin.on_load() is not False
+
+
+def _markdown_kb_plugin(plugin_manager: Any) -> "MarkdownKbPlugin":
+    """将动态插件映射中的 markdown_kb 实例收窄为其实际类型。"""
+    return cast("MarkdownKbPlugin", plugin_manager.plugins["markdown_kb"])
 
 
 @pytest.mark.asyncio
@@ -89,6 +103,7 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
     }
     out = await plugin.on_request(_ctx(request))
     assert out is request
+    assert out is not None
     assert out["model"] == "gpt-4o-mini"
     assert out["messages"][0]["role"] == "user"
 
@@ -309,9 +324,12 @@ async def test_markdown_kb_bind_file_workspace_marks_file_for_rebuild(monkeypatc
 
     async def fake_post(self, url, json=None, **kwargs):
         if url.endswith("/v1/embeddings"):
-            inputs = json.get("input")
+            payload = json if isinstance(json, dict) else {}
+            inputs = payload.get("input", [])
             if isinstance(inputs, str):
                 inputs = [inputs]
+            if not isinstance(inputs, list):
+                inputs = []
             return httpx.Response(200, json={"data": [{"embedding": [1.0, float(idx + 1)], "index": idx} for idx, _ in enumerate(inputs)]})
         return httpx.Response(404, json={"detail": "unexpected url"})
 
@@ -320,10 +338,10 @@ async def test_markdown_kb_bind_file_workspace_marks_file_for_rebuild(monkeypatc
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -355,9 +373,12 @@ async def test_markdown_kb_rebuild_file_persists_bound_workspace(monkeypatch):
 
     async def fake_post(self, url, json=None, **kwargs):
         if url.endswith("/v1/embeddings"):
-            inputs = json.get("input")
+            payload = json if isinstance(json, dict) else {}
+            inputs = payload.get("input", [])
             if isinstance(inputs, str):
                 inputs = [inputs]
+            if not isinstance(inputs, list):
+                inputs = []
             return httpx.Response(200, json={"data": [{"embedding": [1.0, float(idx + 1)], "index": idx} for idx, _ in enumerate(inputs)]})
         return httpx.Response(404, json={"detail": "unexpected url"})
 
@@ -366,10 +387,10 @@ async def test_markdown_kb_rebuild_file_persists_bound_workspace(monkeypatch):
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -592,7 +613,7 @@ async def test_markdown_kb_runs_after_model_matcher_for_plain_aliases(monkeypatc
 
     pm = PluginManager()
     await pm.load_all(FastAPI())
-    markdown_plugin = pm.plugins["markdown_kb"]
+    markdown_plugin = _markdown_kb_plugin(pm)
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
         return [{
@@ -610,6 +631,7 @@ async def test_markdown_kb_runs_after_model_matcher_for_plain_aliases(monkeypatc
     }
     # run_hook 现返回 RequestContext；request 字段在 ctx.request
     out = await pm.run_hook("on_request", request=body)
+    assert isinstance(out, RequestContext)
     request_out = out.request
     assert request_out["model"] == "gpt-4o-mini"
     assert request_out["messages"][0]["role"] == "system"
@@ -1239,7 +1261,7 @@ async def test_stream_restores_placeholder_from_local_request_reverse_map(monkey
     plugin = DataFilterGuard()
     plugin.enabled = True
     plugin.config = {"enabled": True}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     class DummyPM:
         def __init__(self):
@@ -2683,9 +2705,10 @@ async def test_markdown_kb_status_and_upload_api(monkeypatch):
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    pm.plugins["markdown_kb"].enabled = True
-    pm.plugins["markdown_kb"].config = pm.get_config("markdown_kb") or {}
-    await pm.plugins["markdown_kb"].on_load()
+    plugin = _markdown_kb_plugin(pm)
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await _initialize_plugin(plugin)
 
     transport = ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -2786,10 +2809,10 @@ async def test_markdown_kb_learn_api_creates_workspace_bound_doc_and_dedupes(mon
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
     fastapi_app.state.plugin_manager = pm
 
     transport = ASGITransport(app=fastapi_app)
@@ -2894,10 +2917,10 @@ async def test_markdown_kb_learn_ignored_when_model_says_no_stable_knowledge(mon
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     result = await plugin.learn({
         "source": "claude_code",
@@ -2939,9 +2962,10 @@ async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    pm.plugins["markdown_kb"].enabled = True
-    pm.plugins["markdown_kb"].config = pm.get_config("markdown_kb") or {}
-    await pm.plugins["markdown_kb"].on_load()
+    plugin = _markdown_kb_plugin(pm)
+    plugin.enabled = True
+    plugin.config = pm.get_config("markdown_kb") or {}
+    await _initialize_plugin(plugin)
     fastapi_app.state.plugin_manager = pm
 
     transport = ASGITransport(app=app)
@@ -3038,10 +3062,10 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
     plugin.config["reranker_model"] = "rerank-v1"
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
@@ -3218,10 +3242,10 @@ async def test_markdown_kb_keyword_weight_only_affects_non_rerank_order(monkeypa
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -3289,10 +3313,10 @@ async def test_markdown_kb_rerank_keeps_top_k_and_threshold_but_ignores_keyword_
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -3362,10 +3386,10 @@ async def test_markdown_kb_chinese_query_can_hit_partial_phrases_without_full_se
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -3427,10 +3451,10 @@ async def test_markdown_kb_english_query_does_not_depend_on_full_sentence_phrase
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -3483,10 +3507,10 @@ async def test_markdown_kb_query_falls_back_when_index_contains_mixed_embedding_
     fastapi_app = FastAPI()
     pm = PluginManager()
     await pm.load_all(fastapi_app)
-    plugin = pm.plugins["markdown_kb"]
+    plugin = _markdown_kb_plugin(pm)
     plugin.enabled = True
     plugin.config = pm.get_config("markdown_kb") or {}
-    await plugin.on_load()
+    await _initialize_plugin(plugin)
 
     docs_dir = test_home / ".akm" / "markdown_kb" / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)

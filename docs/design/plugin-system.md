@@ -311,8 +311,8 @@ class PluginBase:
     runtime_ready: bool    # 仅 on_load 成功后为 true，才可参与 Hook 管道
 
     # ——— 可重写的生命周期方法 ———
-    async def on_load(self):
-        """插件加载完成时调用（路由已注册），可做初始化操作"""
+    async def on_load(self) -> bool | None:
+        """插件加载完成时调用；返回 False 表示配置或依赖不满足"""
         pass
 
     async def on_unload(self):
@@ -370,11 +370,11 @@ class PluginBase:
 | `self.app` | `FastAPI \| None` | 应用实例；管理器加载后注入，可注册中间件、事件处理器等 |
 | `self.router` | `APIRouter \| None` | 子类定义的插件路由，加载时自动挂载 |
 | `self.config` | `dict` | 本插件配置（含默认值），运行时自动从 config.json 加载 |
-| `self.db` | `sqlite3.Connection` | 项目共享数据库连接，可直接执行 SQL |
+| `self.db` | `Any` | 默认不注入长期连接；需要数据库时插件应自行获取并关闭短生命周期连接 |
 | `self.logger` | `Logger` | 插件专用 logger，输出格式 `[plugin.xxx]` |
 | `self.meta` | `PluginMeta \| None` | plugin.json 解析后的元数据（含 settings schema 等） |
 | `self._static_dir` | `Path` | views/ 目录路径，用于读取静态资源 |
-| `self.runtime_ready` | `bool` | `on_load` 成功后为 true；失败插件不会参加 Hook、转换器选择或侧边栏菜单 |
+| `self.runtime_ready` | `bool` | `on_load` 返回非 `False` 且未抛异常后为 true；未就绪插件不会参加 Hook、转换器选择或侧边栏菜单 |
 
 ### 6.3 生命周期
 
@@ -384,17 +384,17 @@ PluginManager.load_all()
         ├── 1. 读取 plugin.json
         ├── 2. 动态导入 index.py，获取 Plugin 类
         ├── 3. 实例化 plugin = Plugin()（每个实例拥有独立上下文与 config）
-        ├── 4. 注入 name / app / db / meta / logger / notify / static_dir
+        ├── 4. 注入 name / app / meta / logger / notify / static_dir
         ├── 5. 注册 plugin.router 与静态资源（如有）
         ├── 6. 存入 self.plugins
-        └── 7. 调用 plugin.on_load()；成功后设 runtime_ready=true
+        └── 7. 调用 plugin.on_load()；返回非 False 后设 runtime_ready=true
 
 应用关闭时 lifecycle shutdown：
   └── 按加载逆序遍历已就绪插件：
         └── 调用 plugin.on_unload()                     # ← 清理钩子
 ```
 
-动态导入和 `on_load` 均按插件隔离：某个插件导入失败不会阻止后续插件扫描；`on_load` 抛出异常时会记录错误并保持 `runtime_ready=false`，因此该实例不会进入任何 Hook 候选列表、转换器选择或侧边栏菜单。应用关闭时仅对已就绪插件执行 `on_unload`，单个清理异常不会阻止其他插件清理。
+动态导入和 `on_load` 均按插件隔离：某个插件导入失败不会阻止后续插件扫描；`on_load` 返回 `False` 或抛出异常时会保持 `runtime_ready=false`，因此该实例不会进入任何 Hook 候选列表、转换器选择或侧边栏菜单。应用关闭时仅对已就绪插件执行 `on_unload`，单个清理异常不会阻止其他插件清理。
 
 ## 七、PluginManager 设计
 
@@ -425,7 +425,7 @@ class PluginManager:
 > CLI `akm plugin enable/disable`：若本地服务在线则转发 API 热生效；服务未运行时只写 `config.json`，下次启动生效。
 
 ```
-PluginManager.load_all(app, db)
+PluginManager.load_all(app)
   ├── 扫描 akm/plugins/ 下所有子目录（内置插件）
   │   ├── 同上：解析 meta、导入 index.py、注入上下文、on_load、注册路由
   │   └── 存入 self.plugins[name]
@@ -599,7 +599,7 @@ from .plugins.plugin_manager import PluginManager
 
 # lifespan 中：
 plugin_manager = PluginManager()
-plugin_manager.load_all(app, db)  # db 传入共享数据库连接
+await plugin_manager.load_all(app)
 app.state.plugin_manager = plugin_manager
 
 # 新增插件管理 API
