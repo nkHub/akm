@@ -5,6 +5,8 @@ import json
 import asyncio
 from contextlib import suppress
 import httpx
+
+from akm.config import resolve_http_proxy_url
 from akm.key_pool import (
     pick_key_async,
     pick_wildcard_key_async,
@@ -790,7 +792,8 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
         base.update(kw)
         return base
 
-    async with httpx.AsyncClient() as client:
+    _proxy = resolve_http_proxy_url()
+    async with httpx.AsyncClient(**({"proxy": _proxy} if _proxy else {})) as client:
         last_result = None
         for api_path in candidate_paths:
             attempted_paths.append(api_path)

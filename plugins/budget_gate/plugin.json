@@ -1,0 +1,96 @@
+{
+  "name": "budget_gate",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "预算闸门：按全局/模型/用户累计估算费用，超过日预算或滚动窗口预算后阻断新请求（不能替代供应商账单）",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 25,
+  "routes_prefix": "/api/budget-gate",
+  "hooks": {
+    "on_request": true,
+    "on_response": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用预算闸门",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不累计费用也不阻断请求。"
+    },
+    {
+      "key": "scope",
+      "label": "预算维度",
+      "type": "select",
+      "default": "global",
+      "options": ["global", "model", "user"],
+      "description": "global 全进程共享；model 按请求 model 分桶；user 按请求体 user 字段分桶（缺省为 anonymous）。"
+    },
+    {
+      "key": "period",
+      "label": "预算周期",
+      "type": "select",
+      "default": "calendar_day",
+      "options": ["calendar_day", "rolling_window"],
+      "description": "calendar_day 按本地自然日重置；rolling_window 按固定秒数窗口累计。"
+    },
+    {
+      "key": "window_seconds",
+      "label": "滚动窗口秒数",
+      "type": "number",
+      "default": 86400,
+      "min": 60,
+      "max": 604800,
+      "description": "仅 period=rolling_window 时生效；窗口内累计估算费用。"
+    },
+    {
+      "key": "budget_usd",
+      "label": "预算上限（美元）",
+      "type": "number",
+      "default": 5,
+      "min": 0,
+      "description": "当前周期内允许的估算费用上限；0 表示不限制（仅统计）。"
+    },
+    {
+      "key": "soft_warn_ratio",
+      "label": "软告警比例",
+      "type": "number",
+      "default": 0.8,
+      "min": 0,
+      "max": 1,
+      "description": "已用/预算达到该比例时写 warning 日志，不阻断。0 表示关闭软告警。"
+    },
+    {
+      "key": "use_core_pricing",
+      "label": "使用核心单价表",
+      "type": "boolean",
+      "default": true,
+      "description": "开启后读取 ~/.akm/config.json 的 cost_pricing_table；关闭则使用下方自定义单价表。"
+    },
+    {
+      "key": "custom_pricing_table",
+      "label": "自定义单价表",
+      "type": "text",
+      "default": "",
+      "description": "格式与设置页一致：model=输入/缓存/输出（每 1M tokens，美元）。use_core_pricing 关闭或核心表为空时使用。"
+    },
+    {
+      "key": "block_message",
+      "label": "阻断提示",
+      "type": "text",
+      "default": "本地预算已用尽，请求已被预算闸门拦截。",
+      "description": "超预算时返回给客户端的错误文本。"
+    },
+    {
+      "key": "block_status_code",
+      "label": "阻断 HTTP 状态码",
+      "type": "number",
+      "default": 429,
+      "min": 400,
+      "max": 599,
+      "description": "超预算时返回的状态码，默认 429；也可设为 402。"
+    }
+  ]
+}

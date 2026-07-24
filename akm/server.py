@@ -33,7 +33,7 @@ from akm.audit import (
     clean_log_bodies_async,
     AuditLogQueue,
 )
-from akm.config import load_config, save_config, get as config_get
+from akm.config import load_config, save_config, get as config_get, resolve_http_proxy_url
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
     await audit_queue.start()
     app.state.audit_log_queue = audit_queue
     app.state.http_client_lock = asyncio.Lock()
-    http_client = HttpClientPoolManager()
+    http_client = _build_http_client_pool_manager()
     app.state.http_client = http_client
     # 用量查询自动调度器
     usage_query_scheduler = _UsageQueryScheduler(app)
@@ -638,8 +638,9 @@ async def _submit_audit_log(app: FastAPI, data: dict) -> bool:
 
 
 def _build_http_client_pool_manager() -> HttpClientPoolManager:
-    """构建按路由隔离的懒加载 HTTP client 池。"""
-    return HttpClientPoolManager()
+    """构建按路由隔离的懒加载 HTTP client 池，并套用当前出站代理配置。"""
+    proxy_url = resolve_http_proxy_url()
+    return HttpClientPoolManager(proxy_url=proxy_url)
 
 
 async def _recreate_http_client_pool(app: FastAPI, reason: str) -> bool:
@@ -1838,10 +1839,38 @@ async def api_get_config():
 
 @app.post("/api/config")
 async def api_save_config(request: Request):
-    """保存配置"""
+    """保存配置；若出站代理相关项变化则重建 HTTP 连接池使设置立即生效。"""
     body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"detail": "配置体必须是 JSON 对象"})
+    before = load_config()
     save_config(body)
-    return {"ok": True}
+    after = load_config()
+    proxy_changed = (
+        before.get("http_proxy_enabled") != after.get("http_proxy_enabled")
+        or before.get("http_proxy_url") != after.get("http_proxy_url")
+    )
+    recreated = False
+    if proxy_changed:
+        # 强制绕过 should_recreate 冷却：代理变更必须立刻换池
+        lock = getattr(request.app.state, "http_client_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            request.app.state.http_client_lock = lock
+        async with lock:
+            old_client = getattr(request.app.state, "http_client", None)
+            new_client = _build_http_client_pool_manager()
+            request.app.state.http_client = new_client
+            if old_client is not None:
+                try:
+                    await old_client.aclose()
+                except Exception:
+                    pass
+            monitor = _get_health_monitor(request.app)
+            if monitor is not None:
+                monitor.record_http_client_recreated("config.http_proxy_changed")
+            recreated = True
+    return {"ok": True, "http_client_recreated": recreated}
 
 
 @app.get("/api/agents")
@@ -1873,6 +1902,60 @@ async def api_add_agent(request: Request):
             responses_default_reasoning_effort=body.get("responses_default_reasoning_effort"),
         )
         return {"ok": True, "name": name}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+
+@app.put("/api/agents/{name}")
+async def api_update_agent(name: str, request: Request):
+    """更新自定义供应商代理；名称以路径参数为准，不可改名。"""
+    body = await request.json()
+    target = (name or "").strip()
+    if not target:
+        return JSONResponse(status_code=400, content={"detail": "供应商名称不能为空"})
+    # 仅允许改已有自定义项，避免 PUT 误当成新建
+    existing = {a["name"]: a for a in list_agents()}.get(target)
+    if existing is None:
+        return JSONResponse(status_code=404, content={"detail": f"供应商不存在: {target}"})
+    if not existing.get("is_custom"):
+        return JSONResponse(status_code=400, content={"detail": f"不能修改内置供应商: {target}"})
+    try:
+        register_agent(
+            name=target,
+            default_base_url=body.get("default_base_url", existing.get("default_base_url", "")),
+            default_auth_header=body.get(
+                "default_auth_header",
+                existing.get("default_auth_header", "Bearer {api_key}"),
+            ),
+            supports_responses=body.get("supports_responses", existing.get("supports_responses", False)),
+            supports_chat=body.get("supports_chat", existing.get("supports_chat", True)),
+            supports_messages=body.get("supports_messages", existing.get("supports_messages", False)),
+            messages_use_anthropic_path=body.get(
+                "messages_use_anthropic_path",
+                existing.get("messages_use_anthropic_path", False),
+            ),
+            inject_max_completion_tokens=body.get(
+                "inject_max_completion_tokens",
+                existing.get("inject_max_completion_tokens", False),
+            ),
+            inject_reasoning_effort=body.get(
+                "inject_reasoning_effort",
+                existing.get("inject_reasoning_effort", False),
+            ),
+            map_metadata_user_id_to_user=body.get(
+                "map_metadata_user_id_to_user",
+                existing.get("map_metadata_user_id_to_user", True),
+            ),
+            responses_force_thinking_enabled=body.get(
+                "responses_force_thinking_enabled",
+                existing.get("responses_force_thinking_enabled", False),
+            ),
+            responses_default_reasoning_effort=body.get(
+                "responses_default_reasoning_effort",
+                existing.get("responses_default_reasoning_effort"),
+            ),
+        )
+        return {"ok": True, "name": target}
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 

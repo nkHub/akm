@@ -15,10 +15,12 @@
 | `rate_limit_guard` | filter | 关 | 本地 RPM / RPH / 并发限流 |
 | `cache_proxy` | filter | 关 | 相同非流式请求的进程内响应缓存 |
 | `usage_quota_guard` | matcher | 关 | 按 Key/模型限制窗口内请求次数与 Token |
+| `budget_gate` | filter | 关 | 按全局/模型/用户累计估算费用，超预算阻断 |
 | `fallback_router` | handler | 关 | 失败后切到备用模型并重选 Key |
 | `response_schema_guard` | post | 关 | 校验调用方声明的 JSON Schema |
 | `webhook_notifier` | post | 关 | 失败/安全/慢请求异步 Webhook |
 | `provider_health_probe` | app | 关 | Key 连通性探测与状态快照 API |
+| `mcp_tool_gateway` | app | 关 | 本地 HTTP 工具注册、可选注入 tools、受控调用 API |
 | `markdown_kb` | app | 关 | 本地 Markdown 知识库（上传/状态） |
 
 内置核心（通常在 `akm/plugins/`，不在本目录）：`model_matcher`、`error_handler` 等，负责选 Key、重试，不在此表展开。
@@ -56,6 +58,10 @@
 - **`usage_quota_guard`**  
   按 Key、模型在固定时间窗口内限制请求次数和**已观测** Token。超额时 `ctx.set_skip_key` 换其他 Key。Token 仅来自响应里可解析的 usage，**不是**供应商账单。
 
+- **`budget_gate`**  
+  按全局 / 模型 / 用户维度累计**估算费用**（复用核心 `cost_pricing_table` 或插件自定义单价表），超过日预算或滚动窗口预算后在入口 `set_block`（默认 429）。进程内计数，重启清零；不能替代供应商账单。  
+  API：`GET /api/budget-gate/status`、`POST /api/budget-gate/reset`。
+
 - **`fallback_router`**  
   配置 `source_model => fallback_model` 与触发状态码/网络错误；命中后改模型并重新选 Key；尝试历史在 bag `fallback_router.history` 防循环。
 
@@ -72,6 +78,11 @@
   手动或定时探测 Key 连通性，结果脱敏（无 API Key、无上游 URL/正文）。  
   默认前缀 `/api/provider-health`：`GET /status`、`POST /probe`。
 
+- **`mcp_tool_gateway`**  
+  注册本地 HTTP 工具（`tools_json`），可选注入 OpenAI function `tools`、剥离未注册工具声明，并提供受控 `POST /api/mcp-tools/call`。默认仅允许 `127.0.0.1`/`localhost` host，防 SSRF。  
+  **不**自动执行模型返回的 tool_calls 续接；与 `tool_policy_guard` 互补，不能替代本机沙箱。  
+  API：`GET /status`、`GET /list`、`POST /call`。
+
 - **`markdown_kb`**  
   本地 Markdown 知识库骨架：上传 `.md`、查看状态等，供检索/注入类能力扩展。
 
@@ -83,6 +94,8 @@
 |------|--------|------------|
 | `rate_limit_guard` | 防止单进程被打爆、按用户/模型卡 RPM | 需要跨实例共享限流（本插件是进程本地） |
 | `cache_proxy` | 重复相同 prompt、省延迟和费用 | 流式、工具调用、强随机/强时效内容 |
+| `budget_gate` | 本地日预算/滚动预算硬闸门 | 需要跨进程对账或与供应商账单严格一致 |
+| `mcp_tool_gateway` | 给 Agent 暴露受控本地 HTTP 工具 | 需要真正 MCP stdio 传输或多进程沙箱 |
 
 > 费用估算已并入核心：设置页「费用统计」开关 + 模型单价表；首页 `/api/stats` 在开启后展示总费用与每日费用。
 
@@ -103,5 +116,7 @@
 | `cache_proxy.cache_key` / `cache_proxy.eligible` | cache_proxy | 缓存键 / 是否可写 |
 | `rate_limit_guard.slot` | rate_limit_guard | 并发槽位 |
 | `fallback_router.history` | fallback_router | 本请求已尝试模型 |
+| `budget_gate.scope_key` / `period_id` / `last_cost_usd` | budget_gate | 分桶键与本次估算 |
+| `mcp_tool_gateway.injected` / `stripped` | mcp_tool_gateway | 本请求注入/剥离的工具名 |
 
 Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `ctx.set_skip_key`。更完整说明见 `docs/design/plugin-system.md` §8。

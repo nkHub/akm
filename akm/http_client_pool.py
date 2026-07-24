@@ -19,6 +19,8 @@ class HttpClientPoolManager:
     隔离维度使用 provider/key/model/api_path，避免某个长流请求长期占用全局连接池后，
     连带影响其他 key 或模型的请求。client 只在第一次命中对应路由时创建，空闲过久或
     超过池数量上限时再关闭回收。
+
+    proxy_url 作用于本池创建的全部 client，用于 AKM 访问上游时的出站 HTTP/SOCKS 代理。
     """
 
     is_route_pool = True
@@ -32,6 +34,7 @@ class HttpClientPoolManager:
         max_keepalive_connections: int = 2,
         timeout_sec: float = 120.0,
         connect_timeout_sec: float = 10.0,
+        proxy_url: str | None = None,
     ):
         self.max_pools = max(1, int(max_pools or 64))
         self.idle_ttl_sec = max(30.0, float(idle_ttl_sec or 120.0))
@@ -39,6 +42,8 @@ class HttpClientPoolManager:
         self.max_keepalive_connections = max(0, int(max_keepalive_connections or 2))
         self.timeout_sec = max(1.0, float(timeout_sec or 120.0))
         self.connect_timeout_sec = max(1.0, float(connect_timeout_sec or 10.0))
+        # 空串与 None 均视为直连；非空则交给 httpx 作为统一出站代理
+        self.proxy_url = str(proxy_url or "").strip() or None
         self._entries: dict[str, _PoolEntry] = {}
         self._lock = asyncio.Lock()
 
@@ -47,12 +52,17 @@ class HttpClientPoolManager:
         return ":".join(str(part or "unknown").strip() or "unknown" for part in parts)
 
     def _build_client(self) -> httpx.AsyncClient:
+        """创建带超时、连接上限与可选出站代理的 AsyncClient。"""
         keepalive = min(self.max_keepalive_connections, self.max_connections)
         limits = httpx.Limits(max_keepalive_connections=keepalive, max_connections=self.max_connections)
-        return httpx.AsyncClient(
-            limits=limits,
-            timeout=httpx.Timeout(self.timeout_sec, connect=self.connect_timeout_sec),
-        )
+        kwargs = {
+            "limits": limits,
+            "timeout": httpx.Timeout(self.timeout_sec, connect=self.connect_timeout_sec),
+        }
+        if self.proxy_url:
+            # httpx 0.28+ 使用 proxy=；SOCKS 需安装 httpx[socks] / socksio
+            kwargs["proxy"] = self.proxy_url
+        return httpx.AsyncClient(**kwargs)
 
     async def get_client(self, *, provider: str, key_alias: str, model: str, api_path: str) -> httpx.AsyncClient:
         pool_key = self._pool_key(provider, key_alias, model, api_path)
@@ -102,4 +112,6 @@ class HttpClientPoolManager:
             "idle_ttl_sec": self.idle_ttl_sec,
             "max_connections_per_pool": self.max_connections,
             "max_keepalive_per_pool": self.max_keepalive_connections,
+            # 仅暴露是否启用，避免把带账号密码的代理 URL 打进调试接口
+            "proxy_enabled": bool(self.proxy_url),
         }

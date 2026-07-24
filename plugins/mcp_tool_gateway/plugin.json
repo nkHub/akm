@@ -1,0 +1,76 @@
+{
+  "name": "mcp_tool_gateway",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "app",
+  "description": "MCP/工具网关：注册本地 HTTP 工具、可选注入到模型 tools 声明，并提供受控调用 API（与 tool_policy_guard 互补，不替代本机沙箱）",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 35,
+  "routes_prefix": "/api/mcp-tools",
+  "hooks": {
+    "on_request": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用工具网关",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后不注入工具、不处理调用 API 的执行逻辑（路由仍可能 503）。"
+    },
+    {
+      "key": "inject_tools",
+      "label": "注入工具声明到请求",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后将已注册工具以 OpenAI function tools 形式合并进 request.tools（Chat/Responses 兼容结构）。"
+    },
+    {
+      "key": "strip_unlisted_tools",
+      "label": "剥离未注册工具声明",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后移除不在本网关注册表中的 tools 声明；不影响普通无 tools 请求。"
+    },
+    {
+      "key": "tools_json",
+      "label": "工具注册表 JSON",
+      "type": "text",
+      "default": "[]",
+      "description": "JSON 数组。每项: name, description?, parameters?(object schema), url, method?(POST), timeout_seconds?, headers?(object)。仅允许 http/https URL。"
+    },
+    {
+      "key": "max_argument_bytes",
+      "label": "参数最大字节数",
+      "type": "number",
+      "default": 32768,
+      "min": 256,
+      "max": 1048576,
+      "description": "调用工具时 arguments 序列化后的大小上限，防止过大 payload 打爆下游。"
+    },
+    {
+      "key": "default_timeout_seconds",
+      "label": "默认超时秒数",
+      "type": "number",
+      "default": 15,
+      "min": 1,
+      "max": 120,
+      "description": "单工具未单独配置 timeout 时的 HTTP 超时。"
+    },
+    {
+      "key": "allow_call_api",
+      "label": "允许 HTTP 调用 API",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后 POST /call 返回 403，仅保留 list/status 与可选注入。"
+    },
+    {
+      "key": "allowed_url_hosts",
+      "label": "允许的 URL Host",
+      "type": "text",
+      "default": "127.0.0.1,localhost",
+      "description": "逗号/换行分隔；非空时工具 url 的 host 必须命中列表（降低 SSRF 风险）。留空表示不额外限制 host（仍仅 http/https）。"
+    }
+  ]
+}
