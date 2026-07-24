@@ -3,7 +3,7 @@ from akm import __version__
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 import httpx
-from akm.proxy import forward_request, test_key_connectivity, _diagnose_no_key
+from akm.proxy import forward_request, test_key_connectivity as check_key_connectivity, _diagnose_no_key
 from akm.agent import AGENT_REGISTRY
 from akm.db import get_connection, init_db
 from akm.http_client_pool import HttpClientPoolManager
@@ -164,6 +164,69 @@ async def test_forward_success(monkeypatch):
     assert result["key_alias"] == "ok"
     assert send_calls[0]["stream"] is False
     assert send_calls[0]["req"].content.decode("utf-8").find('"stream":false') != -1
+
+
+@pytest.mark.asyncio
+async def test_forward_accepts_any_2xx_response(monkeypatch):
+    """上游任意 2xx 响应都应按成功透传，不触发 Key 错误策略。"""
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "ok", "provider": "openai", "api_key": "sk-xxx",
+        "base_url": "https://api.openai.com",
+    }))
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeStreamResponse(201, '{"id":"created"}')])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
+        client=mock_client,
+    )
+
+    assert result["status_code"] == 201
+    assert result["body"] == '{"id":"created"}'
+
+
+@pytest.mark.asyncio
+async def test_forward_excludes_plugin_replaced_key_after_failure(monkeypatch):
+    """插件替换 Key 后，失败重试必须排除实际发送的替代 Key。"""
+    selected_exclusions = []
+
+    async def pick_key_mock(model, exclude_aliases=None):
+        selected_exclusions.append(set(exclude_aliases or []))
+        if len(selected_exclusions) == 1:
+            return {"alias": "candidate", "provider": "openai", "api_key": "sk-a", "base_url": "https://api.openai.com"}
+        assert selected_exclusions[-1] == {"replacement"}
+        return {"alias": "fallback", "provider": "openai", "api_key": "sk-c", "base_url": "https://api.openai.com"}
+
+    class ReplacingPM:
+        def __init__(self):
+            self.key_selection_count = 0
+
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_key_selected":
+                self.key_selection_count += 1
+                if self.key_selection_count == 1:
+                    assert ctx is not None
+                    ctx.key = {"alias": "replacement", "provider": "openai", "api_key": "sk-b", "base_url": "https://api.openai.com"}
+                return ctx
+            if hook == "on_upstream_error":
+                return "switch"
+            return ctx
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", pick_key_mock)
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeStreamResponse(500), FakeStreamResponse(200, '{"ok":true}')])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}]},
+        client=mock_client,
+        plugin_manager=ReplacingPM(),
+    )
+
+    assert result["status_code"] == 200
+    assert result["key_alias"] == "fallback"
 
 
 @pytest.mark.asyncio
@@ -1013,7 +1076,7 @@ async def test_test_key_connectivity_openai_uses_responses_only(monkeypatch):
 
     monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
 
-    result = await test_key_connectivity({
+    result = await check_key_connectivity({
         "alias": "share",
         "provider": "openai",
         "api_key": "sk-test",
@@ -1048,7 +1111,7 @@ async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch)
 
     monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
 
-    result = await test_key_connectivity({
+    result = await check_key_connectivity({
         "alias": "share",
         "provider": "openai",
         "api_key": "sk-test",
@@ -1081,7 +1144,7 @@ async def test_test_key_connectivity_deepseek_prefers_chat(monkeypatch):
 
     monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
 
-    result = await test_key_connectivity({
+    result = await check_key_connectivity({
         "alias": "gs",
         "provider": "deepseek",
         "api_key": "sk-test",
@@ -1114,7 +1177,7 @@ async def test_test_key_connectivity_anthropic_uses_messages(monkeypatch):
 
     monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
 
-    result = await test_key_connectivity({
+    result = await check_key_connectivity({
         "alias": "claude",
         "provider": "anthropic",
         "api_key": "sk-test",
@@ -1156,7 +1219,7 @@ async def test_test_key_connectivity_custom_agent_uses_first_supported_format(mo
     )
 
     try:
-        result = await test_key_connectivity({
+        result = await check_key_connectivity({
             "alias": "vendor-chat-first-key",
             "provider": "vendor-chat-first",
             "api_key": "__AKM_CREDENTIAL_VALUE_ff9f2df28bc7__",
@@ -1201,7 +1264,7 @@ async def test_test_key_connectivity_messages_provider_without_anthropic_switch(
     )
 
     try:
-        result = await test_key_connectivity({
+        result = await check_key_connectivity({
             "alias": "vendor-msg-key",
             "provider": "vendor-msg",
             "api_key": "sk-test",
@@ -1237,7 +1300,7 @@ async def test_test_key_connectivity_wildcard_uses_first_provider_model(monkeypa
 
     monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
 
-    result = await test_key_connectivity({
+    result = await check_key_connectivity({
         "alias": "wild",
         "provider": "openai",
         "api_key": "sk-test",
@@ -1255,7 +1318,7 @@ async def test_test_key_connectivity_wildcard_uses_first_provider_model(monkeypa
 async def test_test_key_connectivity_wildcard_without_provider_models_errors(monkeypatch):
     """未同步 provider 模型列表时，应明确提示先同步模型列表。"""
 
-    result = await test_key_connectivity({
+    result = await check_key_connectivity({
         "alias": "wild",
         "provider": "openai",
         "api_key": "sk-test",

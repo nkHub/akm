@@ -51,6 +51,8 @@ _dir = _os.path.dirname(_os.path.abspath(__file__))
 _session_scanner_spec = _importlib_util.spec_from_file_location(
     "markdown_kb_session_scanner", _os.path.join(_dir, "session_scanner.py")
 )
+if _session_scanner_spec is None or _session_scanner_spec.loader is None:
+    raise ImportError("无法加载 markdown_kb session_scanner 模块")
 session_scanner = _importlib_util.module_from_spec(_session_scanner_spec)
 _sys.modules["markdown_kb_session_scanner"] = session_scanner
 _session_scanner_spec.loader.exec_module(session_scanner)
@@ -180,6 +182,68 @@ class IndexStore(ABC):
     @abstractmethod
     def clear(self) -> dict:
         """清空索引内容，并返回清理结果。"""
+
+    def find_nearest_chunk(self, embedding_vector: list[float]) -> dict | None:
+        """查找最接近的 chunk；不支持向量索引的后端返回空结果。"""
+        return None
+
+    def get_all_memory_stats(self) -> dict:
+        """返回记忆汇总；不支持记忆持久化的后端返回零值统计。"""
+        return {
+            "memory_chunk_count": 0,
+            "memory_avg_value": 0.0,
+            "memory_total_hits": 0,
+            "memory_high_value_count": 0,
+        }
+
+    def get_memory_detail_stats(self, top_n: int = 20) -> dict:
+        """返回记忆明细；不支持记忆持久化的后端返回空集合。"""
+        return {
+            "summary": self.get_all_memory_stats(),
+            "by_doc": [],
+            "top_chunks": [],
+        }
+
+    def read_memory_map(self, chunk_ids: list[str]) -> dict[str, dict]:
+        """读取 chunk 记忆；无记忆后端没有可返回的记录。"""
+        return {}
+
+    def update_memory(self, upserts: dict[str, dict], cap: float = 1.0) -> None:
+        """更新 chunk 记忆；无记忆后端保持无操作，维持统一调用契约。"""
+
+    def cleanup_expired_memory(self) -> int:
+        """清理过期记忆；无记忆后端没有可清理记录。"""
+        return 0
+
+    def clear_memory(self) -> None:
+        """清空记忆；无记忆后端保持无操作。"""
+
+    def get_learn_doc_memory_stats(self) -> list[dict]:
+        """获取 learn 文档记忆统计；无记忆后端返回空集合。"""
+        return []
+
+    def get_sibling_chunks(self, doc_id: str, heading_path: str = "") -> list[dict]:
+        """获取同节 chunk；不支持该查询的后端返回空集合。"""
+        return []
+
+    def search_by_vector(
+        self,
+        query_vector: list[float],
+        limit: int,
+        workspace_root: str = "",
+        selected_doc: dict | None = None,
+    ) -> list[dict]:
+        """按向量检索；无向量后端交由上层 Python 回退路径处理。"""
+        return []
+
+    def get_documents_by_chunk_ids(self, chunk_ids: list[str]) -> list[dict]:
+        """按 chunk id 获取文档；默认回退到当前索引快照过滤。"""
+        requested_ids = {str(chunk_id or "").strip() for chunk_id in chunk_ids}
+        return [
+            document
+            for document in self.list_documents()
+            if str(document.get("id") or "").strip() in requested_ids
+        ]
 
     def list_documents_by_scope(self, workspace_root: str = "", selected_doc: dict | None = None) -> list[dict]:
         """按 workspace / selected_doc 返回当前候选文档集合。
@@ -1873,7 +1937,8 @@ class Plugin(PluginBase):
         """只重建单个文件的 chunks 与向量。
 
         新增去重合并能力：新 chunk 与存量 chunk 的向量余弦相似度超过
-        dedup_similarity_threshold 时，不再新增 chunk，改为 boost 已有 chunk 的记忆值。
+        dedup_similarity_threshold 时，仍保留新 chunk 以保证文档索引完整，
+        同时 boost 已有 chunk 的记忆值。
         """
         self._ensure_runtime_ready()
         entry = self._find_doc_entry(doc_id=doc_id, file_name=file_name, workspace_root=workspace_root)
@@ -1907,12 +1972,19 @@ class Plugin(PluginBase):
             unique_chunks: list[dict] = []
             for chunk in chunks:
                 nearest = self._find_nearest_chunk_for_dedup(chunk["embedding"])
+                existing = next(
+                    (
+                        item for item in current_documents
+                        if nearest is not None and str(item.get("id") or "") == nearest["chunk_id"]
+                    ),
+                    None,
+                )
                 # 优先走 sqlite-vec，不可用时回退到 brute-force 余弦相似度
-                if nearest is not None and nearest["cosine_similarity"] >= dedup_threshold:
-                    existing = next(
-                        (c for c in current_documents if str(c.get("id") or "") == nearest["chunk_id"]),
-                        None,
-                    )
+                if (
+                    nearest is not None
+                    and existing is not None
+                    and nearest["cosine_similarity"] >= dedup_threshold
+                ):
                     merged_text = None
                     if existing and isinstance(existing.get("chunk_text"), str) and chunk.get("chunk_text"):
                         merged_text = await self._merge_chunks_via_llm(
@@ -1937,6 +2009,7 @@ class Plugin(PluginBase):
                         "[markdown_kb] 去重合并 chunk（vec），相似度 %.3f >= %.2f，boost 已有 chunk %s",
                         nearest["cosine_similarity"], dedup_threshold, nearest["chunk_id"],
                     )
+                    unique_chunks.append(chunk)
                 elif nearest is None:
                     # sqlite-vec 不可用，遍历存量 chunks 做余弦相似度比较
                     best_sim = 0.0
@@ -1975,6 +2048,7 @@ class Plugin(PluginBase):
                             "[markdown_kb] 去重合并 chunk（余弦），相似度 %.3f >= %.2f，boost 已有 chunk %s",
                             best_sim, dedup_threshold, best_cid,
                         )
+                        unique_chunks.append(chunk)
                     else:
                         unique_chunks.append(chunk)
                 else:

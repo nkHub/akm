@@ -340,11 +340,9 @@ async def forward_request(
                 "latency_ms": 0,
             }
 
-        # 避免重复尝试同一个 key（5xx 不会禁用 key，可能被反复选中）
-        # 继续循环让 pick_key 返回下一个匹配的 key，而非直接跳通配符兜底
+        # 候选 Key 只有真正发往上游后才应视为已尝试；插件可能在下一阶段替换它。
         if key["alias"] in tried_aliases:
             continue
-        tried_aliases.add(key["alias"])
 
         tries += 1
 
@@ -360,9 +358,18 @@ async def forward_request(
                     or "当前可用 Key 均已达到配额上限"
                 )
                 ctx.clear_action()
+                tried_aliases.add(key["alias"])
                 continue
             if isinstance(ctx.key, dict):
                 key = ctx.key
+
+        key_alias = str(key.get("alias", "") or "")
+        if not key_alias:
+            last_error = "选中的 Key 缺少 alias"
+            break
+        if key_alias in tried_aliases:
+            continue
+        tried_aliases.add(key_alias)
 
         agent = get_agent(key.get("provider", "openai"))
 
@@ -524,7 +531,7 @@ async def forward_request(
                 break
 
             # ── 错误状态码处理（通过 on_upstream_error hook 决定策略）──
-            is_error = resp.status_code != 200
+            is_error = not 200 <= resp.status_code < 300
 
             if is_error:
                 action = await _handle_upstream_error(
@@ -569,7 +576,7 @@ async def forward_request(
                 # request 都在 ctx 上；server 侧不能读入口原始 body。
                 return {
                     "stream": True,
-                    "status_code": 200,
+                    "status_code": resp.status_code,
                     "response": resp,
                     "adapter": adapter,  # 非 None 时 server.py 会用转换器包装
                     "request_body_for_log": forwarded_request_body,
@@ -805,8 +812,8 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
                 resp = await client.post(url, json=body, headers=headers, timeout=30)
                 latency = int((time.time() - t0) * 1000)
                 resp_text = resp.text[:500]
-                if resp.status_code == 200:
-                    return _result(url, api_path, ok=True, status_code=200, latency_ms=latency)
+                if 200 <= resp.status_code < 300:
+                    return _result(url, api_path, ok=True, status_code=resp.status_code, latency_ms=latency)
                 if resp.status_code == 429:
                     return _result(url, api_path, status_code=429, latency_ms=latency, error="429 限流")
                 if resp.status_code in (401, 403):

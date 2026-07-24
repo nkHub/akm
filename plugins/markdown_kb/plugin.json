@@ -121,7 +121,7 @@
       "default": 0.92,
       "min": 0,
       "max": 1,
-      "description": "新 chunk 与存量 chunk 的向量余弦相似度超过此阈值时视为重复，不再新增而是 boost 已有 chunk 的记忆值。"
+      "description": "新 chunk 与存量 chunk 的向量余弦相似度超过此阈值时视为重复，保留新 chunk 以维持文档完整，并 boost 已有 chunk 的记忆值。"
     },
     {
       "key": "learn_summary_system_prompt",

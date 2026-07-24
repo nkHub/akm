@@ -2324,7 +2324,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                 result["error"] = f"[{source}] {result['error']}"
 
         if monitor is not None:
-            if int(result.get("status_code", 0) or 0) == 200:
+            if 200 <= int(result.get("status_code", 0) or 0) < 300:
                 monitor.record_upstream_success()
             elif int(result.get("status_code", 0) or 0) >= 500 or result.get("error"):
                 monitor.record_upstream_failure(result.get("error", ""))
@@ -2438,7 +2438,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if not current_pm:
                         return {"status_code": status, "response_body": body_str}
                     meta = {
-                        "ok": status == 200,
+                        "ok": 200 <= status < 300,
                         "phase": "upstream",
                         "status_code": status,
                         "key_alias": key_alias,
@@ -2546,7 +2546,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         flags = []
                         if adapter and getattr(adapter, "_fallback_thinking_to_text", False):
                             flags.append("fallback_thinking_to_text")
-                        if status == 200 and not stream_error:
+                        if 200 <= status < 300 and not stream_error:
                             if tokens.get("prompt_tokens", 0) == 0 and tokens.get("completion_tokens", 0) == 0:
                                 flags.append(FLAG_MISSING_USAGE_UPSTREAM)
                         if capture.truncated:
@@ -2599,7 +2599,7 @@ async def _handle_ai_request(request: Request, api_path: str):
 
             return StreamingResponse(
                 stream_generator(),
-                status_code=200,
+                status_code=result["status_code"],
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
