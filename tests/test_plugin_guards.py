@@ -201,6 +201,47 @@ async def test_runtime_unready_plugin_does_not_enter_hook_pipeline():
     assert called is False
 
 
+@pytest.mark.asyncio
+async def test_on_load_returning_false_keeps_plugin_out_of_hook_pipeline(monkeypatch, tmp_path):
+    """配置不满足时，插件可用 False 明确声明未就绪而不抛出异常。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    builtin_dir = tmp_path / "builtin"
+    project_dir = tmp_path / "project"
+    third_party_dir = tmp_path / "third_party"
+    for directory in (builtin_dir, project_dir, third_party_dir):
+        directory.mkdir()
+
+    plugin_dir = project_dir / "not_ready"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({
+            "name": "not_ready",
+            "version": "1.0.0",
+            "default_enabled": True,
+            "hooks": {"on_request": True},
+        }),
+        "utf-8",
+    )
+    (plugin_dir / "index.py").write_text(
+        "from akm.plugins import PluginBase\n\n"
+        "class Plugin(PluginBase):\n"
+        "    async def on_load(self):\n"
+        "        return False\n\n"
+        "    async def on_request(self, ctx):\n"
+        "        raise RuntimeError('must not run')\n",
+        "utf-8",
+    )
+
+    manager = PluginManager()
+    manager._builtin_dir = builtin_dir
+    manager._project_dir = project_dir
+    manager._third_party_dir = third_party_dir
+    await manager.load_all(FastAPI())
+
+    assert manager.plugins["not_ready"].runtime_ready is False
+    await manager.run_hook("on_request", _ctx({"model": "test"}))
+
+
 def test_runtime_unready_plugin_is_not_selected_as_converter():
     """初始化失败的转换器不能被代理层选中并调用。"""
     plugin = PluginBase()
@@ -345,6 +386,58 @@ async def test_unready_plugin_routes_and_static_files_return_503(monkeypatch, tm
     assert route_response.json() == {"ok": True}
     assert static_response.status_code == 200
     assert static_response.text == "ready"
+
+
+@pytest.mark.asyncio
+async def test_deleted_plugin_routes_remain_unavailable(monkeypatch, tmp_path):
+    """删除插件后，FastAPI 无法移除的旧路由也必须稳定返回 503。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    builtin_dir = tmp_path / "builtin"
+    project_dir = tmp_path / "project"
+    third_party_dir = tmp_path / "third_party"
+    for directory in (builtin_dir, project_dir, third_party_dir):
+        directory.mkdir()
+
+    plugin_dir = project_dir / "removable"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({
+            "name": "removable",
+            "version": "1.0.0",
+            "default_enabled": True,
+            "routes_prefix": "/removable",
+        }),
+        "utf-8",
+    )
+    (plugin_dir / "index.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from akm.plugins import PluginBase\n\n"
+        "router = APIRouter()\n\n"
+        "@router.get('/ping')\n"
+        "async def ping():\n"
+        "    return {'ok': True}\n\n"
+        "class Plugin(PluginBase):\n"
+        "    router = router\n",
+        "utf-8",
+    )
+
+    app = FastAPI()
+    manager = PluginManager()
+    manager._builtin_dir = builtin_dir
+    manager._project_dir = project_dir
+    manager._third_party_dir = third_party_dir
+    await manager.load_all(app)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        assert (await client.get("/removable/ping")).status_code == 200
+        result = await manager.delete_plugin("removable")
+        response = await client.get("/removable/ping")
+
+    assert result["ok"] is True
+    assert response.status_code == 503
+    assert not plugin_dir.exists()
 
 
 @pytest.mark.asyncio

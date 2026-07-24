@@ -30,7 +30,7 @@ def _load_plugin(
         "spa_fallback": spa_fallback,
         "static_dir": str(static_dir),
     }
-    asyncio.run(plugin.on_load())
+    plugin.runtime_ready = asyncio.run(plugin.on_load()) is not False
     return plugin
 
 
@@ -73,3 +73,33 @@ def test_frontend_static_server_mounts_custom_static_directory(tmp_path):
     response = TestClient(app).get("/web/static/logo.txt")
     assert response.status_code == 200
     assert response.text == "custom asset"
+
+
+def test_frontend_static_server_rejects_main_and_custom_assets_when_unready(tmp_path):
+    """禁用或删除后的残留挂载不能继续暴露站点与独立静态资源。"""
+    build_dir = tmp_path / "dist"
+    static_dir = tmp_path / "public"
+    build_dir.mkdir()
+    static_dir.mkdir()
+    (build_dir / "index.html").write_text("site", encoding="utf-8")
+    (static_dir / "logo.txt").write_text("custom asset", encoding="utf-8")
+    app = FastAPI()
+    plugin = _load_plugin(app, build_dir, static_dir=static_dir)
+    client = TestClient(app)
+
+    plugin.enabled = False
+    plugin.runtime_ready = False
+
+    assert client.get("/web").status_code == 503
+    assert client.get("/web/static/logo.txt").status_code == 503
+
+
+def test_frontend_static_server_invalid_custom_assets_remain_unready(tmp_path):
+    """配置了不存在的独立资源目录时，插件不应被标记为可用。"""
+    (tmp_path / "index.html").write_text("site", encoding="utf-8")
+    app = FastAPI()
+    plugin = _load_plugin(app, tmp_path, static_dir=tmp_path / "missing-assets")
+
+    assert plugin.runtime_ready is False
+    assert not getattr(plugin, "_mounted", False)
+    assert TestClient(app).get("/web").status_code == 404

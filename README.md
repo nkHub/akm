@@ -357,7 +357,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `provider_health_probe` | app | | 可选供应商健康探测：提供 Key 连通性批量探测与脱敏状态快照 API |
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。`model_matcher` 标记为必需（`required: true`），不可禁用。每个插件实例拥有独立的 `config`；`on_load` 成功前不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。`model_matcher` 标记为必需（`required: true`），不可禁用。每个插件实例拥有独立的 `config`；`on_load` 返回 `False` 或抛出异常时，插件保持未就绪，不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。残留的 API、插件页面和静态资源会按未就绪状态返回 503。管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
 
 当前版本不做“上游可逆加密”；如果上游没有对应解密协议，直接发送密文会让模型只能看到密文内容。
 

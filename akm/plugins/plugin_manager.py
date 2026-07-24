@@ -342,8 +342,7 @@ class PluginManager:
                 # 注入插件配置（从 config.json 读取，合并默认值）
                 plugin.config = self.get_config(plugin.name) or {}
                 try:
-                    await plugin.on_load()
-                    plugin.runtime_ready = True
+                    plugin.runtime_ready = await plugin.on_load() is not False
                 except Exception as e:
                     plugin.runtime_ready = False
                     logger.error(
@@ -616,8 +615,7 @@ class PluginManager:
             if plugin.enabled:
                 plugin.config = self.get_config(name) or {}
                 try:
-                    await plugin.on_load()
-                    plugin.runtime_ready = True
+                    plugin.runtime_ready = await plugin.on_load() is not False
                 except Exception as e:
                     plugin.runtime_ready = False
                     logger.error(f"[PluginManager] 安装后 on_load 失败 {name}: {e}")
@@ -661,7 +659,15 @@ class PluginManager:
             dest = self._third_party_dir / name
 
         plugin = self.plugins.get(name)
-        if plugin is not None and plugin.enabled:
+        if plugin is not None:
+            # 已注册的路由会保留对实例的闭包引用，必须先将其置为不可用，
+            # 使卸载期间及删除后的请求稳定返回 503 而非继续访问旧资源。
+            plugin.enabled = False
+            was_runtime_ready = plugin.runtime_ready
+            plugin.runtime_ready = False
+        else:
+            was_runtime_ready = False
+        if plugin is not None and was_runtime_ready:
             try:
                 await plugin.on_unload()
             except Exception as e:
