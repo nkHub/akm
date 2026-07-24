@@ -640,6 +640,9 @@ async def _submit_audit_log(app: FastAPI, data: dict) -> bool:
 def _build_http_client_pool_manager() -> HttpClientPoolManager:
     """构建按路由隔离的懒加载 HTTP client 池，并套用当前出站代理配置。"""
     proxy_url = resolve_http_proxy_url()
+    # 关闭代理时保留原有无参初始化路径，兼容既有连接池替身。
+    if proxy_url is None:
+        return HttpClientPoolManager()
     return HttpClientPoolManager(proxy_url=proxy_url)
 
 
