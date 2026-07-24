@@ -138,6 +138,8 @@ async def lifespan(app: FastAPI):
     finally:
         # 只清理当前这轮 lifespan 自己创建出来的对象，避免菜单栏重启时
         # 旧实例 shutdown 晚到，把新实例刚挂到 app.state 上的资源误停掉。
+        await plugin_manager.unload_all()
+
         usage_scheduler_task.cancel()
         try:
             await usage_scheduler_task

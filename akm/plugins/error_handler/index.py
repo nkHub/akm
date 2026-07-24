@@ -30,6 +30,14 @@ class Plugin(PluginBase):
 
     async def on_load(self):
         """初始化配置默认值"""
+        self._apply_config()
+
+    def on_config_changed(self, old_config: dict, new_config: dict) -> None:
+        """配置在管理台保存后刷新重试上限，避免继续使用启动时缓存的旧值。"""
+        self._apply_config()
+
+    def _apply_config(self) -> None:
+        """集中读取当前配置，保证加载和热更新采用相同的默认值。"""
         self.max_retries = self.config.get("max_retries_per_key", 3)
         self.max_key_tries = self.config.get("max_key_tries", 5)
 

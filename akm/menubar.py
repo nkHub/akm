@@ -11,6 +11,9 @@ import asyncio
 import json
 from datetime import datetime
 
+import importlib
+from typing import Any
+
 import httpx
 import rumps
 from akm import __version__
@@ -18,13 +21,22 @@ from akm.config import get as config_get
 from akm.key_pool import list_keys
 from akm.proxy import test_key_connectivity
 
+# AppKit/Foundation 为 macOS 可选运行时依赖（pyobjc），且通常无完整类型桩。
+# 使用 importlib 动态加载，避免静态检查报 unknown import symbol。
+NSWorkspace: Any = None
+NSWorkspaceDidWakeNotification: Any = None
+NSObject: Any = object
+
 try:
-    from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
-    from Foundation import NSObject
+    _appkit = importlib.import_module("AppKit")
+    _foundation = importlib.import_module("Foundation")
+    NSWorkspace = getattr(_appkit, "NSWorkspace", None)
+    NSWorkspaceDidWakeNotification = getattr(
+        _appkit, "NSWorkspaceDidWakeNotification", None
+    )
+    NSObject = getattr(_foundation, "NSObject", object)
 except ImportError:
-    NSWorkspace = None
-    NSWorkspaceDidWakeNotification = None
-    NSObject = object
+    pass
 
 
 # GitHub 仓库标识，格式固定为 "owner/repo"，用于拼接 Releases API 地址。
@@ -68,7 +80,7 @@ def _round_corners(input_path: str) -> str:
         img = Image.open(input_path).convert("RGBA")
         # 缩放到菜单栏图标尺寸 (22x22 像素，2x 分辨率)
         size = 44
-        img = img.resize((size, size), Image.LANCZOS)
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
 
         # 创建圆角遮罩
         mask = Image.new("L", (size, size), 0)
@@ -96,15 +108,19 @@ class AKMApp(rumps.App):
             name="AKM",
             title=None,
             icon=icon_path,
-            quit_button=None,
+            quit_button=None,  # type: ignore[arg-type]
         )
         self.server_thread: threading.Thread | None = None
         self.server_ready = False
         self.server_running = False
         self.startup_error: str | None = None
-        self.port = config_get("server_port", 8800)
+        try:
+            self.port = int(config_get("server_port", 8800) or 8800)
+        except (TypeError, ValueError):
+            self.port = 8800
         self.host = "127.0.0.1"
         self._uvicorn_server = None  # uvicorn.Server 实例，用于优雅关闭
+        self._update_url = ""
         self._first_start = True     # 首次启动标记，仅首次自动打开浏览器
         self._wake_recovering = False
         self._last_wake_recover_at = 0.0
@@ -157,8 +173,8 @@ class AKMApp(rumps.App):
 
     def _open_release_page(self, _):
         """点击更新菜单后打开 Release 页面。"""
-        if self.update_item and self.update_item.key:
-            webbrowser.open(self.update_item.key)
+        if self._update_url:
+            webbrowser.open(self._update_url)
 
     def _apply_update_menu(self, info: dict):
         """根据检查结果动态维护“更新到 vX.Y.Z”菜单项。"""
@@ -166,8 +182,10 @@ class AKMApp(rumps.App):
         if not has_update:
             # 已无更新时，移除旧的更新菜单，避免 UI 残留过期提示。
             if self.update_item and self.update_item in self.menu:
-                self.menu.pop(self.menu.index(self.update_item))
+                menu: Any = self.menu
+                menu.pop(menu.index(self.update_item))
             self.update_item = None
+            self._update_url = ""
             return
 
         latest = info.get("latest", "")
@@ -178,14 +196,13 @@ class AKMApp(rumps.App):
         title = f"更新到 v{latest}"
         if self.update_item is None:
             self.update_item = rumps.MenuItem(title=title, callback=self._open_release_page)
-            # 利用 MenuItem.key 暂存链接，减少额外状态字段，保持改动最小。
-            self.update_item.key = release_url
+            self._update_url = release_url
             # 插在“打开管理”后面，保证更新入口显眼但不干扰状态项。
             self.menu.insert_after("打开管理", self.update_item)
             return
 
         self.update_item.title = title
-        self.update_item.key = release_url
+        self._update_url = release_url
 
     def _start_update_checker(self):
         """后台循环检查更新并更新菜单提示。"""
@@ -473,13 +490,14 @@ class AKMApp(rumps.App):
             port=self.port,
             log_level="warning",
         )
-        self._uvicorn_server = uvicorn.server.Server(config)
+        server = uvicorn.server.Server(config)
+        self._uvicorn_server = server
         self.server_ready = False
         self.startup_error = None
 
         def run_server():
             try:
-                self._uvicorn_server.run()
+                server.run()
             except Exception as e:
                 self.startup_error = str(e)
             finally:
@@ -498,6 +516,8 @@ class AKMApp(rumps.App):
                 if self._check_port():
                     self.server_ready = True
                     self.status_item.title = "🟢 运行中"
+                    # 服务就绪后注入宿主系统通知，供 webhook_notifier 等插件使用
+                    self._register_host_notify()
                     if config_get("auto_open_admin", True) and self._first_start:
                         self._first_start = False
                         threading.Timer(
@@ -530,8 +550,66 @@ class AKMApp(rumps.App):
         """打开 Web 管理页面"""
         webbrowser.open(f"http://{self.host}:{self.port}/admin")
 
+    def host_notify(self, title: str, subtitle: str = "", message: str = "") -> None:
+        """向 macOS 发送系统通知（由插件经 PluginManager 调用）。
+
+        rumps.notification 最终走 AppKit，可从服务线程调用；
+        失败只记日志，避免拖垮转发主链路。
+        """
+        try:
+            rumps.notification(
+                title=str(title or "AKM"),
+                subtitle=str(subtitle or ""),
+                message=str(message or ""),
+            )
+        except Exception as exc:
+            logger.warning("宿主系统通知发送失败: %s", exc)
+
+    def _register_host_notify(self) -> None:
+        """把 host_notify 注入到当前进程内的 PluginManager（服务线程已 load_all）。
+
+        菜单栏与 uvicorn 共享同一进程与 ``akm.server:app`` 单例，
+        因此可在端口就绪后直接访问 app.state.plugin_manager。
+        """
+        try:
+            from akm.server import app as fastapi_app
+
+            pm = getattr(getattr(fastapi_app, "state", None), "plugin_manager", None)
+            if pm is None:
+                logger.warning("服务已就绪但 plugin_manager 尚未挂载，稍后重试注入通知")
+                # 插件加载可能略晚于端口监听，短暂重试几次
+                def _retry():
+                    for _ in range(10):
+                        time.sleep(0.3)
+                        try:
+                            from akm.server import app as app2
+                            pm2 = getattr(getattr(app2, "state", None), "plugin_manager", None)
+                            if pm2 is not None:
+                                pm2.set_notify(self.host_notify)
+                                logger.info("宿主系统通知已注入 PluginManager（延迟）")
+                                return
+                        except Exception as inner:
+                            logger.warning("延迟注入宿主通知失败: %s", inner)
+                            return
+                    logger.warning("多次重试后仍无法注入宿主通知")
+
+                threading.Thread(target=_retry, daemon=True).start()
+                return
+            pm.set_notify(self.host_notify)
+            logger.info("宿主系统通知已注入 PluginManager")
+        except Exception as exc:
+            logger.warning("注入宿主系统通知失败: %s", exc)
+
     def quit_app(self, _):
         """退出应用"""
+        # 尽量清空注入，避免退出后残留可调用闭包
+        try:
+            from akm.server import app as fastapi_app
+            pm = getattr(getattr(fastapi_app, "state", None), "plugin_manager", None)
+            if pm is not None:
+                pm.set_notify(None)
+        except Exception:
+            pass
         rumps.quit_application()
 
 

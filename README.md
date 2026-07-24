@@ -147,7 +147,7 @@ akm-menubar
 | 统计 | Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1d/7d/30d 自然日切换；可在设置开启费用估算后显示总费用与每日费用） |
 | 审计 | 请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags） |
 | 管理 | Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示） |
-| 插件 | 插件列表、启用/禁用开关、上传 .zip 安装、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启） |
+| 插件 | 插件列表、启用/禁用开关、上传 .zip 安装、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。 |
 | 设置 | 分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关与模型单价表、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除） |
 | 关于 | 版本与功能简介（展示内置插件能力） |
 
@@ -349,7 +349,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `budget_gate` | filter | | 可选预算闸门：按全局/模型/用户累计估算费用，超预算阻断新请求 |
 | `fallback_router` | handler | | 可选模型降级：指定错误后切到备用模型并重新选 Key |
 | `data_filter_guard` | filter/post | | 可选请求脱敏（正则含原代码敏感规则）与响应安全拦截（流式字段级滑动窗口） |
-| `webhook_notifier` | post | | 可选异步 Webhook / 浏览器告警：上游失败、安全事件与慢请求去重通知 |
+| `webhook_notifier` | post | | 可选异步 Webhook / 原生 App 告警：上游失败、安全事件与慢请求去重通知 |
 | `prompt_profiles` | filter | | 可选提示词配置集：按模型、接口和客户端叠加注入提示词 |
 | `tool_policy_guard` | filter | | 可选工具策略：限制工具名称和客户端续接中的危险参数 |
 | `mcp_tool_gateway` | app | | 可选 MCP/工具网关：注册本地 HTTP 工具、注入 tools 声明、受控调用 API |
@@ -357,7 +357,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `provider_health_probe` | app | | 可选供应商健康探测：提供 Key 连通性批量探测与脱敏状态快照 API |
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。`model_matcher` 标记为必需（`required: true`），不可禁用。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。`model_matcher` 标记为必需（`required: true`），不可禁用。每个插件实例拥有独立的 `config`；`on_load` 成功前不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
 
 当前版本不做“上游可逆加密”；如果上游没有对应解密协议，直接发送密文会让模型只能看到密文内容。
 
@@ -384,7 +384,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 
 `usage_quota_guard` 与 `fallback_router` 均为默认关闭的项目本地插件。前者只维护当前 AKM 进程内的固定窗口统计，服务重启后窗口重新开始；其 Token 计数仅使用上游响应中可解析的 usage，不能替代供应商侧账单额度。后者通过每行 `source_model=>fallback_model` 配置显式降级规则，命中配置的状态码或网络错误后重新匹配目标模型的 Key，并用单请求历史限制防止循环。`data_filter_guard` 也默认关闭；若旧配置已保存其内部“启用过滤”但缺少插件总开关，启动时会自动迁移为实际启用。settings 默认已并入原安全/代码敏感规则（配置页不再展示模板按钮与独立「代码敏感」配置）：`regex_rules` 含邮箱/手机号以及原代码敏感分组（LLM Key、VCS Token、云厂商密钥、ChatOps、JWT/Bearer、私钥头、数据库连接串、凭据赋值等），命中后统一可逆占位符；`response_block_patterns` 含命令执行 + 提示词注入话术（`response_rule_actions` 对注入类多为 warn、dump secrets 为 block）；敏感字段统一可逆占位符，已移除 `redact_replacement`。插件配置弹窗使用结构化行编辑器维护 `keyword_rules` / `regex_rules`（每行一条，正则可选 `#@标签`）；请求侧默认扫描 `messages[].content`（含 content blocks）、`input`、`instructions`、`system` 与 `messages[].tool_calls[].function.arguments`；非流式响应安全扫描覆盖 Chat / Responses / Anthropic Messages 可见文本。流式响应拦截启用后对齐换回截流的字段级滑动窗口：SSE 只扫 `content` / `text` / `delta` 等可见字段，边 yield 边扫，窗口长度由 `stream_guard_cache_chars`（默认 2048）约束；命中 block/mask 均中断输出（流式 mask 退化为 block，不再做整段完整缓冲）。可逆占位符格式为 `<AKM-SEC:tag@seq:hash/>`，仅在确有文本替换时把 reverse map 写入请求级 `RequestContext.bag['data_filter_guard.reverse_map']`（不再塞进 request body）；流式响应由 proxy 回传 `request_context`（及兼容字段 `local_request`）给 server，在 yield 前按 bag 做增量还原：SSE 路径在 `delta.content` 等字段上跨帧截流换回（短 content 仅以 `<` 开头或结尾时缓冲；长 content 先换回再截尾），纯文本路径保留半截前缀缓冲。响应还原同时兼容 JSON 转义斜杠（`\/>`）、中文标签规整为 `t`+指纹，以及模型轻微改写 tag 后按 6 位内容指纹的宽松匹配（流式闭合也支持省略 `/` 的 `>` 形态）。
 
-`webhook_notifier` 默认关闭，支持两条互不阻塞的告警通道：① 可选 HTTP Webhook（generic / 飞书 / 企业微信 / Slack）；② 可选浏览器系统通知（`browser_notifications`，默认开）。浏览器通道把事件写入进程内环形缓冲，经 `GET /api/webhook-notifier/events` SSE 推到插件页，由 `Notification` API 弹系统通知；也可 `GET /status`、`GET /recent` 查看快照。Webhook 与浏览器共用事件分类与冷却去重；Webhook 另限待发送任务数，超时或故障不会拖慢转发。未配置 `webhook_url` 时仍可只开浏览器通知；浏览器通知依赖管理台标签页存活，无人值守请配置 Webhook。它也会在健康监护的审计队列丢弃计数增长时发出一次告警。`prompt_profiles` 默认关闭，使用 `profiles_json` 配置 JSON 数组；每项可通过 `models`（glob）、`api_paths` 和 `client_patterns` 过滤，并按数组顺序叠加 `prompt`。Responses 请求写入 `instructions`，Anthropic Messages 请求写入顶层 `system`，Chat 请求插入 system 消息。若仍启用旧的 `prompt_booster`，两者都会注入提示词，应只保留一套有意配置的规则。
+`webhook_notifier` 默认关闭，支持两条互不阻塞的告警通道：① 可选 HTTP Webhook（generic / 飞书 / 企业微信 / Slack）；② 可选原生 App 系统通知（`app_notifications`，默认开，兼容旧键 `browser_notifications`）。App 通道经菜单栏注入的 `PluginBase.notify`（`rumps.notification`）弹出 macOS 系统通知，无需打开管理台页面；纯 `uvicorn` 启动时无宿主则仅写进程内最近事件缓冲。也可 `GET /api/webhook-notifier/status`、`GET /recent` 查看快照。Webhook 与 App 通知共用事件分类与冷却去重；Webhook 另限待发送任务数，超时或故障不会拖慢转发。未配置 `webhook_url` 时仍可只开 App 通知；无人值守跨机告警请配置 Webhook。它也会在健康监护的审计队列丢弃计数增长时发出一次告警。`prompt_profiles` 默认关闭，使用 `profiles_json` 配置 JSON 数组；每项可通过 `models`（glob）、`api_paths` 和 `client_patterns` 过滤，并按数组顺序叠加 `prompt`。Responses 请求写入 `instructions`，Anthropic Messages 请求写入顶层 `system`，Chat 请求插入 system 消息。若仍启用旧的 `prompt_booster`，两者都会注入提示词，应只保留一套有意配置的规则。
 
 `frontend_static_server` 是默认关闭的项目本地应用插件。启用后在插件配置中填写 Vue/React 打包后的 `dist` 或 `build` 目录，并将 `route_prefix` 设为站点访问路径（默认 `/web`，例如 `/console`）。插件会直接返回目录中的 JS、CSS、图片等真实文件；可选的 `static_dir` 可指定构建目录外的资源目录，并映射到 `<route_prefix>/static`，例如 `/web/static/logo.png`。开启 `spa_fallback`（默认）时，未知的无扩展名路径会返回 `index.html`，用于 Vue Router / React Router 的 History 模式。缺失的带扩展名资源仍返回 404。插件管理页会在成功挂载且启用时显示站点新标签页跳转箭头。为避免覆盖核心服务，不能使用 `/`、`/api`、`/v1`、`/admin`、`/health` 或 `/debug` 及其子路径。修改构建目录、独立静态资源目录或访问路径后需要重启服务；在重启前，跳转箭头仍指向当前已挂载的旧路径。若前端构建工具配置了绝对资源路径，还应将其 `base` / `homepage` 设置为同一挂载路径。
 
