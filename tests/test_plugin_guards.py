@@ -875,6 +875,8 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
         "payload_format": "generic",
         "notify_failures": True,
         "cooldown_seconds": 300,
+        # 本用例只验证 Webhook；浏览器通道另有独立用例
+        "browser_notifications": False,
     }
     await plugin.on_load()
     sent = []
@@ -913,6 +915,60 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
     await asyncio.sleep(0)
     assert sent[1][1]["event"] == "audit_drop"
     assert sent[1][1]["details"]["audit_queue_dropped"] == 2
+
+
+@pytest.mark.asyncio
+async def test_webhook_notifier_browser_channel_without_webhook_url():
+    """未配置 Webhook 时仍可写入浏览器缓冲，并经 SSE 队列推送给订阅者。"""
+    plugin = WebhookNotifier()
+    plugin.logger = logging.getLogger("test.webhook_notifier.browser")
+    plugin.config = {
+        "enabled": True,
+        "webhook_url": "",
+        "browser_notifications": True,
+        "notify_failures": True,
+        "cooldown_seconds": 300,
+    }
+    await plugin.on_load()
+
+    # 模拟页面 SSE 订阅者
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+    plugin._subscribers.add(queue)
+
+    event = {
+        "ok": False,
+        "phase": "upstream",
+        "status_code": 502,
+        "key_alias": "edge",
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_path": "chat/completions",
+        "error": "bad gateway",
+    }
+    ctx = _ctx({})
+    ctx.response = event
+    await plugin.on_response(ctx)
+    # 冷却期内重复事件不应再入缓冲
+    await plugin.on_response(ctx)
+
+    recent = plugin.recent_events(limit=10)
+    assert recent["count"] == 1
+    assert recent["events"][0]["event"] == "failure"
+    assert recent["events"][0]["details"]["status_code"] == 502
+
+    status = plugin.status()
+    assert status["browser_notifications"] is True
+    assert status["webhook_configured"] is False
+    assert status["buffered_events"] == 1
+    assert status["last_event_id"] == 1
+
+    # 订阅者应收到同一条事件
+    item = queue.get_nowait()
+    assert item["id"] == 1
+    assert item["title"] == "AKM 上游请求失败"
+    assert queue.empty()
+
+    await plugin.on_unload()
 
 
 @pytest.mark.asyncio

@@ -568,6 +568,15 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 
 `on_request` 通过 `ctx.set_block(status_code=400, error="...", security_action=..., security_reason=...)` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；`budget_gate` 在估算费用已达预算时以 `security_action=budget_exceeded` 阻断（默认 HTTP 429）；`security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
 
+`webhook_notifier`（默认关闭）在 `on_response` 中按失败 / 安全 / 慢请求 / 审计队列丢弃分类告警，冷却去重键为 `event:subtype:key_alias:model`。通道：
+
+| 通道 | 配置 | 行为 |
+|------|------|------|
+| HTTP Webhook | `webhook_url` + `payload_format` | 异步 `httpx` POST；受 `timeout_seconds` / `max_pending_notifications` 约束 |
+| 浏览器系统通知 | `browser_notifications`（默认 true） | 进程内环形缓冲 + SSE 推送；不占用 Webhook 待发送上限 |
+
+路由前缀 `routes_prefix=/api/webhook-notifier`：`GET /status`、`GET /recent`、`GET /events`（SSE，`after_id` 断线补发）。插件页 `has_menu` 打开后授权 `Notification` 并订阅 SSE；关闭标签页即断订阅。未配置 `webhook_url` 时仍可只走浏览器通道。
+
 项目本地 `mcp_tool_gateway`（默认关闭）维护 HTTP 工具注册表：可选在 `on_request` 注入/剥离 `tools` 声明，并通过 `routes_prefix=/api/mcp-tools` 暴露 `GET /status`、`GET /list`、`POST /call`。默认仅允许本机 host，参数体积与超时受限；它不自动执行模型返回的 tool_calls，与 `tool_policy_guard` 互补。
 
 **流式还原**：proxy 成功流式返回时附带 `request_context`（同一 `RequestContext`）与兼容字段 `local_request=ctx.request`。server 优先从 `request_context.bag_get("data_filter_guard.reverse_map")` 取映射，在 **yield 前** 调用 `reverse_stream_chunk` 做增量还原（`on_response` 只影响流结束后的审计 capture，不改已下发 chunk）。兼容旧路径上 request 内 `__akm_reverse_map__`。
