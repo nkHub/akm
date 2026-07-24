@@ -34,11 +34,11 @@ class PluginBase:
     app = None                   # FastAPI 实例
     db = None                    # 共享 SQLite 连接
     config: dict = {}            # ~/.akm/config.json 中该插件配置
-    logger: logging.Logger = None
+    logger: logging.Logger = logging.getLogger("akm.plugin")
 
     # — 子类覆盖 —
     router = None                # APIRouter（可选）
-    meta: "PluginMeta" = None    # 由 PluginManager 注入
+    meta: "PluginMeta | None" = None    # 由 PluginManager 注入
 
     # — 静态资源路径 —
     _static_dir: Path = Path(".")
@@ -55,7 +55,7 @@ class PluginBase:
 
     # ── Hook 方法（子类按需重写；均接收请求级 RequestContext） ──
 
-    async def on_request(self, ctx: "RequestContext"):
+    async def on_request(self, ctx: "RequestContext") -> dict | None:
         """请求到达回调。
 
         - 直接改写 ``ctx.request``（in-place）或返回新的 request dict；
@@ -83,7 +83,7 @@ class PluginBase:
         """上游错误回调。返回 ``\"retry\"`` / ``\"switch\"`` / ``\"block\"`` / ``\"fallback\"`` / None"""
         pass
 
-    async def on_response(self, ctx: "RequestContext"):
+    async def on_response(self, ctx: "RequestContext") -> dict | None:
         """响应返回回调。
 
         - 读取 ``ctx.request`` / ``ctx.response`` / ``ctx.bag``；
