@@ -1,13 +1,20 @@
 """插件基类 — 提供上下文注入、生命周期、hook 方法"""
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI
 
 if TYPE_CHECKING:
     from .context import RequestContext
     from .models import PluginMeta
+
+
+class NotifyFn(Protocol):
+    """宿主提供的系统通知回调约定。"""
+
+    def __call__(self, title: str, subtitle: str = "", message: str = "") -> None:
+        """发送一条宿主系统通知。"""
 
 
 class PluginBase:
@@ -26,22 +33,27 @@ class PluginBase:
                 pass
     """
 
-    name: str = ""               # 由 PluginManager 注入
-    builtin: bool = False        # 由 PluginManager 注入
-    enabled: bool = True         # 由 PluginManager 注入
+    router: APIRouter | None = None  # 子类可覆盖的 APIRouter（可选）
 
-    # — 上下文注入（由 PluginManager 调用） —
-    app = None                   # FastAPI 实例
-    db = None                    # 共享 SQLite 连接
-    config: dict = {}            # ~/.akm/config.json 中该插件配置
-    logger: logging.Logger = logging.getLogger("akm.plugin")
+    def __init__(self) -> None:
+        """创建彼此隔离的插件运行上下文。
 
-    # — 子类覆盖 —
-    router = None                # APIRouter（可选）
-    meta: "PluginMeta | None" = None    # 由 PluginManager 注入
-
-    # — 静态资源路径 —
-    _static_dir: Path = Path(".")
+        插件经常在测试、第三方扩展或管理器加载失败后的恢复流程中被直接实例化。
+        因此配置和注入上下文必须是实例属性，不能使用可变的类级默认值，避免多个
+        插件实例共享配置或残留上一个实例的运行状态。
+        """
+        self.name: str = ""               # 由 PluginManager 注入
+        self.builtin: bool = False         # 由 PluginManager 注入
+        self.enabled: bool = True          # 由 PluginManager 注入
+        self.app: FastAPI | None = None    # FastAPI 实例
+        self.db: Any = None                # 共享 SQLite 连接
+        self.config: dict = {}             # ~/.akm/config.json 中该插件配置
+        self.logger: logging.Logger = logging.getLogger("akm.plugin")
+        self.notify: NotifyFn | None = None
+        self.meta: "PluginMeta | None" = None
+        self._static_dir: Path = Path(".")
+        # 只有 on_load 成功完成后才参与 Hook 管道，避免半初始化实例处理请求。
+        self.runtime_ready: bool = False
 
     # ── 生命周期 ──
 
@@ -51,6 +63,14 @@ class PluginBase:
 
     async def on_unload(self):
         """插件卸载回调（应用关闭前调用），可在此清理资源"""
+        pass
+
+    def on_config_changed(self, old_config: dict, new_config: dict) -> None:
+        """插件配置保存后的同步回调。
+
+        管理器在持久化新配置并替换 ``self.config`` 后调用此方法。需要缓存配置值的
+        插件可在这里刷新缓存；涉及异步资源重建的配置仍应要求用户重新启用插件。
+        """
         pass
 
     # ── Hook 方法（子类按需重写；均接收请求级 RequestContext） ──

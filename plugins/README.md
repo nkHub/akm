@@ -18,7 +18,7 @@
 | `budget_gate` | filter | 关 | 按全局/模型/用户累计估算费用，超预算阻断 |
 | `fallback_router` | handler | 关 | 失败后切到备用模型并重选 Key |
 | `response_schema_guard` | post | 关 | 校验调用方声明的 JSON Schema |
-| `webhook_notifier` | post | 关 | 失败/安全/慢请求异步 Webhook + 浏览器通知 |
+| `webhook_notifier` | post | 关 | 失败/安全/慢请求异步 Webhook + 原生 App 通知 |
 | `provider_health_probe` | app | 关 | Key 连通性探测与状态快照 API |
 | `mcp_tool_gateway` | app | 关 | 本地 HTTP 工具注册、可选注入 tools、受控调用 API |
 | `markdown_kb` | app | 关 | 本地 Markdown 知识库（上传/状态） |
@@ -72,8 +72,8 @@
 ### 观测与运维
 
 - **`webhook_notifier`**  
-  请求结束后异步告警（generic / 飞书 / 企微 / Slack Webhook，以及可选浏览器系统通知）：上游失败、安全拦截、慢请求、审计队列丢弃等，带冷却去重，避免拖慢转发。  
-  浏览器通道：`browser_notifications`（默认开）写入进程内缓冲，插件页 SSE 订阅 `GET /api/webhook-notifier/events` 后调用 `Notification` API；另有 `GET /status`、`GET /recent`。未配 Webhook 也可单独使用浏览器通知；无人值守仍应配 Webhook。
+  请求结束后异步告警（generic / 飞书 / 企微 / Slack Webhook，以及可选原生 App 系统通知）：上游失败、安全拦截、慢请求、审计队列丢弃等，带冷却去重，避免拖慢转发。  
+  App 通道：`app_notifications`（默认开）经菜单栏注入的 `notify` 调用 `rumps.notification`；`GET /status`、`GET /recent` 可查快照。需用 `python -m akm.menubar` / 打包 App 启动；未配 Webhook 也可单独使用 App 通知；跨机无人值守仍应配 Webhook。
 
 - **`provider_health_probe`**  
   手动或定时探测 Key 连通性，结果脱敏（无 API Key、无上游 URL/正文）。  

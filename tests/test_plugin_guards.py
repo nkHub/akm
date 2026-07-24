@@ -3,18 +3,24 @@
 import json
 import logging
 import asyncio
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
+import zipfile
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile
 from unittest.mock import AsyncMock, MagicMock
 
+from akm.plugins import PluginBase
 from akm.plugins.context import RequestContext
+from akm.plugins.models import PluginMeta
 from akm.plugins.plugin_manager import PluginManager
 from akm.proxy import forward_request
 from plugins.data_filter_guard.index import Plugin as DataFilterGuard
+from akm.plugins.error_handler.index import Plugin as ErrorHandler
 from plugins.fallback_router.index import Plugin as FallbackRouter
 from plugins.usage_quota_guard.index import Plugin as UsageQuotaGuard
 from plugins.webhook_notifier.index import Plugin as WebhookNotifier
@@ -156,6 +162,279 @@ async def test_plugin_hot_toggle_calls_lifecycle(monkeypatch, tmp_path):
     assert loads["n"] == 1  # 未再 on_load
 
 
+def test_plugin_base_instances_do_not_share_config():
+    """直接实例化插件时，配置必须是彼此独立的实例状态。"""
+    first = PluginBase()
+    second = PluginBase()
+
+    first.config["enabled"] = False
+
+    assert second.config == {}
+
+
+@pytest.mark.asyncio
+async def test_runtime_unready_plugin_does_not_enter_hook_pipeline():
+    """on_load 失败后 runtime_ready 为假，插件不能继续处理请求。"""
+    called = False
+
+    class FailingPlugin(PluginBase):
+        async def on_request(self, ctx):
+            nonlocal called
+            called = True
+            return None
+
+    plugin = FailingPlugin()
+    plugin.name = "failing_plugin"
+    plugin.enabled = True
+    plugin.runtime_ready = False
+    plugin.meta = PluginMeta(
+        name=plugin.name,
+        version="1.0.0",
+        hooks={"on_request": True},
+    )
+    manager = PluginManager()
+    manager.plugins[plugin.name] = plugin
+    manager._plugin_metas[plugin.name] = plugin.meta
+
+    await manager.run_hook("on_request", _ctx({"model": "test"}))
+
+    assert called is False
+
+
+def test_runtime_unready_plugin_is_not_selected_as_converter():
+    """初始化失败的转换器不能被代理层选中并调用。"""
+    plugin = PluginBase()
+    plugin.name = "failing_converter"
+    plugin.enabled = True
+    plugin.runtime_ready = False
+    plugin.meta = PluginMeta(
+        name=plugin.name,
+        version="1.0.0",
+        converts=[{"from": "openai", "to": "anthropic"}],
+    )
+    manager = PluginManager()
+    manager.plugins[plugin.name] = plugin
+
+    assert manager.get_converter("openai", "anthropic") is None
+
+    plugin.runtime_ready = True
+
+    assert manager.get_converter("openai", "anthropic") is plugin
+
+
+@pytest.mark.asyncio
+async def test_unload_all_only_unloads_ready_plugins_and_isolates_failures():
+    """服务关闭时只清理已就绪插件，单个清理异常不能跳过后续插件。"""
+    events: list[str] = []
+
+    class TrackedPlugin(PluginBase):
+        def __init__(self, name: str, *, raises: bool = False):
+            super().__init__()
+            self.name = name
+            self.raises = raises
+
+        async def on_unload(self):
+            events.append(self.name)
+            if self.raises:
+                raise RuntimeError("unload failed")
+
+    first = TrackedPlugin("first")
+    skipped = TrackedPlugin("skipped")
+    failing = TrackedPlugin("failing", raises=True)
+    first.runtime_ready = True
+    failing.runtime_ready = True
+
+    manager = PluginManager()
+    manager.plugins = {
+        first.name: first,
+        skipped.name: skipped,
+        failing.name: failing,
+    }
+
+    await manager.unload_all()
+
+    assert events == ["failing", "first"]
+    assert first.runtime_ready is False
+    assert skipped.runtime_ready is False
+    assert failing.runtime_ready is False
+
+
+@pytest.mark.asyncio
+async def test_failed_hot_disable_restores_original_unready_state(monkeypatch, tmp_path):
+    """禁用生命周期失败时，必须恢复原有就绪状态而不是直接按启用状态推断。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    class FailingUnloadPlugin(PluginBase):
+        async def on_unload(self):
+            raise RuntimeError("cannot unload")
+
+    plugin = FailingUnloadPlugin()
+    plugin.name = "failing_unload"
+    plugin.enabled = True
+    plugin.runtime_ready = False
+    plugin.meta = PluginMeta(name=plugin.name, version="1.0.0")
+    manager = PluginManager()
+    manager.plugins[plugin.name] = plugin
+    manager._plugin_metas[plugin.name] = plugin.meta
+
+    result = await manager.toggle_plugin(plugin.name, False, hot=True)
+
+    assert result["ok"] is False
+    assert plugin.enabled is True
+    assert plugin.runtime_ready is False
+
+
+@pytest.mark.asyncio
+async def test_unready_plugin_routes_and_static_files_return_503(monkeypatch, tmp_path):
+    """on_load 失败后，残留路由与静态挂载必须明确拒绝访问而非抛出 500。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    builtin_dir = tmp_path / "builtin"
+    project_dir = tmp_path / "project"
+    third_party_dir = tmp_path / "third_party"
+    for directory in (builtin_dir, project_dir, third_party_dir):
+        directory.mkdir()
+
+    plugin_dir = project_dir / "failed_plugin"
+    views_dir = plugin_dir / "views"
+    views_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({
+            "name": "failed_plugin",
+            "version": "1.0.0",
+            "default_enabled": True,
+            "has_menu": True,
+            "routes_prefix": "/failed-plugin",
+        }),
+        "utf-8",
+    )
+    (plugin_dir / "index.py").write_text(
+        "from fastapi import APIRouter\n"
+        "from akm.plugins import PluginBase\n\n"
+        "router = APIRouter()\n\n"
+        "@router.get('/ping')\n"
+        "async def ping():\n"
+        "    return {'ok': True}\n\n"
+        "class Plugin(PluginBase):\n"
+        "    router = router\n\n"
+        "    async def on_load(self):\n"
+        "        raise RuntimeError('initialization failed')\n",
+        "utf-8",
+    )
+    (views_dir / "asset.txt").write_text("ready", "utf-8")
+
+    app = FastAPI()
+    manager = PluginManager()
+    manager._builtin_dir = builtin_dir
+    manager._project_dir = project_dir
+    manager._third_party_dir = third_party_dir
+    await manager.load_all(app)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        route_response = await client.get("/failed-plugin/ping")
+        static_response = await client.get("/plugins/failed_plugin/static/asset.txt")
+
+        assert route_response.status_code == 503
+        assert static_response.status_code == 503
+
+        manager.plugins["failed_plugin"].runtime_ready = True
+        route_response = await client.get("/failed-plugin/ping")
+        static_response = await client.get("/plugins/failed_plugin/static/asset.txt")
+
+    assert route_response.json() == {"ok": True}
+    assert static_response.status_code == 200
+    assert static_response.text == "ready"
+
+
+@pytest.mark.asyncio
+async def test_install_plugin_checks_zip_builtin_names(monkeypatch, tmp_path):
+    """py2app 内置目录不可遍历时，安装流程仍应拒绝同名第三方插件。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("duplicate/plugin.json", '{"name":"duplicate","version":"1.0.0"}')
+        zf.writestr("duplicate/index.py", "from akm.plugins import PluginBase\n")
+
+    manager = PluginManager()
+    builtin_archive = tmp_path / "python312.zip"
+    builtin_archive.write_bytes(b"not a directory")
+    manager._builtin_dir = builtin_archive
+    manager._third_party_dir = tmp_path / "third_party"
+    monkeypatch.setattr(manager, "_list_zip_builtin_plugins", lambda: {"duplicate"})
+    upload = UploadFile(filename="duplicate.zip", file=BytesIO(archive.getvalue()))
+
+    result = await manager.install_plugin(upload)
+
+    assert result["ok"] is False
+    assert "内置插件重名" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_import_failure_does_not_block_later_plugins(monkeypatch, tmp_path):
+    """单个第三方插件的模块导入失败时，后续插件仍应完成加载。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    builtin_dir = tmp_path / "builtin"
+    project_dir = tmp_path / "project"
+    third_party_dir = tmp_path / "third_party"
+    for directory in (builtin_dir, project_dir, third_party_dir):
+        directory.mkdir()
+
+    broken_dir = project_dir / "broken"
+    broken_dir.mkdir()
+    (broken_dir / "plugin.json").write_text(
+        json.dumps({"name": "broken", "version": "1.0.0"}), "utf-8"
+    )
+    (broken_dir / "index.py").write_text('raise RuntimeError("broken import")\n', "utf-8")
+
+    working_dir = project_dir / "working"
+    working_dir.mkdir()
+    (working_dir / "plugin.json").write_text(
+        json.dumps({"name": "working", "version": "1.0.0"}), "utf-8"
+    )
+    (working_dir / "index.py").write_text(
+        "from akm.plugins import PluginBase\n\nclass Plugin(PluginBase):\n    pass\n",
+        "utf-8",
+    )
+
+    manager = PluginManager()
+    manager._builtin_dir = builtin_dir
+    manager._project_dir = project_dir
+    manager._third_party_dir = third_party_dir
+
+    await manager.load_all(FastAPI())
+
+    assert "broken" not in manager.plugins
+    assert manager.plugins["working"].runtime_ready is True
+
+
+@pytest.mark.asyncio
+async def test_error_handler_refreshes_cached_limits_after_config_save(monkeypatch, tmp_path):
+    """保存插件设置后，错误处理器应立即采用新的重试上限。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config_path = tmp_path / ".akm" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}", "utf-8")
+
+    manager = PluginManager()
+    await manager.load_all(FastAPI())
+    # 管理器用动态模块名加载插件，运行时类对象不同于本测试的静态导入；
+    # 这里仅为类型检查收窄，实际行为仍由 load_all 路径验证。
+    plugin = cast(ErrorHandler, manager.plugins["error_handler"])
+
+    assert plugin.max_retries == 3
+    assert plugin.max_key_tries == 5
+
+    result = manager.set_config(
+        "error_handler",
+        {"max_retries_per_key": 7, "max_key_tries": 11},
+    )
+
+    assert result == {"ok": True}
+    assert plugin.max_retries == 7
+    assert plugin.max_key_tries == 11
+
+
 @pytest.mark.asyncio
 async def test_data_filter_private_reverse_map_is_not_forwarded_upstream(monkeypatch):
     """反向映射仅供本地响应恢复使用，绝不能作为供应商请求参数发送。"""
@@ -213,6 +492,7 @@ async def test_usage_quota_guard_skips_key_after_request_or_token_limit():
     ctx2.key = key
     ctx2.model = "gpt-4"
     skipped = await plugin.on_key_selected(ctx2)
+    assert skipped is not None
     assert skipped["type"] == "skip_key"
     assert "请求数" in skipped["error"]
 
@@ -239,6 +519,7 @@ async def test_usage_quota_guard_skips_key_after_request_or_token_limit():
     ctx4.key = key
     ctx4.model = "gpt-4"
     skipped = await token_plugin.on_key_selected(ctx4)
+    assert skipped is not None
     assert skipped["type"] == "skip_key"
     assert "Token" in skipped["error"]
 
@@ -360,6 +641,7 @@ async def test_data_filter_default_response_patterns_match_without_trailing_comm
     ctx = _ctx({})
     ctx.response = {"stream": False, "api_path": "chat/completions", "response_body": body}
     resp = await plugin.on_response(ctx)
+    assert resp is not None
     assert resp["security_action"] == "block"
     assert "数据安全插件拦截" in resp["response_body"]
 
@@ -481,6 +763,7 @@ async def test_data_filter_blocks_anthropic_nonstream_response():
     ctx = _ctx({})
     ctx.response = {"stream": False, "api_path": "messages", "response_body": body}
     resp = await plugin.on_response(ctx)
+    assert resp is not None
     assert resp["security_action"] == "block"
     assert "msg_akm_security" in resp["response_body"] or "数据安全插件拦截" in resp["response_body"]
 
@@ -875,8 +1158,8 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
         "payload_format": "generic",
         "notify_failures": True,
         "cooldown_seconds": 300,
-        # 本用例只验证 Webhook；浏览器通道另有独立用例
-        "browser_notifications": False,
+        # 本用例只验证 Webhook；App 原生通道另有独立用例
+        "app_notifications": False,
     }
     await plugin.on_load()
     sent = []
@@ -906,9 +1189,8 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
     assert sent[0][1]["event"] == "failure"
     assert sent[0][1]["details"]["status_code"] == 503
 
-    plugin.app = SimpleNamespace(
-        state=SimpleNamespace(health_monitor=SimpleNamespace(audit_queue_dropped=2))
-    )
+    plugin.app = FastAPI()
+    plugin.app.state.health_monitor = SimpleNamespace(audit_queue_dropped=2)
     ctx_ok = _ctx({})
     ctx_ok.response = {"ok": True, "model": "gpt-5", "key_alias": "primary"}
     await plugin.on_response(ctx_ok)
@@ -918,22 +1200,26 @@ async def test_webhook_notifier_sends_failure_once_with_cooldown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_webhook_notifier_browser_channel_without_webhook_url():
-    """未配置 Webhook 时仍可写入浏览器缓冲，并经 SSE 队列推送给订阅者。"""
+async def test_webhook_notifier_app_channel_without_webhook_url():
+    """未配置 Webhook 时仍可走 App 原生通知，并写入最近事件缓冲。"""
     plugin = WebhookNotifier()
-    plugin.logger = logging.getLogger("test.webhook_notifier.browser")
+    plugin.logger = logging.getLogger("test.webhook_notifier.app")
     plugin.config = {
         "enabled": True,
         "webhook_url": "",
-        "browser_notifications": True,
+        "app_notifications": True,
         "notify_failures": True,
         "cooldown_seconds": 300,
     }
     await plugin.on_load()
 
-    # 模拟页面 SSE 订阅者
-    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
-    plugin._subscribers.add(queue)
+    # 模拟菜单栏注入的宿主 notify
+    notified = []
+
+    def fake_notify(title, subtitle="", message=""):
+        notified.append((title, subtitle, message))
+
+    plugin.notify = fake_notify
 
     event = {
         "ok": False,
@@ -948,7 +1234,7 @@ async def test_webhook_notifier_browser_channel_without_webhook_url():
     ctx = _ctx({})
     ctx.response = event
     await plugin.on_response(ctx)
-    # 冷却期内重复事件不应再入缓冲
+    # 冷却期内重复事件不应再通知
     await plugin.on_response(ctx)
 
     recent = plugin.recent_events(limit=10)
@@ -957,16 +1243,15 @@ async def test_webhook_notifier_browser_channel_without_webhook_url():
     assert recent["events"][0]["details"]["status_code"] == 502
 
     status = plugin.status()
-    assert status["browser_notifications"] is True
+    assert status["app_notifications"] is True
+    assert status["host_notify_available"] is True
     assert status["webhook_configured"] is False
     assert status["buffered_events"] == 1
     assert status["last_event_id"] == 1
 
-    # 订阅者应收到同一条事件
-    item = queue.get_nowait()
-    assert item["id"] == 1
-    assert item["title"] == "AKM 上游请求失败"
-    assert queue.empty()
+    assert len(notified) == 1
+    assert notified[0][0] == "AKM 上游请求失败"
+    assert notified[0][1] == "failure/upstream:502"
 
     await plugin.on_unload()
 
@@ -1099,6 +1384,7 @@ async def test_tool_policy_guard_blocks_denied_tool_and_dangerous_continuation()
     blocked_name = await plugin.on_request(_ctx({
         "tools": [{"type": "function", "function": {"name": "bash", "parameters": {}}}],
     }))
+    assert blocked_name is not None
     assert blocked_name["type"] == "block"
     assert "黑名单" in blocked_name["security_reason"]
 
@@ -1106,6 +1392,7 @@ async def test_tool_policy_guard_blocks_denied_tool_and_dangerous_continuation()
     blocked_args = await plugin.on_request(_ctx({
         "messages": [{"role": "assistant", "tool_calls": [{"function": {"name": "run", "arguments": "rm -rf /"}}]}],
     }))
+    assert blocked_args is not None
     assert blocked_args["type"] == "block"
     assert "参数命中" in blocked_args["security_reason"]
 
@@ -1138,6 +1425,7 @@ async def test_response_schema_guard_blocks_invalid_declared_json_schema():
 
     guarded = await plugin.on_response(ctx)
 
+    assert guarded is not None
     assert guarded["security_action"] == "schema_block"
     assert "$.answer 应为 string" == guarded["security_reason"]
     assert json.loads(guarded["response_body"])["error"]["message"] == "invalid structured output"
@@ -1185,7 +1473,7 @@ async def test_provider_health_probe_registers_status_api_when_enabled(monkeypat
     app = FastAPI()
     manager = PluginManager()
     await manager.load_all(app)
-    plugin = manager.plugins["provider_health_probe"]
+    plugin = cast(ProviderHealthProbe, manager.plugins["provider_health_probe"])
     plugin._results = {
         "probe-key": {"alias": "probe-key", "ok": True, "provider": "openai"},
     }

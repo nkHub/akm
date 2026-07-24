@@ -270,7 +270,7 @@ async def on_request(self, ctx):
 
 ```
 
-设置页通过 `settings` schema 自动渲染表单，保存后写入 `~/.akm/config.json`：
+设置页通过 `settings` schema 自动渲染表单，保存后写入 `~/.akm/config.json`，并立即替换已加载实例的 `self.config`。如果插件把配置读取结果缓存到实例字段，应重写同步的 `on_config_changed(old_config, new_config)` 刷新缓存；需要重建异步资源的配置仍应通过重新启用插件或重启服务生效：
 
 ```json
 {
@@ -296,16 +296,19 @@ async def on_request(self, ctx):
 import logging
 from pathlib import Path
 from fastapi import FastAPI, APIRouter
+from akm.plugins.models import PluginMeta
 
 class PluginBase:
     """插件基类，由 PluginManager 在加载时注入上下文"""
 
-    # ——— 由 PluginManager 注入的属性 ———
+    # ——— 由 PluginManager 注入的实例属性 ———
     name: str              # 插件名称（来自 plugin.json）
-    app: FastAPI           # FastAPI 应用实例
-    router: APIRouter      # 本插件的 APIRouter（可在 __init__ 中自定义）
-    meta: dict             # plugin.json 的原始数据
+    app: FastAPI | None    # FastAPI 应用实例；直接实例化时为 None
+    router: APIRouter | None  # 子类可声明的 APIRouter
+    meta: PluginMeta | None   # plugin.json 元数据
     logger: logging.Logger # 本插件专属 logger
+    notify                 # 可选宿主系统通知：notify(title, subtitle="", message="")；菜单栏 App 经 set_notify 注入
+    runtime_ready: bool    # 仅 on_load 成功后为 true，才可参与 Hook 管道
 
     # ——— 可重写的生命周期方法 ———
     async def on_load(self):
@@ -314,6 +317,10 @@ class PluginBase:
 
     async def on_unload(self):
         """插件卸载时调用，可做清理操作"""
+        pass
+
+    def on_config_changed(self, old_config: dict, new_config: dict):
+        """配置保存后同步调用；用于刷新实例内缓存的配置值"""
         pass
 
     # ——— 可重写的 hook 方法（均接收请求级 RequestContext） ———
@@ -353,33 +360,6 @@ class PluginBase:
         """
         pass
 
-    # ——— 辅助属性 ———
-    @property
-    def config(self) -> dict:
-        """当前插件的配置（已合并 settings 默认值）"""
-        return self._get_config()
-
-    @property
-    def db(self):
-        """数据库连接（SQLite，与项目共享同一实例）"""
-        return self._get_db()
-
-    @property
-    def static_dir(self) -> Path:
-        """本插件 views/ 目录的绝对路径"""
-        return self._static_dir
-
-    # ——— 内部方法（由 PluginManager 设置） ———
-    def _set_context(self, name: str, app: FastAPI, meta: dict, static_dir: Path):
-        self.name = name
-        self.app = app
-        self.meta = meta
-        self._static_dir = static_dir
-        self.router = APIRouter()
-        self.logger = logging.getLogger(f"plugin.{name}")
-
-    def _get_config(self) -> dict: ...
-    def _get_db(self): ...
 ```
 
 ### 6.2 上下文能力一览
@@ -387,31 +367,34 @@ class PluginBase:
 | 属性/方法 | 类型 | 说明 |
 |-----------|------|------|
 | `self.name` | `str` | 插件名称 |
-| `self.app` | `FastAPI` | 应用实例，可注册中间件、事件处理器等 |
-| `self.router` | `APIRouter` | 本插件路由，在 `__init__` 中定义端点并自动挂载 |
+| `self.app` | `FastAPI \| None` | 应用实例；管理器加载后注入，可注册中间件、事件处理器等 |
+| `self.router` | `APIRouter \| None` | 子类定义的插件路由，加载时自动挂载 |
 | `self.config` | `dict` | 本插件配置（含默认值），运行时自动从 config.json 加载 |
 | `self.db` | `sqlite3.Connection` | 项目共享数据库连接，可直接执行 SQL |
 | `self.logger` | `Logger` | 插件专用 logger，输出格式 `[plugin.xxx]` |
-| `self.meta` | `dict` | plugin.json 原始数据（含 settings schema 等） |
-| `self.static_dir` | `Path` | views/ 目录路径，用于读取静态资源 |
+| `self.meta` | `PluginMeta \| None` | plugin.json 解析后的元数据（含 settings schema 等） |
+| `self._static_dir` | `Path` | views/ 目录路径，用于读取静态资源 |
+| `self.runtime_ready` | `bool` | `on_load` 成功后为 true；失败插件不会参加 Hook、转换器选择或侧边栏菜单 |
 
 ### 6.3 生命周期
 
 ```
 PluginManager.load_all()
   └── 对每个插件目录：
-       ├── 1. 读取 plugin.json
-       ├── 2. 动态导入 index.py，获取 Plugin 类
-       ├── 3. 实例化 plugin = Plugin()
-       ├── 4. 调用 plugin._set_context(name, app, meta, static_dir)
-       ├── 5. 调用 plugin.on_load()                    # ← 初始化钩子
-       ├── 6. app.include_router(plugin.router)        # ← 注册路由
-       └── 7. 存入 self.plugins
+        ├── 1. 读取 plugin.json
+        ├── 2. 动态导入 index.py，获取 Plugin 类
+        ├── 3. 实例化 plugin = Plugin()（每个实例拥有独立上下文与 config）
+        ├── 4. 注入 name / app / db / meta / logger / notify / static_dir
+        ├── 5. 注册 plugin.router 与静态资源（如有）
+        ├── 6. 存入 self.plugins
+        └── 7. 调用 plugin.on_load()；成功后设 runtime_ready=true
 
 应用关闭时 lifecycle shutdown：
-  └── 对每个已加载插件：
-       └── 调用 plugin.on_unload()                     # ← 清理钩子
+  └── 按加载逆序遍历已就绪插件：
+        └── 调用 plugin.on_unload()                     # ← 清理钩子
 ```
+
+动态导入和 `on_load` 均按插件隔离：某个插件导入失败不会阻止后续插件扫描；`on_load` 抛出异常时会记录错误并保持 `runtime_ready=false`，因此该实例不会进入任何 Hook 候选列表、转换器选择或侧边栏菜单。应用关闭时仅对已就绪插件执行 `on_unload`，单个清理异常不会阻止其他插件清理。
 
 ## 七、PluginManager 设计
 
@@ -438,7 +421,7 @@ class PluginManager:
 ### 7.2 加载流程
 
 > **热启停（默认）**：管理台或 API 启用/禁用/安装/删除时，会立即调用 `on_load` / `on_unload`，hook 管道与侧边栏菜单即时生效，**无需重启**。  
-> **仍需重启的情况**：修改插件 `index.py` 源码、替换已加载文件、或需要拆除已注册的 FastAPI 路由/静态挂载（Starlette 限制，禁用后路由可能仍在，但 hook 与宿主页以 `enabled` 为准不再调度）。  
+> **仍需重启的情况**：修改插件 `index.py` 源码、替换已加载文件、或需要拆除已注册的 FastAPI 路由/静态挂载（Starlette 限制，禁用后路由仍会保留，但会统一返回 503；Hook、转换器与宿主页则以 `enabled` 和 `runtime_ready` 为准停止调度）。  
 > CLI `akm plugin enable/disable`：若本地服务在线则转发 API 热生效；服务未运行时只写 `config.json`，下次启动生效。
 
 ```
@@ -453,9 +436,9 @@ PluginManager.load_all(app, db)
 
 ### 7.3 路由注册规则
 
-- **API 路由**：插件的 `self.router`（在 `__init__` 中定义的 APIRouter）挂载到 `{routes_prefix}` 下
+- **API 路由**：插件的 `self.router`（在 `__init__` 中定义的 APIRouter）挂载到 `{routes_prefix}` 下；插件禁用或 `runtime_ready=false` 时返回 HTTP 503
 - **前端路由**（仅 has_menu 插件）：`/plugins/{name}` 和 `/plugins/{name}/{rest:path}` → `views/index.html`（SPA 支持）
-- **静态文件**（仅 has_menu 插件）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）
+- **静态文件**（仅 has_menu 插件）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）；插件禁用或未就绪时返回 HTTP 503
 
 ## 八、Hook 机制
 
@@ -573,9 +556,11 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 | 通道 | 配置 | 行为 |
 |------|------|------|
 | HTTP Webhook | `webhook_url` + `payload_format` | 异步 `httpx` POST；受 `timeout_seconds` / `max_pending_notifications` 约束 |
-| 浏览器系统通知 | `browser_notifications`（默认 true） | 进程内环形缓冲 + SSE 推送；不占用 Webhook 待发送上限 |
+| 原生 App 系统通知 | `app_notifications`（默认 true；兼容旧键 `browser_notifications`） | 经 `PluginBase.notify`（菜单栏 `rumps.notification`）弹出 macOS 通知；同时写入进程内最近事件缓冲；不占用 Webhook 待发送上限 |
 
-路由前缀 `routes_prefix=/api/webhook-notifier`：`GET /status`、`GET /recent`、`GET /events`（SSE，`after_id` 断线补发）。插件页 `has_menu` 打开后授权 `Notification` 并订阅 SSE；关闭标签页即断订阅。未配置 `webhook_url` 时仍可只走浏览器通道。
+宿主注入：`PluginManager.set_notify(fn)` 由 `akm.menubar` 在服务 ready 后调用，同步到所有已加载插件的 `plugin.notify` 与 `app.state.host_notify`。纯 `uvicorn` 无菜单栏时 `notify` 为 `None`，App 通道仅记缓冲不弹窗。
+
+路由前缀 `routes_prefix=/api/webhook-notifier`：`GET /status`、`GET /recent`（无独立插件页 / 无 SSE）。未配置 `webhook_url` 时仍可只走 App 通道。
 
 项目本地 `mcp_tool_gateway`（默认关闭）维护 HTTP 工具注册表：可选在 `on_request` 注入/剥离 `tools` 声明，并通过 `routes_prefix=/api/mcp-tools` 暴露 `GET /status`、`GET /list`、`POST /call`。默认仅允许本机 host，参数体积与超时受限；它不自动执行模型返回的 tool_calls，与 `tool_policy_guard` 互补。
 

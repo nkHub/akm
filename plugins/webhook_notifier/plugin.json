@@ -1,20 +1,15 @@
 {
   "name": "webhook_notifier",
-  "version": "0.2.0",
-  "has_menu": true,
+  "version": "0.3.0",
+  "has_menu": false,
   "category": "post",
-  "description": "Webhook / 浏览器告警：上游失败、安全拦截或慢请求时异步去重通知",
+  "description": "Webhook / 原生 App 告警：上游失败、安全拦截或慢请求时异步去重通知",
   "builtin": false,
   "default_enabled": false,
   "priority": 180,
   "routes_prefix": "/api/webhook-notifier",
   "hooks": {
     "on_response": true
-  },
-  "menu": {
-    "title": "告警通知",
-    "icon": "bell",
-    "order": 60
   },
   "settings": [
     {
@@ -25,18 +20,18 @@
       "description": "关闭后插件保持加载，但不创建任何通知任务。"
     },
     {
-      "key": "browser_notifications",
-      "label": "浏览器系统通知",
+      "key": "app_notifications",
+      "label": "原生 App 系统通知",
       "type": "boolean",
       "default": true,
-      "description": "开启后，打开本插件页面并授权通知权限即可收到系统级浏览器通知；无需配置 Webhook 地址。"
+      "description": "开启后通过菜单栏 App（rumps）弹出 macOS 系统通知。需用 python -m akm.menubar 或打包 App 启动；纯 uvicorn 无此通道。无需打开管理台页面。"
     },
     {
       "key": "webhook_url",
       "label": "Webhook 地址",
       "type": "text",
       "default": "",
-      "description": "可选通知接收地址。仅支持 http:// 或 https://，为空时只走浏览器通知（若已开启）。"
+      "description": "可选通知接收地址。仅支持 http:// 或 https://，为空时只走原生 App 通知（若已开启）。"
     },
     {
       "key": "payload_format",
@@ -82,7 +77,7 @@
       "default": 300,
       "min": 0,
       "max": 86400,
-      "description": "相同事件在冷却期内只发送一次（Webhook 与浏览器通知共用），0 表示不去重。"
+      "description": "相同事件在冷却期内只发送一次（Webhook 与 App 通知共用），0 表示不去重。"
     },
     {
       "key": "timeout_seconds",
@@ -100,7 +95,7 @@
       "default": 32,
       "min": 1,
       "max": 256,
-      "description": "仅限制 Webhook 后台任务数；浏览器通知走进程内缓冲，不受此上限约束。"
+      "description": "仅限制 Webhook 后台任务数；App 原生通知不占用此上限。"
     }
   ]
 }

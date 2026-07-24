@@ -4,16 +4,37 @@ import logging
 import zipfile
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import FastAPI, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .models import PluginMeta
-from .base import PluginBase
+from .base import NotifyFn, PluginBase
 from .context import RequestContext
 
 logger = logging.getLogger("akm.plugin_manager")
+
+
+class _PluginStaticFiles(StaticFiles):
+    """仅在所属插件已完成初始化时提供静态资源。"""
+
+    def __init__(self, plugin: PluginBase, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._plugin = plugin
+
+    async def __call__(self, scope, receive, send) -> None:
+        if not self._plugin.enabled or not self._plugin.runtime_ready:
+            # StaticFiles 是独立挂载的 ASGI 应用，不能依赖 FastAPI 的异常处理器。
+            # 直接发送响应，避免未初始化插件的静态请求变成未处理异常。
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": f"插件 '{self._plugin.name}' 当前不可用"},
+            )
+            await response(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
 
 
 class PluginManager:
@@ -35,7 +56,9 @@ class PluginManager:
         self._third_party_dir = Path.home() / ".akm" / "plugins"
         self._config_path = Path.home() / ".akm" / "config.json"
         self.app: Optional[FastAPI] = None
-        self.db = None
+        self.db: Any = None
+        # 宿主（菜单栏 App）注册的系统通知回调；纯 uvicorn 启动时保持 None
+        self._notify: NotifyFn | None = None
 
     # ── 配置读写（内部） ──
 
@@ -171,42 +194,62 @@ class PluginManager:
             logger.warning(f"[PluginManager] 无法加载模块: {name}")
             return None
 
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[f"akm_plugin_{name}"] = module
-        spec.loader.exec_module(module)
-
-        PluginClass = getattr(module, "Plugin", None)
-        if PluginClass is None or not issubclass(PluginClass, PluginBase):
+        module_key = f"akm_plugin_{name}"
+        try:
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_key] = module
+            spec.loader.exec_module(module)
+            plugin_class = getattr(module, "Plugin", None)
+            if not isinstance(plugin_class, type) or not issubclass(plugin_class, PluginBase):
+                raise TypeError("未找到继承 PluginBase 的 Plugin 类")
+        except Exception as exc:
+            # 单个插件的依赖或模块顶层代码出错时，其他插件仍应继续加载。
+            sys.modules.pop(module_key, None)
             logger.warning(
-                f"[PluginManager] {name}: 未找到继承 PluginBase 的 Plugin 类"
+                f"[PluginManager] 加载插件模块失败 {name}: {exc}", exc_info=True
             )
             return None
 
         # ── 实例化并注入上下文 ──
-        plugin: PluginBase = PluginClass()
+        plugin: PluginBase = plugin_class()
         plugin.name = name
         plugin.builtin = meta.builtin
         plugin.meta = meta
         plugin.logger = logging.getLogger(f"akm.plugins.{name}")
         plugin._static_dir = plugin_dir / "views"
+        # 若菜单栏已注册 notify，新加载的插件立即拿到宿主通知能力
+        plugin.notify = self._notify
 
-        if self.app is not None:
-            plugin.app = self.app
+        # 局部绑定便于类型收窄：后续 include_router/mount 只在 app 非空时调用
+        app = self.app
+        if app is not None:
+            plugin.app = app
         if self.db is not None:
             plugin.db = self.db
 
         # ── 注册路由 ──
-        if plugin.router is not None:
+        if plugin.router is not None and app is not None:
+            def ensure_plugin_ready() -> None:
+                if not plugin.enabled or not plugin.runtime_ready:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"插件 '{plugin.name}' 当前不可用",
+                    )
+
             routes_prefix = meta.routes_prefix or f"/{name}"
-            self.app.include_router(plugin.router, prefix=routes_prefix)
+            app.include_router(
+                plugin.router,
+                prefix=routes_prefix,
+                dependencies=[Depends(ensure_plugin_ready)],
+            )
             logger.info(f"[PluginManager] 注册路由: {routes_prefix}")
 
         # ── 注册静态文件 + 前端路由（has_menu） ──
-        if meta.has_menu and plugin._static_dir.exists():
+        if meta.has_menu and plugin._static_dir.exists() and app is not None:
             static_path = f"/plugins/{name}/static"
-            self.app.mount(
+            app.mount(
                 static_path,
-                StaticFiles(directory=str(plugin._static_dir)),
+                _PluginStaticFiles(plugin, directory=str(plugin._static_dir)),
                 name=f"plugin_static_{name}",
             )
             logger.info(f"[PluginManager] 挂载静态文件: {static_path}")
@@ -239,17 +282,7 @@ class PluginManager:
         # ── 1. 加载内置插件 (akm/plugins/ 子目录) ──
         # py2app 打包后 akm/plugins/ 在 python312.zip 内，iterdir() 会抛 NotADirectoryError
         try:
-            builtin_entries = sorted(self._builtin_dir.iterdir())
-            use_zip_loading = False
-        except NotADirectoryError:
-            builtin_entries = self._list_zip_builtin_plugins()
-            use_zip_loading = True
-
-        for entry in builtin_entries:
-            if use_zip_loading:
-                # 从 zip 包中提取插件到临时目录再加载
-                self._load_plugin_from_zip(entry, "builtin")
-            else:
+            for entry in sorted(self._builtin_dir.iterdir()):
                 if not entry.is_dir():
                     continue
                 if entry.name.startswith("__"):
@@ -257,6 +290,10 @@ class PluginManager:
                 if entry.name in ("base.py", "models.py", "plugin_manager.py", "__pycache__"):
                     continue
                 self._load_plugin(entry, "builtin")
+        except NotADirectoryError:
+            for plugin_name in self._list_zip_builtin_plugins():
+                # 从 zip 包中提取插件到临时目录再加载
+                self._load_plugin_from_zip(plugin_name, "builtin")
 
         # ── 2. 加载项目本地插件 (项目根目录 plugins/ 子目录) ──
         if self._project_dir.exists():
@@ -279,7 +316,7 @@ class PluginManager:
         changed = False
         for name, plugin in self.plugins.items():
             if name not in plugin_states:
-                enabled = bool(plugin.meta.default_enabled)
+                enabled = bool(self._plugin_metas[name].default_enabled)
                 # data_filter_guard 的早期配置页同时提供了“启用过滤”设置和
                 # 插件总开关。旧配置只保存前者时，插件会始终停在 Hook 之外，
                 # 用户看到“已启用”却没有任何实际效果。仅对这个历史配置做
@@ -306,12 +343,47 @@ class PluginManager:
                 plugin.config = self.get_config(plugin.name) or {}
                 try:
                     await plugin.on_load()
+                    plugin.runtime_ready = True
                 except Exception as e:
+                    plugin.runtime_ready = False
                     logger.error(
                         f"[PluginManager] {plugin.name} on_load 异常: {e}"
                     )
 
         logger.info(f"[PluginManager] 共加载 {len(self.plugins)} 个插件")
+
+    async def unload_all(self) -> None:
+        """关闭服务前依次卸载已初始化的插件，单个异常不影响其余清理。"""
+        for plugin in reversed(list(self.plugins.values())):
+            if not plugin.runtime_ready:
+                continue
+            try:
+                await plugin.on_unload()
+            except Exception as exc:
+                logger.error(f"[PluginManager] {plugin.name} on_unload 异常: {exc}")
+            finally:
+                plugin.runtime_ready = False
+
+    def set_notify(self, notify_fn: NotifyFn | None) -> None:
+        """注入宿主系统通知回调，并同步到所有已加载插件。
+
+        由菜单栏 App 在服务 ready 后调用；参数签名约定为
+        ``notify_fn(title, subtitle="", message="")``。
+        传入 None 可清空（例如宿主退出前），纯 uvicorn 场景无需调用。
+        """
+        self._notify = notify_fn
+        for plugin in self.plugins.values():
+            plugin.notify = notify_fn
+        # 同步挂到 app.state，便于插件在 notify 尚未注入时兜底读取
+        if self.app is not None:
+            try:
+                self.app.state.host_notify = notify_fn
+            except Exception:
+                pass
+        logger.info(
+            "[PluginManager] 宿主通知已%s",
+            "注册" if callable(notify_fn) else "清空",
+        )
 
     # ── Hook 管道执行 ──
 
@@ -354,9 +426,9 @@ class PluginManager:
 
         candidates = [
             p for p in self.plugins.values()
-            if p.enabled and p.meta.hooks.get(hook)
+            if p.enabled and p.runtime_ready and p.meta is not None and p.meta.hooks.get(hook)
         ]
-        candidates.sort(key=lambda p: p.meta.priority)
+        candidates.sort(key=lambda p: self._plugin_metas[p.name].priority)
 
         upstream_action = None  # 仅 on_upstream_error 使用
 
@@ -450,9 +522,10 @@ class PluginManager:
     def get_converter(self, from_format: str, to_format: str) -> Optional[PluginBase]:
         """根据转换声明查找启用的转换插件"""
         for plugin in self.plugins.values():
-            if not plugin.enabled:
+            meta = plugin.meta
+            if not plugin.enabled or not plugin.runtime_ready or meta is None:
                 continue
-            for c in plugin.meta.converts:
+            for c in meta.converts:
                 if c.get("from") == from_format and c.get("to") == to_format:
                     return plugin
         return None
@@ -497,13 +570,20 @@ class PluginManager:
             if dest.exists():
                 return {"ok": False, "error": f"插件 '{name}' 已存在"}
 
-            # 检查是否与内置插件重名
-            for entry in self._builtin_dir.iterdir():
-                if entry.is_dir() and entry.name == name:
-                    return {
-                        "ok": False,
-                        "error": f"插件 '{name}' 与内置插件重名，无法安装",
-                    }
+            # 检查是否与内置插件重名。py2app 中内置目录位于 zip，无法直接 iterdir。
+            try:
+                builtin_names = {
+                    entry.name
+                    for entry in self._builtin_dir.iterdir()
+                    if entry.is_dir()
+                }
+            except NotADirectoryError:
+                builtin_names = self._list_zip_builtin_plugins()
+            if name in builtin_names:
+                return {
+                    "ok": False,
+                    "error": f"插件 '{name}' 与内置插件重名，无法安装",
+                }
 
             # ── 验证 index.py 存在 ──
             if not (plugin_root / "index.py").exists():
@@ -537,7 +617,9 @@ class PluginManager:
                 plugin.config = self.get_config(name) or {}
                 try:
                     await plugin.on_load()
+                    plugin.runtime_ready = True
                 except Exception as e:
+                    plugin.runtime_ready = False
                     logger.error(f"[PluginManager] 安装后 on_load 失败 {name}: {e}")
                     return {
                         "ok": True,
@@ -623,13 +705,14 @@ class PluginManager:
             return {"ok": False, "error": "插件不存在"}
 
         plugin = self.plugins[name]
-        if not enable and plugin.meta.required:
+        if not enable and self._plugin_metas[name].required:
             return {
                 "ok": False,
                 "error": f"插件 '{name}' 是必需的，不可禁用",
             }
 
         was_enabled = bool(plugin.enabled)
+        was_runtime_ready = plugin.runtime_ready
         if was_enabled == bool(enable):
             return {
                 "ok": True,
@@ -659,11 +742,14 @@ class PluginManager:
             if enable:
                 plugin.config = self.get_config(name) or {}
                 await plugin.on_load()
+                plugin.runtime_ready = True
             else:
                 await plugin.on_unload()
+                plugin.runtime_ready = False
         except Exception as e:
             # 回滚内存与配置，避免“配置已开但生命周期失败”
             plugin.enabled = was_enabled
+            plugin.runtime_ready = was_runtime_ready
             plugin_states[name] = was_enabled
             cfg["plugin_states"] = plugin_states
             self._save_config_json(cfg)
@@ -707,12 +793,18 @@ class PluginManager:
         plugin_configs[name] = data
         cfg["plugin_configs"] = plugin_configs
         self._save_config_json(cfg)
-        # 同步更新内存中的 plugin.config（避免重启后才能读取）
+        # 同步更新内存中的 plugin.config，并让缓存配置值的插件立即刷新状态。
         if name in self.plugins:
             defaults = {}
             for s in self._plugin_metas[name].settings:
                 defaults[s.key] = s.default
-            self.plugins[name].config = {**defaults, **data}
+            plugin = self.plugins[name]
+            old_config = plugin.config
+            plugin.config = {**defaults, **data}
+            try:
+                plugin.on_config_changed(old_config, plugin.config)
+            except Exception as e:
+                logger.error(f"[PluginManager] {name} 配置热更新回调失败: {e}")
         return {"ok": True}
 
     # ── 查询 ──
@@ -721,7 +813,7 @@ class PluginManager:
         """返回全部插件信息（供管理界面）"""
         result = []
         for name, plugin in self.plugins.items():
-            meta = plugin.meta
+            meta = self._plugin_metas[name]
             result.append({
                 "name": name,
                 "version": meta.version,
@@ -744,13 +836,14 @@ class PluginManager:
         """返回已启用的有菜单插件信息（供侧边栏）"""
         items = []
         for plugin in self.plugins.values():
-            if plugin.enabled and plugin.meta.has_menu:
+            meta = plugin.meta
+            if plugin.enabled and plugin.runtime_ready and meta is not None and meta.has_menu:
                 items.append({
-                    "name": plugin.meta.name,
-                    "title": plugin.meta.menu.get("title", plugin.meta.name),
-                    "icon": plugin.meta.menu.get("icon", "plugin"),
-                    "order": plugin.meta.menu.get("order", 100),
-                    "route": f"/plugins/{plugin.meta.name}",
+                    "name": meta.name,
+                    "title": meta.menu.get("title", meta.name),
+                    "icon": meta.menu.get("icon", "plugin"),
+                    "order": meta.menu.get("order", 100),
+                    "route": f"/plugins/{meta.name}",
                 })
         items.sort(key=lambda x: x["order"])
         return items
