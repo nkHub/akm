@@ -181,7 +181,10 @@ def register_agent(
     responses_force_thinking_enabled: bool = False,
     responses_default_reasoning_effort: str | None = None,
 ) -> None:
-    """注册自定义 Agent，持久化到 config.json"""
+    """注册或更新自定义 Agent，并持久化到 config.json。
+
+    同名自定义供应商再次调用时为覆盖更新（编辑）；内置名始终拒绝。
+    """
     global _CUSTOM_AGENTS_DIRTY
     if name in BUILTIN_AGENTS:
         raise ValueError(f"不能覆盖内置供应商: {name}")

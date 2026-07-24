@@ -519,6 +519,8 @@ class Plugin(PluginBase):
 | `cache_proxy.cache_key` / `cache_proxy.eligible` | cache_proxy | 缓存键与是否可写缓存 |
 | `rate_limit_guard.slot` | rate_limit_guard | 并发槽位，on_response 释放 |
 | `fallback_router.history` | fallback_router | 本请求已尝试的模型列表，防循环 |
+| `budget_gate.scope_key` / `period_id` / `last_cost_usd` | budget_gate | 预算分桶键、周期与本次估算费用 |
+| `mcp_tool_gateway.injected` / `stripped` | mcp_tool_gateway | 本请求注入或剥离的工具名列表 |
 
 > **禁止**把跨阶段状态塞进 `request` 的 `__akm_*` 字段作为主路径（multipart 等传输字段可仍用 `__akm_*`，由 `forwardable_request()` 统一剥离）。网关元数据（`api_path` / `client_user_agent`）直接挂在 ctx 上，不再写入 body。
 
@@ -564,7 +566,9 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 
 > 未注册对应 hook 的插件不参与该管道。同一个插件可注册多个 hook。
 
-`on_request` 通过 `ctx.set_block(status_code=400, error="...", security_action=..., security_reason=...)` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；`security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
+`on_request` 通过 `ctx.set_block(status_code=400, error="...", security_action=..., security_reason=...)` 直接拒绝请求。`tool_policy_guard` 使用该控制结构阻止不符合策略的工具声明或客户端工具调用续接；`budget_gate` 在估算费用已达预算时以 `security_action=budget_exceeded` 阻断（默认 HTTP 429）；`security_action` 与 `security_reason` 会继续进入响应生命周期，供 `webhook_notifier` 等 post 插件消费。
+
+项目本地 `mcp_tool_gateway`（默认关闭）维护 HTTP 工具注册表：可选在 `on_request` 注入/剥离 `tools` 声明，并通过 `routes_prefix=/api/mcp-tools` 暴露 `GET /status`、`GET /list`、`POST /call`。默认仅允许本机 host，参数体积与超时受限；它不自动执行模型返回的 tool_calls，与 `tool_policy_guard` 互补。
 
 **流式还原**：proxy 成功流式返回时附带 `request_context`（同一 `RequestContext`）与兼容字段 `local_request=ctx.request`。server 优先从 `request_context.bag_get("data_filter_guard.reverse_map")` 取映射，在 **yield 前** 调用 `reverse_stream_chunk` 做增量还原（`on_response` 只影响流结束后的审计 capture，不改已下发 chunk）。兼容旧路径上 request 内 `__akm_reverse_map__`。
 

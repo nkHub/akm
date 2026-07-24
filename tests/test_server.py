@@ -2245,6 +2245,77 @@ async def test_api_add_agent_persists_protocol_capability_fields(tmp_path, monke
     assert agents["vendorx"]["responses_default_reasoning_effort"] == "high"
 
 
+
+
+@pytest.mark.asyncio
+async def test_http_proxy_config_rebuilds_client(tmp_path, monkeypatch):
+    """保存出站代理配置后应标记连接池重建，且 config 规范化 host:port。"""
+    from akm.config import normalize_http_proxy_url, save_config, load_config, CONFIG_PATH
+    assert normalize_http_proxy_url("127.0.0.1:7890") == "http://127.0.0.1:7890"
+
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setattr("akm.config.CONFIG_PATH", str(cfg_path))
+    monkeypatch.setattr("akm.config.CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr("akm.server.load_config", load_config)
+    monkeypatch.setattr("akm.server.save_config", save_config)
+    monkeypatch.setattr("akm.server.resolve_http_proxy_url", lambda cfg=None: (
+        (lambda c: (None if c.get("http_proxy_enabled") is not True else (c.get("http_proxy_url") or None)))(load_config() if cfg is None else cfg)
+    ))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 确保 lifespan 已跑过（http_client 存在）
+        resp = await client.post("/api/config", json={
+            "http_proxy_enabled": True,
+            "http_proxy_url": "127.0.0.1:7890",
+        })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body.get("ok") is True
+    # 可能在测试 ASGI 下 app.state 有连接池；recreated 字段应存在
+    assert "http_client_recreated" in body
+    cfg = load_config()
+    assert cfg["http_proxy_enabled"] is True
+    assert cfg["http_proxy_url"] == "http://127.0.0.1:7890"
+
+
+@pytest.mark.asyncio
+async def test_api_update_agent_custom(tmp_path, monkeypatch):
+    """PUT /api/agents/{name} 可更新自定义供应商，不能改内置。"""
+    monkeypatch.setattr("akm.agent._get_config_path", lambda: str(tmp_path / "config.json"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/api/agents", json={
+            "name": "editme",
+            "default_base_url": "https://old.example.com/v1",
+            "default_auth_header": "Bearer {api_key}",
+            "supports_chat": True,
+            "supports_responses": False,
+            "supports_messages": False,
+        })
+        put_resp = await client.put("/api/agents/editme", json={
+            "default_base_url": "https://new.example.com/v1",
+            "default_auth_header": "X-Key {api_key}",
+            "supports_chat": True,
+            "supports_responses": True,
+            "supports_messages": True,
+            "messages_use_anthropic_path": True,
+        })
+        list_resp = await client.get("/api/agents")
+        builtin_resp = await client.put("/api/agents/openai", json={
+            "default_base_url": "https://evil.example.com",
+        })
+
+    assert put_resp.status_code == 200
+    agents = {item["name"]: item for item in list_resp.json()["data"]}
+    assert agents["editme"]["default_base_url"] == "https://new.example.com/v1"
+    assert agents["editme"]["default_auth_header"] == "X-Key {api_key}"
+    assert agents["editme"]["supports_responses"] is True
+    assert agents["editme"]["messages_use_anthropic_path"] is True
+    assert builtin_resp.status_code == 400
+
+
 @pytest.mark.asyncio
 async def test_api_stats_includes_cost_when_enabled(monkeypatch):
     """开启费用统计后 /api/stats 返回总费用与每日费用。"""

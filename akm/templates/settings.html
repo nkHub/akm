@@ -91,6 +91,23 @@
     </div>
   </section>
 
+  <!-- 供应商代理 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">供应商代理</h3>
+    <div class="bg-surface-light border border-border rounded-lg p-4">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h4 class="text-sm font-semibold text-white">供应商代理管理</h4>
+          <p class="text-xs text-gray-500 mt-0.5">自定义供应商的默认 base_url、认证头和协议能力</p>
+        </div>
+        <button onclick="openAgentModal()" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer font-medium">+ 添加</button>
+      </div>
+      <!-- Agent 列表 -->
+      <div id="agent-list" class="text-xs text-gray-400">加载中...</div>
+
+    </div>
+  </section>
+
   <!-- 费用统计 -->
   <section>
     <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">费用统计</h3>
@@ -118,20 +135,31 @@
     </div>
   </section>
 
-  <!-- 供应商代理 -->
+  <!-- 代理设置：AKM 访问上游的出站代理，非系统 VPN -->
   <section>
-    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">供应商代理</h3>
-    <div class="bg-surface-light border border-border rounded-lg p-4">
-      <div class="flex items-center justify-between mb-3">
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">代理设置</h3>
+    <div class="grid grid-cols-1 gap-4">
+      <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">供应商代理管理</h4>
-          <p class="text-xs text-gray-500 mt-0.5">自定义供应商的默认 base_url、认证头和协议能力</p>
+          <h4 class="text-sm font-semibold text-white">启用出站代理</h4>
+          <p class="text-xs text-gray-500 mt-0.5">仅影响 AKM 访问上游供应商的请求（转发与连通性测试），不影响本机其它软件。</p>
         </div>
-        <button onclick="openAgentModal()" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer font-medium">+ 添加</button>
-      </div>
-      <!-- Agent 列表 -->
-      <div id="agent-list" class="text-xs text-gray-400">加载中...</div>
-
+        <akm-switch id="cfg-http-proxy" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
+      <akm-settings-card align="start">
+        <div>
+          <h4 class="text-sm font-semibold text-white">代理地址</h4>
+          <p class="text-xs text-gray-500 mt-0.5">支持 <code class="text-indigo-300">http://</code> / <code class="text-indigo-300">https://</code> / <code class="text-indigo-300">socks5://</code>；也可写 <code class="text-indigo-300">host:port</code>（自动补 http://）。SOCKS 需环境具备 socksio。</p>
+        </div>
+        <div slot="actions" class="flex flex-col items-stretch shrink-0 w-full min-w-[28rem] max-w-2xl">
+          <div class="flex items-center gap-3 w-full">
+            <input id="http-proxy-url" type="text" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+                   class="flex-1 min-w-0 w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 font-mono">
+            <button type="button" onclick="saveHttpProxy()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer shrink-0">保存</button>
+          </div>
+          <p id="http-proxy-msg" class="text-xs mt-1 hidden"></p>
+        </div>
+      </akm-settings-card>
     </div>
   </section>
 
@@ -139,13 +167,14 @@
 {% endblock %}
 
 {% block extra_html %}
-<akm-modal id="agent-modal" title="添加供应商代理" max-width="max-w-2xl" body-class="px-5 py-4">
+<akm-modal id="agent-modal" title="添加供应商代理" max-width="max-w-2xl" body-class="px-5 py-4" data-mode="add">
   <div>
     <p class="mt-1 text-xs text-gray-500">配置默认 base_url、认证头模板和协议能力，保存后 Key 管理页会自动可选。</p>
     <div class="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
       <div>
         <label class="text-xs text-gray-400">名称</label>
         <input id="agent-name" class="mt-1 w-full rounded border border-border bg-surface-light px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500" placeholder="dmxapi">
+        <p id="agent-name-hint" class="hidden mt-1 text-[11px] text-gray-600">编辑时不可改名；若需新名称请删除后重新添加。</p>
       </div>
       <div>
         <label class="text-xs text-gray-400">Base URL</label>
@@ -188,6 +217,7 @@ var _autoOpen = true;
 var _logReqBody = false;
 var _logRespBody = false;
 var _costStatsEnabled = false;
+var _httpProxyEnabled = false;
 var _jsonViewerMaxTextLength = 600000;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -207,6 +237,10 @@ function loadConfig() {
     _costStatsEnabled = cfg.cost_stats_enabled === true;
     updateCostStatsToggle();
     document.getElementById('cost-pricing-table').value = cfg.cost_pricing_table || '';
+    _httpProxyEnabled = cfg.http_proxy_enabled === true;
+    updateHttpProxyToggle();
+    var proxyUrlEl = document.getElementById('http-proxy-url');
+    if (proxyUrlEl) proxyUrlEl.value = cfg.http_proxy_url || '';
     loadLogStats();
   }).catch(function(){
     loadLogStats();
@@ -404,11 +438,74 @@ function cleanLogBodies() {
   });
 }
 
+// ── 出站代理 ──
+function updateHttpProxyToggle() {
+  _updateSwitch('cfg-http-proxy', _httpProxyEnabled);
+}
+
+function toggleHttpProxy() {
+  _httpProxyEnabled = !_httpProxyEnabled;
+  updateHttpProxyToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({http_proxy_enabled: _httpProxyEnabled})
+  }).then(function(r){ return r.json(); }).then(function(){
+    var msg = document.getElementById('http-proxy-msg');
+    if (!msg) return;
+    msg.textContent = _httpProxyEnabled ? '已启用出站代理' : '已关闭出站代理';
+    msg.className = 'text-xs mt-1 text-emerald-400';
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 2000);
+  }).catch(function(){
+    _httpProxyEnabled = !_httpProxyEnabled;
+    updateHttpProxyToggle();
+  });
+}
+
+function saveHttpProxy() {
+  var urlEl = document.getElementById('http-proxy-url');
+  var msg = document.getElementById('http-proxy-msg');
+  var url = (urlEl && urlEl.value || '').trim();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      http_proxy_enabled: _httpProxyEnabled,
+      http_proxy_url: url
+    })
+  }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, body: d}; }); })
+  .then(function(r){
+    if (!msg) return;
+    if (r.ok) {
+      msg.textContent = '代理设置已保存' + (r.body.http_client_recreated ? '（连接池已重建）' : '');
+      msg.className = 'text-xs mt-1 text-emerald-400';
+    } else {
+      msg.textContent = '保存失败: ' + (r.body.detail || '');
+      msg.className = 'text-xs mt-1 text-red-400';
+    }
+    msg.classList.remove('hidden');
+    setTimeout(function(){ msg.classList.add('hidden'); }, 2500);
+  }).catch(function(){
+    if (!msg) return;
+    msg.textContent = '网络错误';
+    msg.className = 'text-xs mt-1 text-red-400';
+    msg.classList.remove('hidden');
+  });
+}
+
 // ── Agent 管理 ──
-function openAgentModal() {
+var _agentCache = {};
+var _agentEditName = null;
+
+function openAgentModal(editName) {
   var modal = document.getElementById('agent-modal');
   if (!modal || typeof modal.open !== 'function') return;
-  resetAgentModal();
+  if (editName) {
+    fillAgentModal(editName);
+  } else {
+    resetAgentModal();
+  }
   modal.open();
 }
 
@@ -417,8 +514,24 @@ function closeAgentModal() {
   if (modal && typeof modal.close === 'function') modal.close();
 }
 
+function setAgentModalTitle(isEdit) {
+  var modal = document.getElementById('agent-modal');
+  if (!modal) return;
+  var title = isEdit ? '编辑供应商代理' : '添加供应商代理';
+  if (typeof modal.setAttribute === 'function') modal.setAttribute('title', title);
+  // 兼容组件内部标题节点
+  var titleEl = modal.querySelector('[data-modal-title], .modal-title, h3, h2');
+  if (titleEl) titleEl.textContent = title;
+}
+
 function resetAgentModal() {
-  document.getElementById('agent-name').value = '';
+  _agentEditName = null;
+  setAgentModalTitle(false);
+  var nameEl = document.getElementById('agent-name');
+  nameEl.value = '';
+  nameEl.readOnly = false;
+  nameEl.classList.remove('opacity-60', 'cursor-not-allowed');
+  document.getElementById('agent-name-hint').classList.add('hidden');
   document.getElementById('agent-url').value = '';
   document.getElementById('agent-auth').value = 'Bearer {api_key}';
   document.getElementById('agent-chat').checked = true;
@@ -430,13 +543,46 @@ function resetAgentModal() {
   msg.textContent = '';
 }
 
+function fillAgentModal(name) {
+  var a = _agentCache[name];
+  if (!a) return;
+  _agentEditName = name;
+  setAgentModalTitle(true);
+  var nameEl = document.getElementById('agent-name');
+  nameEl.value = a.name || name;
+  nameEl.readOnly = true;
+  nameEl.classList.add('opacity-60', 'cursor-not-allowed');
+  document.getElementById('agent-name-hint').classList.remove('hidden');
+  document.getElementById('agent-url').value = a.default_base_url || '';
+  document.getElementById('agent-auth').value = a.default_auth_header || 'Bearer {api_key}';
+  document.getElementById('agent-chat').checked = a.supports_chat !== false;
+  document.getElementById('agent-responses').checked = !!a.supports_responses;
+  document.getElementById('agent-messages').checked = !!a.supports_messages;
+  document.getElementById('agent-messages-anthropic-path').checked = !!a.messages_use_anthropic_path;
+  var msg = document.getElementById('agent-msg');
+  msg.classList.add('hidden');
+  msg.textContent = '';
+}
+
 function setAgentModalMessage(msg, text, ok) {
   msg.textContent = text;
   msg.className = 'text-xs mt-3 ' + (ok ? 'text-emerald-400' : 'text-red-400');
   msg.classList.remove('hidden');
 }
 
-function addAgent(payload, msg, onSuccess) {
+function collectAgentPayload() {
+  return {
+    name: document.getElementById('agent-name').value.trim(),
+    default_base_url: document.getElementById('agent-url').value.trim(),
+    default_auth_header: document.getElementById('agent-auth').value.trim() || 'Bearer {api_key}',
+    supports_chat: document.getElementById('agent-chat').checked,
+    supports_responses: document.getElementById('agent-responses').checked,
+    supports_messages: document.getElementById('agent-messages').checked,
+    messages_use_anthropic_path: document.getElementById('agent-messages-anthropic-path').checked
+  };
+}
+
+function saveAgent(payload, msg, onSuccess) {
   if (!payload.name) {
     setAgentModalMessage(msg, '名称不能为空', false);
     return;
@@ -445,14 +591,19 @@ function addAgent(payload, msg, onSuccess) {
     setAgentModalMessage(msg, 'Base URL 不能为空', false);
     return;
   }
-  fetch('/api/agents', {
-    method: 'POST',
+  var isEdit = !!_agentEditName;
+  var url = isEdit
+    ? '/api/agents/' + encodeURIComponent(_agentEditName)
+    : '/api/agents';
+  var method = isEdit ? 'PUT' : 'POST';
+  fetch(url, {
+    method: method,
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)
   }).then(function(r){ return r.json().then(function(d){ return {ok: r.ok, body: d}; }); })
   .then(function(r){
     if (r.ok) {
-      setAgentModalMessage(msg, '已添加 ' + payload.name, true);
+      setAgentModalMessage(msg, (isEdit ? '已更新 ' : '已添加 ') + payload.name, true);
       if (typeof onSuccess === 'function') onSuccess();
       loadAgents();
     } else {
@@ -465,16 +616,8 @@ function addAgent(payload, msg, onSuccess) {
 
 function submitAgentModal() {
   var msg = document.getElementById('agent-msg');
-  var payload = {
-    name: document.getElementById('agent-name').value.trim(),
-    default_base_url: document.getElementById('agent-url').value.trim(),
-    default_auth_header: document.getElementById('agent-auth').value.trim() || 'Bearer {api_key}',
-    supports_chat: document.getElementById('agent-chat').checked,
-    supports_responses: document.getElementById('agent-responses').checked,
-    supports_messages: document.getElementById('agent-messages').checked,
-    messages_use_anthropic_path: document.getElementById('agent-messages-anthropic-path').checked
-  };
-  addAgent(payload, msg, function(){
+  var payload = collectAgentPayload();
+  saveAgent(payload, msg, function(){
     setTimeout(function(){ closeAgentModal(); }, 300);
   });
 }
@@ -487,26 +630,55 @@ function deleteAgent(name) {
 function loadAgents() {
   fetch('/api/agents').then(function(r){return r.json()}).then(function(json){
     var agents = json.data || [];
+    _agentCache = {};
+    agents.forEach(function(a){ _agentCache[a.name] = a; });
     var html = '';
     if (agents.length === 0) {
       html = '<div class="text-gray-600">暂无可用的供应商代理</div>';
     } else {
-      html = '<table class="w-full text-xs"><thead><tr class="text-gray-500"><th class="text-left py-1.5 font-medium">名称</th><th class="text-left py-1.5 font-medium">Base URL</th><th class="text-left py-1.5 font-medium">认证头</th><th class="text-center py-1.5 font-medium w-16">Chat</th><th class="text-center py-1.5 font-medium w-16">Responses</th><th class="text-center py-1.5 font-medium w-16">Messages</th><th class="text-center py-1.5 font-medium">/anthropic</th><th class="text-center py-1.5 font-medium w-12"></th></tr></thead><tbody>';
+      // 前三列收窄：固定表宽 + 截断，hover 用 title 看全文
+      html = '<div class="overflow-x-auto"><table class="w-full table-fixed text-xs"><colgroup>'
+        + '<col class="w-24"><col class="w-36"><col class="w-28">'
+        + '<col class="w-12"><col class="w-16"><col class="w-16"><col class="w-16"><col class="w-20">'
+        + '</colgroup><thead><tr class="text-gray-500">'
+        + '<th class="text-left py-1.5 pr-2 font-medium">名称</th>'
+        + '<th class="text-left py-1.5 pr-2 font-medium">Base URL</th>'
+        + '<th class="text-left py-1.5 pr-2 font-medium">认证头</th>'
+        + '<th class="text-center py-1.5 font-medium">Chat</th>'
+        + '<th class="text-center py-1.5 font-medium">Responses</th>'
+        + '<th class="text-center py-1.5 font-medium">Messages</th>'
+        + '<th class="text-center py-1.5 font-medium">/anthropic</th>'
+        + '<th class="text-center py-1.5 font-medium"></th></tr></thead><tbody>';
       agents.forEach(function(a){
+        var nameTitle = esc(a.name) + (a.is_custom ? '' : ' (内置)');
         html += '<tr class="border-t border-border">';
-        html += '<td class="py-1.5 text-gray-300">' + esc(a.name) + (a.is_custom ? '' : ' <span class="text-gray-600">(内置)</span>') + '</td>';
-        html += '<td class="py-1.5 text-gray-500">' + esc(a.default_base_url) + '</td>';
-        html += '<td class="py-1.5 text-gray-500">' + esc(a.default_auth_header) + '</td>';
+        html += '<td class="py-1.5 pr-2 text-gray-300 truncate" title="' + nameTitle + '">' + esc(a.name) + (a.is_custom ? '' : ' <span class="text-gray-600">(内置)</span>') + '</td>';
+        html += '<td class="py-1.5 pr-2 text-gray-500 truncate" title="' + esc(a.default_base_url) + '">' + esc(a.default_base_url) + '</td>';
+        html += '<td class="py-1.5 pr-2 text-gray-500 truncate" title="' + esc(a.default_auth_header) + '">' + esc(a.default_auth_header) + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.supports_chat ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.supports_responses ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.supports_messages ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.messages_use_anthropic_path ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
-        html += '<td class="py-1.5 text-center">' + (a.is_custom ? '<button onclick="deleteAgent(\'' + esc(a.name) + '\')" class="text-red-400 hover:text-red-300 cursor-pointer text-xs">删除</button>' : '') + '</td>';
+        if (a.is_custom) {
+          html += '<td class="py-1.5 text-center whitespace-nowrap">'
+            + '<button type="button" data-agent-edit="' + esc(a.name) + '" class="text-indigo-400 hover:text-indigo-300 cursor-pointer text-xs mr-2">编辑</button>'
+            + '<button type="button" data-agent-del="' + esc(a.name) + '" class="text-red-400 hover:text-red-300 cursor-pointer text-xs">删除</button>'
+            + '</td>';
+        } else {
+          html += '<td class="py-1.5 text-center"></td>';
+        }
         html += '</tr>';
       });
-      html += '</tbody></table>';
+      html += '</tbody></table></div>';
     }
-    document.getElementById('agent-list').innerHTML = html;
+    var list = document.getElementById('agent-list');
+    list.innerHTML = html;
+    list.querySelectorAll('[data-agent-edit]').forEach(function(btn){
+      btn.addEventListener('click', function(){ openAgentModal(btn.getAttribute('data-agent-edit')); });
+    });
+    list.querySelectorAll('[data-agent-del]').forEach(function(btn){
+      btn.addEventListener('click', function(){ deleteAgent(btn.getAttribute('data-agent-del')); });
+    });
   }).catch(function(){ document.getElementById('agent-list').textContent = '加载失败'; });
 }
 
@@ -519,6 +691,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (logRespEl) logRespEl.addEventListener('click', toggleLogResp);
   var costStatsEl = document.getElementById('cfg-cost-stats');
   if (costStatsEl) costStatsEl.addEventListener('click', toggleCostStats);
+  var httpProxyEl = document.getElementById('cfg-http-proxy');
+  if (httpProxyEl) httpProxyEl.addEventListener('click', toggleHttpProxy);
   loadConfig();
   loadAgents();
 });
