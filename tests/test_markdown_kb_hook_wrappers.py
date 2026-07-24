@@ -1,12 +1,16 @@
 import json
 import subprocess
 import os
+import sys
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_codex_user_prompt_submit_wrapper_runs_and_returns_continue_json():
     """Codex wrapper 至少应能读取 stdin JSON，并返回可继续执行的 Hook JSON。"""
-    repo_root = Path("/Users/nk/Desktop/ccs")
+    repo_root = REPO_ROOT
     script = repo_root / ".codex" / "hooks" / "user_prompt_submit.py"
     payload = {
         "session_id": "sess_wrapper",
@@ -16,7 +20,7 @@ def test_codex_user_prompt_submit_wrapper_runs_and_returns_continue_json():
     }
 
     result = subprocess.run(
-        [str(repo_root / ".venv" / "bin" / "python"), str(script)],
+        [sys.executable, str(script)],
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
         capture_output=True,
@@ -31,7 +35,7 @@ def test_codex_user_prompt_submit_wrapper_runs_and_returns_continue_json():
 
 def test_codex_user_prompt_submit_wrapper_accepts_nested_payload_and_writes_debug_log(tmp_path: Path, monkeypatch):
     """Codex wrapper 应能从嵌套 payload 中识别字段，并写出调试日志。"""
-    repo_root = Path("/Users/nk/Desktop/ccs")
+    repo_root = REPO_ROOT
     script = repo_root / ".codex" / "hooks" / "user_prompt_submit.py"
     debug_file = tmp_path / "hook_debug.jsonl"
     payload = {
@@ -43,7 +47,7 @@ def test_codex_user_prompt_submit_wrapper_accepts_nested_payload_and_writes_debu
     env = {**os.environ, "AKM_MARKDOWN_KB_HOOK_DEBUG_FILE": str(debug_file)}
 
     result = subprocess.run(
-        [str(repo_root / ".venv" / "bin" / "python"), str(script)],
+        [sys.executable, str(script)],
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
         capture_output=True,
@@ -67,7 +71,7 @@ def test_codex_user_prompt_submit_wrapper_accepts_nested_payload_and_writes_debu
 
 def test_claude_stop_wrapper_accepts_nested_messages_and_writes_debug_log(tmp_path: Path):
     """Claude wrapper 应能从常见消息数组里抽取 assistant 摘录并落日志。"""
-    repo_root = Path("/Users/nk/Desktop/ccs")
+    repo_root = REPO_ROOT
     script = repo_root / ".claude" / "hooks" / "stop.py"
     debug_file = tmp_path / "hook_debug.jsonl"
     payload = {
@@ -82,7 +86,7 @@ def test_claude_stop_wrapper_accepts_nested_messages_and_writes_debug_log(tmp_pa
     env = {**os.environ, "AKM_MARKDOWN_KB_HOOK_DEBUG_FILE": str(debug_file)}
 
     result = subprocess.run(
-        [str(repo_root / ".venv" / "bin" / "python"), str(script)],
+        [sys.executable, str(script)],
         input=json.dumps(payload, ensure_ascii=False),
         text=True,
         capture_output=True,
