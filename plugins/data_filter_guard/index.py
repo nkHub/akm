@@ -26,10 +26,7 @@
 from akm.plugins import PluginBase
 import hashlib
 import json
-import logging
-import os
 import re
-from datetime import datetime, timezone
 
 
 # 默认请求文本扫描路径：对话正文 + 系统/指令 + Chat 续接工具参数
@@ -78,47 +75,10 @@ _SSE_CONTENT_FIELD_KEYS = frozenset({
 class Plugin(PluginBase):
     """数据安全插件 — 可逆占位符 + 响应安全拦截。"""
 
-    # 换回诊断日志文件：打包 App 下 uvicorn 仅 warning，info 不会进控制台，
-    # 因此把换回链路单独落到 ~/.akm，方便本地 tail 排查。
-    _DIAG_LOG_PATH = os.path.expanduser("~/.akm/data_filter_guard.log")
-    _file_logger_ready = False
-
     # ── 占位符/反向映射 ──────────────────────────────────────
 
-    def _ensure_diag_file_logger(self) -> None:
-        """给插件 logger 挂载本地文件 Handler（幂等）。"""
-        if self._file_logger_ready:
-            return
-        log = self.logger
-        if log is None:
-            return
-        try:
-            os.makedirs(os.path.dirname(self._DIAG_LOG_PATH), exist_ok=True)
-            # 避免重复挂载同一文件
-            for h in list(log.handlers):
-                if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == self._DIAG_LOG_PATH:
-                    self._file_logger_ready = True
-                    return
-            handler = logging.FileHandler(self._DIAG_LOG_PATH, encoding="utf-8")
-            handler.setLevel(logging.INFO)
-            handler.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-            )
-            # 打包环境 root 可能是 WARNING，插件自身拉到 INFO 才能写出换回诊断
-            log.setLevel(logging.INFO)
-            log.addHandler(handler)
-            self._file_logger_ready = True
-            log.info(
-                "[data_filter_guard] 换回诊断日志已启用: %s",
-                self._DIAG_LOG_PATH,
-            )
-        except Exception:
-            # 文件日志失败不影响主链路
-            pass
-
     def _diag(self, level: str, msg: str, *args) -> None:
-        """写换回诊断：同时走 logger 与直接 append 文件（双保险）。"""
-        self._ensure_diag_file_logger()
+        """输出插件诊断信息，由应用统一处理日志去向。"""
         text = msg % args if args else msg
         try:
             log = self.logger
@@ -127,14 +87,6 @@ class Plugin(PluginBase):
                     log.warning(text)
                 else:
                     log.info(text)
-        except Exception:
-            pass
-        # 直接落盘：不依赖 handler 是否被 uvicorn 清掉
-        try:
-            os.makedirs(os.path.dirname(self._DIAG_LOG_PATH), exist_ok=True)
-            ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
-            with open(self._DIAG_LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(f"{ts} {level.upper()} {text}\n")
         except Exception:
             pass
 
@@ -784,9 +736,7 @@ class Plugin(PluginBase):
         self._request_text_paths = set()
         self._response_block_patterns = []
         self._reset_reverse_map()
-        # 启动时挂上本地诊断文件，避免打包环境 info 日志被丢弃
-        self._ensure_diag_file_logger()
-        self._diag("info", "[data_filter_guard] on_load 完成，换回诊断文件: %s", self._DIAG_LOG_PATH)
+        self._diag("info", "[data_filter_guard] on_load 完成")
 
     def _reload_config(self):
         """从当前插件配置重新解析规则。"""
@@ -1096,7 +1046,9 @@ class Plugin(PluginBase):
             )
         if changed:
             self._diag("info", "[data_filter_guard] 请求体已执行脱敏/过滤（可逆占位符）")
-            return new_request
+            # 请求入口始终传入 dict；这里再次收窄类型，防止递归处理函数的
+            # 任意 JSON 节点返回类型扩散到插件回调契约。
+            return new_request if isinstance(new_request, dict) else None
         return None
 
     def _collect_content_texts(self, content) -> list[str]:
@@ -1270,7 +1222,7 @@ class Plugin(PluginBase):
                 updated = replaced
         return updated, changed
 
-    async def on_response(self, ctx):
+    async def on_response(self, ctx) -> dict | None:
         """响应处理：先反向还原占位符为原始值，再做安全扫描拦截。"""
         self._reload_config()
         if not self._enabled:

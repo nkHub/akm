@@ -578,7 +578,11 @@ def _build_runtime_debug_payload(app: FastAPI) -> dict:
     monitor = _get_health_monitor(app)
     audit_queue = getattr(app.state, "audit_log_queue", None)
     http_client = getattr(app.state, "http_client", None)
-    http_client_stats = http_client.stats() if getattr(http_client, "is_route_pool", False) is True else {}
+    http_client_stats = (
+        http_client.stats()
+        if http_client is not None and getattr(http_client, "is_route_pool", False) is True
+        else {}
+    )
     if not isinstance(http_client_stats, dict):
         http_client_stats = {}
     return {
@@ -2388,18 +2392,26 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if (isinstance(_raw_rev, dict) and _raw_rev and _dfg and _dfg.enabled)
                     else None
                 )
-                _rev_state = _dfg.reverse_stream_state() if _rev_map else None
+                _rev_state = _dfg.reverse_stream_state() if _rev_map and _dfg is not None else None
                 # 流式安全保护默认关闭。开启后边 yield 边做字段级滑动窗口扫描
                 # （stream_guard_cache_chars），与占位符换回截流同思路；命中即中断。
                 _stream_guard_active = bool(_dfg and _dfg.is_stream_guard_active())
-                _stream_guard_state = _dfg.create_stream_guard_state() if _stream_guard_active else None
+                _stream_guard_state = (
+                    _dfg.create_stream_guard_state()
+                    if _stream_guard_active and _dfg is not None
+                    else None
+                )
                 _stream_guard_blocked = False
 
                 def _guard_stream_chunk(chunk: bytes) -> tuple[list[bytes], bool]:
                     """处理已完成占位符还原的流式片段，返回可输出内容与终止标记。"""
                     nonlocal _stream_guard_blocked
                     nonlocal security_action, security_reason, security_changed
-                    if not _stream_guard_active:
+                    if (
+                        not _stream_guard_active
+                        or _dfg is None
+                        or _stream_guard_state is None
+                    ):
                         return [chunk], False
 
                     payload_text = chunk.decode("utf-8", errors="replace")
@@ -2456,7 +2468,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     if adapter:
                         async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
                             chunk = line.encode("utf-8") if isinstance(line, str) else line
-                            if _rev_state is not None:
+                            if _rev_state is not None and _dfg is not None:
                                 text = chunk.decode("utf-8", errors="replace")
                                 processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
                                 if not processed:
@@ -2471,7 +2483,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                                 break
                     else:
                         async for chunk in resp.aiter_bytes():
-                            if _rev_state is not None:
+                            if _rev_state is not None and _dfg is not None:
                                 text = chunk.decode("utf-8", errors="replace")
                                 processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
                                 if not processed:
@@ -2485,7 +2497,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                             if stop_stream:
                                 break
                     # ── 刷新反向还原缓冲（流结束时） ──
-                    if _rev_state is not None and not _stream_guard_blocked:
+                    if _rev_state is not None and _dfg is not None and not _stream_guard_blocked:
                         pending = _dfg.reverse_stream_flush(_rev_state, reverse_map=_rev_map)
                         if pending:
                             chunk = pending.encode("utf-8")
