@@ -18,8 +18,8 @@ __version__ = _read_version()
 
 APP = ["akm/menubar.py"]
 DATA_FILES = [
-    ("", ["logo.png"]),
-    ("templates", [
+    ("", ("logo.png",)),
+    ("templates", (
         "akm/templates/_layout.html",
         "akm/templates/_sidebar.html",
         "akm/templates/_header.html",
@@ -32,14 +32,14 @@ DATA_FILES = [
         "akm/templates/about.html",
         "akm/templates/plugins.html",
         "akm/templates/plugin_host.html",
-    ]),
-    ("static", [
+    )),
+    ("static", (
         "akm/static/marked.min.js",
         "akm/static/tailwindcss.js",
         "akm/static/chat-viewer.js",
         "akm/static/json-viewer.js",
         "akm/static/json-worker.js",
-    ]),
+    )),
 ]
 
 OPTIONS = {
