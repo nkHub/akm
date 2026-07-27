@@ -110,9 +110,9 @@ def add_cost(costs: dict[str, float], currency: str, cost: float) -> None:
     costs["$"] = float(costs.get("$", 0.0) or 0.0) + float(cost)
 
 
-def finalize_costs(costs: dict[str, float]) -> tuple[float, str, dict[str, float]]:
-    """返回固定美元符号的汇总费用。"""
-    total = round(float(costs.get("$", 0.0) or 0.0), 2)
+def finalize_costs(costs: dict[str, float], precision: int = 5) -> tuple[float, str, dict[str, float]]:
+    """返回固定美元符号的汇总费用；precision 控制内部四舍五入小数位数。"""
+    total = round(float(costs.get("$", 0.0) or 0.0), precision)
     return total, "$", {"$": total} if costs else {}
 
 

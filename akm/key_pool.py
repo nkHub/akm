@@ -249,9 +249,13 @@ def add_key(
     normalized_provider_models = _normalize_provider_models(provider_models)
     conn = get_connection()
     try:
+        # 显式写入 usage_query_interval_m = 0 确保新建 Key 默认关闭用量自动查询。
+        # SQLite ALTER TABLE ADD COLUMN 的 DEFAULT 一旦设定就无法修改；
+        # 已迁移到旧版本（DEFAULT=5）的数据库，ALTER TABLE ADD COLUMN DEFAULT 0
+        # 会因“列已存在”静默跳过，导致新 Key 仍拿到旧默认值 5。
         conn.execute(
-            """INSERT INTO keys (alias, provider, api_key, base_url, models, provider_models, auth_header, priority)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO keys (alias, provider, api_key, base_url, models, provider_models, auth_header, priority, usage_query_interval_m)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
             (alias, provider, enc_key, base_url, models, normalized_provider_models, auth_header, priority),
         )
         conn.commit()
