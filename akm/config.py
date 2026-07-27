@@ -26,6 +26,9 @@ DEFAULTS = {
     # 出站 HTTP 代理：仅作用于 AKM 访问上游供应商的请求，不是系统 VPN
     "http_proxy_enabled": False,
     "http_proxy_url": "",  # 例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
+    # macOS 原生功能
+    "launch_at_login": False,  # 开机自启动（仅打包后的 .app 生效，通过 SMAppService 注册）
+    "menu_bar_show_usage": False,  # 菜单栏显示今日用量（Token 数 / 费用交替展示）
 }
 
 

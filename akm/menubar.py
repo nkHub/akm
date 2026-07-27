@@ -131,6 +131,12 @@ class AKMApp(rumps.App):
         # 更新菜单项对象。默认没有更新提示，只有检测到新版本后才动态插入菜单。
         self.update_item: rumps.MenuItem | None = None
 
+        # 原生功能：开机自启动 & 菜单栏用量展示
+        self._launch_login_enabled: bool | None = None  # 上次同步状态，避免重复调用 SMAppService
+        self._usage_show_cost = False  # 交替显示费用/Token
+        self._native_timer: rumps.Timer | None = None
+        self._last_usage_title: str | None = None
+
         # 动态菜单项
         self.status_item = rumps.MenuItem(title="🟡 启动中...")
         self.menu = [
@@ -146,6 +152,7 @@ class AKMApp(rumps.App):
         # 后台启动更新检查线程。该线程与服务启动解耦，即使服务未成功启动也可提示新版本。
         self._start_update_checker()
         self._install_wake_observer()
+        self._start_native_timer()
 
     def _fetch_update_info(self) -> dict:
         """从 GitHub Releases API 拉取最新版本信息并与本地版本比对。"""
@@ -238,6 +245,104 @@ class AKMApp(rumps.App):
             self._wake_notification_center = center
         except Exception as exc:
             logger.warning("注册系统唤醒监听失败: %s", exc)
+
+    def _start_native_timer(self):
+        """启动原生功能定时器：开机自启动同步 + 菜单栏用量刷新。"""
+        self._native_timer = rumps.Timer(self._on_native_tick, 5)
+        self._native_timer.start()
+
+    def _on_native_tick(self, _):
+        """每 5 秒回调一次：同步开机自启动状态 + 刷新菜单栏用量。
+        所有操作在 rumps 主线程执行，安全更新 UI。"""
+        try:
+            self._sync_launch_at_login()
+        except Exception:
+            pass
+        try:
+            self._refresh_usage_title()
+        except Exception:
+            pass
+
+    # ── 开机自启动 ──────────────────────────────────────
+
+    def _sync_launch_at_login(self):
+        """根据配置同步 SMAppService 登录项状态。
+        仅在打包后的 .app 中生效（hasattr(sys, 'frozen')）。"""
+        if not hasattr(sys, "frozen"):
+            return
+        try:
+            cfg = self._load_config_safe()
+        except Exception:
+            return
+        enabled = bool(cfg.get("launch_at_login", False))
+        if self._launch_login_enabled == enabled:
+            return
+        try:
+            import objc
+            objc.loadBundle(
+                "ServiceManagement",
+                globals(),
+                bundle_path="/System/Library/Frameworks/ServiceManagement.framework",
+            )
+            SMAppService = objc.lookUpClass("SMAppService")
+            service = SMAppService.mainAppService()
+            if enabled:
+                service.register()
+                logger.info("已注册为开机自启动")
+            else:
+                service.unregister()
+                logger.info("已取消开机自启动")
+            self._launch_login_enabled = enabled
+        except Exception as exc:
+            logger.warning("SMAppService 操作失败: %s", exc)
+
+    def _load_config_safe(self) -> dict:
+        """安全读取配置，失败时返回空字典避免拖垮定时器。"""
+        try:
+            from akm.config import load_config
+            return load_config()
+        except Exception:
+            return {}
+
+    # ── 菜单栏用量展示 ──────────────────────────────────
+
+    def _refresh_usage_title(self):
+        """从本地服务获取今日用量并更新菜单栏标题。
+        配置关闭或服务未就绪时恢复默认标题。"""
+        cfg = self._load_config_safe()
+        if not cfg.get("menu_bar_show_usage", False):
+            if self._last_usage_title is not None:
+                self.title = None
+                self._last_usage_title = None
+            return
+        if not self.server_ready:
+            return
+        try:
+            resp = httpx.get(
+                f"http://{self.host}:{self.port}/api/stats?days=1",
+                timeout=3,
+            )
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            tokens = int(data.get("total_tokens", 0) or 0)
+            cost = float(data.get("total_cost", 0) or 0)
+            if tokens >= 1_000_000_000:
+                token_str = f"{tokens / 1_000_000_000:.1f}B"
+            elif tokens >= 1_000_000:
+                token_str = f"{tokens / 1_000_000:.1f}M"
+            elif tokens >= 1000:
+                token_str = f"{tokens / 1000:.1f}K"
+            else:
+                token_str = str(tokens)
+            cost_str = f"${cost:.2f}"
+            # 交替展示 Token 和费用
+            self._usage_show_cost = not self._usage_show_cost
+            title = cost_str if self._usage_show_cost else token_str
+            self.title = title
+            self._last_usage_title = title
+        except Exception:
+            pass
 
     def _read_wake_recover_delay_seconds(self) -> float:
         """读取唤醒恢复延迟配置，并对异常值做兜底，避免配置错误把恢复流程搞坏。"""

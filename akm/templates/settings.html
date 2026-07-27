@@ -13,6 +13,20 @@
         </div>
         <akm-switch id="cfg-auto-open" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">开机自启动</h4>
+          <p class="text-xs text-gray-500 mt-0.5">登录系统时自动启动 AKM（仅打包后的 .app 生效）</p>
+        </div>
+        <akm-switch id="cfg-launch-login" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">菜单栏显示用量</h4>
+          <p class="text-xs text-gray-500 mt-0.5">在菜单栏图标旁交替显示今日 Token 用量和费用</p>
+        </div>
+        <akm-switch id="cfg-menu-usage" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
       <akm-settings-card align="start">
         <div>
           <h4 class="text-sm font-semibold text-white">服务端口</h4>
@@ -219,6 +233,8 @@ var _logRespBody = false;
 var _costStatsEnabled = false;
 var _httpProxyEnabled = false;
 var _jsonViewerMaxTextLength = 600000;
+var _launchAtLogin = false;
+var _menuBarShowUsage = false;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -236,6 +252,10 @@ function loadConfig() {
     document.getElementById('server-port').value = cfg.server_port || 8800;
     _costStatsEnabled = cfg.cost_stats_enabled === true;
     updateCostStatsToggle();
+    _launchAtLogin = cfg.launch_at_login === true;
+    updateLaunchLoginToggle();
+    _menuBarShowUsage = cfg.menu_bar_show_usage === true;
+    updateMenuUsageToggle();
     document.getElementById('cost-pricing-table').value = cfg.cost_pricing_table || '';
     _httpProxyEnabled = cfg.http_proxy_enabled === true;
     updateHttpProxyToggle();
@@ -292,6 +312,30 @@ function toggleCostStats() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({cost_stats_enabled: _costStatsEnabled})
+  });
+}
+
+function updateLaunchLoginToggle() { _updateSwitch('cfg-launch-login', _launchAtLogin); }
+
+function toggleLaunchAtLogin() {
+  _launchAtLogin = !_launchAtLogin;
+  updateLaunchLoginToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({launch_at_login: _launchAtLogin})
+  });
+}
+
+function updateMenuUsageToggle() { _updateSwitch('cfg-menu-usage', _menuBarShowUsage); }
+
+function toggleMenuUsage() {
+  _menuBarShowUsage = !_menuBarShowUsage;
+  updateMenuUsageToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({menu_bar_show_usage: _menuBarShowUsage})
   });
 }
 
@@ -693,6 +737,10 @@ document.addEventListener('DOMContentLoaded', function() {
   if (costStatsEl) costStatsEl.addEventListener('click', toggleCostStats);
   var httpProxyEl = document.getElementById('cfg-http-proxy');
   if (httpProxyEl) httpProxyEl.addEventListener('click', toggleHttpProxy);
+  var launchLoginEl = document.getElementById('cfg-launch-login');
+  if (launchLoginEl) launchLoginEl.addEventListener('click', toggleLaunchAtLogin);
+  var menuUsageEl = document.getElementById('cfg-menu-usage');
+  if (menuUsageEl) menuUsageEl.addEventListener('click', toggleMenuUsage);
   loadConfig();
   loadAgents();
 });
