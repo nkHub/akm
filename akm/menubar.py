@@ -133,7 +133,6 @@ class AKMApp(rumps.App):
 
         # 原生功能：开机自启动 & 菜单栏用量展示
         self._launch_login_enabled: bool | None = None  # 上次同步状态，避免重复调用 SMAppService
-        self._usage_show_cost = False  # 交替显示费用/Token
         self._native_timer: rumps.Timer | None = None
         self._last_usage_title: str | None = None
 
@@ -335,14 +334,34 @@ class AKMApp(rumps.App):
                 token_str = f"{tokens / 1000:.1f}K"
             else:
                 token_str = str(tokens)
-            cost_str = f"${cost:.2f}"
-            # 交替展示 Token 和费用
-            self._usage_show_cost = not self._usage_show_cost
-            title = cost_str if self._usage_show_cost else token_str
-            self.title = title
+            # 紧凑单行：费用在前，Token 在后
+            cost_str = f"${cost:.1f}" if cost < 10 else f"${cost:.0f}"
+            title = f"{cost_str}·{token_str}"
+            self._set_small_title(title)
             self._last_usage_title = title
         except Exception:
             pass
+
+    def _set_small_title(self, text: str):
+        """用较小字号设置菜单栏标题，图标居左。"""
+        try:
+            from Foundation import NSAttributedString
+            from AppKit import NSFont, NSFontAttributeName
+            button = self._nsapp.nsstatusitem.button()
+            if button is None:
+                self.title = text
+                return
+            icon = getattr(self, "_icon_nsimage", None)
+            if icon is not None:
+                button.setImage_(icon)
+                button.setImagePosition_(2)  # NSImageLeft
+            font = NSFont.menuBarFontOfSize_(NSFont.systemFontSize() - 1)
+            attr_title = NSAttributedString.alloc().initWithString_attributes_(
+                " " + text, {NSFontAttributeName: font}
+            )
+            button.setAttributedTitle_(attr_title)
+        except Exception:
+            self.title = text
 
     def _read_wake_recover_delay_seconds(self) -> float:
         """读取唤醒恢复延迟配置，并对异常值做兜底，避免配置错误把恢复流程搞坏。"""
