@@ -1649,7 +1649,7 @@ def _get_stats(days: int) -> dict:
             bucket["requests"] += 1
             if cost_enabled:
                 add_cost(bucket["costs_by_currency"], row_currency, row_cost)
-                total_c, cur, cmap = finalize_costs(bucket["costs_by_currency"])
+                total_c, cur, cmap = finalize_costs(bucket["costs_by_currency"], 5)
                 bucket["cost"] = total_c
                 bucket["currency"] = cur
                 bucket["costs_by_currency"] = cmap
@@ -1659,7 +1659,7 @@ def _get_stats(days: int) -> dict:
         _bump(_ensure_bucket(by_key, key_alias))
         _bump(_ensure_bucket(daily, ts))
 
-    primary_cost, primary_currency, costs_map = finalize_costs(global_costs)
+    primary_cost, primary_currency, costs_map = finalize_costs(global_costs, 5)
     # 收尾：确保 daily 按日期排序，并去掉关闭费用时的多余字段
     daily_sorted = {}
     for day, item in sorted(daily.items()):
@@ -1695,7 +1695,7 @@ def _get_stats(days: int) -> dict:
         "daily": daily_sorted,
     }
     if cost_enabled:
-        result["total_cost"] = primary_cost
+        result["total_cost"] = round(primary_cost, 2)
         result["cost_currency"] = primary_currency
         result["costs_by_currency"] = costs_map
         result["cost_default_currency"] = cost_default_currency

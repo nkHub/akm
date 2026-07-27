@@ -62,6 +62,10 @@ class HttpClientPoolManager:
         if self.proxy_url:
             # httpx 0.28+ 使用 proxy=；SOCKS 需安装 httpx[socks] / socksio
             kwargs["proxy"] = self.proxy_url
+        else:
+            # 未配置 AKM 出站代理时屏蔽系统代理环境变量（如 Clash 全局代理），
+            # 防止 httpx 默认跟随 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY 走代理转发。
+            kwargs["trust_env"] = False
         return httpx.AsyncClient(**kwargs)
 
     async def get_client(self, *, provider: str, key_alias: str, model: str, api_path: str) -> httpx.AsyncClient:

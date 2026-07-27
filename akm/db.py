@@ -119,3 +119,9 @@ def _migrate_key_usage_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE keys ADD COLUMN {col} {col_type} DEFAULT {default}")
         except sqlite3.OperationalError:
             pass
+    # 修正旧版迁移残留：早期版本 usage_query_interval_m 默认值为 5，
+    # SQLite 不支持 ALTER COLUMN 修改 DEFAULT，需对从未手动配置过的 Key
+    # 显式重置为 0（无脚本且间隔为旧默认值 5 的视为未配置）。
+    conn.execute(
+        "UPDATE keys SET usage_query_interval_m = 0 WHERE usage_query_interval_m = 5 AND (usage_query_script IS NULL OR usage_query_script = '')"
+    )
