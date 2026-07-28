@@ -313,19 +313,30 @@ class AgentLoop:
         if self._audit_submitter is None:
             return
         try:
-            resp_for_log = response_body
-            if len(resp_for_log) > 64000:
-                resp_for_log = resp_for_log[:32000] + f"\n...(截断，共 {len(resp_for_log)} 字符)" + resp_for_log[-32000:]
+            from akm.config import load_config
+
+            cfg = load_config()
+            save_request_body = bool(cfg.get("log_request_body", False))
+            save_response_body = bool(cfg.get("log_response_body", False))
+
+            resp_for_log = ""
+            if save_response_body:
+                resp_for_log = response_body
+                if len(resp_for_log) > 64000:
+                    resp_for_log = resp_for_log[:32000] + f"\n...(截断，共 {len(resp_for_log)} 字符)" + resp_for_log[-32000:]
+            req_body_for_log = ""
+            if save_request_body:
+                req_body_for_log = json.dumps(request_body, ensure_ascii=False)
             await self._audit_submitter({
                 "provider": str(result.get("provider", "") or ""),
                 "key_alias": str(result.get("key_alias", "") or ""),
                 "model": model,
-                "request_body": json.dumps(request_body, ensure_ascii=False),
+                "request_body": req_body_for_log,
                 "response_body": resp_for_log,
                 "status_code": status_code,
                 "latency_ms": int(result.get("latency_ms", 0) or 0),
                 "error": error,
-                "request_headers": json.dumps({"x-source": "agent"}),
+                "request_headers": json.dumps({"user-agent": "agent/1.0"}),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
