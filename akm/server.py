@@ -38,6 +38,7 @@ from akm.agent import register_agent, unregister_agent, list_agents, load_custom
 from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
 from akm.db import get_keys_log_path
+from akm.error_log import write_error_log
 from akm.health import HealthMonitor
 from akm.usage_flags import (
     FLAG_COUNT_TOKENS_FALLBACK,
@@ -114,6 +115,9 @@ async def lifespan(app: FastAPI):
     conn = get_connection()
     init_db(conn)
     conn.close()
+    # 启动时自动清理过期日志
+    from akm.audit import auto_cleanup_logs
+    auto_cleanup_logs()
     # 初始化插件管理器
     plugin_manager = PluginManager()
     # 初始化连接已关闭，不能把它注入插件上下文；插件需自行获取短生命周期连接。
@@ -163,10 +167,16 @@ app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """全局异常处理：500 时返回详细报错信息，方便本地排查"""
+    """全局异常处理：内部错误详情写入 error.log，客户端只返回通用提示"""
+    write_error_log(
+        source="server.global_exception",
+        error=str(exc),
+        traceback_str=traceback.format_exc(),
+        request_path=str(request.url.path),
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "traceback": traceback.format_exc()},
+        content={"detail": "服务器内部错误，请查看 error.log 了解详情"},
     )
 logger = logging.getLogger("akm")
 
@@ -1086,9 +1096,15 @@ async def api_query_key_usage(alias: str):
         update_usage_data(alias, result)
         return {"ok": True, "data": result}
     except Exception as e:
-        result = {"ok": False, "error": str(e)}
+        write_error_log(
+            source="usage_query.execute",
+            error=str(e),
+            request_path=f"/api/keys/{alias}/usage-query",
+            extra={"alias": alias},
+        )
+        result = {"ok": False, "error": "用量查询失败，请查看 error.log 了解详情"}
         update_usage_data(alias, result)
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "用量查询失败，请查看 error.log 了解详情"}
 
 
 @app.post("/api/keys/{alias:path}/usage-data")
@@ -1839,6 +1855,22 @@ async def api_clean_log_bodies():
     """清空审计日志请求体/响应体内容，保留统计字段与元数据"""
     count = await clean_log_bodies_async()
     return {"ok": True, "updated": count}
+
+
+@app.post("/api/server/restart")
+async def api_restart_server():
+    """重启内置服务（由 menubar 主线程异步执行）"""
+    from akm import trigger_server_restart
+    trigger_server_restart()
+    return {"ok": True, "action": "restart"}
+
+
+@app.post("/api/server/shutdown")
+async def api_shutdown_server():
+    """关闭 AKM 应用"""
+    import rumps
+    rumps.quit_application()
+    return {"ok": True, "action": "shutdown"}
 
 
 @app.get("/api/config")
@@ -2683,9 +2715,21 @@ async def _handle_ai_request(request: Request, api_path: str):
             )
 
         if result["status_code"] == 503:
-            return JSONResponse(status_code=503, content={"detail": result["error"]})
+            write_error_log(
+                source="proxy.forward",
+                error=result["error"],
+                request_path=api_path,
+                extra={"model": result.get("model", ""), "key_alias": result.get("key_alias", "")},
+            )
+            return JSONResponse(status_code=503, content={"detail": "服务暂时不可用，请稍后重试"})
         if result["status_code"] == 502:
-            return JSONResponse(status_code=502, content={"detail": result["error"]})
+            write_error_log(
+                source="proxy.forward",
+                error=result["error"],
+                request_path=api_path,
+                extra={"model": result.get("model", ""), "key_alias": result.get("key_alias", "")},
+            )
+            return JSONResponse(status_code=502, content={"detail": "上游服务异常，请稍后重试"})
 
         return Response(
             content=result["body"],

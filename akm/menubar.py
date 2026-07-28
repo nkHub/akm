@@ -52,7 +52,16 @@ def _wake_recovery_log_path() -> str:
     """返回唤醒恢复日志路径，并确保目录存在。"""
     log_dir = os.path.expanduser("~/.akm")
     os.makedirs(log_dir, exist_ok=True)
-    return os.path.join(log_dir, "wake-recovery.log")
+    return os.path.join(log_dir, "wake_recovery.log")
+
+
+def _trigger_log_cleanup():
+    """在后台线程中执行一次审计日志自动清理，不阻塞恢复流程。"""
+    try:
+        from akm.audit import auto_cleanup_logs
+        auto_cleanup_logs()
+    except Exception:
+        pass
 
 
 class _WakeObserver(NSObject):
@@ -251,8 +260,9 @@ class AKMApp(rumps.App):
         self._native_timer.start()
 
     def _on_native_tick(self, _):
-        """每 5 秒回调一次：同步开机自启动状态 + 刷新菜单栏用量。
+        """每 5 秒回调一次：同步开机自启动状态 + 刷新菜单栏用量 + 处理待执行操作。
         所有操作在 rumps 主线程执行，安全更新 UI。"""
+        import akm
         try:
             self._sync_launch_at_login()
         except Exception:
@@ -261,6 +271,11 @@ class AKMApp(rumps.App):
             self._refresh_usage_title()
         except Exception:
             pass
+        # 处理由 server.py API 触发的待执行操作
+        action = akm._pending_action
+        akm._pending_action = None
+        if action == "restart":
+            self._restart_server_internal("api_restart")
 
     # ── 开机自启动 ──────────────────────────────────────
 
@@ -277,13 +292,13 @@ class AKMApp(rumps.App):
         if self._launch_login_enabled == enabled:
             return
         try:
-            import objc
-            objc.loadBundle(
+            import objc  # type: ignore[import-untyped]
+            objc.loadBundle(  # type: ignore[attr-defined]
                 "ServiceManagement",
                 globals(),
                 bundle_path="/System/Library/Frameworks/ServiceManagement.framework",
             )
-            SMAppService = objc.lookUpClass("SMAppService")
+            SMAppService = objc.lookUpClass("SMAppService")  # type: ignore[attr-defined]
             service = SMAppService.mainAppService()
             if enabled:
                 service.register()
@@ -345,8 +360,8 @@ class AKMApp(rumps.App):
     def _set_small_title(self, text: str):
         """用较小字号设置菜单栏标题，图标居左。"""
         try:
-            from Foundation import NSAttributedString
-            from AppKit import NSFont, NSFontAttributeName
+            from Foundation import NSAttributedString  # type: ignore[import-untyped]
+            from AppKit import NSFont, NSFontAttributeName  # type: ignore[import-untyped]
             button = self._nsapp.nsstatusitem.button()
             if button is None:
                 self.title = text
@@ -567,6 +582,8 @@ class AKMApp(rumps.App):
             if self.status_item.title == previous_title and previous_title:
                 self._update_status_for_recovery(previous_title)
             self._wake_recovering = False
+            # 唤醒恢复完成后触发一次日志清理
+            _trigger_log_cleanup()
 
     def _get_icon(self) -> str | None:
         """获取菜单栏图标，支持圆角处理"""

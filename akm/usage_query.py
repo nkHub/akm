@@ -20,10 +20,13 @@ import json
 import re
 import subprocess
 import time
+import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import httpx
+
+from akm.error_log import write_error_log
 
 # ── JS extractor 后端执行 ─────────────────────────────────────
 
@@ -268,7 +271,13 @@ async def execute_query_script(key: dict, script_config: dict, http_client=None)
     except httpx.TimeoutException:
         result = _query_result(False, error="请求超时")
     except Exception as e:
-        result = _query_result(False, error=str(e))
+        write_error_log(
+            source="usage_query.execute",
+            error=str(e),
+            traceback_str=traceback.format_exc(),
+            extra={"key_alias": key.get("alias", "")},
+        )
+        result = _query_result(False, error="用量查询执行失败")
     finally:
         if own_client:
             await http_client.aclose()
