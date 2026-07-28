@@ -2274,10 +2274,12 @@ async def agent(request: Request):
             ],
             "instructions": "可选的系统级指令",
             "api_path": "chat/completions",
-            "max_turns": 20
+            "max_turns": 20,
+            "stream": false
         }
 
-    返回 Agent 最终回复，包含完整消息历史和 token 用量。
+    - ``stream: false`` (默认) — 返回完整 AgentResult JSON
+    - ``stream: true`` — SSE 流式返回，每轮 emit ``turn_start`` / ``tool_call`` / ``tool_result`` / ``final`` / ``error`` 事件
     """
     body = await request.json()
     messages = body.get("messages")
@@ -2288,6 +2290,7 @@ async def agent(request: Request):
     tools = body.get("tools")
     instructions = str(body.get("instructions", "") or "")
     api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
+    stream = bool(body.get("stream", False))
     try:
         max_turns = int(body.get("max_turns", 0) or 0)
     except (TypeError, ValueError):
@@ -2296,6 +2299,20 @@ async def agent(request: Request):
     agent_loop = request.app.state.agent_loop
     if agent_loop is None:
         return JSONResponse(status_code=503, content={"detail": "Agent Loop 尚未初始化"})
+
+    if stream:
+        return StreamingResponse(
+            agent_loop.run_stream(
+                messages,
+                model=model,
+                tools=tools if isinstance(tools, list) else None,
+                instructions=instructions,
+                max_turns=max_turns,
+                api_path=api_path,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
 
     result = await agent_loop.run(
         messages,

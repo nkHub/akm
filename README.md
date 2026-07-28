@@ -294,6 +294,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息 |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
+| `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`），流式模式逐轮推送 `turn_start` / `tool_call` / `tool_result` / `final` 事件 |
 
 ### 工具注册
 
@@ -336,6 +337,27 @@ def register_tools(self, registry):
     "total_tokens": 1550
   }
 }
+```
+
+### SSE 流式事件（`stream: true`）
+
+| 事件 | 说明 |
+|------|------|
+| `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
+| `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
+| `tool_result` | 工具执行结果，`data.name` / `data.result` |
+| `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` |
+| `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` |
+
+```json
+// SSE 示例
+data: {"event":"turn_start","data":{"turn":1}}
+
+data: {"event":"tool_call","data":{"name":"get_weather","arguments":{"city":"beijing"}}}
+
+data: {"event":"tool_result","data":{"name":"get_weather","result":"{\"city\":\"beijing\",\"temp\":25}"}}
+
+data: {"event":"final","data":{"final_message":{"role":"assistant","content":"北京今天..."},"turns":2,"usage":{...}}}
 ```
 
 ## 故障切换策略

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Loop Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; }
+.sidebar { width: 320px; padding: 16px; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 12px; background: #16213e; }
+.sidebar label { font-size: 12px; color: #888; margin-bottom: 2px; display: block; }
+.sidebar input, .sidebar textarea, .sidebar select { width: 100%; padding: 8px; border: 1px solid #444; border-radius: 6px; background: #0f3460; color: #e0e0e0; font-size: 13px; }
+.sidebar textarea { resize: vertical; min-height: 80px; font-family: monospace; font-size: 12px; }
+.sidebar button { padding: 10px; background: #e94560; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.sidebar button:hover { background: #d63851; }
+.sidebar button:disabled { background: #666; cursor: not-allowed; }
+.main { flex: 1; display: flex; flex-direction: column; }
+.header { padding: 12px 20px; border-bottom: 1px solid #333; font-size: 14px; font-weight: 600; background: #16213e; display: flex; justify-content: space-between; align-items: center; }
+.chat { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.msg.user { align-self: flex-end; background: #0f3460; }
+.msg.assistant { align-self: flex-start; background: #16213e; border: 1px solid #333; }
+.msg.system { align-self: center; background: #1a3a1a; border: 1px solid #2a5a2a; font-size: 12px; max-width: 90%; }
+.msg.tool { align-self: flex-start; background: #1a1a3a; border: 1px solid #3a3a5a; font-family: monospace; font-size: 12px; }
+.msg.tool .tool-name { color: #f0c040; font-weight: 600; }
+.msg.tool .tool-result { color: #80c080; margin-top: 4px; max-height: 200px; overflow-y: auto; }
+.input-bar { padding: 12px 20px; border-top: 1px solid #333; display: flex; gap: 10px; background: #16213e; }
+.input-bar input { flex: 1; padding: 10px 14px; border: 1px solid #444; border-radius: 8px; background: #0f3460; color: #e0e0e0; font-size: 14px; }
+.input-bar button { padding: 10px 20px; background: #e94560; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; }
+.input-bar button:hover { background: #d63851; }
+.input-bar button:disabled { background: #666; cursor: not-allowed; }
+.status { font-size: 12px; color: #888; }
+.status.active { color: #4caf50; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 6px; }
+.badge.stream { background: #e94560; color: white; }
+.badge.normal { background: #444; color: #aaa; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div>
+    <label>模型</label>
+    <input id="model" value="" placeholder="留空自动选择">
+  </div>
+  <div>
+    <label>系统指令</label>
+    <textarea id="instructions" placeholder="可选的系统指令...">你是 AKM 内置助手。请用中文回复，工具有结果后直接引用数据作答。</textarea>
+  </div>
+  <div>
+    <label>工具定义 (JSON)</label>
+    <textarea id="toolsJson">[
+  {
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "查询指定城市的天气",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": { "type": "string", "description": "城市名称" }
+        },
+        "required": ["city"]
+      }
+    }
+  }
+]</textarea>
+  </div>
+  <div style="display:flex;gap:8px">
+    <div style="flex:1">
+      <label>最大轮次</label>
+      <input id="maxTurns" value="10" type="number" min="1" max="50">
+    </div>
+    <div style="flex:1">
+      <label>协议</label>
+      <select id="apiPath">
+        <option value="chat/completions">chat/completions</option>
+        <option value="responses">responses</option>
+        <option value="messages">messages</option>
+      </select>
+    </div>
+  </div>
+  <div>
+    <label>
+      <input type="checkbox" id="streamMode" checked style="width:auto;vertical-align:middle;margin-right:4px">
+      SSE 流式模式
+    </label>
+  </div>
+  <button id="clearBtn" style="background:#444">清空对话</button>
+</div>
+
+<div class="main">
+  <div class="header">
+    <span>Agent Loop Demo — POST /v1/agent</span>
+    <span class="status" id="status">就绪</span>
+  </div>
+  <div class="chat" id="chat">
+    <div class="msg system">向 /v1/agent 发起请求测试 Agent Loop。<br>左侧配有一个示例工具 get_weather（需要插件注册同名工具才可执行）。</div>
+  </div>
+  <div class="input-bar">
+    <input id="userInput" placeholder="输入消息，例如：查一下北京和上海的天气" onkeydown="if(event.key==='Enter')send()">
+    <button id="sendBtn" onclick="send()">发送</button>
+  </div>
+</div>
+
+<script>
+const BASE = 'http://127.0.0.1:8800';
+let messages = [];
+
+function $(id) { return document.getElementById(id); }
+const chat = $('chat');
+const statusEl = $('status');
+
+function addMsg(role, content, cls) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + (cls || role);
+  div.textContent = content;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function addToolCall(name, args) {
+  const div = document.createElement('div');
+  div.className = 'msg tool';
+  div.innerHTML = `<span class="tool-name">🔧 ${name}</span><br>参数: ${JSON.stringify(args)}`;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function addToolResult(name, result) {
+  const div = document.createElement('div');
+  div.className = 'msg tool';
+  let display = result;
+  try { display = JSON.stringify(JSON.parse(result), null, 2); } catch(e) {}
+  div.innerHTML = `<span class="tool-name">✅ ${name}</span><div class="tool-result">${display}</div>`;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+async function send() {
+  const input = $('userInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  const stream = $('streamMode').checked;
+  const sendBtn = $('sendBtn');
+  input.disabled = true;
+  sendBtn.disabled = true;
+
+  // 构造参数
+  let tools = [];
+  try { tools = JSON.parse($('toolsJson').value); } catch(e) {}
+  const body = {
+    messages: [...messages, { role: 'user', content: text }],
+    model: $('model').value.trim() || undefined,
+    instructions: $('instructions').value.trim() || undefined,
+    tools: tools.length > 0 ? tools : undefined,
+    max_turns: parseInt($('maxTurns').value) || 10,
+    api_path: $('apiPath').value,
+    stream: stream,
+  };
+
+  // 清空可选字段
+  Object.keys(body).forEach(k => { if (body[k] === undefined) delete body[k]; });
+
+  addMsg('user', text);
+  messages.push({ role: 'user', content: text });
+  input.value = '';
+
+  statusEl.textContent = stream ? '流式请求中...' : '请求中...';
+  statusEl.className = 'status active';
+
+  try {
+    if (stream) {
+      await sendStream(body);
+    } else {
+      await sendNormal(body);
+    }
+    statusEl.textContent = '就绪';
+    statusEl.className = 'status';
+  } catch(e) {
+    addMsg('system', `请求失败: ${e.message}`);
+    statusEl.textContent = '错误';
+    statusEl.className = 'status';
+  }
+
+  input.disabled = false;
+  sendBtn.disabled = false;
+  input.focus();
+}
+
+async function sendNormal(body) {
+  const resp = await fetch(BASE + '/v1/agent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    addMsg('assistant', data.final_message.content || '(空回复)');
+    messages = data.messages || [];
+  } else {
+    addMsg('system', `Agent 失败: ${data.error}`);
+  }
+}
+
+async function sendStream(body) {
+  const resp = await fetch(BASE + '/v1/agent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6);
+      try {
+        const event = JSON.parse(jsonStr);
+        handleStreamEvent(event);
+      } catch(e) { /* skip malformed */ }
+    }
+  }
+}
+
+let streamMsgs = [];
+
+function handleStreamEvent(event) {
+  switch (event.event) {
+    case 'turn_start':
+      addMsg('system', `🔄 第 ${event.data.turn} 轮`);
+      break;
+    case 'tool_call':
+      addToolCall(event.data.name, event.data.arguments);
+      streamMsgs.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_' + Date.now(),
+          type: 'function',
+          function: { name: event.data.name, arguments: JSON.stringify(event.data.arguments) }
+        }]
+      });
+      break;
+    case 'tool_result':
+      addToolResult(event.data.name, event.data.result);
+      // 追加 tool 消息
+      const lastTool = streamMsgs[streamMsgs.length - 1];
+      const callId = lastTool?.tool_calls?.[0]?.id || 'call_unknown';
+      streamMsgs.push({ role: 'tool', tool_call_id: callId, content: event.data.result });
+      break;
+    case 'final':
+      const content = event.data.final_message?.content || '';
+      if (content) addMsg('assistant', content);
+      messages = event.data.messages || [];
+      const usage = event.data.usage;
+      if (usage?.total_tokens) {
+        addMsg('system', `✅ 完成 | ${event.data.turns} 轮 | ${usage.total_tokens} tokens`);
+      }
+      streamMsgs = [];
+      break;
+    case 'error':
+      addMsg('system', `❌ 错误: ${event.data.error}`);
+      streamMsgs = [];
+      break;
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
+$('clearBtn').onclick = () => {
+  messages = [];
+  streamMsgs = [];
+  chat.innerHTML = '<div class="msg system">对话已清空。</div>';
+};
+</script>
+</body>
+</html>
