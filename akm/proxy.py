@@ -17,6 +17,7 @@ from akm.key_pool import (
 from akm.db import get_connection
 from akm.agent import BUILTIN_AGENTS, get_agent
 from akm.plugins.context import RequestContext
+from akm.error_log import write_error_log
 
 
 class _ChainedAdapter:
@@ -843,10 +844,20 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
                 last_result = _result(url, api_path, error="请求超时")
                 return last_result
             except httpx.ConnectError as e:
-                last_result = _result(url, api_path, error=f"连接失败: {e}")
+                write_error_log(
+                    source="proxy.connectivity_test",
+                    error=f"连接失败: {e}",
+                    extra={"url": url, "api_path": api_path, "key_alias": key.get("alias", "")},
+                )
+                last_result = _result(url, api_path, error="连接失败")
                 return last_result
             except Exception as e:
-                last_result = _result(url, api_path, error=str(e))
+                write_error_log(
+                    source="proxy.connectivity_test",
+                    error=str(e),
+                    extra={"url": url, "api_path": api_path, "key_alias": key.get("alias", "")},
+                )
+                last_result = _result(url, api_path, error="测试失败")
                 return last_result
 
         return last_result or _result(agent.resolve_url(key, candidate_paths[0]), candidate_paths[0], error="测试失败")

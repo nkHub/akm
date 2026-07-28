@@ -41,6 +41,26 @@
           <p id="port-msg" class="text-xs text-emerald-400 mt-1 hidden"></p>
         </div>
       </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">重启服务</h4>
+          <p class="text-xs text-gray-500 mt-0.5">重新启动 AKM 内置服务，端口修改后需重启生效</p>
+        </div>
+        <button slot="actions" onclick="restartServer()"
+                class="bg-amber-600 hover:bg-amber-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer shrink-0">
+          重启
+        </button>
+      </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">关闭应用</h4>
+          <p class="text-xs text-gray-500 mt-0.5">完全退出 AKM 菜单栏应用</p>
+        </div>
+        <button slot="actions" onclick="shutdownServer()"
+                class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer shrink-0">
+          关闭
+        </button>
+      </akm-settings-card>
     </div>
   </section>
 
@@ -181,6 +201,15 @@
 {% endblock %}
 
 {% block extra_html %}
+<akm-modal id="confirm-modal" title="" max-width="max-w-sm" body-class="p-4">
+  <p id="confirm-msg" class="text-sm text-gray-200"></p>
+  <div data-modal-footer>
+    <div class="flex w-full justify-end gap-2">
+      <button type="button" onclick="closeConfirmModal()" class="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 cursor-pointer">取消</button>
+      <button type="button" id="confirm-ok-btn" class="rounded bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-500 cursor-pointer">确认</button>
+    </div>
+  </div>
+</akm-modal>
 <akm-modal id="agent-modal" title="添加供应商代理" max-width="max-w-2xl" body-class="px-5 py-4" data-mode="add">
   <div>
     <p class="mt-1 text-xs text-gray-500">配置默认 base_url、认证头模板和协议能力，保存后 Key 管理页会自动可选。</p>
@@ -237,6 +266,50 @@ var _launchAtLogin = false;
 var _menuBarShowUsage = false;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+var _confirmCallback = null;
+
+function showConfirm(title, msg, okText, onOk, danger) {
+  var modal = document.getElementById('confirm-modal');
+  if (!modal || typeof modal.open !== 'function') return;
+  modal.setAttribute('title', title);
+  document.getElementById('confirm-msg').textContent = msg;
+  var btn = document.getElementById('confirm-ok-btn');
+  btn.textContent = okText || '确认';
+  btn.className = danger
+    ? 'rounded bg-red-600 px-3 py-1.5 text-xs text-white hover:bg-red-500 cursor-pointer'
+    : 'rounded bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-500 cursor-pointer';
+  _confirmCallback = onOk;
+  modal.open();
+}
+
+function closeConfirmModal() {
+  _confirmCallback = null;
+  var modal = document.getElementById('confirm-modal');
+  if (modal && typeof modal.close === 'function') modal.close();
+}
+
+document.getElementById('confirm-ok-btn').addEventListener('click', function() {
+  var cb = _confirmCallback;
+  closeConfirmModal();
+  if (typeof cb === 'function') cb();
+});
+
+function restartServer() {
+  showConfirm('重启服务', '确认重启服务？管理页面将短暂不可用。', '重启', function() {
+    fetch('/api/server/restart', {method:'POST'}).then(function(r){return r.json()}).then(function(d){
+      if(d.ok) showConfirm('提示', '已下发重启指令，页面即将刷新。', '确定', null);
+    });
+  });
+}
+
+function shutdownServer() {
+  showConfirm('关闭应用', '确认关闭 AKM 应用？', '关闭', function() {
+    fetch('/api/server/shutdown', {method:'POST'}).then(function(r){return r.json()}).then(function(d){
+      if(d.ok) showConfirm('提示', '应用即将关闭。', '确定', null);
+    });
+  }, true);
+}
 
 function loadConfig() {
   fetch('/api/config').then(function(r){return r.json()}).then(function(cfg){

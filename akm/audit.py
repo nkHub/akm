@@ -1,8 +1,11 @@
 """审计日志：写入、查询、清理"""
 
 import asyncio
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from akm.db import get_connection
+
+logger = logging.getLogger("akm.audit")
 
 
 def _compact_audit_db(conn) -> None:
@@ -327,3 +330,29 @@ def clean_log_bodies() -> int:
 async def clean_log_bodies_async() -> int:
     """异步清空日志体，避免大批量 UPDATE/VACUUM 阻塞服务。"""
     return await asyncio.to_thread(clean_log_bodies)
+
+
+def auto_cleanup_logs() -> bool:
+    """根据 `log_retention_days` 配置自动清理过期审计日志。
+
+    在服务启动时和系统唤醒恢复时调用，计算阈值日期并清理超出保留天数的旧日志。
+    该函数可在同步线程中安全调用。
+    """
+    try:
+        from akm.config import get as config_get
+    except ImportError:
+        logger.warning("无法加载配置，跳过自动日志清理")
+        return False
+    retention_days = int(config_get("log_retention_days", 30) or 30)
+    if retention_days <= 0:
+        logger.info("log_retention_days 为 0，永久保留日志")
+        return False
+    threshold = (datetime.utcnow() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+    try:
+        count = clean_logs(threshold)
+        if count > 0:
+            logger.info("自动日志清理完成: 清理 %s 之前日志，共 %d 条", threshold, count)
+        return True
+    except Exception as exc:
+        logger.warning("自动日志清理失败: %s", exc)
+        return False

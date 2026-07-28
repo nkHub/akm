@@ -176,7 +176,7 @@ akm-menubar
 }
 ```
 
-Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。菜单栏应用的休眠恢复链路则会单独把关键节点追加写入 `~/.akm/wake-recovery.log`，采用逐行 JSON 的形式记录收到唤醒、等待、探针结果、重启动作和最终恢复结果，便于判断到底是等待时间过短、本地服务未 ready，还是上游链路尚未恢复。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
+Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。菜单栏应用的休眠恢复链路则会单独把关键节点追加写入 `~/.akm/wake-recovery.log`，采用逐行 JSON 的形式记录收到唤醒、等待、探针结果、重启动作和最终恢复结果，便于判断到底是等待时间过短、本地服务未 ready，还是上游链路尚未恢复。系统内部错误（全局异常、代理转发失败、用量查询异常、插件加载失败等）会以逐行 JSON 写入 `~/.akm/error.log`，不再将 traceback 或内部报错详情返回给客户端；客户端仅收到通用错误提示，排障时请查看该文件。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
 
 `image_supported_models` 也是 `config.json` 中的全局配置项，默认值为 `gpt-image-2`。它支持逗号分隔多个图片模型，首项会作为 `/v1/images/generations` 与 `/v1/images/edits` 在未显式传 `model` 时的默认回填值；只有当当前存在 active key 支持该默认模型时才会自动补齐，否则接口会直接返回明确报错。
 

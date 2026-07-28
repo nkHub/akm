@@ -1,6 +1,7 @@
 """插件管理器 — 扫描、加载、生命周期管理、配置读写、Hook 管道执行"""
 import json
 import logging
+import traceback
 import zipfile
 import shutil
 from pathlib import Path
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .models import PluginMeta
 from .base import NotifyFn, PluginBase
 from .context import RequestContext
+from akm.error_log import write_error_log
 
 logger = logging.getLogger("akm.plugin_manager")
 
@@ -560,7 +562,12 @@ class PluginManager:
                     meta_path.read_text("utf-8")
                 )
             except Exception as e:
-                return {"ok": False, "error": f"plugin.json 格式错误: {e}"}
+                write_error_log(
+                    source="plugin_manager.install",
+                    error=str(e),
+                    traceback_str=traceback.format_exc(),
+                )
+                return {"ok": False, "error": "plugin.json 格式错误"}
 
             name = meta.name
 
@@ -753,7 +760,7 @@ class PluginManager:
                 await plugin.on_unload()
                 plugin.runtime_ready = False
         except Exception as e:
-            # 回滚内存与配置，避免“配置已开但生命周期失败”
+            # 回滚内存与配置，避免"配置已开但生命周期失败"
             plugin.enabled = was_enabled
             plugin.runtime_ready = was_runtime_ready
             plugin_states[name] = was_enabled
@@ -762,9 +769,15 @@ class PluginManager:
             logger.error(
                 f"[PluginManager] {name} 热{'启用' if enable else '禁用'}失败: {e}"
             )
+            write_error_log(
+                source="plugin_manager.lifecycle",
+                error=str(e),
+                traceback_str=traceback.format_exc(),
+                extra={"plugin": name, "action": "enable" if enable else "disable"},
+            )
             return {
                 "ok": False,
-                "error": f"生命周期钩子失败: {e}",
+                "error": f"插件 '{name}' {'启用' if enable else '禁用'}失败",
             }
 
         action = "启用" if enable else "禁用"
