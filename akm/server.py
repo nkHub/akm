@@ -135,10 +135,23 @@ async def lifespan(app: FastAPI):
     http_client = _build_http_client_pool_manager()
     app.state.http_client = http_client
     # 初始化 Agent Loop（依赖 plugin_manager 已就绪）
-    agent_loop = AgentLoop(http_client, plugin_manager=plugin_manager)
+    from akm.audit import write_log_async
+
+    async def _agent_audit(data: dict) -> None:
+        """Agent Loop 专用审计写入，来源标记为 agent，直接写 DB 不入队列"""
+        try:
+            await write_log_async(data)
+        except Exception:
+            logger.warning("[Server] 审计日志写入失败", exc_info=True)
+
+    agent_loop = AgentLoop(
+        http_client,
+        plugin_manager=plugin_manager,
+        audit_submitter=_agent_audit,
+    )
     set_agent_loop(agent_loop)
     app.state.agent_loop = agent_loop
-    logger.info("[Server] Agent Loop 已初始化")
+    logger.info("[Server] Agent Loop 已初始化，审计日志已就绪")
     # 用量查询自动调度器
     usage_query_scheduler = _UsageQueryScheduler(app)
     usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
