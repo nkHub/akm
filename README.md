@@ -214,6 +214,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/rerank` | Rerank 转发接口（按 `model` 选 key 后纯透传，不做协议转换） |
 | POST | `/v1/images/generations` | Images Generations 转发接口（仅透传，不做协议转换；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
+| POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见「Agent Loop」章节） |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
@@ -248,6 +249,94 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | DELETE | `/api/plugins/{name}` | 删除第三方插件 |
 | POST | `/api/plugins/upload` | 上传 .zip 安装第三方插件 |
 | GET/POST | `/api/plugin-config/{name}` | 插件配置读写 |
+
+## Agent Loop
+
+`POST /v1/agent` 提供多轮 LLM 工具调用编排能力。请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。
+
+每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
+
+### 请求格式
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [{"role": "user", "content": "帮我查一下今天的天气"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "查询指定城市的天气",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "城市名称"}
+          },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "instructions": "你是 AKM 内置助手，请用中文回复",
+  "api_path": "chat/completions",
+  "max_turns": 20
+}
+```
+
+### 参数说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
+| `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式），与插件注册的工具合并 |
+| `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息 |
+| `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
+| `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
+
+### 工具注册
+
+插件可通过重写 `register_tools()` 方法向 Agent Loop 注册工具，所有注册的工具自动参与到工具调用编排中：
+
+```python
+from akm.agent_loop import ToolDef
+
+def register_tools(self, registry):
+    def get_weather(city: str) -> str:
+        return json.dumps({"city": city, "temp": 25, "condition": "晴"})
+
+    registry.register(ToolDef(
+        name="get_weather",
+        description="查询指定城市的天气",
+        parameters={
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+        handler=get_weather,
+    ))
+```
+
+### 响应格式
+
+```json
+{
+  "ok": true,
+  "final_message": {
+    "role": "assistant",
+    "content": "今天北京的天气是晴天，气温 25°C。"
+  },
+  "messages": [...],
+  "turns": 2,
+  "error": "",
+  "usage": {
+    "prompt_tokens": 1200,
+    "completion_tokens": 350,
+    "total_tokens": 1550
+  }
+}
+```
 
 ## 故障切换策略
 

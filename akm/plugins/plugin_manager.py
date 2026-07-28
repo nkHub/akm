@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .models import PluginMeta
 from .base import NotifyFn, PluginBase
 from .context import RequestContext
+from akm.agent_loop import ToolRegistry
 from akm.error_log import write_error_log
 
 logger = logging.getLogger("akm.plugin_manager")
@@ -350,6 +351,14 @@ class PluginManager:
                     logger.error(
                         f"[PluginManager] {plugin.name} on_load 异常: {e}"
                     )
+                # ── 注册工具：on_load 成功后调用 register_tools ──
+                if plugin.runtime_ready:
+                    try:
+                        plugin.register_tools(ToolRegistry.instance())
+                    except Exception as e:
+                        logger.error(
+                            f"[PluginManager] {plugin.name} register_tools 异常: {e}"
+                        )
 
         logger.info(f"[PluginManager] 共加载 {len(self.plugins)} 个插件")
 
