@@ -296,29 +296,6 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`），流式模式逐轮推送 `turn_start` / `tool_call` / `tool_result` / `final` 事件 |
 
-### 工具注册
-
-插件可通过重写 `register_tools()` 方法向 Agent Loop 注册工具，所有注册的工具自动参与到工具调用编排中：
-
-```python
-from akm.agent_loop import ToolDef
-
-def register_tools(self, registry):
-    def get_weather(city: str) -> str:
-        return json.dumps({"city": city, "temp": 25, "condition": "晴"})
-
-    registry.register(ToolDef(
-        name="get_weather",
-        description="查询指定城市的天气",
-        parameters={
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"],
-        },
-        handler=get_weather,
-    ))
-```
-
 ### 响应格式
 
 ```json

@@ -47,7 +47,6 @@ class ToolDef:
 class ToolRegistry:
     """全局工具注册中心
 
-    插件在 register_tools() 中通过 register() 注册工具实现。
     Agent Loop 通过 execute() 查找并执行工具。
     """
 
