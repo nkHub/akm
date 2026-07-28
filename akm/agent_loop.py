@@ -9,7 +9,7 @@ import json
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Callable, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 logger = logging.getLogger("akm.agent_loop")
 
@@ -281,11 +281,57 @@ class AgentLoop:
         http_client,
         plugin_manager=None,
         tool_registry: Optional[ToolRegistry] = None,
+        audit_submitter: Optional[Callable[[dict], Awaitable[Any]]] = None,
     ):
+        """初始化 AgentLoop
+
+        Args:
+            http_client: httpx.AsyncClient 实例
+            plugin_manager: PluginManager 实例，传给 forward_request 用
+            tool_registry: 工具注册中心，默认使用全局单例
+            audit_submitter: 审计日志异步回调，接收 dict 参数写入 DB
+        """
         self._http_client = http_client
         self._plugin_manager = plugin_manager
         self._tool_registry = tool_registry or ToolRegistry.instance()
         self._max_turns = MAX_AGENT_TURNS
+        self._audit_submitter = audit_submitter
+
+    async def _try_audit(
+        self,
+        result: dict,
+        model: str,
+        request_body: dict,
+        response_body: str,
+        status_code: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        error: str = "",
+    ) -> None:
+        """如果注册了审计回调，则写入审计日志（来源标记为 agent）"""
+        if self._audit_submitter is None:
+            return
+        try:
+            resp_for_log = response_body
+            if len(resp_for_log) > 64000:
+                resp_for_log = resp_for_log[:32000] + f"\n...(截断，共 {len(resp_for_log)} 字符)" + resp_for_log[-32000:]
+            await self._audit_submitter({
+                "provider": str(result.get("provider", "") or ""),
+                "key_alias": str(result.get("key_alias", "") or ""),
+                "model": model,
+                "request_body": json.dumps(request_body, ensure_ascii=False),
+                "response_body": resp_for_log,
+                "status_code": status_code,
+                "latency_ms": int(result.get("latency_ms", 0) or 0),
+                "error": error,
+                "request_headers": json.dumps({"x-source": "agent"}),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            })
+        except Exception:
+            logger.warning("[AgentLoop] 审计日志写入失败", exc_info=True)
 
     async def run(
         self,
@@ -372,6 +418,10 @@ class AgentLoop:
             if status_code < 200 or status_code >= 300:
                 error_msg = str(result.get("error", f"上游返回 HTTP {status_code}") or "")
                 logger.warning("[AgentLoop] LLM 调用失败 (turn=%d): %s", turn, error_msg)
+                await self._try_audit(
+                    result, model, body, response_body, status_code,
+                    0, 0, 0, error=error_msg,
+                )
                 return AgentResult(
                     ok=False,
                     messages=working_messages,
@@ -381,15 +431,25 @@ class AgentLoop:
                 )
 
             # 累加 token 用量
+            prompt_tokens = 0
+            completion_tokens = 0
             try:
                 resp_data = json.loads(response_body)
                 usage = resp_data.get("usage", {})
                 if isinstance(usage, dict):
-                    total_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
-                    total_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+                    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                    total_usage["prompt_tokens"] += prompt_tokens
+                    total_usage["completion_tokens"] += completion_tokens
                     total_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
             except json.JSONDecodeError:
                 pass
+
+            # 写入审计日志，来源标记为 agent
+            await self._try_audit(
+                result, model, body, response_body, status_code,
+                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
+            )
 
             # 提取 tool_calls
             tool_calls = _extract_tool_calls_from_response(response_body)
@@ -548,18 +608,32 @@ class AgentLoop:
 
             if status_code < 200 or status_code >= 300:
                 error_msg = str(result.get("error", f"上游返回 HTTP {status_code}") or "")
+                await self._try_audit(
+                    result, model, body, response_body, status_code,
+                    0, 0, 0, error=error_msg,
+                )
                 yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
                 return
 
+            prompt_tokens = 0
+            completion_tokens = 0
             try:
                 resp_data = json.loads(response_body)
                 usage = resp_data.get("usage", {})
                 if isinstance(usage, dict):
-                    total_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
-                    total_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+                    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                    total_usage["prompt_tokens"] += prompt_tokens
+                    total_usage["completion_tokens"] += completion_tokens
                     total_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
             except json.JSONDecodeError:
                 pass
+
+            # 写入审计日志，来源标记为 agent
+            await self._try_audit(
+                result, model, body, response_body, status_code,
+                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
+            )
 
             tool_calls = _extract_tool_calls_from_response(response_body)
 
