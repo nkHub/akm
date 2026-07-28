@@ -8,7 +8,8 @@
 import json
 import inspect
 import logging
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Callable, Optional
 
 logger = logging.getLogger("akm.agent_loop")
 
@@ -471,6 +472,167 @@ class AgentLoop:
             error=f"达到最大轮次限制 ({_max_turns})",
             usage=total_usage,
         )
+
+    async def run_stream(
+        self,
+        messages: list[dict],
+        *,
+        model: str = "",
+        tools: list[dict] | None = None,
+        instructions: str = "",
+        max_turns: int = 0,
+        api_path: str = "chat/completions",
+    ) -> AsyncGenerator[str, None]:
+        """运行 Agent Loop 并流式返回 SSE 事件（每轮 emit 一次事件）
+
+        事件类型：
+        - ``turn_start``    — 新一轮开始
+        - ``tool_call``     — 单个工具调用
+        - ``tool_result``   — 单个工具执行结果
+        - ``final``         — Agent 完成，含 final_message / usage / turns
+        - ``error``         — 错误结束，含 error / turns / usage
+
+        Args:
+            与 ``run()`` 相同。
+
+        Yields:
+            格式化为 ``data: {...}\\n\\n`` 的 SSE 字符串
+        """
+        from akm.proxy import forward_request
+
+        _max_turns = max_turns if max_turns > 0 else self._max_turns
+
+        working_messages: list[dict] = list(messages or [])
+        if instructions and working_messages:
+            if working_messages[0].get("role") == "system":
+                working_messages[0]["content"] = (
+                    str(working_messages[0].get("content", "")) + "\n\n" + instructions
+                )
+            else:
+                working_messages.insert(0, {"role": "system", "content": instructions})
+
+        registered_tools = self._tool_registry.list_tools()
+        all_tools = list(tools or []) + registered_tools
+        seen_names: set[str] = set()
+        deduped_tools: list[dict] = []
+        for t in all_tools:
+            name = (t.get("function", {}) or {}).get("name", "")
+            if name and name not in seen_names:
+                seen_names.add(name)
+                deduped_tools.append(t)
+
+        total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        for turn in range(1, _max_turns + 1):
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": working_messages,
+                "stream": False,
+            }
+            if deduped_tools:
+                body["tools"] = deduped_tools
+
+            result = await forward_request(
+                body,
+                self._http_client,
+                api_path=api_path,
+                plugin_manager=self._plugin_manager,
+            )
+
+            if result.get("stream"):
+                yield _sse_event("error", {"error": "内部调用返回了流式响应", "turns": turn, "usage": total_usage})
+                return
+
+            status_code = int(result.get("status_code", 0) or 0)
+            response_body = str(result.get("body", "") or "")
+
+            if status_code < 200 or status_code >= 300:
+                error_msg = str(result.get("error", f"上游返回 HTTP {status_code}") or "")
+                yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
+                return
+
+            try:
+                resp_data = json.loads(response_body)
+                usage = resp_data.get("usage", {})
+                if isinstance(usage, dict):
+                    total_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+                    total_usage["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+                    total_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            except json.JSONDecodeError:
+                pass
+
+            tool_calls = _extract_tool_calls_from_response(response_body)
+
+            if not tool_calls:
+                text_content = _extract_text_content(response_body)
+                final_message = {
+                    "role": "assistant",
+                    "content": text_content or response_body,
+                }
+                working_messages.append(final_message)
+                yield _sse_event("final", {
+                    "final_message": final_message,
+                    "messages": working_messages,
+                    "turns": turn,
+                    "usage": total_usage,
+                })
+                return
+
+            yield _sse_event("turn_start", {"turn": turn})
+
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [],
+            }
+            tool_result_msgs: list[dict] = []
+            for tc in tool_calls:
+                tc_id = tc["id"]
+                tc_name = tc["name"]
+                try:
+                    tc_args = (
+                        json.loads(tc["arguments"])
+                        if isinstance(tc["arguments"], str)
+                        else tc["arguments"]
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    tc_args = {}
+
+                yield _sse_event("tool_call", {"name": tc_name, "arguments": tc_args})
+
+                assistant_msg["tool_calls"].append({
+                    "id": tc_id,
+                    "type": "function",
+                    "function": {
+                        "name": tc_name,
+                        "arguments": json.dumps(tc_args, ensure_ascii=False),
+                    },
+                })
+
+                tool_result = await self._tool_registry.execute(tc_name, tc_args)
+                yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
+
+                tool_result_msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": tool_result,
+                })
+
+            working_messages.append(assistant_msg)
+            working_messages.extend(tool_result_msgs)
+
+        logger.warning("[AgentLoop] 达到最大轮次限制 %d", _max_turns)
+        yield _sse_event("error", {
+            "error": f"达到最大轮次限制 ({_max_turns})",
+            "turns": _max_turns,
+            "usage": total_usage,
+        })
+
+
+def _sse_event(event: str, data: dict) -> str:
+    """构造一条 SSE 格式的字符串"""
+    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
+    return f"data: {payload}\n\n"
 
 
 # ── 全局 Agent Loop 实例引用，由 server.py 在 lifespan 中创建和设置 ──
