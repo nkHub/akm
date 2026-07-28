@@ -69,38 +69,8 @@ class PluginBase:
         """插件卸载回调（应用关闭前调用），可在此清理资源"""
         pass
 
-    def register_tools(self, tool_registry) -> None:
-        """插件可重写此方法，向 ToolRegistry 注册工具
+    
 
-        调用时机：PluginManager 在 on_load 成功后调用此方法。
-        所有通过此方法注册的工具将自动参与到 Agent Loop 的工具调用编排中。
-
-        Args:
-            tool_registry: ``akm.agent_loop.ToolRegistry`` 全局单例实例
-
-        示例::
-
-            from akm.agent_loop import ToolDef
-
-            def register_tools(self, registry):
-                def search_kb(query: str) -> str:
-                    results = self._search(query)
-                    return json.dumps(results, ensure_ascii=False)
-
-                registry.register(ToolDef(
-                    name="search_knowledge_base",
-                    description="搜索知识库中的文档内容",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "搜索关键词"},
-                        },
-                        "required": ["query"],
-                    },
-                    handler=search_kb,
-                ))
-        """
-        pass
 
     def on_config_changed(self, old_config: dict, new_config: dict) -> None:
         """插件配置保存后的同步回调。
