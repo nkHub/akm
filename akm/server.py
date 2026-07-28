@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from akm import __version__
 from akm.proxy import forward_request, test_key_connectivity
+from akm.agent_loop import AgentLoop, set_agent_loop
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
@@ -133,6 +134,11 @@ async def lifespan(app: FastAPI):
     app.state.http_client_lock = asyncio.Lock()
     http_client = _build_http_client_pool_manager()
     app.state.http_client = http_client
+    # 初始化 Agent Loop（依赖 plugin_manager 已就绪）
+    agent_loop = AgentLoop(http_client, plugin_manager=plugin_manager)
+    set_agent_loop(agent_loop)
+    app.state.agent_loop = agent_loop
+    logger.info("[Server] Agent Loop 已初始化")
     # 用量查询自动调度器
     usage_query_scheduler = _UsageQueryScheduler(app)
     usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
@@ -2251,6 +2257,55 @@ async def image_edits(request: Request):
     3. 不参与协议转换。
     """
     return await _handle_ai_request(request, "images/edits")
+
+
+@app.post("/v1/agent")
+@app.post("/agent")
+async def agent(request: Request):
+    """Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环
+
+    请求体（JSON）：::
+
+        {
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "..."}],
+            "tools": [
+                {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+            ],
+            "instructions": "可选的系统级指令",
+            "api_path": "chat/completions",
+            "max_turns": 20
+        }
+
+    返回 Agent 最终回复，包含完整消息历史和 token 用量。
+    """
+    body = await request.json()
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return JSONResponse(status_code=400, content={"detail": "缺少 messages 参数"})
+
+    model = str(body.get("model", "") or "")
+    tools = body.get("tools")
+    instructions = str(body.get("instructions", "") or "")
+    api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
+    try:
+        max_turns = int(body.get("max_turns", 0) or 0)
+    except (TypeError, ValueError):
+        max_turns = 0
+
+    agent_loop = request.app.state.agent_loop
+    if agent_loop is None:
+        return JSONResponse(status_code=503, content={"detail": "Agent Loop 尚未初始化"})
+
+    result = await agent_loop.run(
+        messages,
+        model=model,
+        tools=tools if isinstance(tools, list) else None,
+        instructions=instructions,
+        max_turns=max_turns,
+        api_path=api_path,
+    )
+    return JSONResponse(content=result.to_dict())
 
 
 async def _handle_ai_request(request: Request, api_path: str):

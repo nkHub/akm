@@ -6,6 +6,7 @@
 
 为 akm 提供可扩展的插件机制，支持第三方在不修改核心代码的情况下：
 - 注册自定义 API 路由
+- 注册 Agent Loop 工具（通过 `register_tools` 生命周期方法）
 - 提供独立的前端界面（集成到管理台菜单）
 - 拦截请求/响应做自定义处理（日志、审计、过滤等）
 - 访问项目数据库、配置、日志等上下文
@@ -323,6 +324,18 @@ class PluginBase:
         """配置保存后同步调用；用于刷新实例内缓存的配置值"""
         pass
 
+    def register_tools(self, tool_registry) -> None:
+        """on_load 成功后调用，用于向 ToolRegistry 注册 Agent Loop 专用工具
+
+        tool_registry 是 ``akm.agent_loop.ToolRegistry`` 全局单例，
+        通过 ``registry.register(ToolDef(...))`` 注册工具。
+        注册的工具自动参与 POST /v1/agent 的工具调用编排。
+
+        调用时机：PluginManager 在 on_load 返回 True/None 后自动调用，
+        与 on_load 一样受 runtime_ready 保护（异常时只记录错误，不阻断插件加载）。
+        """
+        pass
+
     # ——— 可重写的 hook 方法（均接收请求级 RequestContext） ———
     async def on_request(self, ctx: "RequestContext"):
         """请求到达时调用（需在 plugin.json 中声明 hooks.on_request: true）
@@ -388,6 +401,7 @@ PluginManager.load_all()
         ├── 5. 注册 plugin.router 与静态资源（如有）
         ├── 6. 存入 self.plugins
         └── 7. 调用 plugin.on_load()；返回非 False 后设 runtime_ready=true
+              └── 若 runtime_ready=true，调用 plugin.register_tools(ToolRegistry.instance())
 
 应用关闭时 lifecycle shutdown：
   └── 按加载逆序遍历已就绪插件：
