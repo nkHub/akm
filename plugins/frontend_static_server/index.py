@@ -6,6 +6,7 @@ from pathlib import Path
 
 from starlette.exceptions import HTTPException
 from starlette.responses import PlainTextResponse
+from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
 from akm.plugins import PluginBase
@@ -68,6 +69,12 @@ class Plugin(PluginBase):
             self.logger.warning("[frontend_static_server] FastAPI app 未注入，跳过挂载")
             return False
 
+        # 清除同名旧挂载，避免进程内重启后旧实例残留路由遮蔽新实例。
+        # Starlette 的路由匹配按顺序命中第一条，重启时前一个 lifespan 创建的
+        # Mount 如果未清理，其引用的旧插件实例 runtime_ready 已经被 unload_all
+        # 置为 False，会导致所有请求返回 503。
+        self._remove_stale_mounts(app)
+
         self.spa_fallback = bool((self.config or {}).get("spa_fallback", True))
         if asset_dir is not None:
             app.mount(
@@ -86,6 +93,25 @@ class Plugin(PluginBase):
         self.site_path = route_prefix
         self.logger.info("[frontend_static_server] 已挂载 %s 到 %s", build_dir, route_prefix)
         return True
+
+    def _remove_stale_mounts(self, app):
+        """移除同插件名的旧挂载路由，防止进程内重启后残留。"""
+        mount_names = {
+            f"frontend_static_assets_{self.name}",
+            f"frontend_static_{self.name}",
+        }
+        old_count = len(app.router.routes)
+        app.router.routes = [
+            route
+            for route in app.router.routes
+            if not (isinstance(route, Mount) and route.name in mount_names)
+        ]
+        removed = old_count - len(app.router.routes)
+        if removed:
+            self.logger.info(
+                "[frontend_static_server] 清理了 %d 个旧挂载路由（进程内重启）",
+                removed,
+            )
 
     def _build_dir(self) -> Path | None:
         """解析目录并拒绝空值或非目录配置，避免意外挂载当前工作目录。"""
