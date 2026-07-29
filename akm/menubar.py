@@ -342,16 +342,20 @@ class AKMApp(rumps.App):
             tokens = int(data.get("total_tokens", 0) or 0)
             cost = float(data.get("total_cost", 0) or 0)
             if tokens >= 1_000_000_000:
-                token_str = f"{tokens / 1_000_000_000:.1f}B"
+                token_str = f"{tokens / 1_000_000_000:.2f}B"
             elif tokens >= 1_000_000:
-                token_str = f"{tokens / 1_000_000:.1f}M"
+                token_str = f"{tokens / 1_000_000:.2f}M"
             elif tokens >= 1000:
-                token_str = f"{tokens / 1000:.1f}K"
+                token_str = f"{tokens / 1000:.2f}K"
             else:
                 token_str = str(tokens)
-            # 紧凑单行：费用在前，Token 在后
-            cost_str = f"${cost:.1f}" if cost < 10 else f"${cost:.0f}"
-            title = f"{cost_str}·{token_str}"
+            # 紧凑单行：费用在前，Token 在后，用 / 分割；未开启费用估算则不显示费用
+            cost_stats_enabled = cfg.get("cost_stats_enabled", False)
+            if cost_stats_enabled:
+                cost_str = f"${cost:.2f}"
+                title = f"{cost_str} / {token_str}"
+            else:
+                title = token_str
             self._set_small_title(title)
             self._last_usage_title = title
         except Exception:
