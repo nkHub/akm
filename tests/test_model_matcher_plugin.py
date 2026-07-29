@@ -187,12 +187,16 @@ async def test_model_matcher_on_response_recycles_inflight_count():
 
     ctx = _ctx({})
     ctx.response = {"key_alias": "k1"}
+    # 模拟 on_key_selected 已登记 inflight_key，on_response 配对成功时回收一次
+    ctx.bag_set("model_matcher.inflight_key", "k1")
     await plugin.on_response(ctx)
     assert plugin._inflight_counts["k1"] == 1
 
+    # bag 已被清空，第二次调用不会重复回收
+    assert ctx.bag_get("model_matcher.inflight_key") is None
+    plugin._inflight_counts["k1"] = 1
     await plugin.on_response(ctx)
-    assert "k1" not in plugin._inflight_counts
-    assert "k1" not in plugin._inflight_oldest_ts
+    assert plugin._inflight_counts["k1"] == 1
 
 
 @pytest.mark.asyncio

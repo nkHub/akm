@@ -359,6 +359,21 @@ async def forward_request(
                     or "当前可用 Key 均已达到配额上限"
                 )
                 ctx.clear_action()
+                # model_matcher 在 on_key_selected 阶段已为当前 key 递增 inflight，
+                # 跳过时需触发 on_response 回收，防止 inflight 计数泄漏。
+                inflight_key = ctx.bag_get("model_matcher.inflight_key")
+                if inflight_key:
+                    await _emit_on_response_meta({
+                        "ok": True,
+                        "phase": "skip_key",
+                        "status_code": 0,
+                        "key_alias": inflight_key,
+                        "provider": key.get("provider", ""),
+                        "model": model,
+                        "latency_ms": 0,
+                        "error": "",
+                        "api_path": api_path,
+                    })
                 tried_aliases.add(key["alias"])
                 continue
             if isinstance(ctx.key, dict):
