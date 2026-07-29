@@ -327,15 +327,23 @@ class Plugin(PluginBase):
                 key = alt
                 current_alias = str(key.get("alias", ""))
 
-        # 将最终选择的 key 记为 in-flight；由 on_response 生命周期回收
+        # 将最终选择的 key 记为 in-flight；由 on_response 生命周期回收。
+        # 同时在 ctx.bag 中登记本请求使用的 key，防止重试时 on_response 被多次
+        # 调用导致 inflight 重复 -1（第一次失败即回收，重试中 inflight 已归零不准确）。
         if current_alias:
             self._inflight_counts[current_alias] = int(self._inflight_counts.get(current_alias, 0)) + 1
             self._inflight_oldest_ts.setdefault(current_alias, now)
+            ctx.bag_set("model_matcher.inflight_key", current_alias)
 
         return key
 
     async def on_response(self, ctx) -> None:
-        """请求完成生命周期回调：回收 in-flight 计数，避免并发统计累积失真。"""
+        """请求完成生命周期回调：回收 in-flight 计数，避免并发统计累积失真。
+
+        使用 ctx.bag 中的 "model_matcher.inflight_key" 与本响应的 key_alias 配对，
+        确保同一条请求的生命周期中 inflight 只被回收一次。重试场景下第一次尝试失败后
+        on_response 已回收计数，后续重试调用不再重复操作。
+        """
         response = ctx.response
         if not isinstance(response, dict):
             return
@@ -345,6 +353,13 @@ class Plugin(PluginBase):
 
         # 先更新健康统计，再回收并发计数。
         self._update_health_stats(alias, response)
+
+        # 仅当本响应的 key_alias 与 on_key_selected 阶段登记的 key 一致时才回收；
+        # 重试/跳过等场景可能多次调用 on_response，bag 回收后置空可防止重复 -1。
+        inflight_key = ctx.bag_get("model_matcher.inflight_key")
+        if inflight_key != alias:
+            return
+        ctx.bag_set("model_matcher.inflight_key", None)
 
         count = int(self._inflight_counts.get(alias, 0))
         if count <= 1:

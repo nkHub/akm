@@ -704,7 +704,7 @@ async def test_chat_completions_no_keys(monkeypatch):
         )
     assert resp.status_code == 503
     data = resp.json()
-    assert "没有可用" in data["detail"]
+    assert "服务暂时不可用" in data["detail"]
 
 
 @pytest.mark.asyncio
