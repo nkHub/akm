@@ -507,6 +507,8 @@ class Plugin(PluginBase):
 
 > **禁止**把跨阶段状态塞进 `request` 的 `__akm_*` 字段作为主路径（multipart 等传输字段可仍用 `__akm_*`，由 `forwardable_request()` 统一剥离）。网关元数据（`api_path` / `client_user_agent`）直接挂在 ctx 上，不再写入 body。
 
+`key_source_guard` 是默认关闭的项目本地 matcher 插件。它在 `on_key_selected` 阶段读取当前 `ctx.key.alias` 和 `ctx.client_user_agent`，以 `bindings_json` 中的 `{ "key_alias": "...", "client_patterns": ["CodexCLI/*"] }` 规则做大小写不敏感的 glob 匹配。仅配置中明确列出的 Key 会受限制；来源不匹配时调用 `ctx.set_skip_key(...)`，由代理继续选择其它 Key。若全部候选都被跳过，代理以 429 结束请求。`User-Agent` 可以被调用方伪造，因此该插件适合作为客户端路由约束，不能替代网络层身份认证或 API 入站鉴权。
+
 ### 8.4 执行顺序与状态传递
 
 同一 hook 的多个插件按 `priority` 从小到大依次执行（越小越优先），形成**管道链**，共享同一 `ctx`：

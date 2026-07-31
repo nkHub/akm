@@ -1,4 +1,4 @@
-"""rate_limit_guard / cache_proxy 聚焦回归测试。"""
+"""项目本地请求策略插件的聚焦回归测试。"""
 
 import json
 import logging
@@ -7,6 +7,7 @@ import pytest
 
 from akm.plugins.context import RequestContext
 from plugins.cache_proxy.index import Plugin as CacheProxy
+from plugins.key_source_guard.index import Plugin as KeySourceGuard
 from plugins.rate_limit_guard.index import Plugin as RateLimitGuard
 
 
@@ -96,6 +97,35 @@ async def test_rate_limit_guard_rpm_uses_configured_scope():
     assert await plugin.on_request(_ctx({"model": "gpt-a", "user": "alice"})) is None
     assert (await plugin.on_request(_ctx({"model": "gpt-b", "user": "alice"})))["type"] == "block"
     assert await plugin.on_request(_ctx({"model": "gpt-a", "user": "bob"})) is None
+
+
+@pytest.mark.asyncio
+async def test_key_source_guard_only_allows_bound_key_for_matching_user_agent():
+    plugin = KeySourceGuard()
+    plugin.logger = logging.getLogger("test.key_source_guard")
+    plugin.config = {
+        "enabled": True,
+        "bindings_json": json.dumps([
+            {"key_alias": "codex-key", "client_patterns": ["CodexCLI/*", "ClaudeCode/*"]}
+        ]),
+    }
+
+    allowed = _ctx({}, client_user_agent="CodexCLI/1.2")
+    allowed.key = {"alias": "codex-key"}
+    assert await plugin.on_key_selected(allowed) is None
+    assert allowed.is_skip_key is False
+
+    denied = _ctx({}, client_user_agent="curl/8.0")
+    denied.key = {"alias": "codex-key"}
+    assert await plugin.on_key_selected(denied) is None
+    assert denied.action is not None
+    assert denied.action["type"] == "skip_key"
+    assert denied.action["security_action"] == "key_source_denied"
+
+    unbound = _ctx({}, client_user_agent="curl/8.0")
+    unbound.key = {"alias": "other-key"}
+    assert await plugin.on_key_selected(unbound) is None
+    assert unbound.is_skip_key is False
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,36 @@
+{
+  "name": "key_source_guard",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "matcher",
+  "description": "按客户端 User-Agent 来源绑定指定上游 Key；来源不匹配时跳过该 Key",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 10,
+  "hooks": {
+    "on_key_selected": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用 Key 来源绑定",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不限制 Key 的客户端来源。"
+    },
+    {
+      "key": "bindings_json",
+      "label": "绑定规则 JSON",
+      "type": "text",
+      "default": "[]",
+      "description": "JSON 数组。每项为 {\"key_alias\": \"my-key\", \"client_patterns\": [\"ClaudeCode/*\"]}；仅列出的 Key 受限，client_patterns 使用 User-Agent glob。"
+    },
+    {
+      "key": "block_message",
+      "label": "拒绝提示",
+      "type": "text",
+      "default": "当前客户端来源无权使用此 API Key。",
+      "description": "当全部候选 Key 均因来源不匹配被跳过时，返回给客户端的提示。"
+    }
+  ]
+}
