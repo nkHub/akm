@@ -77,12 +77,14 @@ try {
   <div class="flex border-b border-border shrink-0">
     <button onclick="switchDrawerTab('chat')" id="dtab-chat" class="flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50">对话视图</button>
     <button onclick="switchDrawerTab('client-request')" id="dtab-client-request" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">客户端请求体</button>
+    <button onclick="switchDrawerTab('upstream-response')" id="dtab-upstream-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">上游响应</button>
     <button onclick="switchDrawerTab('request')" id="dtab-request" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">转换请求体</button>
-    <button onclick="switchDrawerTab('response')" id="dtab-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">响应体</button>
+    <button onclick="switchDrawerTab('response')" id="dtab-response" class="flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer">转换响应体</button>
   </div>
   <div class="flex-1 overflow-auto p-4" id="drawer-content">
     <akm-chat-viewer id="drawer-chat" class="block"></akm-chat-viewer>
     <akm-json-viewer id="drawer-client-request" class="hidden block"></akm-json-viewer>
+    <akm-json-viewer id="drawer-upstream-response" class="hidden block"></akm-json-viewer>
     <akm-json-viewer id="drawer-request" class="hidden block"></akm-json-viewer>
     <akm-json-viewer id="drawer-response" class="hidden block"></akm-json-viewer>
   </div>
@@ -108,6 +110,12 @@ var _jsonViewerMaxTextLength = 600000;
 var _chatLazyThreshold = 600000;
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
+function jsonTextEqual(a, b) {
+  // 忽略 JSON 键顺序差异后比较两段文本是否等价；任一段不是合法 JSON 时退化为原字符串比较。
+  if (!a || !b) return String(a) === String(b);
+  try { return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b)); }
+  catch(e) { return String(a) === String(b); }
+}
 function renderMarkdownSafe(text) {
   if (!text) return '<span class="text-gray-500">(空)</span>';
   // 先转义原始 HTML，再交给 marked 做 Markdown 解析。
@@ -448,14 +456,30 @@ function openDrawer(idx) {
   var currentLog = _drawerLog;
   var chatEl = document.getElementById('drawer-chat');
   var clientReqEl = document.getElementById('drawer-client-request');
+  var upstreamRespEl = document.getElementById('drawer-upstream-response');
   var reqEl = document.getElementById('drawer-request');
   var respEl = document.getElementById('drawer-response');
   document.getElementById('log-drawer').setTitle('['+esc(_drawerLog.key_alias||'-')+'] '+esc(_drawerLog.model||'-')+' - '+esc(_drawerLog.timestamp||'-'));
   // 聊天视图改为延迟渲染：避免大请求体时阻塞主线程，导致 tab 切换看起来失效。
   currentLog.__chatRendered = false;
   currentLog.__clientReqRendered = false;
+  currentLog.__upstreamRespRendered = false;
   currentLog.__reqRendered = false;
   currentLog.__respRendered = false;
+  // 未发生协议转换时隐藏「转换请求体」「转换响应体」两个 tab：
+  // 客户端原始请求体与上游请求体、上游原始响应体与发给客户端的响应体 JSON 内容一致即视为无转换。
+  // 任一侧数据缺失（未开启对应保存开关）时无法比较，保守保留 tab 显示。
+  // 「对话视图」「客户端请求体」「上游响应」三个 tab 始终显示。
+  var clientReqRaw = currentLog.client_request_body || '';
+  var upReqRaw = currentLog.request_body || '';
+  var upRespRaw = currentLog.upstream_response_body || '';
+  var clientRespRaw = currentLog.response_body || '';
+  var hasReqTransform = !(clientReqRaw && upReqRaw) || !jsonTextEqual(clientReqRaw, upReqRaw);
+  var hasRespTransform = !(upRespRaw && clientRespRaw) || !jsonTextEqual(upRespRaw, clientRespRaw);
+  var dtabReq = document.getElementById('dtab-request');
+  var dtabResp = document.getElementById('dtab-response');
+  if (dtabReq) dtabReq.classList.toggle('hidden', !hasReqTransform);
+  if (dtabResp) dtabResp.classList.toggle('hidden', !hasRespTransform);
   var reqLen = (currentLog.request_body || '').length;
   if (reqLen > _chatLazyThreshold) {
     chatEl.innerHTML = '<div class="text-gray-500 text-xs py-4 text-center">数据较大，切换到“对话视图”时再渲染</div>';
@@ -464,6 +488,7 @@ function openDrawer(idx) {
   }
   // 抽屉打开时先清空滚动与内容，避免看到上一次日志残留。
   if (typeof clientReqEl.setLoading === 'function') clientReqEl.setLoading(); else clientReqEl.textContent = '加载中...';
+  if (typeof upstreamRespEl.setLoading === 'function') upstreamRespEl.setLoading(); else upstreamRespEl.textContent = '加载中...';
   if (typeof reqEl.setLoading === 'function') reqEl.setLoading(); else reqEl.textContent = '加载中...';
   if (typeof respEl.setLoading === 'function') respEl.setLoading(); else respEl.textContent = '加载中...';
   // 先切换到聊天 tab 的基础样式，但把真正的大块内容渲染延后到抽屉滑出后，
@@ -491,13 +516,16 @@ function closeDrawer() {
     var chatEl = document.getElementById('drawer-chat');
     if (chatEl && typeof chatEl.clear === 'function') chatEl.clear(); else if (chatEl) chatEl.innerHTML = '';
     var clientReqEl = document.getElementById('drawer-client-request');
+    var upstreamRespEl = document.getElementById('drawer-upstream-response');
     var reqEl = document.getElementById('drawer-request');
     var respEl = document.getElementById('drawer-response');
     if (clientReqEl && typeof clientReqEl.clear === 'function') clientReqEl.clear(); else if (clientReqEl) clientReqEl.textContent = '';
+    if (upstreamRespEl && typeof upstreamRespEl.clear === 'function') upstreamRespEl.clear(); else if (upstreamRespEl) upstreamRespEl.textContent = '';
     if (reqEl && typeof reqEl.clear === 'function') reqEl.clear(); else if (reqEl) reqEl.textContent = '';
     if (respEl && typeof respEl.clear === 'function') respEl.clear(); else if (respEl) respEl.textContent = '';
     document.getElementById('drawer-content').scrollTop = 0;
     document.getElementById('drawer-client-request').scrollTop = 0;
+    document.getElementById('drawer-upstream-response').scrollTop = 0;
     document.getElementById('drawer-request').scrollTop = 0;
     document.getElementById('drawer-response').scrollTop = 0;
     _drawerLog = null;
@@ -505,8 +533,11 @@ function closeDrawer() {
 }
 function switchDrawerTab(tab) {
   // 不依赖 _drawerLog 状态，确保抽屉切换始终可执行。
-  var tabs = {chat:'dtab-chat', 'client-request':'dtab-client-request', request:'dtab-request', response:'dtab-response'};
-  var views = {chat:'drawer-chat', 'client-request':'drawer-client-request', request:'drawer-request', response:'drawer-response'};
+  var tabs = {chat:'dtab-chat', 'client-request':'dtab-client-request', 'upstream-response':'dtab-upstream-response', request:'dtab-request', response:'dtab-response'};
+  var views = {chat:'drawer-chat', 'client-request':'drawer-client-request', 'upstream-response':'drawer-upstream-response', request:'drawer-request', response:'drawer-response'};
+  // 目标 tab 已被隐藏（未发生对应转换）时回退到对话视图，避免残留状态切到空白 tab。
+  var targetBtn = document.getElementById(tabs[tab]);
+  if (targetBtn && targetBtn.classList.contains('hidden')) tab = 'chat';
   var active = views[tab] || views.chat;
   for (var k in tabs) {
     var tb = document.getElementById(tabs[k]);
@@ -531,6 +562,16 @@ function switchDrawerTab(tab) {
       setTimeout(function() {
         if (_drawerLog !== logRefClient) return;
         renderJsonAsync('drawer-client-request', logRefClient.client_request_body, logRefClient);
+      }, 0);
+    }
+  } else if (tab === 'upstream-response') {
+    if (_drawerLog && !_drawerLog.__upstreamRespRendered) {
+      // 先完成 tab 显隐，再异步触发 JSON 赋值，避免大文本处理阻塞导致 hidden 状态看起来未切换。
+      var logRefUpstreamResp = _drawerLog;
+      _drawerLog.__upstreamRespRendered = true;
+      setTimeout(function() {
+        if (_drawerLog !== logRefUpstreamResp) return;
+        renderJsonAsync('drawer-upstream-response', logRefUpstreamResp.upstream_response_body, logRefUpstreamResp);
       }, 0);
     }
   } else if (tab === 'request') {
