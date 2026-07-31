@@ -4,7 +4,7 @@ from akm.config import DEFAULTS
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 import httpx
-from akm.proxy import forward_request, test_key_connectivity as check_key_connectivity, _diagnose_no_key
+from akm.proxy import forward_request, test_key_connectivity as check_key_connectivity, _diagnose_no_key, redact_headers
 from akm.agent import AGENT_REGISTRY
 from akm.db import get_connection, init_db
 from akm.http_client_pool import HttpClientPoolManager
@@ -495,6 +495,63 @@ async def test_forward_responses_to_messages_with_chained_adapter(monkeypatch):
     assert result["body"] == "hello|chat|resp"
     assert send_calls[0]["stream"] is False
     assert send_calls[0]["req"].content.decode("utf-8").find('"stream":false') != -1
+
+
+@pytest.mark.asyncio
+async def test_forward_records_upstream_raw_response_before_conversion(monkeypatch):
+    """非流式下 upstream_response_body_for_log 应记录插件转换前的上游原始响应。"""
+
+    class DummyRespToChat:
+        _source_format = "responses"
+
+        def convert_request(self, body):
+            return dict(body)
+
+        def convert_response(self, body):
+            return body + "|chat"
+
+    class DummyChatToMsg:
+        _source_format = "chat"
+
+        def convert_request(self, body):
+            return dict(body)
+
+        def convert_response(self, body):
+            return body + "|msg"
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            if (from_fmt, to_fmt) == ("responses", "chat"):
+                return DummyRespToChat()
+            if (from_fmt, to_fmt) == ("chat", "messages"):
+                return DummyChatToMsg()
+            return None
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            return ctx if ctx is not None else kwargs
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "k1",
+        "provider": "anthropic",
+        "api_key": "sk-ant",
+        "base_url": "https://api.anthropic.com",
+    }))
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"raw":"upstream"}')])
+
+    result = await forward_request(
+        body={"model": "claude-3", "input": "hi", "stream": False},
+        client=mock_client,
+        api_path="responses",
+        plugin_manager=DummyPM(),
+    )
+
+    assert result["status_code"] == 200
+    # 转换前原始响应 = 上游返回内容
+    assert result["upstream_response_body_for_log"] == '{"raw":"upstream"}'
+    # 转换后响应 = 发给客户端的 body（两段转换：先 chat→msg，再 responses→chat）
+    assert result["body"] == '{"raw":"upstream"}|msg|chat'
 
 
 @pytest.mark.asyncio
@@ -1332,3 +1389,26 @@ async def test_test_key_connectivity_wildcard_without_provider_models_errors(mon
     assert result["model"] == ""
     assert result["attempted_paths"] == []
     assert "请先保存或刷新模型" in result["error"]
+
+
+def test_redact_headers_masks_sensitive_values_keeps_keys():
+    """敏感请求头值应被掩码，但键名与非敏感头应原样保留。"""
+    out = redact_headers({
+        "Authorization": "Bearer sk-secret-123",
+        "x-api-key": "abc123",
+        "Cookie": "session=xyz",
+        "X-Custom": "keep-me",
+        "user-agent": "test-client/1.0",
+    })
+    assert out["Authorization"] == "Bearer ***"
+    assert out["x-api-key"] == "***"
+    assert out["Cookie"] == "***"
+    assert out["X-Custom"] == "keep-me"
+    assert out["user-agent"] == "test-client/1.0"
+
+
+def test_redact_headers_case_insensitive_and_empty():
+    """脱敏匹配应大小写不敏感，空输入应返回空对象。"""
+    assert redact_headers({"AUTHORIZATION": "abc"}) == {"AUTHORIZATION": "***"}
+    assert redact_headers(None) == {}
+    assert redact_headers({}) == {}
