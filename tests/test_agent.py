@@ -113,7 +113,6 @@ def test_build_headers_uses_native_user_agent_when_enabled(monkeypatch):
         "akm.agent.config_get",
         lambda key, default=None: {
             "use_native_user_agent": True,
-            "user_agent_override": "Codex Desktop/test",
         }.get(key, default),
     )
     agent = Agent(name="openai", default_base_url="https://api.openai.com")
@@ -122,18 +121,17 @@ def test_build_headers_uses_native_user_agent_when_enabled(monkeypatch):
     assert headers["User-Agent"] == "Claude-Code/1.2.3"
 
 
-def test_build_headers_uses_configured_user_agent_override(monkeypatch):
-    """未启用原生透传时，应使用全局配置的固定上游 User-Agent。"""
+def test_build_headers_uses_akm_user_agent_when_native_disabled(monkeypatch):
+    """未启用原生透传时，应使用 akm 版本标识作为上游 User-Agent。"""
     monkeypatch.setattr(
         "akm.agent.config_get",
         lambda key, default=None: {
             "use_native_user_agent": False,
-            "user_agent_override": "Codex Desktop/test",
         }.get(key, default),
     )
     agent = Agent(name="openai", default_base_url="https://api.openai.com")
     headers = agent.build_headers({"api_key": "sk-test123"})
-    assert headers["User-Agent"] == "Codex Desktop/test"
+    assert headers["User-Agent"].startswith("akm/")
 
 
 def test_build_headers_falls_back_to_akm_user_agent_without_native_value(monkeypatch):
@@ -142,7 +140,6 @@ def test_build_headers_falls_back_to_akm_user_agent_without_native_value(monkeyp
         "akm.agent.config_get",
         lambda key, default=None: {
             "use_native_user_agent": True,
-            "user_agent_override": "",
         }.get(key, default),
     )
     agent = Agent(name="openai", default_base_url="https://api.openai.com")

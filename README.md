@@ -198,7 +198,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `wake_recover_delay_sec` 也是 `config.json` 中的隐藏配置项，默认值为 `8`。它仅作用于菜单栏应用收到系统唤醒事件后的恢复流程，用来控制在执行本地 `ready` 检查和真实上游探活之前要等待多久，适合在 VPN、Wi-Fi 或代理路由恢复偏慢的机器上手动调大；该项不会在设置页单独展示。
 
-`user_agent_override` 是 `config.json` 中的隐藏配置项，默认使用 Codex Desktop 的 User-Agent。未启用原生透传时，聊天、图片、模型探测等所有走统一 `build_headers()` 的上游请求都会使用该值；可手动改为 OpenCode、Claude Code 等任意固定标识，留空则回退为 `akm/<version>`。`use_native_user_agent` 默认值为 `false`；设为 `true` 后，如果当前 HTTP 请求带有原始 `User-Agent`，会优先透传该原值并忽略 `user_agent_override`。若原始请求没有该请求头，则继续使用 `user_agent_override` 或 `akm/<version>` 回退值。
+`use_native_user_agent` 是 `config.json` 中的隐藏配置项，默认值为 `false`。设为 `true` 后启用**原生透传**：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时会把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。若需要伪装成特定客户端，后续由客户端模拟插件承担。
 
 如果需要给本地智能体接入图片能力，优先使用仓库内置的 `skills/akm-image-local/SKILL.md`。这个 skill 的定位是让图片生成与编辑统一走本地 AKM 服务，而不是继续依赖单独的图片 MCP 网关；它已经约定了默认模型、尺寸、质量和提示词组织方式，适合直接复用到智能体工作流中。
 

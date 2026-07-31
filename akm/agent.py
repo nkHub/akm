@@ -86,14 +86,15 @@ class Agent:
         }
 
     def _resolve_user_agent(self, api_path: str = "", original_user_agent: str = "") -> str:
-        """根据全局配置和接口类型决定上游请求使用的 User-Agent。"""
+        """根据全局配置和接口类型决定上游请求使用的 User-Agent。
+
+        开启 use_native_user_agent 且客户端带有原始 User-Agent 时透传原值，
+        否则回退 akm/<version>。模拟指定客户端的能力由后续客户端伪装插件承担。
+        """
         if bool(config_get("use_native_user_agent", False)):
             native = str(original_user_agent or "").strip()
             if native:
                 return native
-        override = str(config_get("user_agent_override", "") or "").strip()
-        if override:
-            return override
         return f"akm/{__version__}"
 
     def needs_conversion(self, api_path: str) -> Optional[str]:
