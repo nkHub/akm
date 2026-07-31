@@ -263,6 +263,220 @@ class AgentResult:
         }
 
 
+class _SSEStreamAccumulator:
+    """SSE 流式累加器
+
+    从上游 SSE 增量流中提取可见文本和工具调用。无论上游使用 Chat、
+    Responses 还是 Messages 事件，均重建为内部统一的 Chat 响应，避免
+    Agent API 向客户端泄露或混杂上游协议帧。
+    """
+
+    def __init__(self):
+        self._line_buf = ""  # 行缓冲区，处理跨 chunk 边界的 SSE 行
+        self._content_parts: list[str] = []  # 文本增量累积
+        self._reasoning_parts: list[str] = []  # 推理内容增量累积 (delta.reasoning_content)
+        self._tool_calls: dict[int, dict] = {}  # index → 累积后的 tool_call
+        self._usage: dict = {}
+        self._model = ""
+
+    def feed(self, text: str) -> list[str]:
+        """喂入一段 SSE 文本，返回本段新解析出的可见文本增量。"""
+        self._line_buf += text
+        return self._extract_lines()
+
+    def finish(self) -> list[str]:
+        """处理流结束时未以换行结尾的最后一个 SSE 数据行。"""
+        if not self._line_buf:
+            return []
+        self._line_buf += "\n"
+        return self._extract_lines()
+
+    def _extract_lines(self) -> list[str]:
+        deltas: list[str] = []
+        while "\n" in self._line_buf:
+            idx = self._line_buf.index("\n")
+            line = self._line_buf[:idx].rstrip("\r")
+            self._line_buf = self._line_buf[idx + 1 :]
+            line = line.strip()
+            if line.startswith("data: "):
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    continue
+                try:
+                    delta = self._process_chunk(json.loads(data_str))
+                    if delta:
+                        deltas.append(delta)
+                except json.JSONDecodeError:
+                    pass
+        return deltas
+
+    def _update_usage(self, usage: dict) -> None:
+        """兼容三种协议的字段名，且保留上游给出的 total_tokens。"""
+        self._usage.update(usage)
+        if "input_tokens" in usage and "prompt_tokens" not in usage:
+            self._usage["prompt_tokens"] = usage["input_tokens"]
+        if "output_tokens" in usage and "completion_tokens" not in usage:
+            self._usage["completion_tokens"] = usage["output_tokens"]
+
+    def _tool_call(self, index: int) -> dict:
+        if index not in self._tool_calls:
+            self._tool_calls[index] = {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            }
+        return self._tool_calls[index]
+
+    def _process_chunk(self, data: dict) -> str:
+        """解析单个协议帧并返回其中的可见文本增量。"""
+        if not self._model:
+            self._model = str(data.get("model", "") or "")
+
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            self._update_usage(usage)
+
+        visible_parts: list[str] = []
+        for choice in (data.get("choices") or []):
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta", {})
+            if not isinstance(delta, dict):
+                continue
+            # 文本增量
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                self._content_parts.append(content)
+                visible_parts.append(content)
+            # 推理内容增量（thinking/reasoning，如 deepseek-reasoner 的 reasoning_content）
+            reasoning = delta.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                self._reasoning_parts.append(reasoning)
+            # 工具调用增量（OpenAI Chat 流式 tool_calls 以 delta 形式分片到达）
+            tool_calls = delta.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    try:
+                        idx = int(tc.get("index", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    cur = self._tool_call(idx)
+                    if "id" in tc and tc["id"]:
+                        cur["id"] = str(tc["id"])
+                    if "type" in tc:
+                        cur["type"] = str(tc["type"])
+                    fn = tc.get("function")
+                    if isinstance(fn, dict):
+                        if fn.get("name"):
+                            cur["function"]["name"] += str(fn["name"])
+                        if fn.get("arguments"):
+                            cur["function"]["arguments"] += str(fn["arguments"])
+
+        event_type = str(data.get("type", "") or "")
+        if event_type == "response.output_text.delta":
+            content = data.get("delta")
+            if isinstance(content, str) and content:
+                self._content_parts.append(content)
+                visible_parts.append(content)
+        elif event_type == "response.output_item.added":
+            item = data.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                try:
+                    index = int(data.get("output_index", len(self._tool_calls)) or 0)
+                except (TypeError, ValueError):
+                    index = len(self._tool_calls)
+                cur = self._tool_call(index)
+                cur["id"] = str(item.get("call_id", item.get("id", "")) or "")
+                cur["function"]["name"] = str(item.get("name", "") or "")
+                cur["function"]["arguments"] = str(item.get("arguments", "") or "")
+        elif event_type == "response.function_call_arguments.delta":
+            try:
+                index = int(data.get("output_index", 0) or 0)
+            except (TypeError, ValueError):
+                index = 0
+            cur = self._tool_call(index)
+            if data.get("call_id"):
+                cur["id"] = str(data["call_id"])
+            content = data.get("delta")
+            if isinstance(content, str):
+                cur["function"]["arguments"] += content
+        elif event_type == "content_block_start":
+            block = data.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                try:
+                    index = int(data.get("index", 0) or 0)
+                except (TypeError, ValueError):
+                    index = 0
+                cur = self._tool_call(index)
+                cur["id"] = str(block.get("id", "") or "")
+                cur["function"]["name"] = str(block.get("name", "") or "")
+                input_data = block.get("input")
+                cur["function"]["arguments"] = (
+                    json.dumps(input_data, ensure_ascii=False)
+                    if input_data else ""
+                )
+        elif event_type == "content_block_delta":
+            delta = data.get("delta")
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                content = delta.get("text")
+                if isinstance(content, str) and content:
+                    self._content_parts.append(content)
+                    visible_parts.append(content)
+            elif isinstance(delta, dict) and delta.get("type") == "input_json_delta":
+                try:
+                    index = int(data.get("index", 0) or 0)
+                except (TypeError, ValueError):
+                    index = 0
+                partial_json = delta.get("partial_json")
+                if isinstance(partial_json, str):
+                    self._tool_call(index)["function"]["arguments"] += partial_json
+        elif event_type == "message_start":
+            message = data.get("message")
+            if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                self._update_usage(message["usage"])
+
+        return "".join(visible_parts)
+
+    @property
+    def prompt_tokens(self) -> int:
+        return int(self._usage.get("prompt_tokens", 0) or 0)
+
+    @property
+    def completion_tokens(self) -> int:
+        return int(self._usage.get("completion_tokens", 0) or 0)
+
+    @property
+    def total_tokens(self) -> int:
+        total = self._usage.get("total_tokens")
+        if total is not None:
+            return int(total or 0)
+        return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def response_body(self) -> str:
+        """重建非流式完整响应 JSON，供 _extract_tool_calls_from_response 等复用"""
+        sorted_calls = [self._tool_calls[i] for i in sorted(self._tool_calls)]
+        reasoning = "".join(self._reasoning_parts) or None
+        return json.dumps(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "".join(self._content_parts) or None,
+                            "reasoning_content": reasoning,
+                            "tool_calls": sorted_calls if sorted_calls else None,
+                        }
+                    }
+                ],
+                "usage": self._usage,
+            },
+            ensure_ascii=False,
+        )
+
+
 class AgentLoop:
     """Agent Loop 编排器
 
@@ -553,20 +767,24 @@ class AgentLoop:
         max_turns: int = 0,
         api_path: str = "chat/completions",
     ) -> AsyncGenerator[str, None]:
-        """运行 Agent Loop 并流式返回 SSE 事件（每轮 emit 一次事件）
+        """运行 Agent Loop 并流式返回 SSE 事件
 
         事件类型：
-        - ``turn_start``    — 新一轮开始
+        - ``model_delta``   — LLM 新生成的可见文本片段
+        - ``turn_start``    — 新一轮开始（检测到工具调用时）
         - ``tool_call``     — 单个工具调用
         - ``tool_result``   — 单个工具执行结果
         - ``final``         — Agent 完成，含 final_message / usage / turns
         - ``error``         — 错误结束，含 error / turns / usage
 
+        每轮 LLM 调用以 ``stream: True`` 发送。上游协议帧只在服务端解析，
+        客户端始终收到统一的 Agent SSE 事件。
+
         Args:
             与 ``run()`` 相同。
 
         Yields:
-            格式化为 ``data: {...}\\n\\n`` 的 SSE 字符串
+            格式化为 ``data: {...}\\n\\n`` 的 Agent SSE 字符串
         """
         from akm.proxy import forward_request
 
@@ -597,7 +815,7 @@ class AgentLoop:
             body: dict[str, Any] = {
                 "model": model,
                 "messages": working_messages,
-                "stream": False,
+                "stream": True,
             }
             if deduped_tools:
                 body["tools"] = deduped_tools
@@ -610,44 +828,82 @@ class AgentLoop:
             )
 
             if result.get("stream"):
-                yield _sse_event("error", {"error": "内部调用返回了流式响应", "turns": turn, "usage": total_usage})
-                return
+                # Agent 对外协议独立于原始上游协议，不能通过 adapter 转换后再解析。
+                resp = result["response"]
+                status_code = int(result.get("status_code", 0) or 0)
+                acc = _SSEStreamAccumulator()
 
-            status_code = int(result.get("status_code", 0) or 0)
-            response_body = str(result.get("body", "") or "")
+                try:
+                    if status_code < 200 or status_code >= 300:
+                        response_body = (await resp.aread()).decode("utf-8", errors="replace")
+                        try:
+                            error_data = json.loads(response_body)
+                            error_msg = str(error_data.get("error", "") or "")
+                        except json.JSONDecodeError:
+                            error_msg = ""
+                        error_msg = str(result.get("error", error_msg) or error_msg or f"上游返回 HTTP {status_code}")
+                        await self._try_audit(
+                            result, model, body, response_body, status_code,
+                            0, 0, 0, error=error_msg,
+                        )
+                        yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
+                        return
 
-            if status_code < 200 or status_code >= 300:
-                error_msg = str(result.get("error", f"上游返回 HTTP {status_code}") or "")
-                await self._try_audit(
-                    result, model, body, response_body, status_code,
-                    0, 0, 0, error=error_msg,
-                )
-                yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
-                return
+                    async for chunk in resp.aiter_bytes():
+                        for content in acc.feed(chunk.decode("utf-8", errors="replace")):
+                            yield _sse_event("model_delta", {"turn": turn, "content": content})
+                    for content in acc.finish():
+                        yield _sse_event("model_delta", {"turn": turn, "content": content})
+                finally:
+                    await resp.aclose()
 
-            prompt_tokens = 0
-            completion_tokens = 0
-            try:
-                resp_data = json.loads(response_body)
-                usage = resp_data.get("usage", {})
-                if isinstance(usage, dict):
-                    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-                    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-                    total_usage["prompt_tokens"] += prompt_tokens
-                    total_usage["completion_tokens"] += completion_tokens
-                    total_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
-            except json.JSONDecodeError:
-                pass
+                response_body = acc.response_body
+                prompt_tokens = acc.prompt_tokens
+                completion_tokens = acc.completion_tokens
+                total_tokens = acc.total_tokens
+            else:
+                # ── 非流式兜底（上游不支持流式或其他原因返回了普通 JSON 响应）──
+                status_code = int(result.get("status_code", 0) or 0)
+                response_body = str(result.get("body", "") or "")
 
-            # 写入审计日志，来源标记为 agent
+                if status_code < 200 or status_code >= 300:
+                    error_msg = str(result.get("error", f"上游返回 HTTP {status_code}") or "")
+                    await self._try_audit(
+                        result, model, body, response_body, status_code,
+                        0, 0, 0, error=error_msg,
+                    )
+                    yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
+                    return
+
+                prompt_tokens = 0
+                completion_tokens = 0
+                total_tokens = 0
+                try:
+                    resp_data = json.loads(response_body)
+                    usage = resp_data.get("usage", {})
+                    if isinstance(usage, dict):
+                        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                        total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+                except json.JSONDecodeError:
+                    pass
+
+            # ── 累加 token 用量 ──
+            total_usage["prompt_tokens"] += prompt_tokens
+            total_usage["completion_tokens"] += completion_tokens
+            total_usage["total_tokens"] += total_tokens
+
+            # ── 审计日志 ──
             await self._try_audit(
                 result, model, body, response_body, status_code,
-                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
+                prompt_tokens, completion_tokens, total_tokens,
             )
 
+            # ── 从累积/重建的响应中提取 tool_calls ──
             tool_calls = _extract_tool_calls_from_response(response_body)
 
             if not tool_calls:
+                # 没有工具调用 → Agent 完成
                 text_content = _extract_text_content(response_body)
                 final_message = {
                     "role": "assistant",
@@ -662,6 +918,7 @@ class AgentLoop:
                 })
                 return
 
+            # 有工具调用 → emit 事件并执行
             yield _sse_event("turn_start", {"turn": turn})
 
             assistant_msg: dict[str, Any] = {
