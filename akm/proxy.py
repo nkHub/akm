@@ -103,6 +103,38 @@ def _proxy_retry_backoff_base() -> float:
 def _proxy_default_timeout() -> float:
     return max(30.0, float(load_config().get("proxy_default_timeout_sec", 120.0) or 120.0))
 
+# 敏感请求头名（小写比较）：值一律掩码，避免 API Key / Cookie 等凭据落入审计日志
+SENSITIVE_HEADER_NAMES = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+    "x-goog-api-key",
+    "x-akm-api-key",
+}
+
+
+def redact_headers(headers: dict | None) -> dict:
+    """请求头脱敏：敏感头保留键名但掩码值，其余头原样保留。
+
+    用于审计日志记录“客户端发起的请求头”和“实际发往上游的请求头”，
+    既能事后追溯请求链路，又不把 API Key / Cookie 等凭据明文写入日志。
+    Authorization 会保留 scheme（如 Bearer），只掩码凭据本身。
+    """
+    result = {}
+    for key, value in (headers or {}).items():
+        lower_key = str(key).lower()
+        if lower_key in SENSITIVE_HEADER_NAMES:
+            if lower_key == "authorization" and isinstance(value, str) and " " in value:
+                result[key] = f"{value.split(' ', 1)[0]} ***"
+            else:
+                result[key] = "***"
+        else:
+            result[key] = value
+    return result
+
 def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     """诊断为什么没有可用的 key，返回详细错误信息"""
     conn = get_connection()
@@ -479,6 +511,11 @@ async def forward_request(
         else:
             forwarded_request_body = json.dumps(upstream_body, ensure_ascii=False)
 
+        # 实际发往上游的请求头（脱敏后），随结果回传供审计落库。
+        # multipart 场景下 Content-Type 已在上方移除，交由 httpx 生成 boundary，
+        # 因此这里记录的即是真实发送时的头集合。
+        upstream_headers_for_log = json.dumps(redact_headers(headers), ensure_ascii=False)
+
         if supports_stream:
             upstream_body["stream"] = client_wants_stream
         # 对 OpenAI Chat 流式显式请求 usage，提升 token 统计稳定性。
@@ -605,6 +642,7 @@ async def forward_request(
                     "response": resp,
                     "adapter": adapter,  # 非 None 时 server.py 会用转换器包装
                     "request_body_for_log": forwarded_request_body,
+                    "upstream_headers_for_log": upstream_headers_for_log,
                     "request_context": ctx,
                     "local_request": ctx.request,  # 兼容旧测试/调用方
                     "key_alias": key["alias"],
@@ -644,6 +682,8 @@ async def forward_request(
 
             latency = int((time.time() - t0) * 1000)
             json_body = resp_body
+            # 上游原始响应（插件/协议转换前），随结果回传供审计记录原始响应体
+            upstream_response_body_for_log = json_body
             # 协议转换：响应体格式转回客户端期望的格式
             if adapter:
                 json_body = adapter.convert_response(json_body)
@@ -669,6 +709,8 @@ async def forward_request(
                 "body": json_body,
                 "adapter": adapter,
                 "request_body_for_log": forwarded_request_body,
+                "upstream_headers_for_log": upstream_headers_for_log,
+                "upstream_response_body_for_log": upstream_response_body_for_log,
                 "key_alias": key["alias"],
                 "provider": key["provider"],
                 "model": model,

@@ -61,7 +61,11 @@ def init_db(conn: sqlite3.Connection) -> None:
             completion_tokens INTEGER DEFAULT 0,
             total_tokens      INTEGER DEFAULT 0,
             cached_tokens     INTEGER DEFAULT 0,
-            cache_creation_tokens INTEGER DEFAULT 0
+            cache_creation_tokens INTEGER DEFAULT 0,
+            client_request_headers TEXT DEFAULT '',
+            client_request_body TEXT DEFAULT '',
+            upstream_request_headers TEXT DEFAULT '',
+            upstream_response_body TEXT DEFAULT ''
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp
@@ -89,6 +93,12 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE audit_logs ADD COLUMN request_headers TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
+    # audit_logs 表 — 三段式审计信息列（客户端请求头/客户端请求体/上游请求头）
+    for col in ["client_request_headers", "client_request_body", "upstream_request_headers", "upstream_response_body"]:
+        try:
+            conn.execute(f"ALTER TABLE audit_logs ADD COLUMN {col} TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
     # audit_logs 表 — token 列
     for col, default in [
         ("prompt_tokens", "0"),

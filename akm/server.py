@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from akm import __version__
-from akm.proxy import forward_request, test_key_connectivity
+from akm.proxy import forward_request, test_key_connectivity, redact_headers
 from akm.agent_runtime.router import router as agent_router
 from akm.agent_runtime.service import initialize_agent_runtime
 from akm.key_pool import (
@@ -242,6 +242,17 @@ def _build_trace_headers(request: Request) -> tuple[dict, str]:
         ensure_ascii=False,
     )
     return trace_headers, trace_headers_json
+
+
+def _build_client_headers_for_log(request: Request) -> str:
+    """提取客户端发起的全部请求头（敏感头脱敏后）为 JSON，供审计日志落库。
+
+    与 _build_trace_headers 的白名单差异在于：这里记录完整头集合（保留键名、
+    掩码敏感值），便于事后追溯客户端实际发了什么；而 request_headers 列
+    继续承担白名单 + AKM 内部 flags 的职责，两者语义互不干扰。
+    """
+    raw = {k: v for k, v in request.headers.items()}
+    return json.dumps(redact_headers(raw), ensure_ascii=False)
 
 
 def _safe_request_body_for_log(body) -> str:
@@ -2358,9 +2369,13 @@ async def _handle_ai_request(request: Request, api_path: str):
         # ── 提取关键请求头用于溯源（User-Agent 区分 opencode/codex/curl）──
         # starlette 的 headers 是大小写不敏感的 MutableHeaders
         _trace_headers, request_headers_json = _build_trace_headers(request)
+        # 客户端全量请求头（敏感头脱敏），始终记录，供审计链路追溯
+        client_request_headers_for_log = _build_client_headers_for_log(request)
         # 读取日志存储配置
         save_request_body = cfg.get("log_request_body", False)
         save_response_body = cfg.get("log_response_body", False)
+        # 客户端原始请求体，与上游请求体（request_body 列）分开记录，受 log_request_body 控制
+        client_request_body_for_log = _safe_request_body_for_log(body) if save_request_body else ""
         stream_capture_max_bytes = int(cfg.get("stream_capture_max_bytes", 262144) or 262144)
         request_timeout = _image_request_timeout_seconds(cfg) if api_path in {"images/generations", "images/edits"} else None
         result = await forward_request(
@@ -2436,6 +2451,8 @@ async def _handle_ai_request(request: Request, api_path: str):
 
             async def stream_generator():
                 capture = _BoundedStreamCapture(stream_capture_max_bytes)
+                # 上游原始响应捕获（插件/协议转换前），供审计记录原始响应体
+                raw_capture = _BoundedStreamCapture(stream_capture_max_bytes)
                 usage_tracker = _IncrementalSSEUsageTracker()
                 t0 = __import__("time").time()
                 stream_error = ""
@@ -2536,7 +2553,12 @@ async def _handle_ai_request(request: Request, api_path: str):
 
                 try:
                     if adapter:
-                        async for line in adapter.convert_sse_stream(resp.aiter_bytes()):
+                        async def _raw_tee():
+                            async for raw_chunk in resp.aiter_bytes():
+                                raw_capture.append(raw_chunk)
+                                yield raw_chunk
+
+                        async for line in adapter.convert_sse_stream(_raw_tee()):
                             chunk = line.encode("utf-8") if isinstance(line, str) else line
                             if _rev_state is not None and _dfg is not None:
                                 text = chunk.decode("utf-8", errors="replace")
@@ -2553,6 +2575,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                                 break
                     else:
                         async for chunk in resp.aiter_bytes():
+                            raw_capture.append(chunk)
                             if _rev_state is not None and _dfg is not None:
                                 text = chunk.decode("utf-8", errors="replace")
                                 processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
@@ -2585,6 +2608,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         monitor.stream_finished()
                     latency = int((__import__("time").time() - t0) * 1000)
                     body_str = capture.build_text()
+                    raw_body_str = raw_capture.build_text()
                     status = 200 if not stream_error else 502
                     response_meta = await _emit_stream_response_meta(status, latency, body_str)
                     if isinstance(response_meta, dict):
@@ -2661,6 +2685,10 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "total_tokens": tokens.get("total_tokens", 0),
                         "cached_tokens": tokens.get("cached_tokens", 0),
                         "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
+                        "client_request_headers": client_request_headers_for_log,
+                        "client_request_body": client_request_body_for_log,
+                        "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
+                        "upstream_response_body": raw_body_str if save_response_body else "",
                     })
                     logger.info(f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)")
 
@@ -2734,6 +2762,10 @@ async def _handle_ai_request(request: Request, api_path: str):
             "total_tokens": tokens.get("total_tokens", 0),
             "cached_tokens": tokens.get("cached_tokens", 0),
             "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
+            "client_request_headers": client_request_headers_for_log,
+            "client_request_body": client_request_body_for_log,
+            "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
+            "upstream_response_body": str(result.get("upstream_response_body_for_log", "") or "") if save_response_body else "",
         })
 
         if result["key_alias"]:

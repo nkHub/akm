@@ -5,7 +5,7 @@ import time
 import pytest
 
 from akm.db import get_connection, init_db
-from akm.audit import AuditLogQueue, write_log, list_logs, count_logs, clean_logs
+from akm.audit import AuditLogQueue, write_log, list_logs, count_logs, clean_logs, clean_log_bodies
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +78,64 @@ def test_clean_logs_partial(setup):
     count = clean_logs("2000-01-01")
     assert count == 0
     assert len(list_logs()) == 2
+
+
+def test_write_log_three_stage_trace_fields(setup):
+    """三段式审计链路字段应完整写入并读回。"""
+    write_log({
+        "provider": "openai",
+        "key_alias": "my-key",
+        "model": "gpt-4",
+        "request_body": '{"model":"gpt-4"}',
+        "response_body": '{"choices":[]}',
+        "status_code": 200,
+        "latency_ms": 100,
+        "error": "",
+        "client_request_headers": '{"authorization":"Bearer ***","x-custom":"abc"}',
+        "client_request_body": '{"model":"gpt-4","messages":[]}',
+        "upstream_request_headers": '{"Authorization":"Bearer ***"}',
+        "upstream_response_body": '{"type":"message","content":[]}',
+    })
+    logs = list_logs(limit=10)
+    assert len(logs) == 1
+    log = logs[0]
+    assert log["client_request_headers"] == '{"authorization":"Bearer ***","x-custom":"abc"}'
+    assert log["client_request_body"] == '{"model":"gpt-4","messages":[]}'
+    assert log["upstream_request_headers"] == '{"Authorization":"Bearer ***"}'
+    assert log["upstream_response_body"] == '{"type":"message","content":[]}'
+
+
+def test_clean_log_bodies_clears_client_request_body(setup):
+    """清理请求/响应体时应同步清空 client_request_body 与 upstream_response_body。"""
+    write_log({
+        "provider": "o", "key_alias": "k", "model": "m",
+        "request_body": '{"a":1}', "response_body": '{"b":2}',
+        "status_code": 200, "latency_ms": 0, "error": "",
+        "client_request_body": '{"orig":true}',
+        "upstream_response_body": '{"raw":true}',
+        "client_request_headers": '{"host":"x"}',
+        "upstream_request_headers": '{"authorization":"Bearer ***"}',
+    })
+    count = clean_log_bodies()
+    assert count == 1
+    logs = list_logs()
+    assert logs[0]["request_body"] == ""
+    assert logs[0]["response_body"] == ""
+    assert logs[0]["client_request_body"] == ""
+    assert logs[0]["upstream_response_body"] == ""
+    # 头信息不属于请求/响应体内容，不应被清空
+    assert logs[0]["client_request_headers"] == '{"host":"x"}'
+    assert logs[0]["upstream_request_headers"] == '{"authorization":"Bearer ***"}'
+
+
+def test_clean_log_bodies_noop_when_nothing_to_clean(setup):
+    """所有 body 均为空时，clean_log_bodies 不应影响行数。"""
+    write_log({
+        "provider": "o", "key_alias": "k", "model": "m",
+        "request_body": "", "response_body": "",
+        "status_code": 200, "latency_ms": 0, "error": "",
+    })
+    assert clean_log_bodies() == 0
 
 
 def test_list_logs_hide_est_filters_only_low_latency_metadata_rows(setup):

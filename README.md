@@ -272,7 +272,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost`） |
 | GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
-| POST | `/api/logs/clean-bodies` | 清空请求体/响应体（保留元数据与统计列） |
+| POST | `/api/logs/clean-bodies` | 清空请求体/响应体（含客户端原始请求体与上游原始响应体，保留元数据与统计列） |
 | GET | `/api/stats` | Token 统计（支持 days 自然日范围：1=今天，7=近7天，30=近30天） |
 | GET/POST | `/api/config` | 配置读写 |
 | GET | `/api/agents` | 供应商代理列表（内置 + 自定义） |
@@ -414,6 +414,12 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
 - 客户端 `stream=false` → 直接请求上游普通 JSON 并原样/按协议转换后返回
 - 流式结束后异步写入审计日志（完整响应体用于统计和对话回放）
 - 审计日志中的 `request_body` 默认优先记录“实际转发给上游的请求体”，而不是入口原始请求体；这样可以准确反映协议转换、插件改写、脱敏或默认值补齐后的最终出站内容，便于排查“AKM 实际发了什么”。代价是日志不再完全等同于客户端最初提交的原始输入。
+- 审计日志同时支持完整链路追溯（四段式），逐段还原“客户端原始内容 → 上游实际内容”，便于核对协议转换与插件改写前后的差异：
+  - `client_request_headers`：客户端发起的全部请求头（`Authorization`/`Cookie`/`x-api-key` 等敏感头值已掩码为 `***`，`Authorization` 保留 scheme）
+  - `client_request_body`：客户端原始请求体（受 `log_request_body` 控制）
+  - `upstream_request_headers`：实际发往上游的请求头（敏感头同样脱敏）
+  - `upstream_response_body`：上游返回的原始响应体（协议转换前，受 `log_response_body` 控制）
+  - 与既有 `request_body`（上游请求体）、`response_body`（发给客户端、转换后的响应）共同组成完整链路；`clean-bodies` 清理时会一并清空 `client_request_body` 与 `upstream_response_body`。
 - 流式请求的插件 `on_response` 生命周期会等到 SSE 真正结束后才触发，避免并发计数过早回收导致慢 key 持续拥塞
 - 流式响应的内存捕获已改为有界模式：默认最多保留 `256KB`（配置项 `stream_capture_max_bytes`），超出后仅保留头尾两段并追加截断标记，日志 flags 会记录 `stream_capture_truncated`
 

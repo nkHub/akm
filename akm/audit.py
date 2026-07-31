@@ -33,8 +33,9 @@ def _do_write(data: dict) -> None:
            (timestamp, provider, key_alias, model, request_body,
              response_body, status_code, latency_ms, error,
              request_headers,
-             prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens)
-             VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens,
+             client_request_headers, client_request_body, upstream_request_headers, upstream_response_body)
+             VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data.get("provider", ""),
             data.get("key_alias", ""),
@@ -50,6 +51,10 @@ def _do_write(data: dict) -> None:
             data.get("total_tokens", 0),
             data.get("cached_tokens", 0),
             data.get("cache_creation_tokens", 0),
+            data.get("client_request_headers", ""),
+            data.get("client_request_body", ""),
+            data.get("upstream_request_headers", ""),
+            data.get("upstream_response_body", ""),
         ),
     )
     conn.commit()
@@ -316,8 +321,10 @@ def clean_log_bodies() -> int:
     conn = get_connection()
     cursor = conn.execute(
         """UPDATE audit_logs
-           SET request_body = '', response_body = ''
-           WHERE request_body != '' OR response_body != ''"""
+           SET request_body = '', response_body = '',
+               client_request_body = '', upstream_response_body = ''
+           WHERE request_body != '' OR response_body != ''
+              OR client_request_body != '' OR upstream_response_body != ''"""
     )
     conn.commit()
     count = cursor.rowcount
