@@ -1477,7 +1477,7 @@ async def test_lifespan_shutdown_only_stops_its_own_audit_queue(monkeypatch):
 
         is_route_pool = False
 
-        def __init__(self):
+        def __init__(self, **kwargs):
             self.closed = False
 
         async def aclose(self):

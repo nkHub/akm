@@ -29,6 +29,27 @@ DEFAULTS = {
     # macOS 原生功能
     "launch_at_login": False,  # 开机自启动（仅打包后的 .app 生效，通过 SMAppService 注册）
     "menu_bar_show_usage": False,  # 菜单栏显示今日用量（Token 数 / 费用交替展示）
+    # 上游连接池：控制 AKM 访问上游供应商时的并发连接数
+    "http_client_max_connections": 8,   # 每个上游路由的最大并发连接数
+    "http_client_max_keepalive": 2,     # 每个上游路由的 keep-alive 连接数
+    "http_client_max_pools": 64,        # 最大路由池数量（provider+key+model+path 组合数上限）
+    "http_client_idle_ttl_sec": 120.0,  # 连接池空闲超时（秒），超时后该路由池被回收
+    "http_client_connect_timeout_sec": 10.0,  # 连接建立超时（秒）
+    # 代理转发：控制请求重试与 Key 选择策略
+    "proxy_max_key_tries": 20,          # 选择 Key 的最大尝试次数，防止无限循环
+    "proxy_max_retries_per_key": 2,     # 单个 Key 在 5xx/连接失败时的最大重试次数
+    "proxy_retry_backoff_base_sec": 0.5,  # 重试退避基础等待秒数
+    "proxy_default_timeout_sec": 120.0,  # 默认转发超时（秒），图片接口另有独立超时
+    # Agent Loop
+    "agent_max_turns": 20,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
+    # Key 管理
+    "rate_limit_cooldown_sec": 60,      # 限流冷却秒数，被 429 后多久恢复可用
+    # 审计队列
+    "audit_queue_maxsize": 512,         # 审计日志异步队列上限，满后丢弃新增日志
+    # 用量查询
+    "usage_query_check_interval_sec": 60,  # 用量查询后台扫描间隔（秒）
+    # 统计
+    "stats_cache_ttl_sec": 60,          # 首页统计缓存有效期（秒）
 }
 
 
@@ -102,6 +123,27 @@ def load_config() -> dict:
     merged["cost_pricing_table"] = _normalize_cost_pricing_table(merged["cost_pricing_table"])
     merged["http_proxy_enabled"] = merged.get("http_proxy_enabled") is True
     merged["http_proxy_url"] = normalize_http_proxy_url(merged.get("http_proxy_url", ""))
+    # 连接池参数：确保为合理整数，防止配置异常导致连接池初始化失败
+    merged["http_client_max_connections"] = max(1, int(merged.get("http_client_max_connections", 8) or 8))
+    merged["http_client_max_keepalive"] = max(0, int(merged.get("http_client_max_keepalive", 2) or 2))
+    merged["http_client_max_pools"] = max(1, int(merged.get("http_client_max_pools", 64) or 64))
+    merged["http_client_idle_ttl_sec"] = max(30.0, float(merged.get("http_client_idle_ttl_sec", 120.0) or 120.0))
+    merged["http_client_connect_timeout_sec"] = max(1.0, float(merged.get("http_client_connect_timeout_sec", 10.0) or 10.0))
+    # 代理转发参数
+    merged["proxy_max_key_tries"] = max(1, int(merged.get("proxy_max_key_tries", 20) or 20))
+    merged["proxy_max_retries_per_key"] = max(0, int(merged.get("proxy_max_retries_per_key", 2) or 2))
+    merged["proxy_retry_backoff_base_sec"] = max(0.1, float(merged.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
+    merged["proxy_default_timeout_sec"] = max(30.0, float(merged.get("proxy_default_timeout_sec", 120.0) or 120.0))
+    # Agent Loop
+    merged["agent_max_turns"] = max(1, int(merged.get("agent_max_turns", 20) or 20))
+    # Key 管理
+    merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
+    # 审计队列
+    merged["audit_queue_maxsize"] = max(1, int(merged.get("audit_queue_maxsize", 512) or 512))
+    # 用量查询
+    merged["usage_query_check_interval_sec"] = max(10, int(merged.get("usage_query_check_interval_sec", 60) or 60))
+    # 统计
+    merged["stats_cache_ttl_sec"] = max(1, int(merged.get("stats_cache_ttl_sec", 60) or 60))
     return merged
 
 
@@ -112,6 +154,27 @@ def save_config(data: dict) -> None:
     current.update(data)
     current["http_proxy_enabled"] = current.get("http_proxy_enabled") is True
     current["http_proxy_url"] = normalize_http_proxy_url(current.get("http_proxy_url", ""))
+    # 连接池参数：确保为合理整数/浮点，防止配置异常导致连接池初始化失败
+    current["http_client_max_connections"] = max(1, int(current.get("http_client_max_connections", 8) or 8))
+    current["http_client_max_keepalive"] = max(0, int(current.get("http_client_max_keepalive", 2) or 2))
+    current["http_client_max_pools"] = max(1, int(current.get("http_client_max_pools", 64) or 64))
+    current["http_client_idle_ttl_sec"] = max(30.0, float(current.get("http_client_idle_ttl_sec", 120.0) or 120.0))
+    current["http_client_connect_timeout_sec"] = max(1.0, float(current.get("http_client_connect_timeout_sec", 10.0) or 10.0))
+    # 代理转发参数
+    current["proxy_max_key_tries"] = max(1, int(current.get("proxy_max_key_tries", 20) or 20))
+    current["proxy_max_retries_per_key"] = max(0, int(current.get("proxy_max_retries_per_key", 2) or 2))
+    current["proxy_retry_backoff_base_sec"] = max(0.1, float(current.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
+    current["proxy_default_timeout_sec"] = max(30.0, float(current.get("proxy_default_timeout_sec", 120.0) or 120.0))
+    # Agent Loop
+    current["agent_max_turns"] = max(1, int(current.get("agent_max_turns", 20) or 20))
+    # Key 管理
+    current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
+    # 审计队列
+    current["audit_queue_maxsize"] = max(1, int(current.get("audit_queue_maxsize", 512) or 512))
+    # 用量查询
+    current["usage_query_check_interval_sec"] = max(10, int(current.get("usage_query_check_interval_sec", 60) or 60))
+    # 统计
+    current["stats_cache_ttl_sec"] = max(1, int(current.get("stats_cache_ttl_sec", 60) or 60))
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(current, f, indent=2, ensure_ascii=False)
 

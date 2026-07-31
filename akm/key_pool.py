@@ -7,6 +7,7 @@ import json
 from cryptography.fernet import Fernet
 from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
+from akm.config import load_config
 
 # ── 用量查询默认脚本 ─────────────────────────────────────────
 # 按供应商提供不同的默认脚本，extractor 返回字段由各供应商脚本决定
@@ -93,7 +94,6 @@ def get_default_usage_script(provider: str = "") -> str:
     return _PROVIDER_SCRIPTS.get(provider_lower, DEFAULT_USAGE_QUERY_SCRIPT)
 
 SECRET_DIR = os.path.expanduser("~/.akm")
-RATE_LIMIT_COOLDOWN = 60  # 限流冷却秒数
 _cipher: Fernet | None = None
 
 
@@ -402,7 +402,7 @@ _rate_limit_timers: dict[str, float] = {}
 def mark_rate_limited(alias: str) -> None:
     """标记 key 为限流状态，60 秒后自动恢复"""
     set_status(alias, "rate_limited")
-    _rate_limit_timers[alias] = time.time() + RATE_LIMIT_COOLDOWN
+    _rate_limit_timers[alias] = time.time() + max(1, int(load_config().get("rate_limit_cooldown_sec", 60) or 60))
 
 
 def clear_expired_rate_limits() -> None:

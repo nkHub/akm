@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from akm.agent_loop import AgentLoop, ToolDef, ToolRegistry, _SSEStreamAccumulator
+from akm.agent_runtime.loop import AgentLoop, ToolDef, ToolRegistry, _SSEStreamAccumulator
 
 
 class FakeStreamResponse:
@@ -36,8 +36,8 @@ def _events(chunks):
 async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(monkeypatch):
     """Chat SSE 必须转换为 model_delta，不能把 choices 等上游字段直接交给客户端。"""
     response = FakeStreamResponse(200, [
-        _sse({"model": "test", "choices": [{"delta": {"content": "你"}}]}),
-        _sse({"choices": [{"delta": {"content": "好"}}]}) + _sse({"usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}}),
+        _sse({"model": "test", "choices": [{"delta": {"content": "你", "reasoning_content": "先"}}]}),
+        _sse({"choices": [{"delta": {"content": "好", "reasoning_content": "思考"}}]}) + _sse({"usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}}),
         "data: [DONE]\n\n",
     ])
 
@@ -51,6 +51,7 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
     assert [event["event"] for event in events] == ["model_delta", "model_delta", "final"]
     assert [event["data"]["content"] for event in events[:2]] == ["你", "好"]
     assert events[-1]["data"]["final_message"]["content"] == "你好"
+    assert events[-1]["data"]["final_message"]["reasoning_content"] == "先思考"
     assert events[-1]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
     assert response.closed is True
 
@@ -107,6 +108,24 @@ async def test_run_stream_reports_streaming_http_error_and_closes_response(monke
     assert audits[-1]["error"] == "rate limited"
 
 
+@pytest.mark.asyncio
+async def test_run_includes_registered_tools_in_upstream_request(monkeypatch):
+    """未显式传 tools 时，内置注册表工具也必须提供给上游模型调用。"""
+    registry = ToolRegistry()
+    registry.register(ToolDef("akm_get_status", "读取 AKM 状态", {"type": "object", "properties": {}}, lambda: {}))
+    requests = []
+
+    async def forward(body, *_args, **_kwargs):
+        requests.append(body)
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"ok"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    result = await AgentLoop(http_client=None, tool_registry=registry).run([{"role": "user", "content": "状态"}])
+
+    assert result.ok is True
+    assert requests[0]["tools"] == [registry.list_tools()[0]]
+
+
 def test_sse_accumulator_supports_responses_and_messages_events():
     """原生 Responses/Messages 流也应能还原可见文本和工具调用。"""
     responses = _SSEStreamAccumulator()
@@ -123,6 +142,6 @@ def test_sse_accumulator_supports_responses_and_messages_events():
 
 
 def _extract_calls(response_body):
-    from akm.agent_loop import _extract_tool_calls_from_response
+    from akm.agent_runtime.loop import _extract_tool_calls_from_response
 
     return _extract_tool_calls_from_response(response_body)

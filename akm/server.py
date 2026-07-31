@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from akm import __version__
 from akm.proxy import forward_request, test_key_connectivity
-from akm.agent_loop import AgentLoop, set_agent_loop
+from akm.agent_runtime.router import router as agent_router
+from akm.agent_runtime.service import initialize_agent_runtime
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
@@ -56,8 +57,6 @@ from akm.usage_query import execute_query_script
 class _UsageQueryScheduler:
     """后台定时调度器：自动执行已开启用查的 key"""
 
-    _CHECK_INTERVAL_SEC = 60  # 每 60 秒扫描一次
-
     def __init__(self, app: FastAPI):
         self.app = app
 
@@ -65,7 +64,8 @@ class _UsageQueryScheduler:
         """后台循环，周期性检查并执行到期的用量查询"""
         while True:
             try:
-                await asyncio.sleep(self._CHECK_INTERVAL_SEC)
+                interval = max(10, int(load_config().get("usage_query_check_interval_sec", 60) or 60))
+                await asyncio.sleep(interval)
                 await self._check_and_query()
             except asyncio.CancelledError:
                 break
@@ -119,6 +119,8 @@ async def lifespan(app: FastAPI):
     # 启动时自动清理过期日志
     from akm.audit import auto_cleanup_logs
     auto_cleanup_logs()
+    # 加载配置（后续连接池、队列等参数均从此读取）
+    cfg = load_config()
     # 初始化插件管理器
     plugin_manager = PluginManager()
     # 初始化连接已关闭，不能把它注入插件上下文；插件需自行获取短生命周期连接。
@@ -128,7 +130,7 @@ async def lifespan(app: FastAPI):
     app.state.health_monitor = health_monitor
     health_task = asyncio.create_task(health_monitor.run_heartbeat())
     app.state.health_task = health_task
-    audit_queue = AuditLogQueue(maxsize=512)
+    audit_queue = AuditLogQueue(maxsize=max(1, int(cfg.get("audit_queue_maxsize", 512) or 512)))
     await audit_queue.start()
     app.state.audit_log_queue = audit_queue
     app.state.http_client_lock = asyncio.Lock()
@@ -144,14 +146,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning("[Server] 审计日志写入失败", exc_info=True)
 
-    agent_loop = AgentLoop(
+    await initialize_agent_runtime(
+        app,
         http_client,
-        plugin_manager=plugin_manager,
-        audit_submitter=_agent_audit,
+        plugin_manager,
+        _agent_audit,
+        logger,
     )
-    set_agent_loop(agent_loop)
-    app.state.agent_loop = agent_loop
-    logger.info("[Server] Agent Loop 已初始化，审计日志已就绪")
     # 用量查询自动调度器
     usage_query_scheduler = _UsageQueryScheduler(app)
     usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
@@ -182,6 +183,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
+app.include_router(agent_router)
 
 
 @app.exception_handler(Exception)
@@ -674,12 +676,23 @@ async def _submit_audit_log(app: FastAPI, data: dict) -> bool:
 
 
 def _build_http_client_pool_manager() -> HttpClientPoolManager:
-    """构建按路由隔离的懒加载 HTTP client 池，并套用当前出站代理配置。"""
-    proxy_url = resolve_http_proxy_url()
-    # 关闭代理时保留原有无参初始化路径，兼容既有连接池替身。
-    if proxy_url is None:
-        return HttpClientPoolManager()
-    return HttpClientPoolManager(proxy_url=proxy_url)
+    """构建按路由隔离的懒加载 HTTP client 池，并套用当前出站代理与连接池配置。"""
+    cfg = load_config()
+    proxy_url = resolve_http_proxy_url(cfg)
+    # 连接池参数从配置读取，无配置时使用 HttpClientPoolManager 的默认值（8/2/64）
+    max_connections = max(1, int(cfg.get("http_client_max_connections", 8) or 8))
+    max_keepalive = max(0, int(cfg.get("http_client_max_keepalive", 2) or 2))
+    max_pools = max(1, int(cfg.get("http_client_max_pools", 64) or 64))
+    idle_ttl = max(30.0, float(cfg.get("http_client_idle_ttl_sec", 120.0) or 120.0))
+    connect_timeout = max(1.0, float(cfg.get("http_client_connect_timeout_sec", 10.0) or 10.0))
+    return HttpClientPoolManager(
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive,
+        max_pools=max_pools,
+        idle_ttl_sec=idle_ttl,
+        connect_timeout_sec=connect_timeout,
+        proxy_url=proxy_url,
+    )
 
 
 async def _recreate_http_client_pool(app: FastAPI, reason: str) -> bool:
@@ -1552,7 +1565,7 @@ def _get_stats(days: int) -> dict:
     now = time.time()
     if cache_key in _stats_cache:
         ts, data = _stats_cache[cache_key]
-        if now - ts < 60:
+        if now - ts < max(1, int(load_config().get("stats_cache_ttl_sec", 60) or 60)):
             result = dict(data)
             result["cached_at"] = datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S")
             return result
@@ -1900,20 +1913,23 @@ async def api_get_config():
 
 @app.post("/api/config")
 async def api_save_config(request: Request):
-    """保存配置；若出站代理相关项变化则重建 HTTP 连接池使设置立即生效。"""
+    """保存配置；若出站代理或连接池相关项变化则重建 HTTP 连接池使设置立即生效。"""
     body = await request.json()
     if not isinstance(body, dict):
         return JSONResponse(status_code=400, content={"detail": "配置体必须是 JSON 对象"})
     before = load_config()
     save_config(body)
     after = load_config()
-    proxy_changed = (
+    pool_config_changed = (
         before.get("http_proxy_enabled") != after.get("http_proxy_enabled")
         or before.get("http_proxy_url") != after.get("http_proxy_url")
+        or before.get("http_client_max_connections") != after.get("http_client_max_connections")
+        or before.get("http_client_max_keepalive") != after.get("http_client_max_keepalive")
+        or before.get("http_client_max_pools") != after.get("http_client_max_pools")
     )
     recreated = False
-    if proxy_changed:
-        # 强制绕过 should_recreate 冷却：代理变更必须立刻换池
+    if pool_config_changed:
+        # 强制绕过 should_recreate 冷却：代理或连接池变更必须立刻换池
         lock = getattr(request.app.state, "http_client_lock", None)
         if lock is None:
             lock = asyncio.Lock()
@@ -1929,7 +1945,7 @@ async def api_save_config(request: Request):
                     pass
             monitor = _get_health_monitor(request.app)
             if monitor is not None:
-                monitor.record_http_client_recreated("config.http_proxy_changed")
+                monitor.record_http_client_recreated("config.pool_settings_changed")
             recreated = True
     return {"ok": True, "http_client_recreated": recreated}
 
@@ -2270,72 +2286,6 @@ async def image_edits(request: Request):
     3. 不参与协议转换。
     """
     return await _handle_ai_request(request, "images/edits")
-
-
-@app.post("/v1/agent")
-@app.post("/agent")
-async def agent(request: Request):
-    """Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环
-
-    请求体（JSON）：::
-
-        {
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "..."}],
-            "tools": [
-                {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
-            ],
-            "instructions": "可选的系统级指令",
-            "api_path": "chat/completions",
-            "max_turns": 20,
-            "stream": false
-        }
-
-    - ``stream: false`` (默认) — 返回完整 AgentResult JSON
-    - ``stream: true`` — SSE 流式返回，文本增量为 ``model_delta``，并在回合边界 emit ``turn_start`` / ``tool_call`` / ``tool_result`` / ``final`` / ``error`` 事件
-    """
-    body = await request.json()
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        return JSONResponse(status_code=400, content={"detail": "缺少 messages 参数"})
-
-    model = str(body.get("model", "") or "")
-    tools = body.get("tools")
-    instructions = str(body.get("instructions", "") or "")
-    api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
-    stream = bool(body.get("stream", False))
-    try:
-        max_turns = int(body.get("max_turns", 0) or 0)
-    except (TypeError, ValueError):
-        max_turns = 0
-
-    agent_loop = request.app.state.agent_loop
-    if agent_loop is None:
-        return JSONResponse(status_code=503, content={"detail": "Agent Loop 尚未初始化"})
-
-    if stream:
-        return StreamingResponse(
-            agent_loop.run_stream(
-                messages,
-                model=model,
-                tools=tools if isinstance(tools, list) else None,
-                instructions=instructions,
-                max_turns=max_turns,
-                api_path=api_path,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-        )
-
-    result = await agent_loop.run(
-        messages,
-        model=model,
-        tools=tools if isinstance(tools, list) else None,
-        instructions=instructions,
-        max_turns=max_turns,
-        api_path=api_path,
-    )
-    return JSONResponse(content=result.to_dict())
 
 
 async def _handle_ai_request(request: Request, api_path: str):

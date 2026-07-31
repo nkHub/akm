@@ -11,10 +11,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
-logger = logging.getLogger("akm.agent_loop")
+from akm.config import load_config
 
-# Agent Loop 最大迭代次数，防止工具调用无限循环
-MAX_AGENT_TURNS = 20
+logger = logging.getLogger("akm.agent_runtime.loop")
+
+# Agent Loop 最大迭代次数，防止工具调用无限循环（可通过 config.json 覆盖）
 
 
 class ToolDef:
@@ -230,6 +231,26 @@ def _extract_text_content(response_body: str) -> str:
         return "\n".join(texts)
 
     return ""
+
+
+def _extract_reasoning_content(response_body: str) -> str:
+    """从 LLM 非流式响应中提取 Chat 格式的推理内容。"""
+    try:
+        data = json.loads(response_body)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+
+    if not isinstance(data, dict):
+        return ""
+
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message", {})
+    if not isinstance(message, dict):
+        return ""
+    reasoning = message.get("reasoning_content")
+    return reasoning if isinstance(reasoning, str) else ""
 
 
 class AgentResult:
@@ -507,7 +528,7 @@ class AgentLoop:
         self._http_client = http_client
         self._plugin_manager = plugin_manager
         self._tool_registry = tool_registry or ToolRegistry.instance()
-        self._max_turns = MAX_AGENT_TURNS
+        self._max_turns = max(1, int(load_config().get("agent_max_turns", 20) or 20))
         self._audit_submitter = audit_submitter
 
     async def _try_audit(
@@ -685,6 +706,9 @@ class AgentLoop:
                     "role": "assistant",
                     "content": text_content or response_body,
                 }
+                reasoning_content = _extract_reasoning_content(response_body)
+                if reasoning_content:
+                    final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
                 logger.info(
                     "[AgentLoop] 完成，共 %d 轮，tokens=%d",
@@ -909,6 +933,9 @@ class AgentLoop:
                     "role": "assistant",
                     "content": text_content or response_body,
                 }
+                reasoning_content = _extract_reasoning_content(response_body)
+                if reasoning_content:
+                    final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
                 yield _sse_event("final", {
                     "final_message": final_message,

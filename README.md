@@ -172,7 +172,21 @@ akm-menubar
   "json_viewer_max_text_length": 600000,
   "image_request_timeout_sec": 300,
   "wake_recover_delay_sec": 8,
-  "use_native_user_agent": false
+  "use_native_user_agent": false,
+  "http_client_max_connections": 8,
+  "http_client_max_keepalive": 2,
+  "http_client_max_pools": 64,
+  "http_client_idle_ttl_sec": 120.0,
+  "http_client_connect_timeout_sec": 10.0,
+  "proxy_max_key_tries": 20,
+  "proxy_max_retries_per_key": 2,
+  "proxy_retry_backoff_base_sec": 0.5,
+  "proxy_default_timeout_sec": 120.0,
+  "agent_max_turns": 20,
+  "rate_limit_cooldown_sec": 60,
+  "audit_queue_maxsize": 512,
+  "usage_query_check_interval_sec": 60,
+  "stats_cache_ttl_sec": 60
 }
 ```
 
@@ -200,6 +214,27 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 `stats_include_estimated_usage` 仅作为 `config.json` 隐藏配置项存在，默认 `false`，不会在设置页单独展示；如需让首页统计把 `usage_estimated_light` 这类估算 token 计入总量与请求数，可手动改为 `true`。
 
 `http_proxy_enabled` / `http_proxy_url` 控制 AKM **出站代理**（仅访问上游供应商：主转发连接池与连通性测试）。开启后填写代理 URL，例如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`；也可写 `host:port`（自动补 `http://`）。保存后会重建 HTTP 连接池使配置立即生效。这不是系统 VPN，不影响本机其它软件；SOCKS 依赖运行环境中的 `socksio`。
+
+`http_client_max_connections` / `http_client_max_keepalive` / `http_client_max_pools` / `http_client_idle_ttl_sec` / `http_client_connect_timeout_sec` 控制 AKM 访问上游供应商时的**连接池参数**，均为设置页可调整的配置项：
+- `http_client_max_connections`（默认 8）：每个上游路由（provider/key/model/path）的最大并发连接数。如果同一路由的并发流式请求超过该值，后续请求会阻塞等待直到连接释放或超时。
+- `http_client_max_keepalive`（默认 2）：每个上游路由的 keep-alive 连接数，应 ≤ `max_connections`。
+- `http_client_max_pools`（默认 64）：不同路由组合的池数量上限，超出时按 LRU 淘汰旧池。
+- `http_client_idle_ttl_sec`（默认 120）：路由池空闲超过此秒数后自动关闭回收。
+- `http_client_connect_timeout_sec`（默认 10）：TCP 连接建立的超时秒数。
+
+修改后保存会立即重建 HTTP 连接池，无需重启服务。可通过 `/debug/runtime` 查看当前池数量与单池连接上限的实时值。
+
+`proxy_max_key_tries` / `proxy_max_retries_per_key` / `proxy_retry_backoff_base_sec` / `proxy_default_timeout_sec` 控制**转发与重试策略**，均为设置页可调整：
+- `proxy_max_key_tries`（默认 20）：选 Key 的最大尝试次数，防止无限循环。所有 Key 均不可用时返回 503。
+- `proxy_max_retries_per_key`（默认 2）：单个 Key 在遇到 5xx 或连接/超时错误时的最大重试次数。
+- `proxy_retry_backoff_base_sec`（默认 0.5）：重试退避的基础等待秒数，实际等待 = 基数 × 2^attempt。
+- `proxy_default_timeout_sec`（默认 120）：聊天等非图片请求的默认上游超时秒数；图片接口另有独立的 `image_request_timeout_sec`。
+
+`agent_max_turns`（默认 20）控制 Agent Loop 的最大工具调用轮次，防止死循环，设置页可调。
+
+`rate_limit_cooldown_sec`（默认 60）控制被 429 限流后的冷却秒数，冷却期满后 key 自动恢复 active，设置页可调。
+
+`audit_queue_maxsize`（默认 512）控制异步审计日志队列容量上限，满后丢弃新增日志；`stats_cache_ttl_sec`（默认 60）控制首页统计缓存有效期；`usage_query_check_interval_sec`（默认 60）控制用量查询后台扫描间隔。均在设置页可调。
 
 `cost_stats_enabled` / `cost_pricing_table` 控制首页费用估算：可在设置页开关与编辑单价表。单价仅支持 `model=输入/输入缓存/输出`（每 1M tokens），费用固定以美元计算和展示；未匹配到任何规则时回退为 `$1/$1/$3`。估算值不能替代供应商账单。
 
@@ -256,6 +291,16 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
+Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
+
+服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配：
+
+| 工具 | 用途 |
+|------|------|
+| `akm_get_status` | 查询健康监护、审计队列和插件状态 |
+| `akm_list_keys` | 查询 Key 的别名、供应商、状态和模型列表，不返回 API Key 或连接地址 |
+| `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
+
 ### 请求格式
 
 ```json
@@ -290,11 +335,13 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 |------|------|------|------|
 | `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
 | `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式），与插件注册的工具合并 |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式），与内置 AKM 调试工具合并；名称必须避免与内置工具冲突 |
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息 |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；每个可见文本增量立即推送 `model_delta`，其余阶段推送 Agent 事件 |
+
+流式 `final` 事件中的 `final_message` 会保留上游 Chat 响应的 `reasoning_content`，以便客户端展示完成后的推理内容。
 
 ### 响应格式
 
