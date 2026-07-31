@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 import httpx
 
-from akm.config import resolve_http_proxy_url
+from akm.config import resolve_http_proxy_url, load_config
 from akm.key_pool import (
     pick_key_async,
     pick_wildcard_key_async,
@@ -87,12 +87,21 @@ class _ChainedAdapter:
                 await producer
 
 
-# 最大尝试 key 数量，防止无限循环
-MAX_KEY_TRIES = 20
+# 最大尝试 key 数量，防止无限循环（可通过 config.json 覆盖）
+def _proxy_max_key_tries() -> int:
+    return max(1, int(load_config().get("proxy_max_key_tries", 20) or 20))
+
 # 5xx 最大重试次数（单个 key）
-MAX_RETRIES_PER_KEY = 2
+def _proxy_max_retries_per_key() -> int:
+    return max(0, int(load_config().get("proxy_max_retries_per_key", 2) or 2))
+
 # 重试退避基础等待秒数
-RETRY_BACKOFF_BASE = 0.5
+def _proxy_retry_backoff_base() -> float:
+    return max(0.1, float(load_config().get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
+
+# 默认转发超时（秒），图片接口另有独立超时
+def _proxy_default_timeout() -> float:
+    return max(30.0, float(load_config().get("proxy_default_timeout_sec", 120.0) or 120.0))
 
 def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     """诊断为什么没有可用的 key，返回详细错误信息"""
@@ -191,7 +200,7 @@ async def _handle_upstream_error(
             return hook_result
 
     # ── 内置兜底策略（无 error_handler 插件或插件返回 None 时生效）──
-    max_retries = MAX_RETRIES_PER_KEY
+    max_retries = _proxy_max_retries_per_key()
     if status_code == 429:
         return "block"
     if status_code in (402, 401, 403):
@@ -301,7 +310,7 @@ async def forward_request(
                 "request_context": ctx,
             }
 
-    while tries < MAX_KEY_TRIES:
+    while tries < _proxy_max_key_tries():
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
         if use_fallback:
             key = await pick_wildcard_key_async(model, list(tried_aliases))
@@ -482,7 +491,7 @@ async def forward_request(
                 upstream_body["stream_options"] = {"include_usage": True}
 
         last_error = ""
-        for attempt in range(1 + MAX_RETRIES_PER_KEY):
+        for attempt in range(1 + _proxy_max_retries_per_key()):
             t0 = time.time()
             try:
                 if is_multipart_request:
@@ -492,7 +501,7 @@ async def forward_request(
                         data=multipart_fields,
                         files=multipart_files,
                         headers=headers,
-                        timeout=request_timeout or 120,
+                        timeout=request_timeout or _proxy_default_timeout(),
                     )
                 else:
                     req = route_client.build_request(
@@ -500,7 +509,7 @@ async def forward_request(
                         url,
                         json=upstream_body,
                         headers=headers,
-                        timeout=request_timeout or 120,
+                        timeout=request_timeout or _proxy_default_timeout(),
                     )
                 resp = await route_client.send(req, stream=client_wants_stream)
             except (httpx.TimeoutException, httpx.ConnectError) as e:
@@ -523,8 +532,8 @@ async def forward_request(
                     "upstream_api_path": upstream_api_path,
                     "action": action,
                 })
-                if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
-                    await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                if action == "retry" and attempt < _proxy_max_retries_per_key():
+                    await asyncio.sleep(_proxy_retry_backoff_base() * (2 ** attempt))
                     continue
                 last_error = str(e)
                 break
@@ -575,8 +584,8 @@ async def forward_request(
                     "upstream_api_path": upstream_api_path,
                     "action": action,
                 })
-                if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
-                    await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                if action == "retry" and attempt < _proxy_max_retries_per_key():
+                    await asyncio.sleep(_proxy_retry_backoff_base() * (2 ** attempt))
                     continue
                 break
 
@@ -627,8 +636,8 @@ async def forward_request(
                     "upstream_api_path": upstream_api_path,
                     "action": action,
                 })
-                if action == "retry" and attempt < MAX_RETRIES_PER_KEY:
-                    await asyncio.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
+                if action == "retry" and attempt < _proxy_max_retries_per_key():
+                    await asyncio.sleep(_proxy_retry_backoff_base() * (2 ** attempt))
                     continue
                 break
             await resp.aclose()
