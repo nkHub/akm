@@ -2385,6 +2385,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             plugin_manager=request.app.state.plugin_manager,
             request_timeout=request_timeout,
             original_user_agent=_trace_headers.get("user-agent", ""),
+            passthrough_headers=dict(request.headers),
         )
         request_body_for_log = str(result.get("request_body_for_log", "") or "")
 

@@ -1,6 +1,5 @@
 import pytest
 from akm import __version__
-from akm.config import DEFAULTS
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 import httpx
@@ -795,7 +794,7 @@ async def test_forward_image_generations_request_does_not_inject_stream_or_conve
     assert result["status_code"] == 200
     assert send_calls[0]["stream"] is False
     payload = send_calls[0]["req"].content.decode("utf-8")
-    assert send_calls[0]["req"].headers["User-Agent"] == DEFAULTS["user_agent_override"]
+    assert send_calls[0]["req"].headers["User-Agent"] == f"akm/{__version__}"
     assert '"stream":' not in payload
 
 
@@ -821,6 +820,91 @@ async def test_forward_image_generations_request_can_use_native_user_agent(monke
 
     assert result["status_code"] == 200
     assert send_calls[0]["req"].headers["User-Agent"] == "OpenCode/9.9.9"
+
+
+@pytest.mark.asyncio
+async def test_forward_passthrough_headers_in_native_mode(monkeypatch):
+    """开启 use_native_user_agent 后，客户端业务头应透传，认证/传输基础设施头应被排除。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "gs-codex", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+    monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": True})
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"object":"chat.completion","model":"m","choices":[]}')])
+
+    client_headers = {
+        "authorization": "Bearer client-token",
+        "host": "127.0.0.1:8800",
+        "content-length": "63348",
+        "connection": "keep-alive",
+        "accept-encoding": "gzip, deflate, br",
+        "user-agent": "Codex Desktop/9.9.9",
+        "originator": "Codex Desktop",
+        "session-id": "019fb7bd-6079-7d03",
+        "x-codex-turn-metadata": '{"installation_id":"i1","sandbox":"seatbelt"}',
+        "x-openai-internal-codex-responses-lite": "true",
+        "accept": "text/event-stream",
+    }
+
+    result = await forward_request(
+        body={"model": "gpt-5", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
+        client=mock_client,
+        api_path="responses",
+        original_user_agent="Codex Desktop/9.9.9",
+        passthrough_headers=client_headers,
+    )
+
+    assert result["status_code"] == 200
+    sent = send_calls[0]["req"].headers
+    # 业务头应透传到上游
+    assert sent["originator"] == "Codex Desktop"
+    assert sent["session-id"] == "019fb7bd-6079-7d03"
+    assert sent["x-codex-turn-metadata"] == '{"installation_id":"i1","sandbox":"seatbelt"}'
+    assert sent["x-openai-internal-codex-responses-lite"] == "true"
+    assert sent["accept"] == "text/event-stream"
+    # 认证头被替换为所选 key 密钥，客户端原始认证头不生效
+    assert sent["Authorization"] == "Bearer __AKM_CREDENTIAL_VALUE_63353636d4c9__"
+    # 传输基础设施头被排除，交由 httpx 重建（host 按上游 URL 生成）
+    assert sent["host"] == "api.openai.com"
+    assert "connection" not in sent
+    assert "accept-encoding" not in sent
+    assert sent.get("content-length") != "63348"
+    # User-Agent 走 _resolve_user_agent：原生模式 + override 为空 → 原生 UA
+    assert sent["User-Agent"] == "Codex Desktop/9.9.9"
+
+
+@pytest.mark.asyncio
+async def test_forward_passthrough_disabled_when_native_off(monkeypatch):
+    """未开启 use_native_user_agent 时，透传头不生效，上游仍只发基础头。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "x", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+    monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": False})
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"object":"chat.completion","model":"m","choices":[]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-5", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
+        client=mock_client,
+        api_path="responses",
+        original_user_agent="Codex Desktop/9.9.9",
+        passthrough_headers={"originator": "Codex Desktop", "x-codex-turn-metadata": "{}"},
+    )
+
+    assert result["status_code"] == 200
+    sent = send_calls[0]["req"].headers
+    # 原生模式未开启，客户端业务头不随转发携带
+    assert "originator" not in sent
+    assert "x-codex-turn-metadata" not in sent
+    # 未开启原生 + 无 override → 回退 akm/<version>
+    assert sent["User-Agent"] == f"akm/{__version__}"
 
 
 @pytest.mark.asyncio
@@ -889,7 +973,7 @@ async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatc
     assert send_calls[0]["stream"] is False
     req = send_calls[0]["req"]
     assert req.headers["Content-Type"].startswith("multipart/form-data;")
-    assert req.headers["User-Agent"] == DEFAULTS["user_agent_override"]
+    assert req.headers["User-Agent"] == f"akm/{__version__}"
     body = b"".join(req.stream)
     assert b"filename=\"cat.png\"" in body
 

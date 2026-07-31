@@ -20,6 +20,22 @@ from akm.plugins.context import RequestContext
 from akm.error_log import write_error_log
 
 
+# 原生透传模式下需要跳过的请求头：认证头与传输基础设施头由本服务负责重建，
+# 透传原始值会覆盖服务已注入的密钥/Content-Type/User-Agent，或与 httpx 自身管理冲突。
+_NATIVE_PASSTHROUGH_SKIP = {
+    "authorization",
+    "proxy-authorization",
+    "host",
+    "content-length",
+    "connection",
+    "accept-encoding",
+    "content-type",
+    "user-agent",
+    "transfer-encoding",
+    "upgrade",
+}
+
+
 class _ChainedAdapter:
     """串联两个协议转换器，支持两段式转换（A->B->C）"""
 
@@ -265,6 +281,7 @@ async def forward_request(
     plugin_manager=None,
     request_timeout: float | None = None,
     original_user_agent: str = "",
+    passthrough_headers: dict | None = None,
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
@@ -475,6 +492,15 @@ async def forward_request(
         upstream_api_path = target_api_path or api_path
         url = agent.resolve_url(key, upstream_api_path)
         headers = agent.build_headers(key, upstream_api_path, original_user_agent=original_user_agent)
+        # 原生透传模式（use_native_user_agent=true）下，把客户端携带的业务头一并带给上游，
+        # 让依赖身份/会话头的网关（如 Codex 官方）能识别为原生客户端。
+        # 认证头与传输基础设施头在 _NATIVE_PASSTHROUGH_SKIP 中排除，避免覆盖密钥或与 httpx 冲突。
+        if passthrough_headers and bool(load_config().get("use_native_user_agent", False)):
+            for name, value in passthrough_headers.items():
+                if str(name).lower() in _NATIVE_PASSTHROUGH_SKIP:
+                    continue
+                if value is not None:
+                    headers[name] = value
         route_client = await _resolve_route_client(client, key, model, upstream_api_path)
 
         if adapter and hasattr(adapter, "set_request_context"):
