@@ -294,7 +294,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息 |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
-| `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`），流式模式逐轮推送 `turn_start` / `tool_call` / `tool_result` / `final` 事件 |
+| `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；每个可见文本增量立即推送 `model_delta`，其余阶段推送 Agent 事件 |
 
 ### 响应格式
 
@@ -320,6 +320,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 | 事件 | 说明 |
 |------|------|
+| `model_delta` | LLM 新生成的可见文本片段，`data.turn` 为当前轮次，`data.content` 为增量内容 |
 | `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
 | `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
@@ -328,6 +329,8 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 ```json
 // SSE 示例
+data: {"event":"model_delta","data":{"turn":1,"content":"我来查询"}}
+
 data: {"event":"turn_start","data":{"turn":1}}
 
 data: {"event":"tool_call","data":{"name":"get_weather","arguments":{"city":"beijing"}}}

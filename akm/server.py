@@ -2292,7 +2292,7 @@ async def agent(request: Request):
         }
 
     - ``stream: false`` (默认) — 返回完整 AgentResult JSON
-    - ``stream: true`` — SSE 流式返回，每轮 emit ``turn_start`` / ``tool_call`` / ``tool_result`` / ``final`` / ``error`` 事件
+    - ``stream: true`` — SSE 流式返回，文本增量为 ``model_delta``，并在回合边界 emit ``turn_start`` / ``tool_call`` / ``tool_result`` / ``final`` / ``error`` 事件
     """
     body = await request.json()
     messages = body.get("messages")
