@@ -35,6 +35,20 @@ _NATIVE_PASSTHROUGH_SKIP = {
     "upgrade",
 }
 
+# 插件覆写上游请求头时仍需排除的头：只拦认证与传输基础设施头，避免插件覆盖密钥或破坏 httpx 传输。
+# 与原生透传不同，这里刻意放行 user-agent / content-type / accept 等业务头，
+# 以便客户端模拟插件（如 codex_impersonation）能改写身份与内容协商头。
+_PLUGIN_HEADER_SKIP = {
+    "authorization",
+    "proxy-authorization",
+    "host",
+    "content-length",
+    "connection",
+    "accept-encoding",
+    "transfer-encoding",
+    "upgrade",
+}
+
 
 class _ChainedAdapter:
     """串联两个协议转换器，支持两段式转换（A->B->C）"""
@@ -492,10 +506,21 @@ async def forward_request(
         upstream_api_path = target_api_path or api_path
         url = agent.resolve_url(key, upstream_api_path)
         headers = agent.build_headers(key, upstream_api_path, original_user_agent=original_user_agent)
-        # 原生透传模式（use_native_user_agent=true）下，把客户端携带的业务头一并带给上游，
-        # 让依赖身份/会话头的网关（如 Codex 官方）能识别为原生客户端。
-        # 认证头与传输基础设施头在 _NATIVE_PASSTHROUGH_SKIP 中排除，避免覆盖密钥或与 httpx 冲突。
-        if passthrough_headers and bool(load_config().get("use_native_user_agent", False)):
+        # 上游请求头合并策略（优先级从高到低）：
+        #   1. 插件覆写：on_request 阶段经 ctx.set_upstream_headers() 写入（如客户端模拟插件），
+        #      允许覆盖 User-Agent / Content-Type 等业务头，但认证头与传输基础设施头仍被排除，
+        #      防止插件破坏密钥注入或 httpx 传输。
+        #   2. 原生透传（use_native_user_agent=true）：把客户端携带的业务头原样带给上游，
+        #      让依赖身份/会话头的网关（如 Codex 官方）能识别为原生客户端。
+        #   3. build_headers 默认头。
+        # 二者互斥：插件显式覆写存在时优先，避免原生透传的杂项头与模拟身份冲突。
+        if ctx.upstream_headers:
+            for name, value in ctx.upstream_headers.items():
+                if str(name).lower() in _PLUGIN_HEADER_SKIP:
+                    continue
+                if value is not None:
+                    headers[name] = value
+        elif passthrough_headers and bool(load_config().get("use_native_user_agent", False)):
             for name, value in passthrough_headers.items():
                 if str(name).lower() in _NATIVE_PASSTHROUGH_SKIP:
                     continue

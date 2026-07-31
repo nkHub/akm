@@ -40,6 +40,9 @@ class RequestContext:
         self.bag: dict[str, Any] = {}
         # 管道控制结构：block（阻断请求）/ skip_key（跳过当前 Key）
         self.action: dict | None = None
+        # 插件对上游请求头的覆写集合：由 on_request 阶段的插件写入，
+        # 转发层在 build_headers 之后按此合并进实际发出的请求头（模拟客户端身份等）。
+        self.upstream_headers: dict = {}
 
     # ── 请求体 ──────────────────────────────────────────────
 
@@ -110,6 +113,28 @@ class RequestContext:
     def clear_action(self) -> None:
         """清除管道控制标记。"""
         self.action = None
+
+    # ── 上游请求头覆写 ─────────────────────────────────────
+
+    def set_upstream_header(self, name: str, value: str) -> None:
+        """覆写单个上游请求头。
+
+        Args:
+            name: 请求头名（原样写入，转发层按大小写不敏感处理）。
+            value: 请求头值；为 None 时跳过。
+        """
+        if value is None:
+            return
+        self.upstream_headers[str(name)] = str(value)
+
+    def set_upstream_headers(self, headers: dict) -> None:
+        """批量覆写上游请求头（多个头名以字典形式传入）。
+
+        Args:
+            headers: ``{头名: 头值}`` 字典；None 值会被忽略。
+        """
+        for name, value in (headers or {}).items():
+            self.set_upstream_header(name, value)
 
     @property
     def is_block(self) -> bool:
