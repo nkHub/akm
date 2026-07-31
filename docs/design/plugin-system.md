@@ -328,6 +328,9 @@ class PluginBase:
         """请求到达时调用（需在 plugin.json 中声明 hooks.on_request: true）
 
         - 直接改写 ctx.request（in-place）或返回新的 request dict；
+        - 用 ctx.set_upstream_headers(...) 覆写上游请求头（如客户端模拟插件）；
+          转发层在 build_headers 之后按「插件覆写 > 原生透传 > 默认头」的顺序合并，
+          Authorization 等认证头与 host/content-length/connection 等传输基础设施头始终被保护；
         - 跨阶段状态写入 ctx.bag（约定键 ``{plugin}.{field}``）；
         - 需要阻断时调用 ctx.set_block(...)
         """
@@ -492,6 +495,9 @@ class Plugin(PluginBase):
 | `bag_get` / `bag_set` / `bag_pop` | 读写跨阶段状态 |
 | `set_block(...)` | 标记 on_request 阻断，proxy 直接返回客户端 |
 | `set_skip_key(...)` | 标记 on_key_selected 跳过当前 Key |
+| `upstream_headers` | 插件对上游请求头的覆写集合（on_request 写入，转发层在 build_headers 后优先合并） |
+| `set_upstream_header(name, value)` | 覆写单个上游请求头（None 值忽略） |
+| `set_upstream_headers(dict)` | 批量覆写上游请求头（客户端模拟插件用） |
 | `forwardable_request()` | 生成可发往上游的请求体：剥离所有 `__akm_*` 本地字段 |
 
 **bag 约定键（示例）**：
@@ -520,7 +526,7 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 
 | Hook | 输入 | 返回值 / 控制 | 管道传递 |
 |------|------|---------------|---------|
-| `on_request` | `ctx` | 返回新 request dict 则 `ctx.set_request`；或 `ctx.set_block(...)` | 同一 ctx 传给下一个；block 后立即停止管道 |
+| `on_request` | `ctx` | 返回新 request dict 则 `ctx.set_request`；`ctx.set_upstream_headers(...)` 覆写上游请求头；或 `ctx.set_block(...)` | 同一 ctx 传给下一个；block 后立即停止管道 |
 | `on_key_selected` | `ctx`（含 model/key） | 返回替代 key dict；或 `ctx.set_skip_key(...)` | skip_key 后立即停止本轮管道，proxy 重选 Key |
 | `on_upstream_error` | `ctx` + 错误参数 | `"retry"` / `"switch"` / `"block"` / `"fallback"` / `None` | 第一个非 None 动作即为最终决策；`fallback` 可改写 `ctx.request.model` 后重选 Key |
 | `on_response` | `ctx`（含 response） | 返回新 response dict 则写回 `ctx.response` | 同一 ctx 按优先级依次执行 |

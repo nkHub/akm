@@ -198,7 +198,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `wake_recover_delay_sec` 也是 `config.json` 中的隐藏配置项，默认值为 `8`。它仅作用于菜单栏应用收到系统唤醒事件后的恢复流程，用来控制在执行本地 `ready` 检查和真实上游探活之前要等待多久，适合在 VPN、Wi-Fi 或代理路由恢复偏慢的机器上手动调大；该项不会在设置页单独展示。
 
-`use_native_user_agent` 是 `config.json` 中的隐藏配置项，默认值为 `false`。设为 `true` 后启用**原生透传**：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时会把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。若需要伪装成特定客户端，后续由客户端模拟插件承担。
+`use_native_user_agent` 是 `config.json` 中的隐藏配置项，默认值为 `false`。设为 `true` 后启用**原生透传**：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时会把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。若需要把**特定来源**的请求伪装成 Codex Desktop（例如 opencode 请求命中后模拟成官方 Codex 身份头），可使用项目本地插件 `codex_impersonation`，见 [plugins/codex_impersonation/plugin.json](plugins/codex_impersonation/plugin.json)。
 
 如果需要给本地智能体接入图片能力，优先使用仓库内置的 `skills/akm-image-local/SKILL.md`。这个 skill 的定位是让图片生成与编辑统一走本地 AKM 服务，而不是继续依赖单独的图片 MCP 网关；它已经约定了默认模型、尺寸、质量和提示词组织方式，适合直接复用到智能体工作流中。
 
@@ -492,6 +492,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `error_handler` | handler | 默认开启 | 429 限流换 Key、5xx 指数退避重试 |
 | `usage_quota_guard` | matcher | | 可选本地窗口配额：按 Key/模型限制请求次数和已观测 Token，超额时跳过 Key |
 | `key_source_guard` | matcher | | 可选 Key 来源绑定：按客户端 `User-Agent` glob 限制指定上游 Key，未匹配时跳过该 Key |
+| `codex_impersonation` | filter | | 可选 Codex 客户端模拟：将匹配来源的请求头覆写为 Codex Desktop 风格（含 `originator`、`x-codex-turn-metadata` 等），用于通过官方客户端身份校验 |
 | `budget_gate` | filter | | 可选预算闸门：按全局/模型/用户累计估算费用，超预算阻断新请求 |
 | `fallback_router` | handler | | 可选模型降级：指定错误后切到备用模型并重新选 Key |
 | `data_filter_guard` | filter/post | | 可选请求脱敏（正则含原代码敏感规则）与响应安全拦截（流式字段级滑动窗口） |

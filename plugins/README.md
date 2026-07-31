@@ -10,6 +10,7 @@
 | `protocol_converter` | converter | — | Responses / Messages / Chat 三格式互转 |
 | `prompt_booster` | filter | — | 给请求追加固定 system prompt |
 | `prompt_profiles` | filter | 关 | 按模型/接口/客户端叠加多套提示词 |
+| `codex_impersonation` | filter | 关 | 将匹配来源的请求头模拟为 Codex Desktop 风格 |
 | `data_filter_guard` | filter | 关 | 请求脱敏 + 响应敏感内容拦截 |
 | `tool_policy_guard` | filter | 关 | 限制工具名与危险工具参数 |
 | `rate_limit_guard` | filter | 关 | 本地 RPM / RPH / 并发限流 |
@@ -39,6 +40,9 @@
 
 - **`prompt_profiles`**  
   用 JSON 配置多条 profile：按模型 glob、接口路径、客户端 UA 等过滤，再按顺序叠加 `prompt`。适合多客户端、多模型不同系统提示。
+
+- **`codex_impersonation`**  
+  将指定来源客户端的请求头模拟为 Codex Desktop 风格。部分上游网关（如 Codex 官方接口）除 User-Agent 外还依赖 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等专属头判定请求来自官方客户端；开启本插件并配置 `client_patterns`（客户端 UA glob，默认 `["opencode/*"]`），命中来源的请求在转发前会被覆写为一套自洽的 Codex 风格头。覆写通过 `ctx.set_upstream_headers()` 写入，优先级高于原生透传，但认证头（`Authorization`）与传输基础设施头仍被转发层保护。`installation_id` 留空时进程内随机生成并复用。
 
 ### 安全与策略
 
