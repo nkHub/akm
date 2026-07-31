@@ -22,7 +22,8 @@ DEFAULTS = {
     "image_supported_models": "gpt-image-2",  # 图片生成/编辑支持的模型列表（逗号分隔，首项作为默认值）
     "image_request_timeout_sec": 300,  # 图片生成/编辑请求超时（秒），默认比聊天接口更宽松
     "wake_recover_delay_sec": 8,  # 菜单栏应用在系统唤醒后等待网络/VPN恢复的秒数
-    "use_native_user_agent": False,  # 是否透传客户端原始 User-Agent；默认继续使用 akm/<version>
+    "use_native_user_agent": False,  # 是否透传客户端原始 User-Agent；开启时优先于固定覆盖值
+    "user_agent_override": "Codex Desktop/0.146.0-alpha.9.2 (Mac OS 14.1.2; arm64) unknown (Codex Desktop; 26.727.40816)",  # 非原生透传时固定使用的上游 User-Agent；留空则回退 akm/<version>
     # 出站 HTTP 代理：仅作用于 AKM 访问上游供应商的请求，不是系统 VPN
     "http_proxy_enabled": False,
     "http_proxy_url": "",  # 例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080

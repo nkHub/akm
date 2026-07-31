@@ -91,6 +91,9 @@ class Agent:
             native = str(original_user_agent or "").strip()
             if native:
                 return native
+        override = str(config_get("user_agent_override", "") or "").strip()
+        if override:
+            return override
         return f"akm/{__version__}"
 
     def needs_conversion(self, api_path: str) -> Optional[str]:

@@ -1,5 +1,6 @@
 import pytest
 from akm import __version__
+from akm.config import DEFAULTS
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 import httpx
@@ -737,7 +738,7 @@ async def test_forward_image_generations_request_does_not_inject_stream_or_conve
     assert result["status_code"] == 200
     assert send_calls[0]["stream"] is False
     payload = send_calls[0]["req"].content.decode("utf-8")
-    assert send_calls[0]["req"].headers["User-Agent"] == f"akm/{__version__}"
+    assert send_calls[0]["req"].headers["User-Agent"] == DEFAULTS["user_agent_override"]
     assert '"stream":' not in payload
 
 
@@ -831,7 +832,7 @@ async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatc
     assert send_calls[0]["stream"] is False
     req = send_calls[0]["req"]
     assert req.headers["Content-Type"].startswith("multipart/form-data;")
-    assert req.headers["User-Agent"] == f"akm/{__version__}"
+    assert req.headers["User-Agent"] == DEFAULTS["user_agent_override"]
     body = b"".join(req.stream)
     assert b"filename=\"cat.png\"" in body
 

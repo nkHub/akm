@@ -198,7 +198,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `wake_recover_delay_sec` 也是 `config.json` 中的隐藏配置项，默认值为 `8`。它仅作用于菜单栏应用收到系统唤醒事件后的恢复流程，用来控制在执行本地 `ready` 检查和真实上游探活之前要等待多久，适合在 VPN、Wi-Fi 或代理路由恢复偏慢的机器上手动调大；该项不会在设置页单独展示。
 
-`use_native_user_agent` 也是 `config.json` 中的隐藏配置项，默认值为 `false`。默认情况下 AKM 会统一把上游请求的 `User-Agent` 写成 `akm/<version>`；当该项设为 `true` 时，如果当前 HTTP 请求带有原始 `User-Agent`，AKM 会优先透传客户端原值。聊天、图片、模型探测等走统一 `build_headers()` 的链路都会复用这套规则；如果当前链路没有原始请求头可用，则仍会回退到 `akm/<version>`。
+`user_agent_override` 是 `config.json` 中的隐藏配置项，默认使用 Codex Desktop 的 User-Agent。未启用原生透传时，聊天、图片、模型探测等所有走统一 `build_headers()` 的上游请求都会使用该值；可手动改为 OpenCode、Claude Code 等任意固定标识，留空则回退为 `akm/<version>`。`use_native_user_agent` 默认值为 `false`；设为 `true` 后，如果当前 HTTP 请求带有原始 `User-Agent`，会优先透传该原值并忽略 `user_agent_override`。若原始请求没有该请求头，则继续使用 `user_agent_override` 或 `akm/<version>` 回退值。
 
 如果需要给本地智能体接入图片能力，优先使用仓库内置的 `skills/akm-image-local/SKILL.md`。这个 skill 的定位是让图片生成与编辑统一走本地 AKM 服务，而不是继续依赖单独的图片 MCP 网关；它已经约定了默认模型、尺寸、质量和提示词组织方式，适合直接复用到智能体工作流中。
 

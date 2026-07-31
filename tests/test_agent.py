@@ -109,16 +109,42 @@ def test_build_headers_default():
 
 def test_build_headers_uses_native_user_agent_when_enabled(monkeypatch):
     """开启 use_native_user_agent 后，应优先透传原始 User-Agent。"""
-    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+    monkeypatch.setattr(
+        "akm.agent.config_get",
+        lambda key, default=None: {
+            "use_native_user_agent": True,
+            "user_agent_override": "Codex Desktop/test",
+        }.get(key, default),
+    )
     agent = Agent(name="openai", default_base_url="https://api.openai.com")
     key = {"api_key": "sk-test123"}
     headers = agent.build_headers(key, original_user_agent="Claude-Code/1.2.3")
     assert headers["User-Agent"] == "Claude-Code/1.2.3"
 
 
+def test_build_headers_uses_configured_user_agent_override(monkeypatch):
+    """未启用原生透传时，应使用全局配置的固定上游 User-Agent。"""
+    monkeypatch.setattr(
+        "akm.agent.config_get",
+        lambda key, default=None: {
+            "use_native_user_agent": False,
+            "user_agent_override": "Codex Desktop/test",
+        }.get(key, default),
+    )
+    agent = Agent(name="openai", default_base_url="https://api.openai.com")
+    headers = agent.build_headers({"api_key": "sk-test123"})
+    assert headers["User-Agent"] == "Codex Desktop/test"
+
+
 def test_build_headers_falls_back_to_akm_user_agent_without_native_value(monkeypatch):
     """即使开启 use_native_user_agent，没有原始值时也应回退到 akm 版本标识。"""
-    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+    monkeypatch.setattr(
+        "akm.agent.config_get",
+        lambda key, default=None: {
+            "use_native_user_agent": True,
+            "user_agent_override": "",
+        }.get(key, default),
+    )
     agent = Agent(name="openai", default_base_url="https://api.openai.com")
     key = {"api_key": "sk-test123"}
     headers = agent.build_headers(key, original_user_agent="")
