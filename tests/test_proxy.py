@@ -1,7 +1,6 @@
 import pytest
 from akm import __version__
 import tempfile
-import logging
 from unittest.mock import AsyncMock, MagicMock
 import httpx
 from akm.proxy import forward_request, test_key_connectivity as check_key_connectivity, _diagnose_no_key, redact_headers
@@ -9,7 +8,6 @@ from akm.agent import AGENT_REGISTRY
 from akm.db import get_connection, init_db
 from akm.http_client_pool import HttpClientPoolManager
 from akm.key_pool import add_key, set_status
-from plugins.codex_impersonation.index import Plugin as CodexImpersonation
 
 
 @pytest.fixture(autouse=True)
@@ -907,135 +905,6 @@ async def test_forward_passthrough_disabled_when_native_off(monkeypatch):
     assert "x-codex-turn-metadata" not in sent
     # 未开启原生 + 无 override → 回退 akm/<version>
     assert sent["User-Agent"] == f"akm/{__version__}"
-
-
-class _HookPM:
-    """最小插件管理器桩：跑 on_request hook 并转发其余调用，供头部模拟测试使用。"""
-
-    def __init__(self, plugin):
-        self._plugin = plugin
-
-    def get_converter(self, from_fmt, to_fmt):
-        return None
-
-    async def run_hook(self, hook, ctx=None, **kwargs):
-        if hook == "on_request":
-            await self._plugin.on_request(ctx)
-        return ctx if ctx is not None else kwargs
-
-
-def _codex_impersonation_pm():
-    """构造已启用且默认匹配 opencode/* 来源的 codex_impersonation 插件管理器桩。"""
-    plugin = CodexImpersonation()
-    plugin.logger = logging.getLogger("test.codex_impersonation")
-    plugin.config = {
-        "enabled": True,
-        "client_patterns": '["opencode/*"]',
-        "user_agent": "Codex Desktop/9.9.9",
-        "installation_id": "",
-        "sandbox": "seatbelt",
-    }
-    return _HookPM(plugin)
-
-
-@pytest.mark.asyncio
-async def test_forward_applies_plugin_header_overrides(monkeypatch):
-    """客户端模拟插件写入的 upstream_headers 应覆写上游请求头为 Codex 风格。"""
-
-    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
-        "alias": "gs-codex", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
-        "base_url": "https://api.openai.com",
-    }))
-    monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": False})
-
-    mock_client = AsyncMock()
-    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"object":"chat.completion","model":"m","choices":[]}')])
-
-    result = await forward_request(
-        body={"model": "gpt-5", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
-        client=mock_client,
-        api_path="responses",
-        original_user_agent="opencode/1.18.4 ai-sdk/4.0.23",
-        passthrough_headers={"x-session-id": "ses_abc", "accept": "*/*"},
-        plugin_manager=_codex_impersonation_pm(),
-    )
-
-    assert result["status_code"] == 200
-    sent = send_calls[0]["req"].headers
-    # 插件覆写生效：UA / 身份头 / Codex 专属头
-    assert sent["User-Agent"] == "Codex Desktop/9.9.9"
-    assert sent["Originator"] == "Codex Desktop"
-    assert sent["X-OpenAI-Internal-Codex-Responses-Lite"] == "true"
-    assert sent["Accept"] == "text/event-stream"
-    assert "x-codex-turn-metadata" in sent
-    # 认证头仍被替换为所选 key 密钥，传输基础设施头交由 httpx 重建
-    assert sent["Authorization"] == "Bearer __AKM_CREDENTIAL_VALUE_63353636d4c9__"
-    assert sent["host"] == "api.openai.com"
-    # 插件覆写存在时原生透传被跳过：客户端杂项业务头不混入模拟身份
-    assert "x-session-id" not in sent
-
-
-@pytest.mark.asyncio
-async def test_forward_plugin_overrides_beat_native_passthrough(monkeypatch):
-    """同时开启原生透传与插件覆写时，插件头优先，原生业务头不再透传。"""
-
-    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
-        "alias": "gs-codex", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
-        "base_url": "https://api.openai.com",
-    }))
-    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
-    monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": True})
-
-    mock_client = AsyncMock()
-    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"object":"chat.completion","model":"m","choices":[]}')])
-
-    result = await forward_request(
-        body={"model": "gpt-5", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
-        client=mock_client,
-        api_path="responses",
-        original_user_agent="opencode/1.18.4 ai-sdk/4.0.23",
-        passthrough_headers={"x-session-id": "ses_abc", "originator": "opencode"},
-        plugin_manager=_codex_impersonation_pm(),
-    )
-
-    assert result["status_code"] == 200
-    sent = send_calls[0]["req"].headers
-    # 插件模拟的 Codex 身份胜出
-    assert sent["Originator"] == "Codex Desktop"
-    assert sent["User-Agent"] == "Codex Desktop/9.9.9"
-    # 客户端原始业务头未透传
-    assert "x-session-id" not in sent
-
-
-@pytest.mark.asyncio
-async def test_forward_plugin_overrides_skipped_when_client_not_matched(monkeypatch):
-    """来源不匹配时插件不覆写，原生透传照常生效。"""
-
-    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
-        "alias": "gs-codex", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
-        "base_url": "https://api.openai.com",
-    }))
-    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
-    monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": True})
-
-    mock_client = AsyncMock()
-    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"object":"chat.completion","model":"m","choices":[]}')])
-
-    result = await forward_request(
-        body={"model": "gpt-5", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
-        client=mock_client,
-        api_path="responses",
-        original_user_agent="curl/8.0",
-        passthrough_headers={"x-session-id": "ses_abc", "originator": "curl"},
-        plugin_manager=_codex_impersonation_pm(),
-    )
-
-    assert result["status_code"] == 200
-    sent = send_calls[0]["req"].headers
-    # curl 未命中模拟规则：插件不覆写，UA 走原生透传（curl），业务头照常透传
-    assert sent["User-Agent"] == "curl/8.0"
-    assert sent["Originator"] == "curl"
-    assert "x-codex-turn-metadata" not in sent
 
 
 @pytest.mark.asyncio

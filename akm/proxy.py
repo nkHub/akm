@@ -37,7 +37,7 @@ _NATIVE_PASSTHROUGH_SKIP = {
 
 # 插件覆写上游请求头时仍需排除的头：只拦认证与传输基础设施头，避免插件覆盖密钥或破坏 httpx 传输。
 # 与原生透传不同，这里刻意放行 user-agent / content-type / accept 等业务头，
-# 以便客户端模拟插件（如 codex_impersonation）能改写身份与内容协商头。
+# 以便客户端模拟类插件能改写身份与内容协商头。
 _PLUGIN_HEADER_SKIP = {
     "authorization",
     "proxy-authorization",

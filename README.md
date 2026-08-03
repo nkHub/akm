@@ -142,20 +142,52 @@ akm-menubar
 
 `akm serve` 启动后访问 `http://127.0.0.1:8800/admin`
 
-| 页面 | 功能 |
-|------|------|
-| 统计 | Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1d/7d/30d 自然日切换；可在设置开启费用估算后显示总费用与每日费用；开启费用时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列带图标，悬停展示输入未命中缓存、输入缓存命中、输出三者的 Token 数与价格明细） |
-| 审计 | 请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用，费用列带图标，悬停展示输入/缓存/输出三者的 Token 数与价格明细；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags） |
-| 管理 | Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示） |
-| 插件 | 插件列表、启用/禁用开关、上传 .zip 安装、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。 |
-| 设置 | 分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关与模型单价表、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除） |
-| 关于 | 版本与功能简介（展示内置插件能力） |
+<table>
+  <thead>
+    <tr>
+      <th style="width: 72px; white-space: nowrap;">页面</th>
+      <th>功能</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="white-space: nowrap;">统计</td>
+      <td>Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1d/7d/30d 自然日切换；可在设置开启费用估算后显示总费用与每日费用；开启费用时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列带图标，悬停展示输入未命中缓存、输入缓存命中、输出三者的 Token 数与价格明细）</td>
+    </tr>
+    <tr>
+      <td style="white-space: nowrap;">审计</td>
+      <td>请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用，费用列带图标，悬停展示输入/缓存/输出三者的 Token 数与价格明细；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags）</td>
+    </tr>
+    <tr>
+      <td style="white-space: nowrap;">管理</td>
+      <td>Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示）</td>
+    </tr>
+    <tr>
+      <td style="white-space: nowrap;">插件</td>
+      <td>插件列表、启用/禁用开关、上传 .zip 安装、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
+    </tr>
+    <tr>
+      <td style="white-space: nowrap;">设置</td>
+      <td>分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关与模型单价表、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除）</td>
+    </tr>
+    <tr>
+      <td style="white-space: nowrap;">关于</td>
+      <td>版本与功能简介（展示内置插件能力）</td>
+    </tr>
+  </tbody>
+</table>
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉和设置卡片等基础壳组件，供后续页面复用。
 
 仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，提供 Markdown 知识库、RAG 检索增强生成和自动注入能力。详见 [plugins/markdown_kb/README.md](plugins/markdown_kb/README.md)。
 
 ## 配置
+
+所有配置保存在 `~/.akm/config.json`（首次启动自动创建），服务启动时读取，缺失项自动用默认值补全。命令行可用 `akm config get <项>` 查看、`akm config set <项> <值>` 修改单个配置项。
+
+保存后多数配置项即时生效；连接池、出站代理相关项保存后会自动重建 HTTP 连接池，无需重启服务。
+
+### 默认配置
 
 ```json
 {
@@ -164,15 +196,19 @@ akm-menubar
   "server_port": 8800,
   "log_request_body": false,
   "log_response_body": false,
+  "stream_capture_max_bytes": 262144,
   "stats_include_estimated_usage": false,
   "cost_stats_enabled": false,
   "cost_pricing_table": "gpt-5.4=2.5/0.25/15\n*=1/0.5/3",
-  "http_proxy_enabled": false,
-  "http_proxy_url": "",
   "json_viewer_max_text_length": 600000,
+  "image_supported_models": "gpt-image-2",
   "image_request_timeout_sec": 300,
   "wake_recover_delay_sec": 8,
   "use_native_user_agent": false,
+  "launch_at_login": false,
+  "menu_bar_show_usage": false,
+  "http_proxy_enabled": false,
+  "http_proxy_url": "",
   "http_client_max_connections": 8,
   "http_client_max_keepalive": 2,
   "http_client_max_pools": 64,
@@ -183,6 +219,8 @@ akm-menubar
   "proxy_retry_backoff_base_sec": 0.5,
   "proxy_default_timeout_sec": 120.0,
   "agent_max_turns": 20,
+  "agent_upload_dir": "~/.akm/cache",
+  "tavily_api_key": "",
   "rate_limit_cooldown_sec": 60,
   "audit_queue_maxsize": 512,
   "usage_query_check_interval_sec": 60,
@@ -190,15 +228,103 @@ akm-menubar
 }
 ```
 
+### 服务与日志
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `server_port` | `8800` | 服务端口 |
+| `auto_open_admin` | `true` | 启动时自动打开管理台 |
+| `log_retention_days` | `30` | 日志保留天数 |
+| `log_request_body` | `false` | 是否记录请求体（含完整对话内容，占用空间大） |
+| `log_response_body` | `false` | 是否记录响应体（占用空间大，关闭不影响统计） |
+| `stream_capture_max_bytes` | `262144` | 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB） |
+| `json_viewer_max_text_length` | `600000` | JSON 查看器超长文本阈值（超过后仅允许下载原文） |
+
+### macOS 原生功能
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `launch_at_login` | `false` | 开机自启动（仅打包后的 `.app` 生效） |
+| `menu_bar_show_usage` | `false` | 菜单栏显示今日用量（Token 数 / 费用交替展示） |
+| `wake_recover_delay_sec` | `8` | 菜单栏应用收到系统唤醒事件后，执行本地 ready 检查与上游探活前的等待秒数；VPN/Wi-Fi/代理恢复偏慢的机器可调大 |
+
+### 图片
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `image_supported_models` | `gpt-image-2` | 图片生成/编辑模型列表（逗号分隔，首项作为 `/v1/images/generations`、`/v1/images/edits` 未显式传 `model` 时的默认回填值；仅在存在 active key 支持该默认模型时自动补齐，否则接口直接报错） |
+| `image_request_timeout_sec` | `300` | 图片请求超时（秒），比聊天接口更宽松；作用于图片生成/编辑接口与 CLI 本地图片调用链路，设置页不单独展示 |
+
+### Agent
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `agent_max_turns` | `20` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
+| `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
+| `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
+
+### 出站代理
+
+仅作用于 AKM 访问上游供应商的请求（主转发连接池与连通性测试），不是系统 VPN，不影响本机其它软件；SOCKS 依赖运行环境中的 `socksio`。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `http_proxy_enabled` | `false` | 是否启用出站代理 |
+| `http_proxy_url` | `""` | 代理地址，如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`；也可写 `host:port`（自动补 `http://`） |
+
+保存后自动重建 HTTP 连接池使配置立即生效。
+
+### 上游连接池
+
+控制 AKM 访问上游供应商时的并发连接数，均可在设置页调整。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `http_client_max_connections` | `8` | 每个上游路由（provider/key/model/path）的最大并发连接数，超出后阻塞等待 |
+| `http_client_max_keepalive` | `2` | 每个路由的 keep-alive 连接数，应 ≤ `max_connections` |
+| `http_client_max_pools` | `64` | 不同路由组合的池数量上限，超出时按 LRU 淘汰旧池 |
+| `http_client_idle_ttl_sec` | `120` | 路由池空闲超过此秒数后自动关闭回收 |
+| `http_client_connect_timeout_sec` | `10` | TCP 连接建立的超时秒数 |
+
+修改保存后立即重建连接池，可通过 `/debug/runtime` 查看当前池数量与单池连接上限的实时值。
+
+### 转发与重试
+
+控制请求转发时的 Key 选择与重试策略，均可在设置页调整。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `proxy_max_key_tries` | `20` | 选 Key 的最大尝试次数，防止无限循环；所有 Key 均不可用时返回 503 |
+| `proxy_max_retries_per_key` | `2` | 单个 Key 在 5xx 或连接/超时错误时的最大重试次数 |
+| `proxy_retry_backoff_base_sec` | `0.5` | 重试退避基础等待秒数，实际等待 = 基数 × 2^attempt |
+| `proxy_default_timeout_sec` | `120` | 聊天等非图片请求的默认上游超时秒数；图片接口另有独立的 `image_request_timeout_sec` |
+
+### Key 管理、审计与用量
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `rate_limit_cooldown_sec` | `60` | 被 429 限流后的冷却秒数，冷却期满后 key 自动恢复 active |
+| `audit_queue_maxsize` | `512` | 审计日志异步队列上限，满后丢弃新增日志 |
+| `usage_query_check_interval_sec` | `60` | 用量查询后台扫描间隔（秒） |
+
+### 统计与费用估算
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `stats_include_estimated_usage` | `false` | 首页统计是否计入估算 token（`usage_estimated_light`），默认关闭更保守；设置页不单独展示 |
+| `cost_stats_enabled` | `false` | 首页费用估算开关（不能替代供应商账单） |
+| `cost_pricing_table` | 内置默认单价表 | 模型单价表：`model=输入/输入缓存/输出`（每 1M tokens，固定美元）；未匹配到任何规则时回退为 `$1/$1/$3` |
+| `stats_cache_ttl_sec` | `60` | 首页统计缓存有效期（秒） |
+
+### 原生透传（`use_native_user_agent`）
+
+设为 `true` 后启用**原生透传**：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。
+
+## 数据与日志存储
+
 Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。菜单栏应用的休眠恢复链路则会单独把关键节点追加写入 `~/.akm/wake-recovery.log`，采用逐行 JSON 的形式记录收到唤醒、等待、探针结果、重启动作和最终恢复结果，便于判断到底是等待时间过短、本地服务未 ready，还是上游链路尚未恢复。系统内部错误（全局异常、代理转发失败、用量查询异常、插件加载失败等）会以逐行 JSON 写入 `~/.akm/error.log`，不再将 traceback 或内部报错详情返回给客户端；客户端仅收到通用错误提示，排障时请查看该文件。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
 
-`image_supported_models` 也是 `config.json` 中的全局配置项，默认值为 `gpt-image-2`。它支持逗号分隔多个图片模型，首项会作为 `/v1/images/generations` 与 `/v1/images/edits` 在未显式传 `model` 时的默认回填值；只有当当前存在 active key 支持该默认模型时才会自动补齐，否则接口会直接返回明确报错。
-
-`image_request_timeout_sec` 也是 `config.json` 中的隐藏配置项，默认值为 `300`。它仅作用于 `/v1/images/generations`、`/v1/images/edits` 以及 CLI 复用的本地图片调用链路，用来把图片请求超时放宽到比聊天接口更长的时间；该项不会在设置页单独展示。
-
-`wake_recover_delay_sec` 也是 `config.json` 中的隐藏配置项，默认值为 `8`。它仅作用于菜单栏应用收到系统唤醒事件后的恢复流程，用来控制在执行本地 `ready` 检查和真实上游探活之前要等待多久，适合在 VPN、Wi-Fi 或代理路由恢复偏慢的机器上手动调大；该项不会在设置页单独展示。
-
-`use_native_user_agent` 是 `config.json` 中的隐藏配置项，默认值为 `false`。设为 `true` 后启用**原生透传**：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时会把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。若需要把**特定来源**的请求伪装成 Codex Desktop（例如 opencode 请求命中后模拟成官方 Codex 身份头），可使用项目本地插件 `codex_impersonation`，见 [plugins/codex_impersonation/plugin.json](plugins/codex_impersonation/plugin.json)。
+## 本地智能体接入指引
 
 如果需要给本地智能体接入图片能力，优先使用仓库内置的 `skills/akm-image-local/SKILL.md`。这个 skill 的定位是让图片生成与编辑统一走本地 AKM 服务，而不是继续依赖单独的图片 MCP 网关；它已经约定了默认模型、尺寸、质量和提示词组织方式，适合直接复用到智能体工作流中。
 
@@ -211,33 +337,6 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 这两个命令都会请求本地代理，成功时只输出原始 JSON，便于 skill 或其他外部程序直接解析 `data[].url` 或 `data[].b64_json`。其中 `image edit` 会自动把本地文件组装为 `multipart/form-data`，调用方无需自己处理上传细节。
 
-`stats_include_estimated_usage` 仅作为 `config.json` 隐藏配置项存在，默认 `false`，不会在设置页单独展示；如需让首页统计把 `usage_estimated_light` 这类估算 token 计入总量与请求数，可手动改为 `true`。
-
-`http_proxy_enabled` / `http_proxy_url` 控制 AKM **出站代理**（仅访问上游供应商：主转发连接池与连通性测试）。开启后填写代理 URL，例如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`；也可写 `host:port`（自动补 `http://`）。保存后会重建 HTTP 连接池使配置立即生效。这不是系统 VPN，不影响本机其它软件；SOCKS 依赖运行环境中的 `socksio`。
-
-`http_client_max_connections` / `http_client_max_keepalive` / `http_client_max_pools` / `http_client_idle_ttl_sec` / `http_client_connect_timeout_sec` 控制 AKM 访问上游供应商时的**连接池参数**，均为设置页可调整的配置项：
-- `http_client_max_connections`（默认 8）：每个上游路由（provider/key/model/path）的最大并发连接数。如果同一路由的并发流式请求超过该值，后续请求会阻塞等待直到连接释放或超时。
-- `http_client_max_keepalive`（默认 2）：每个上游路由的 keep-alive 连接数，应 ≤ `max_connections`。
-- `http_client_max_pools`（默认 64）：不同路由组合的池数量上限，超出时按 LRU 淘汰旧池。
-- `http_client_idle_ttl_sec`（默认 120）：路由池空闲超过此秒数后自动关闭回收。
-- `http_client_connect_timeout_sec`（默认 10）：TCP 连接建立的超时秒数。
-
-修改后保存会立即重建 HTTP 连接池，无需重启服务。可通过 `/debug/runtime` 查看当前池数量与单池连接上限的实时值。
-
-`proxy_max_key_tries` / `proxy_max_retries_per_key` / `proxy_retry_backoff_base_sec` / `proxy_default_timeout_sec` 控制**转发与重试策略**，均为设置页可调整：
-- `proxy_max_key_tries`（默认 20）：选 Key 的最大尝试次数，防止无限循环。所有 Key 均不可用时返回 503。
-- `proxy_max_retries_per_key`（默认 2）：单个 Key 在遇到 5xx 或连接/超时错误时的最大重试次数。
-- `proxy_retry_backoff_base_sec`（默认 0.5）：重试退避的基础等待秒数，实际等待 = 基数 × 2^attempt。
-- `proxy_default_timeout_sec`（默认 120）：聊天等非图片请求的默认上游超时秒数；图片接口另有独立的 `image_request_timeout_sec`。
-
-`agent_max_turns`（默认 20）控制 Agent Loop 的最大工具调用轮次，防止死循环，设置页可调。
-
-`rate_limit_cooldown_sec`（默认 60）控制被 429 限流后的冷却秒数，冷却期满后 key 自动恢复 active，设置页可调。
-
-`audit_queue_maxsize`（默认 512）控制异步审计日志队列容量上限，满后丢弃新增日志；`stats_cache_ttl_sec`（默认 60）控制首页统计缓存有效期；`usage_query_check_interval_sec`（默认 60）控制用量查询后台扫描间隔。均在设置页可调。
-
-`cost_stats_enabled` / `cost_pricing_table` 控制首页费用估算：可在设置页开关与编辑单价表。单价仅支持 `model=输入/输入缓存/输出`（每 1M tokens），费用固定以美元计算和展示；未匹配到任何规则时回退为 `$1/$1/$3`。估算值不能替代供应商账单。
-
 ## API 端点
 
 | 方法 | 路径 | 说明 |
@@ -249,7 +348,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/rerank` | Rerank 转发接口（按 `model` 选 key 后纯透传，不做协议转换） |
 | POST | `/v1/images/generations` | Images Generations 转发接口（仅透传，不做协议转换；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
-| POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见「Agent Loop」章节） |
+| POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)） |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
@@ -287,192 +386,13 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 ## Agent Loop
 
-`POST /v1/agent` 提供多轮 LLM 工具调用编排能力。请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。
+`POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
-每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
+完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、响应格式与 SSE 流式事件。
+
+服务启动后会自动为每次 Agent 请求注入内置 AKM 调试工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配。
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
-
-服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配：
-
-| 工具 | 用途 |
-|------|------|
-| `akm_get_status` | 查询健康监护、审计队列和插件状态 |
-| `akm_list_keys` | 查询 Key 的别名、供应商、状态和模型列表，不返回 API Key 或连接地址 |
-| `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
-| `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
-| `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
-| `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
-| `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需提供服务器可访问的图片路径 |
-
-### 请求格式
-
-```json
-{
-  "model": "gpt-4o",
-  "messages": [{"role": "user", "content": "帮我查一下今天的天气"}],
-  "tools": [
-    {
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "查询指定城市的天气",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "city": {"type": "string", "description": "城市名称"}
-          },
-          "required": ["city"]
-        }
-      }
-    }
-  ],
-  "instructions": "你是 AKM 内置助手，请用中文回复",
-  "api_path": "chat/completions",
-  "max_turns": 20
-}
-```
-
-### 参数说明
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
-| `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式），与内置 AKM 调试工具合并；名称必须避免与内置工具冲突 |
-| `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息 |
-| `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
-| `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
-| `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考、工具事件先发，最终主体内容最后以 `model_delta` 推送（详见「SSE 流式事件」） |
-
-### 文件上传
-
-`/v1/agent` 支持 `multipart/form-data` 上传文件。`messages` 改为 JSON 字符串表单字段，`tools` 等其余字段同纯 JSON 方式；`files` 字段可携带多个文件。上传的文件会被读取并作为独立的 user 消息追加到对话末尾：图片（`image/*`）转成 base64 的 `image_url` 内容块，其他文件按 UTF-8 读取为文本内容，无法解码的二进制文件会返回 400。纯 JSON 请求方式保持不变。
-
-上传的图片还会同时落盘到 `agent_upload_dir` 配置的目录（默认 `~/.akm/cache`，可通过 `~/.akm/config.json` 修改，支持 `~` 展开；文件名为随机 UUID），并在追加的 user 消息文本中给出绝对路径提示。模型可据此调用 `akm_edit_image` 传入 `image_path` 编辑该图片。该目录不会自动清理，请根据运行环境定期清理。
-
-```bash
-curl -X POST http://127.0.0.1:8788/v1/agent \
-  -F 'messages=[{"role":"user","content":"请分析这个文件"}]' \
-  -F 'model=gpt-4o' \
-  -F 'files=@./report.txt'
-```
-
-流式 `final` 事件中的 `final_message` 会保留上游 Chat 响应的 `reasoning_content`，以便客户端展示完成后的推理内容。
-
-### 联网搜索
-
-内置的 `tavily_search` 工具通过 Tavily 官方远程 MCP 端点提供实时联网搜索。使用前需要在 `~/.akm/config.json` 中配置 API Key：
-
-```json
-{
-  "tavily_api_key": "tvly-xxxxxxxx"
-}
-```
-
-配置后 Agent 即可调用 `tavily_search`，参数如下：
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `query` | string | 是 | 搜索关键词 |
-| `max_results` | int | 否 | 返回结果数量（1-20，默认 5） |
-| `search_depth` | string | 否 | 搜索深度 `basic` 或 `advanced`（默认 `basic`） |
-
-请求会经 AKM 的按路由隔离 HTTP 连接池发往 `https://mcp.tavily.com/mcp/`（Key 通过查询参数注入），遵循出站代理设置。未配置 `tavily_api_key` 时工具调用会返回明确错误提示。
-
-### 图片生成
-
-内置的 `akm_generate_image` 工具复用 `/v1/images/generations` 的转发链路，让 Agent 可以直接生成图片。返回结果只含图片 URL（或 `b64_json_hint` 提示），避免体积巨大的 base64 数据占用模型上下文。参数如下：
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `prompt` | string | 是 | 图片描述提示词 |
-| `model` | string | 否 | 图片生成模型，默认取 `image_supported_models` 配置首项 |
-| `size` | string | 否 | 图片尺寸，如 `1024x1024` |
-| `quality` | string | 否 | 生成质量，如 `standard` 或 `hd` |
-| `n` | int | 否 | 生成张数（默认 1） |
-
-请求经连接池调用 `forward_request`（`api_path=images/generations`），自动复用 Key 选择、故障切换与图片专用超时（`image_request_timeout_sec`，默认 300 秒）。调用失败时会返回明确错误文本；上游只返回 `b64_json` 时会给出数据长度提示。
-
-生成成功后，每张图片还会下载保存到 `agent_upload_dir`（默认 `~/.akm/cache`），并在结果项中附带两个资源字段：
-
-- `local_path`：图片在本机的绝对路径，可供 `akm_edit_image` 等按路径读取的工具使用；
-- `http_url`：`http://127.0.0.1:{port}/agent-uploads/{filename}` 形式的访问地址，可直接用于前端展示或下载。
-
-若下载或保存失败，结果项会附带 `save_error` 说明原因，且不影响 `url` 等主结果字段。
-
-#### 图片编辑
-
-内置的 `akm_edit_image` 工具复用 `/v1/images/edits` 的 multipart 纯透传链路。图片通过 `image_path`（服务器可访问的本地绝对路径）传入，工具读取文件后按与 `/v1/images/edits` 一致的 multipart 结构组装请求，`image` 与可选的 `mask` 作为文件字段上传。参数如下：
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `image_path` | string | 是 | 服务器本地图片文件的绝对路径 |
-| `prompt` | string | 是 | 编辑指令，描述期望的修改效果 |
-| `model` | string | 否 | 图片编辑模型，默认取 `image_supported_models` 配置首项 |
-| `mask_path` | string | 否 | 本地蒙版图片路径，用于限定重绘区域 |
-| `size` | string | 否 | 输出图片尺寸，如 `1024x1024` |
-| `quality` | string | 否 | 生成质量，如 `standard` 或 `hd` |
-| `output_format` | string | 否 | 输出格式，如 `png` 或 `jpeg` |
-| `n` | int | 否 | 生成张数（默认 1） |
-
-文件不存在或读取失败会返回明确错误提示；其余失败（上游错误、无法解析响应等）与 `akm_generate_image` 行为一致。编辑结果与生成结果一样，会附带 `local_path`、`http_url`（`/agent-uploads/...`）资源字段，保存失败时附 `save_error`。
-
-#### 上传目录的 HTTP 访问
-
-服务端提供 `GET /agent-uploads/{filename}` 端点，按文件名提供 `agent_upload_dir` 目录下文件的访问（文件名仅接受单段安全名称，防止路径穿越）。生成、编辑工具返回的 `http_url` 即指向该端点，前端或其他客户端可通过 `http://127.0.0.1:{port}/agent-uploads/{filename}` 直接获取图片。
-
-### 响应格式
-
-```json
-{
-  "ok": true,
-  "final_message": {
-    "role": "assistant",
-    "content": "今天北京的天气是晴天，气温 25°C。"
-  },
-  "messages": [...],
-  "turns": 2,
-  "error": "",
-  "usage": {
-    "prompt_tokens": 1200,
-    "completion_tokens": 350,
-    "total_tokens": 1550
-  }
-}
-```
-
-### SSE 流式事件（`stream: true`）
-
-事件顺序约定：**思考（`reasoning_delta`）→ 工具（`thinking`/`turn_start`/`tool_call`/`tool_result`）→ 最终主体内容（`model_delta`）→ `final`**，保证主体内容一定在工具/思考之后返回。
-
-| 事件 | 说明 |
-|------|------|
-| `reasoning_delta` | LLM 思考（推理）过程片段，`data.turn` 为当前轮次，`data.content` 为增量内容；先于正文/工具实时下发 |
-| `thinking` | 工具调用轮产生的过程性正文（模型发起工具前的说明文本），`data.content` 为整段文本，在工具事件前下发 |
-| `model_delta` | 最终主体内容的可见文本片段，`data.turn` 为当前轮次，`data.content` 为增量内容 |
-| `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
-| `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
-| `tool_result` | 工具执行结果，`data.name` / `data.result` |
-| `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` |
-| `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` |
-
-```json
-// SSE 示例（工具轮：思考在前，工具调用轮的正文以 thinking 下发，主体内容最后出现）
-data: {"event":"reasoning_delta","data":{"turn":1,"content":"用户想查天气"}}
-
-data: {"event":"thinking","data":{"turn":1,"content":"我来查询"}}
-
-data: {"event":"turn_start","data":{"turn":1}}
-
-data: {"event":"tool_call","data":{"name":"get_weather","arguments":{"city":"beijing"}}}
-
-data: {"event":"tool_result","data":{"name":"get_weather","result":"{\"city\":\"beijing\",\"temp\":25}"}}
-
-data: {"event":"model_delta","data":{"turn":2,"content":"北京今天..."}}
-
-data: {"event":"final","data":{"final_message":{"role":"assistant","content":"北京今天..."},"turns":2,"usage":{...}}}
-```
 
 ## 故障切换策略
 
@@ -495,22 +415,11 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
 
 ## 流式转发
 
-请求转发会跟随客户端的流式意图：
+请求转发跟随客户端的流式意图：`stream=true` 逐块透传 SSE，`stream=false` 直接请求上游普通 JSON 并原样或按协议转换后返回；流式结束后异步写入审计日志（完整响应体用于统计和对话回放）。流式响应的内存捕获有界（默认 `stream_capture_max_bytes` 256KB，超出保留头尾并记录 `stream_capture_truncated` flag）。
 
-- 客户端 `stream=true` → 逐块透传 SSE
-- 客户端 `stream=false` → 直接请求上游普通 JSON 并原样/按协议转换后返回
-- 流式结束后异步写入审计日志（完整响应体用于统计和对话回放）
-- 审计日志中的 `request_body` 默认优先记录“实际转发给上游的请求体”，而不是入口原始请求体；这样可以准确反映协议转换、插件改写、脱敏或默认值补齐后的最终出站内容，便于排查“AKM 实际发了什么”。代价是日志不再完全等同于客户端最初提交的原始输入。
-- 审计日志同时支持完整链路追溯（四段式），逐段还原“客户端原始内容 → 上游实际内容”，便于核对协议转换与插件改写前后的差异：
-  - `client_request_headers`：客户端发起的全部请求头（`Authorization`/`Cookie`/`x-api-key` 等敏感头值已掩码为 `***`，`Authorization` 保留 scheme）
-  - `client_request_body`：客户端原始请求体（受 `log_request_body` 控制）
-  - `upstream_request_headers`：实际发往上游的请求头（敏感头同样脱敏）
-  - `upstream_response_body`：上游返回的原始响应体（协议转换前，受 `log_response_body` 控制）
-  - 与既有 `request_body`（上游请求体）、`response_body`（发给客户端、转换后的响应）共同组成完整链路；`clean-bodies` 清理时会一并清空 `client_request_body` 与 `upstream_response_body`。
-- 日志页详情抽屉提供「对话视图 / 客户端请求体 / 上游响应」三个常驻标签页，分别对应聊天视图、`client_request_body`（客户端原始请求体）与 `upstream_response_body`（上游原始响应体）；发生协议转换时（客户端原始请求体与上游请求体、上游原始响应体与返回响应内容 JSON 不一致）会追加「转换请求体」（`request_body`，实际发往上游的内容）与「转换响应体」（`response_body`，发给客户端的转换后内容）两个标签页。任一侧数据因未开启保存而缺失时保守保留转换标签页。
-- 对话视图的渲染约定：markdown 标题统一收敛到 1.15em 以内（避免 `<h1>` 等默认字号把气泡撑大），代码块/引用/表格有独立底色边框；纯工具调用轮次（`tool_calls` / `function_call` / SSE `delta.tool_calls` / responses `output_text.done`）渲染为「🔧 调用工具 xxx」摘要，避免显示成空回复。
-- 流式请求的插件 `on_response` 生命周期会等到 SSE 真正结束后才触发，避免并发计数过早回收导致慢 key 持续拥塞
-- 流式响应的内存捕获已改为有界模式：默认最多保留 `256KB`（配置项 `stream_capture_max_bytes`），超出后仅保留头尾两段并追加截断标记，日志 flags 会记录 `stream_capture_truncated`
+审计日志支持完整链路追溯（四段式）：`client_request_headers` / `client_request_body`（客户端原始内容，敏感头掩码，body 受 `log_request_body` 控制）/ `upstream_request_headers`（上游请求头）/ `upstream_response_body`（上游原始响应体，受 `log_response_body` 控制）；与既有 `request_body`（实际转发给上游的请求体）、`response_body`（发给客户端、转换后的响应）共同组成「客户端原始内容 → 上游实际内容」的完整链路。日志页详情抽屉提供「对话视图 / 客户端请求体 / 上游响应」三个常驻标签页，发生协议转换时追加「转换请求体 / 转换响应体」标签页。
+
+对话视图渲染约定：markdown 标题收敛到 1.15em 以内，代码块/引用/表格有独立底色边框；纯工具调用轮次渲染为「🔧 调用工具 xxx」摘要，避免显示成空回复。
 
 ## 健康监护
 
@@ -581,7 +490,6 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `error_handler` | handler | 默认开启 | 429 限流换 Key、5xx 指数退避重试 |
 | `usage_quota_guard` | matcher | | 可选本地窗口配额：按 Key/模型限制请求次数和已观测 Token，超额时跳过 Key |
 | `key_source_guard` | matcher | | 可选 Key 来源绑定：按客户端 `User-Agent` glob 限制指定上游 Key，未匹配时跳过该 Key |
-| `codex_impersonation` | filter | | 可选 Codex 客户端模拟：将匹配来源的请求头覆写为 Codex Desktop 风格（含 `originator`、`x-codex-turn-metadata` 等），用于通过官方客户端身份校验 |
 | `budget_gate` | filter | | 可选预算闸门：按全局/模型/用户累计估算费用，超预算阻断新请求 |
 | `fallback_router` | handler | | 可选模型降级：指定错误后切到备用模型并重新选 Key |
 | `data_filter_guard` | filter/post | | 可选请求脱敏（正则含原代码敏感规则）与响应安全拦截（流式字段级滑动窗口） |
@@ -593,42 +501,11 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `provider_health_probe` | app | | 可选供应商健康探测：提供 Key 连通性批量探测与脱敏状态快照 API |
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。`model_matcher` 标记为必需（`required: true`），不可禁用。每个插件实例拥有独立的 `config`；`on_load` 返回 `False` 或抛出异常时，插件保持未就绪，不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。残留的 API、插件页面和静态资源会按未就绪状态返回 503。管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；`model_matcher` 标记为必需（`required: true`），不可禁用。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
 
-当前版本不做“上游可逆加密”；如果上游没有对应解密协议，直接发送密文会让模型只能看到密文内容。
+每个插件实例拥有独立 `config`；`on_load` 返回 `False` 或抛异常时插件保持未就绪，残留的 API、插件页面和静态资源返回 503；管理台保存配置后调用 `on_config_changed` 刷新缓存状态。
 
-`proxy` 已补充 `on_response` 生命周期事件：每次上游尝试结束（成功/失败）都会向插件发送结构化元信息（如 `phase`、`status_code`、`key_alias`、`latency_ms`、`action`），用于审计增强与并发状态回收。
-
-插件列表页按“展示生命周期”排序：`model_matcher` 固定置顶，其余插件按 `filter → converter → post → handler → app` 顺序、同类别再按优先级/名称排列；宽屏下一行展示 2 个插件卡片。
-
-`model_matcher` 新增可配置的并发/慢 key 旁路策略（默认关闭，保守模式）：
-
-- `enable_inflight_bypass`：是否启用拥塞旁路（默认 `false`）
-- `max_inflight_per_key`：单 key 并发阈值（默认 `3`）
-
-`model_matcher` 的 `aliases` 配置仅支持显式映射（如 `gpt-4=gpt-4.1`），用于在请求进入转发链路前直接替换 `model`。未命中显式映射时，请求会保留原始模型名继续做 key 匹配。
-- `slow_inflight_threshold_sec`：最老 in-flight 慢请求阈值秒数（默认 `8`）
-
-可选开启“智能旁路”（同样默认关闭），在触发拥塞旁路后对多个候选 key 进行健康打分择优：
-
-- `enable_smart_bypass`：启用健康分择优（默认 `false`）
-- `smart_bypass_candidate_pool`：候选评估数量（默认 `4`）
-- `smart_bypass_min_improve`：最小改善阈值（默认 `0.15`）
-- `smart_bypass_error_cooldown_sec`：错误冷却惩罚窗口（默认 `15` 秒）
-
-开启后，仅在当前 key 明显拥塞时尝试旁路到其他可用 key；若无替代 key 则自动回退当前 key，不会额外硬失败。
-
-`usage_quota_guard`、`key_source_guard` 与 `fallback_router` 均为默认关闭的项目本地插件。`usage_quota_guard` 只维护当前 AKM 进程内的固定窗口统计，服务重启后窗口重新开始；其 Token 计数仅使用上游响应中可解析的 usage，不能替代供应商侧账单额度。`key_source_guard` 通过 `bindings_json` 配置 `[{"key_alias":"my-key","client_patterns":["CodexCLI/*"]}]`：只有规则中列出的 Key 受限，`client_patterns` 按原始客户端 `User-Agent` 的 glob 匹配；不匹配时跳过该 Key 并继续选 Key，全部候选被跳过时返回 429。该来源标识适用于区分可信客户端，不可替代网络层身份认证。`fallback_router` 通过每行 `source_model=>fallback_model` 配置显式降级规则，命中配置的状态码或网络错误后重新匹配目标模型的 Key，并用单请求历史限制防止循环。`data_filter_guard` 也默认关闭；若旧配置已保存其内部“启用过滤”但缺少插件总开关，启动时会自动迁移为实际启用。settings 默认已并入原安全/代码敏感规则（配置页不再展示模板按钮与独立「代码敏感」配置）：`regex_rules` 含邮箱/手机号以及原代码敏感分组（LLM Key、VCS Token、云厂商密钥、ChatOps、JWT/Bearer、私钥头、数据库连接串、凭据赋值等），命中后统一可逆占位符；`response_block_patterns` 含命令执行 + 提示词注入话术（`response_rule_actions` 对注入类多为 warn、dump secrets 为 block）；敏感字段统一可逆占位符，已移除 `redact_replacement`。插件配置弹窗使用结构化行编辑器维护 `keyword_rules` / `regex_rules`（每行一条，正则可选 `#@标签`）；请求侧默认扫描 `messages[].content`（含 content blocks）、`input`、`instructions`、`system` 与 `messages[].tool_calls[].function.arguments`；非流式响应安全扫描覆盖 Chat / Responses / Anthropic Messages 可见文本。流式响应拦截启用后对齐换回截流的字段级滑动窗口：SSE 只扫 `content` / `text` / `delta` 等可见字段，边 yield 边扫，窗口长度由 `stream_guard_cache_chars`（默认 2048）约束；命中 block/mask 均中断输出（流式 mask 退化为 block，不再做整段完整缓冲）。可逆占位符格式为 `<AKM-SEC:tag@seq:hash/>`，仅在确有文本替换时把 reverse map 写入请求级 `RequestContext.bag['data_filter_guard.reverse_map']`（不再塞进 request body）；流式响应由 proxy 回传 `request_context`（及兼容字段 `local_request`）给 server，在 yield 前按 bag 做增量还原：SSE 路径在 `delta.content` 等字段上跨帧截流换回（短 content 仅以 `<` 开头或结尾时缓冲；长 content 先换回再截尾），纯文本路径保留半截前缀缓冲。响应还原同时兼容 JSON 转义斜杠（`\/>`）、中文标签规整为 `t`+指纹，以及模型轻微改写 tag 后按 6 位内容指纹的宽松匹配（流式闭合也支持省略 `/` 的 `>` 形态）。
-
-`webhook_notifier` 默认关闭，支持两条互不阻塞的告警通道：① 可选 HTTP Webhook（generic / 飞书 / 企业微信 / Slack）；② 可选原生 App 系统通知（`app_notifications`，默认开，兼容旧键 `browser_notifications`）。App 通道经菜单栏注入的 `PluginBase.notify`（`rumps.notification`）弹出 macOS 系统通知，无需打开管理台页面；纯 `uvicorn` 启动时无宿主则仅写进程内最近事件缓冲。也可 `GET /api/webhook-notifier/status`、`GET /recent` 查看快照。Webhook 与 App 通知共用事件分类与冷却去重；Webhook 另限待发送任务数，超时或故障不会拖慢转发。未配置 `webhook_url` 时仍可只开 App 通知；无人值守跨机告警请配置 Webhook。它也会在健康监护的审计队列丢弃计数增长时发出一次告警。`prompt_profiles` 默认关闭，使用 `profiles_json` 配置 JSON 数组；每项可通过 `models`（glob）、`api_paths` 和 `client_patterns` 过滤，并按数组顺序叠加 `prompt`。Responses 请求写入 `instructions`，Anthropic Messages 请求写入顶层 `system`，Chat 请求插入 system 消息。若仍启用旧的 `prompt_booster`，两者都会注入提示词，应只保留一套有意配置的规则。
-
-`frontend_static_server` 是默认关闭的项目本地应用插件。启用后在插件配置中填写 Vue/React 打包后的 `dist` 或 `build` 目录，并将 `route_prefix` 设为站点访问路径（默认 `/web`，例如 `/console`）。插件会直接返回目录中的 JS、CSS、图片等真实文件；可选的 `static_dir` 可指定构建目录外的资源目录，并映射到 `<route_prefix>/static`，例如 `/web/static/logo.png`。开启 `spa_fallback`（默认）时，未知的无扩展名路径会返回 `index.html`，用于 Vue Router / React Router 的 History 模式。缺失的带扩展名资源仍返回 404。插件管理页会在成功挂载且启用时显示站点新标签页跳转箭头。为避免覆盖核心服务，不能使用 `/`、`/api`、`/v1`、`/admin`、`/health` 或 `/debug` 及其子路径。修改构建目录、独立静态资源目录或访问路径后需要重启服务；在重启前，跳转箭头仍指向当前已挂载的旧路径。若前端构建工具配置了绝对资源路径，还应将其 `base` / `homepage` 设置为同一挂载路径。
-
-`tool_policy_guard` 默认关闭，覆盖 Chat/Responses 的工具声明和客户端续接中已存在的工具调用参数，可配置白名单、黑名单与危险参数正则。它保护进入模型代理的工具协议，不能替代客户端本机的工具执行沙箱。`mcp_tool_gateway` 默认关闭，用 `tools_json` 注册本地 HTTP 工具（仅 http/https，默认可调用 host 为 `127.0.0.1`/`localhost`），可选把工具注入请求 `tools` 或剥离未注册声明，并提供 `GET /api/mcp-tools/status`、`GET /api/mcp-tools/list`、`POST /api/mcp-tools/call`；它不自动执行模型返回的 tool_calls 续接，与 `tool_policy_guard` 互补。`response_schema_guard` 默认关闭，仅在请求显式声明 `json_object` 或 `json_schema` 时校验非流式响应，支持 JSON 合法性以及 `type`、`required`、`properties`、`items`、`enum` 等常用 Schema 子集。`provider_health_probe` 默认关闭，提供 `GET /api/provider-health/status` 与 `POST /api/provider-health/probe`；后者可提交 `aliases`、`include_inactive`、`allow_protocol_fallback`，结果不会包含 API Key、上游 URL 或响应正文。
-
-费用估算已并入核心（不再使用 `cost_tracker` 插件）：设置页可开关 `cost_stats_enabled` 并编辑 `cost_pricing_table`（仅 `model=输入/输入缓存/输出`，每 1M tokens，固定美元）。开启后 `GET /api/stats` 与首页在「总请求」左侧以 `$金额` 显示总费用，每日用量增加费用列；同时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列图标悬停可查看输入未命中缓存（含缓存写入）、输入缓存命中、输出三者的 Token 数与价格明细（各 bucket 的 `cost_detail` 字段，三部分价格之和与总费用一致）；审计页会在状态前显示每条请求的估算费用。计费口径与 token 统计同源。估算值不能替代供应商账单。项目本地 `budget_gate` 可基于同一单价口径做进程内日预算/滚动预算硬闸门（默认关闭）：`GET /api/budget-gate/status`、`POST /api/budget-gate/reset`；超预算在入口阻断，重启后计数清零。
-
-更完整的 Hook/字段定义见 `docs/design/plugin-system.md`。
+各插件的完整功能、配置项、注意事项与更完整的 Hook/字段定义见 [docs/design/plugin-system.md](docs/design/plugin-system.md)（第十二章「内置插件功能与配置说明」）。
 
 #### 协议转换细节
 
