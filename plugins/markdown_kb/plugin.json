@@ -104,6 +104,13 @@
       "description": "默认关闭。开启后自动跟踪 chunk 记忆值（检索命中 / learn / scan 时自动更新记忆，记忆值按艾宾浩斯曲线衰减并影响检索排序）。"
     },
     {
+      "key": "auto_organize_enabled",
+      "label": "自动整理记忆",
+      "type": "boolean",
+      "default": false,
+      "description": "默认关闭。开启后，每次检索时按消息计数（organize_message_threshold）或定时周期（organize_interval_hours）异步触发自动整理：扫描最近会话、生成知识、更新记忆，并清理过期记忆与无价值 learn 文档。"
+    },
+    {
       "key": "organize_cleanup_enabled",
       "label": "自动清理无价值记忆",
       "type": "boolean",
