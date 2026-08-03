@@ -2921,8 +2921,9 @@ class Plugin(PluginBase):
             "keyword_weight": keyword_weight,
             "memory_weight": memory_weight,
             "score_threshold": min(1.0, max(0.0, _safe_float(cfg.get("score_threshold"), 0.7))),
-            # 记忆系统配置
-            "memory_enabled": bool(cfg.get("memory_enabled", True)),
+            # 记忆系统配置（memory_enabled 默认关闭：开启后才自动跟踪记忆值，
+            # 在检索命中 / learn / scan 时自动更新记忆）
+            "memory_enabled": bool(cfg.get("memory_enabled", False)),
             "memory_boost": _safe_float(cfg.get("memory_boost"), 0.15),
             "memory_decay_half_life_hours": _safe_float(cfg.get("memory_decay_half_life_hours"), 24.0),
             "memory_value_cap": _safe_float(cfg.get("memory_value_cap"), 0.7),

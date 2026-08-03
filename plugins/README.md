@@ -138,7 +138,7 @@ Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `
 | `fallback_router` | [plugins/fallback_router/README.md](fallback_router/README.md) | 5 |
 | `frontend_static_server` | [plugins/frontend_static_server/README.md](frontend_static_server/README.md) | 4 |
 | `key_source_guard` | [plugins/key_source_guard/README.md](key_source_guard/README.md) | 3 |
-| `markdown_kb` | [plugins/markdown_kb/README.md](markdown_kb/README.md) | 17 |
+| `markdown_kb` | [plugins/markdown_kb/README.md](markdown_kb/README.md) | 18 |
 | `mcp_tool_gateway` | [plugins/mcp_tool_gateway/README.md](mcp_tool_gateway/README.md) | 8 |
 | `prompt_booster` | [plugins/prompt_booster/README.md](prompt_booster/README.md) | 2 |
 | `prompt_profiles` | [plugins/prompt_profiles/README.md](prompt_profiles/README.md) | 2 |

@@ -54,7 +54,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 
 ## 配置项
 
-> 以下为管理台「插件」页可配置的全部配置项（存储于 `~/.akm/config.json` 的 `plugin_configs.markdown_kb`），默认值与插件 `plugin.json` 声明一致。其余记忆系统参数（`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours` 等）为代码级默认，当前不在管理台暴露。
+> 以下为管理台「插件」页可配置的全部配置项（存储于 `~/.akm/config.json` 的 `plugin_configs.markdown_kb`），默认值与插件 `plugin.json` 声明一致。其余记忆系统参数（`memory_boost`、`category_bonus`、`organize_interval_hours` 等）为代码级默认，当前不在管理台暴露。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
@@ -68,6 +68,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 | `semantic_weight` | number | `1` | 仅在未启用 rerank 时生效。用于控制向量语义分在第一阶段排序中的占比；会和关键词权重按比例归一化。 |
 | `keyword_weight` | number | `0` | 仅在未启用 rerank 时生效。用于补强标题词、英文术语或精确短语匹配。 |
 | `score_threshold` | number | `0.7` | 0~1。最终命中分低于该阈值时直接过滤；未启用 rerank 时使用混合分，启用 rerank 后使用 rerank 分。 |
+| `memory_enabled` | boolean | `False` | 默认关闭。开启后自动跟踪 chunk 记忆值（检索命中 / learn / scan 时自动更新记忆，记忆值按艾宾浩斯曲线衰减并影响检索排序）。 |
 | `organize_cleanup_enabled` | boolean | `False` | 默认关闭。开启后，长时间未被检索的 learn 文档会在自动整理时被清理。 |
 | `organize_cleanup_memory_threshold` | number | `0.05` | 记忆值低于此阈值且从未被检索命中的 chunk 所属文档可能被视为无价值。 |
 | `organize_cleanup_keep_days` | number | `7` | 从未被检索命中的 learn 文档至少保活的天数。 |
