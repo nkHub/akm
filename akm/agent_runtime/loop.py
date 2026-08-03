@@ -806,17 +806,17 @@ class AgentLoop:
         """运行 Agent Loop 并流式返回 SSE 事件
 
         事件类型：
-        - ``reasoning_delta`` — LLM 思考（推理）过程片段，先于正文/工具实时下发
-        - ``thinking``        — 工具调用轮产生的过程性正文（模型在发起工具前的说明文本），在工具前下发
-        - ``model_delta``     — 最终主体内容的可见文本片段
+        - ``reasoning_delta`` — LLM 思考（推理）过程片段，实时下发，先于同段正文
+        - ``model_delta``     — 可见正文片段，实时下发（含工具轮过程性正文与最终主体内容）
         - ``turn_start``      — 新一轮开始（检测到工具调用时）
         - ``tool_call``       — 单个工具调用
         - ``tool_result``     — 单个工具执行结果
         - ``final``           — Agent 完成，含 final_message / usage / turns
         - ``error``           — 错误结束，含 error / turns / usage
 
-        顺序约定：思考（reasoning_delta）→ 工具（thinking/tool_call/tool_result）→
-        最终主体内容（model_delta），保证主体内容一定在工具/思考之后返回。
+        顺序约定：思考（reasoning_delta）与正文（model_delta）按模型输出顺序
+        实时流式下发；工具调用轮在正文之后出现 turn_start / tool_call /
+        tool_result 事件；最终主体内容同样实时下发，最后以 final 收尾。
 
         每轮 LLM 调用以 ``stream: True`` 发送。上游协议帧只在服务端解析，
         客户端始终收到统一的 Agent SSE 事件。
@@ -868,10 +868,8 @@ class AgentLoop:
                 plugin_manager=self._plugin_manager,
             )
 
-            # 本轮正文增量先暂存，轮结束后判断：最终轮才作为主体
-            # model_delta 下发；工具轮改以 thinking 事件在工具前下发。
-            turn_content_parts: list[str] = []
-
+            # 本轮正文与思考均实时下发：正文作为 model_delta，思考作为
+            # reasoning_delta。工具轮正文也实时流出（模型输出的自然顺序）。
             if result.get("stream"):
                 # Agent 对外协议独立于原始上游协议，不能通过 adapter 转换后再解析。
                 resp = result["response"]
@@ -895,15 +893,19 @@ class AgentLoop:
                         return
 
                     async for chunk in resp.aiter_bytes():
-                        for content in acc.feed(chunk.decode("utf-8", errors="replace")):
-                            turn_content_parts.append(content)
-                        # 思考（推理）内容独立成 reasoning_delta，先于正文/工具实时下发
+                        text = chunk.decode("utf-8", errors="replace")
+                        contents = acc.feed(text)
+                        # 思考（推理）增量先于正文下发，保证「先思考后正文」
                         for reasoning in acc.drain_reasoning_deltas():
                             yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
-                    for content in acc.finish():
-                        turn_content_parts.append(content)
+                        # 正文增量实时下发，保证最终主体逐字流式输出
+                        for content in contents:
+                            yield _sse_event("model_delta", {"turn": turn, "content": content})
+                    contents = acc.finish()
                     for reasoning in acc.drain_reasoning_deltas():
                         yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
+                    for content in contents:
+                        yield _sse_event("model_delta", {"turn": turn, "content": content})
                 finally:
                     await resp.aclose()
 
@@ -953,10 +955,7 @@ class AgentLoop:
             tool_calls = _extract_tool_calls_from_response(response_body)
 
             if not tool_calls:
-                # 没有工具调用 → 该轮正文即为最终主体内容，作为 model_delta 下发
-                for content in turn_content_parts:
-                    yield _sse_event("model_delta", {"turn": turn, "content": content})
-                # 没有工具调用 → Agent 完成
+                # 无工具调用：该轮正文已实时以 model_delta 下发，此处仅确认完成
                 text_content = _extract_text_content(response_body)
                 final_message = {
                     "role": "assistant",
@@ -974,10 +973,8 @@ class AgentLoop:
                 })
                 return
 
-            # 有工具调用：本轮正文属于过程性说明，作为 thinking 事件在工具前下发
-            if turn_content_parts:
-                yield _sse_event("thinking", {"turn": turn, "content": "".join(turn_content_parts)})
-            # 有工具调用 → emit 事件并执行
+            # 有工具调用：工具轮正文已实时以 model_delta 下发（模型输出自然顺序），
+            # 此处接着下发工具事件
             yield _sse_event("turn_start", {"turn": turn})
 
             assistant_msg: dict[str, Any] = {

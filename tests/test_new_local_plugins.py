@@ -7,7 +7,6 @@ import pytest
 
 from akm.plugins.context import RequestContext
 from plugins.cache_proxy.index import Plugin as CacheProxy
-from plugins.codex_impersonation.index import Plugin as CodexImpersonation
 from plugins.key_source_guard.index import Plugin as KeySourceGuard
 from plugins.rate_limit_guard.index import Plugin as RateLimitGuard
 
@@ -235,85 +234,3 @@ def test_cost_pricing_table_migrates_legacy_currency_column():
     assert _normalize_cost_pricing_table(
         "gpt-4=1/0.1/2/USD\n*=0.5/0.05/1/CNY"
     ) == "gpt-4=1/0.1/2\n*=0.5/0.05/1"
-
-
-def _codex_plugin(**config_override) -> CodexImpersonation:
-    """构造带默认配置的 codex_impersonation 插件实例。"""
-    plugin = CodexImpersonation()
-    plugin.logger = logging.getLogger("test.codex_impersonation")
-    plugin.config = {
-        "enabled": True,
-        "client_patterns": '["opencode/*"]',
-        "user_agent": "Codex Desktop/9.9.9",
-        "installation_id": "",
-        "sandbox": "seatbelt",
-        **config_override,
-    }
-    return plugin
-
-
-@pytest.mark.asyncio
-async def test_codex_impersonation_sets_codex_style_headers_on_match():
-    """命中的请求应被覆写为一套自洽的 Codex Desktop 风格请求头。"""
-    plugin = _codex_plugin()
-    ctx = _ctx({"model": "gpt-5"}, client_user_agent="opencode/1.18.4 ai-sdk/4.0.23")
-
-    assert await plugin.on_request(ctx) is None
-    assert ctx.upstream_headers["User-Agent"] == "Codex Desktop/9.9.9"
-    assert ctx.upstream_headers["Originator"] == "Codex Desktop"
-    assert ctx.upstream_headers["X-OpenAI-Internal-Codex-Responses-Lite"] == "true"
-    assert ctx.upstream_headers["Accept"] == "text/event-stream"
-
-    # 会话标识三件套彼此一致，且每次请求为新的 UUID
-    assert ctx.upstream_headers["Session-Id"] == ctx.upstream_headers["Thread-Id"] == ctx.upstream_headers["X-Client-Request-Id"]
-    assert ctx.upstream_headers["X-Codex-Window-Id"] == f'{ctx.upstream_headers["Session-Id"]}:0'
-
-    # turn-metadata 是合法 JSON，字段齐全
-    meta = json.loads(ctx.upstream_headers["X-Codex-Turn-Metadata"])
-    assert meta["sandbox"] == "seatbelt"
-    assert meta["request_kind"] == "turn"
-    assert meta["thread_source"] == "system"
-    assert meta["session_id"] == ctx.upstream_headers["Session-Id"]
-    assert meta["window_id"] == ctx.upstream_headers["X-Codex-Window-Id"]
-    assert meta["installation_id"]
-
-
-@pytest.mark.asyncio
-async def test_codex_impersonation_uses_configured_installation_id():
-    """配置固定 installation_id 后，turn-metadata 应使用该值且跨请求稳定。"""
-    plugin = _codex_plugin(installation_id="fixed-install")
-    ctx = _ctx({}, client_user_agent="opencode/1.18.4")
-    await plugin.on_request(ctx)
-    assert json.loads(ctx.upstream_headers["X-Codex-Turn-Metadata"])["installation_id"] == "fixed-install"
-
-    ctx2 = _ctx({}, client_user_agent="opencode/1.18.4")
-    await plugin.on_request(ctx2)
-    assert json.loads(ctx2.upstream_headers["X-Codex-Turn-Metadata"])["installation_id"] == "fixed-install"
-
-
-@pytest.mark.asyncio
-async def test_codex_impersonation_random_installation_id_stays_stable():
-    """未配置 installation_id 时，进程内应复用同一个随机安装标识。"""
-    plugin = _codex_plugin()
-    ctx = _ctx({}, client_user_agent="opencode/1.18.4")
-    await plugin.on_request(ctx)
-    first = json.loads(ctx.upstream_headers["X-Codex-Turn-Metadata"])["installation_id"]
-
-    ctx2 = _ctx({}, client_user_agent="opencode/1.18.4")
-    await plugin.on_request(ctx2)
-    second = json.loads(ctx2.upstream_headers["X-Codex-Turn-Metadata"])["installation_id"]
-    assert first == second
-
-
-@pytest.mark.asyncio
-async def test_codex_impersonation_ignores_non_matching_and_disabled():
-    """来源不匹配或插件被禁用时，不应覆写任何上游请求头。"""
-    plugin = _codex_plugin()
-    ctx = _ctx({}, client_user_agent="curl/8.0")
-    await plugin.on_request(ctx)
-    assert ctx.upstream_headers == {}
-
-    plugin = _codex_plugin(enabled=False)
-    ctx = _ctx({}, client_user_agent="opencode/1.18.4")
-    await plugin.on_request(ctx)
-    assert ctx.upstream_headers == {}

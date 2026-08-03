@@ -849,3 +849,77 @@ class Plugin(PluginBase):
 - `PluginBase` 中的数据库访问为共享连接，插件需自行管理事务和锁
 - 插件加载失败时打印警告但不阻止 akm 启动
 - hook 执行异常被捕获，不影响请求正常流程
+
+## 十二、内置插件功能与配置说明
+
+各内置插件按 `filter → converter → post → handler → app` 顺序参与请求处理，同类再按优先级/名称排列；`model_matcher` 固定置顶。插件列表页按该顺序展示，宽屏下一行 2 个卡片。
+
+### 12.1 通用行为
+
+- 启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。
+- 每个插件实例拥有独立的 `config`；`on_load` 返回 `False` 或抛出异常时，插件保持未就绪，不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。残留的 API、插件页面和静态资源会按未就绪状态返回 503。
+- 管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
+- `error_handler` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。`model_matcher` 标记为必需（`required: true`），不可禁用。
+- 当前版本不做“上游可逆加密”；如果上游没有对应解密协议，直接发送密文会让模型只能看到密文内容。
+
+### 12.2 on_response 生命周期
+
+`proxy` 已补充 `on_response` 生命周期事件：每次上游尝试结束（成功/失败）都会向插件发送结构化元信息（如 `phase`、`status_code`、`key_alias`、`latency_ms`、`action`），用于审计增强与并发状态回收。
+
+### 12.3 model_matcher
+
+`model_matcher` 新增可配置的并发/慢 key 旁路策略（默认关闭，保守模式）：
+
+- `enable_inflight_bypass`：是否启用拥塞旁路（默认 `false`）
+- `max_inflight_per_key`：单 key 并发阈值（默认 `3`）
+
+`model_matcher` 的 `aliases` 配置仅支持显式映射（如 `gpt-4=gpt-4.1`），用于在请求进入转发链路前直接替换 `model`。未命中显式映射时，请求会保留原始模型名继续做 key 匹配。
+- `slow_inflight_threshold_sec`：最老 in-flight 慢请求阈值秒数（默认 `8`）
+
+可选开启“智能旁路”（同样默认关闭），在触发拥塞旁路后对多个候选 key 进行健康打分择优：
+
+- `enable_smart_bypass`：启用健康分择优（默认 `false`）
+- `smart_bypass_candidate_pool`：候选评估数量（默认 `4`）
+- `smart_bypass_min_improve`：最小改善阈值（默认 `0.15`）
+- `smart_bypass_error_cooldown_sec`：错误冷却惩罚窗口（默认 `15` 秒）
+
+开启后，仅在当前 key 明显拥塞时尝试旁路到其他可用 key；若无替代 key 则自动回退当前 key，不会额外硬失败。
+
+### 12.4 usage_quota_guard / key_source_guard / fallback_router / data_filter_guard
+
+`usage_quota_guard`、`key_source_guard` 与 `fallback_router` 均为默认关闭的项目本地插件。
+
+- `usage_quota_guard` 只维护当前 AKM 进程内的固定窗口统计，服务重启后窗口重新开始；其 Token 计数仅使用上游响应中可解析的 usage，不能替代供应商侧账单额度。
+- `key_source_guard` 通过 `bindings_json` 配置 `[{"key_alias":"my-key","client_patterns":["CodexCLI/*"]}]`：只有规则中列出的 Key 受限，`client_patterns` 按原始客户端 `User-Agent` 的 glob 匹配；不匹配时跳过该 Key 并继续选 Key，全部候选被跳过时返回 429。该来源标识适用于区分可信客户端，不可替代网络层身份认证。
+- `fallback_router` 通过每行 `source_model=>fallback_model` 配置显式降级规则，命中配置的状态码或网络错误后重新匹配目标模型的 Key，并用单请求历史限制防止循环。
+- `data_filter_guard` 也默认关闭；若旧配置已保存其内部“启用过滤”但缺少插件总开关，启动时会自动迁移为实际启用。settings 默认已并入原安全/代码敏感规则（配置页不再展示模板按钮与独立「代码敏感」配置）：`regex_rules` 含邮箱/手机号以及原代码敏感分组（LLM Key、VCS Token、云厂商密钥、ChatOps、JWT/Bearer、私钥头、数据库连接串、凭据赋值等），命中后统一可逆占位符；`response_block_patterns` 含命令执行 + 提示词注入话术（`response_rule_actions` 对注入类多为 warn、dump secrets 为 block）；敏感字段统一可逆占位符，已移除 `redact_replacement`。
+
+插件配置弹窗使用结构化行编辑器维护 `keyword_rules` / `regex_rules`（每行一条，正则可选 `#@标签`）；请求侧默认扫描 `messages[].content`（含 content blocks）、`input`、`instructions`、`system` 与 `messages[].tool_calls[].function.arguments`；非流式响应安全扫描覆盖 Chat / Responses / Anthropic Messages 可见文本。
+
+流式响应拦截启用后对齐换回截流的字段级滑动窗口：SSE 只扫 `content` / `text` / `delta` 等可见字段，边 yield 边扫，窗口长度由 `stream_guard_cache_chars`（默认 2048）约束；命中 block/mask 均中断输出（流式 mask 退化为 block，不再做整段完整缓冲）。可逆占位符格式为 `<AKM-SEC:tag@seq:hash/>`，仅在确有文本替换时把 reverse map 写入请求级 `RequestContext.bag['data_filter_guard.reverse_map']`（不再塞进 request body）；流式响应由 proxy 回传 `request_context`（及兼容字段 `local_request`）给 server，在 yield 前按 bag 做增量还原：SSE 路径在 `delta.content` 等字段上跨帧截流换回（短 content 仅以 `<` 开头或结尾时缓冲；长 content 先换回再截尾），纯文本路径保留半截前缀缓冲。响应还原同时兼容 JSON 转义斜杠（`\/>`）、中文标签规整为 `t`+指纹，以及模型轻微改写 tag 后按 6 位内容指纹的宽松匹配（流式闭合也支持省略 `/` 的 `>` 形态）。
+
+### 12.5 webhook_notifier / prompt_profiles
+
+`webhook_notifier` 默认关闭，支持两条互不阻塞的告警通道：① 可选 HTTP Webhook（generic / 飞书 / 企业微信 / Slack）；② 可选原生 App 系统通知（`app_notifications`，默认开，兼容旧键 `browser_notifications`）。App 通道经菜单栏注入的 `PluginBase.notify`（`rumps.notification`）弹出 macOS 系统通知，无需打开管理台页面；纯 `uvicorn` 启动时无宿主则仅写进程内最近事件缓冲。也可 `GET /api/webhook-notifier/status`、`GET /recent` 查看快照。Webhook 与 App 通知共用事件分类与冷却去重；Webhook 另限待发送任务数，超时或故障不会拖慢转发。未配置 `webhook_url` 时仍可只开 App 通知；无人值守跨机告警请配置 Webhook。它也会在健康监护的审计队列丢弃计数增长时发出一次告警。
+
+`prompt_profiles` 默认关闭，使用 `profiles_json` 配置 JSON 数组；每项可通过 `models`（glob）、`api_paths` 和 `client_patterns` 过滤，并按数组顺序叠加 `prompt`。Responses 请求写入 `instructions`，Anthropic Messages 请求写入顶层 `system`，Chat 请求插入 system 消息。若仍启用旧的 `prompt_booster`，两者都会注入提示词，应只保留一套有意配置的规则。
+
+### 12.6 frontend_static_server
+
+`frontend_static_server` 是默认关闭的项目本地应用插件。启用后在插件配置中填写 Vue/React 打包后的 `dist` 或 `build` 目录，并将 `route_prefix` 设为站点访问路径（默认 `/web`，例如 `/console`）。插件会直接返回目录中的 JS、CSS、图片等真实文件；可选的 `static_dir` 可指定构建目录外的资源目录，并映射到 `<route_prefix>/static`，例如 `/web/static/logo.png`。开启 `spa_fallback`（默认）时，未知的无扩展名路径会返回 `index.html`，用于 Vue Router / React Router 的 History 模式。缺失的带扩展名资源仍返回 404。插件管理页会在成功挂载且启用时显示站点新标签页跳转箭头。为避免覆盖核心服务，不能使用 `/`、`/api`、`/v1`、`/admin`、`/health` 或 `/debug` 及其子路径。修改构建目录、独立静态资源目录或访问路径后需要重启服务；在重启前，跳转箭头仍指向当前已挂载的旧路径。若前端构建工具配置了绝对资源路径，还应将其 `base` / `homepage` 设置为同一挂载路径。
+
+### 12.7 tool_policy_guard / mcp_tool_gateway / response_schema_guard / provider_health_probe
+
+`tool_policy_guard` 默认关闭，覆盖 Chat/Responses 的工具声明和客户端续接中已存在的工具调用参数，可配置白名单、黑名单与危险参数正则。它保护进入模型代理的工具协议，不能替代客户端本机的工具执行沙箱。
+
+`mcp_tool_gateway` 默认关闭，用 `tools_json` 注册本地 HTTP 工具（仅 http/https，默认可调用 host 为 `127.0.0.1`/`localhost`），可选把工具注入请求 `tools` 或剥离未注册声明，并提供 `GET /api/mcp-tools/status`、`GET /api/mcp-tools/list`、`POST /api/mcp-tools/call`；它不自动执行模型返回的 tool_calls 续接，与 `tool_policy_guard` 互补。
+
+`response_schema_guard` 默认关闭，仅在请求显式声明 `json_object` 或 `json_schema` 时校验非流式响应，支持 JSON 合法性以及 `type`、`required`、`properties`、`items`、`enum` 等常用 Schema 子集。
+
+`provider_health_probe` 默认关闭，提供 `GET /api/provider-health/status` 与 `POST /api/provider-health/probe`；后者可提交 `aliases`、`include_inactive`、`allow_protocol_fallback`，结果不会包含 API Key、上游 URL 或响应正文。
+
+### 12.8 budget_gate（费用估算）
+
+费用估算已并入核心（不再使用 `cost_tracker` 插件）：设置页可开关 `cost_stats_enabled` 并编辑 `cost_pricing_table`（仅 `model=输入/输入缓存/输出`，每 1M tokens，固定美元）。开启后 `GET /api/stats` 与首页在「总请求」左侧以 `$金额` 显示总费用，每日用量增加费用列；同时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列图标悬停可查看输入未命中缓存（含缓存写入）、输入缓存命中、输出三者的 Token 数与价格明细（各 bucket 的 `cost_detail` 字段，三部分价格之和与总费用一致）；审计页会在状态前显示每条请求的估算费用。计费口径与 token 统计同源。估算值不能替代供应商账单。
+
+项目本地 `budget_gate` 可基于同一单价口径做进程内日预算/滚动预算硬闸门（默认关闭）：`GET /api/budget-gate/status`、`POST /api/budget-gate/reset`；超预算在入口阻断，重启后计数清零。

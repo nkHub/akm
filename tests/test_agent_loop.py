@@ -34,7 +34,7 @@ def _events(chunks):
 
 @pytest.mark.asyncio
 async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(monkeypatch):
-    """思考（reasoning）应以独立事件先于主体内容下发，正文转为 model_delta。"""
+    """思考（reasoning）与正文应各自实时流式下发，思考优先于同段正文。"""
     response = FakeStreamResponse(200, [
         _sse({"model": "test", "choices": [{"delta": {"content": "你", "reasoning_content": "先"}}]}),
         _sse({"choices": [{"delta": {"content": "好", "reasoning_content": "思考"}}]}) + _sse({"usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}}),
@@ -48,9 +48,8 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert [event["event"] for event in events] == ["reasoning_delta", "reasoning_delta", "model_delta", "model_delta", "final"]
-    assert [event["data"]["content"] for event in events[:2]] == ["先", "思考"]
-    assert [event["data"]["content"] for event in events[2:4]] == ["你", "好"]
+    assert [event["event"] for event in events] == ["reasoning_delta", "model_delta", "reasoning_delta", "model_delta", "final"]
+    assert [event["data"]["content"] for event in events[:4]] == ["先", "你", "思考", "好"]
     assert events[-1]["data"]["final_message"]["content"] == "你好"
     assert events[-1]["data"]["final_message"]["reasoning_content"] == "先思考"
     assert events[-1]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
@@ -88,8 +87,8 @@ async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_stream_emits_thinking_before_tool_and_model_delta_last(monkeypatch):
-    """工具轮的过程性正文应在工具前以 thinking 事件下发，最终主体内容必须最后返回。"""
+async def test_run_stream_streams_content_realtime_then_tools(monkeypatch):
+    """工具轮正文应实时以 model_delta 流出（自然顺序），工具事件随后，最终主体实时流式。"""
     ToolRegistry.reset()
     registry = ToolRegistry.instance()
     registry.register(ToolDef("get_weather", "weather", {"type": "object"}, lambda city: {"city": city, "temp": 25}))
@@ -108,9 +107,9 @@ async def test_run_stream_emits_thinking_before_tool_and_model_delta_last(monkey
     loop = AgentLoop(http_client=None, tool_registry=registry)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "北京天气"}])])
 
-    # 顺序：思考 → 工具轮正文(thinking) → 工具 → 最终主体(model_delta) → final
+    # 顺序：思考 → 工具轮正文(model_delta) → 工具 → 最终主体(model_delta) → final
     assert [event["event"] for event in events] == [
-        "reasoning_delta", "thinking", "turn_start", "tool_call", "tool_result", "model_delta", "final",
+        "reasoning_delta", "model_delta", "turn_start", "tool_call", "tool_result", "model_delta", "final",
     ]
     assert events[0]["data"]["content"] == "用户想查天气"
     assert events[1]["data"]["content"] == "我来查一下天气"
