@@ -302,8 +302,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
 | `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
-| `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片 URL 列表；需配置 `image_supported_models` 对应的可用 API Key |
-| `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回图片 URL 列表；需提供服务器可访问的图片路径 |
+| `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
+| `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需提供服务器可访问的图片路径 |
 
 ### 请求格式
 
@@ -349,6 +349,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 
 `/v1/agent` 支持 `multipart/form-data` 上传文件。`messages` 改为 JSON 字符串表单字段，`tools` 等其余字段同纯 JSON 方式；`files` 字段可携带多个文件。上传的文件会被读取并作为独立的 user 消息追加到对话末尾：图片（`image/*`）转成 base64 的 `image_url` 内容块，其他文件按 UTF-8 读取为文本内容，无法解码的二进制文件会返回 400。纯 JSON 请求方式保持不变。
 
+上传的图片还会同时落盘到 `agent_upload_dir` 配置的目录（默认 `~/.akm/cache`，可通过 `~/.akm/config.json` 修改，支持 `~` 展开；文件名为随机 UUID），并在追加的 user 消息文本中给出绝对路径提示。模型可据此调用 `akm_edit_image` 传入 `image_path` 编辑该图片。该目录不会自动清理，请根据运行环境定期清理。
+
 ```bash
 curl -X POST http://127.0.0.1:8788/v1/agent \
   -F 'messages=[{"role":"user","content":"请分析这个文件"}]' \
@@ -380,7 +382,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ### 图片生成
 
-内置的 `akm_generate_image` 工具复用 `/v1/images/generations` 的转发链路，让 Agent 可以直接生成图片。返回结果只含图片 URL，避免体积巨大的 base64 数据占用模型上下文。参数如下：
+内置的 `akm_generate_image` 工具复用 `/v1/images/generations` 的转发链路，让 Agent 可以直接生成图片。返回结果只含图片 URL（或 `b64_json_hint` 提示），避免体积巨大的 base64 数据占用模型上下文。参数如下：
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -391,6 +393,13 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `n` | int | 否 | 生成张数（默认 1） |
 
 请求经连接池调用 `forward_request`（`api_path=images/generations`），自动复用 Key 选择、故障切换与图片专用超时（`image_request_timeout_sec`，默认 300 秒）。调用失败时会返回明确错误文本；上游只返回 `b64_json` 时会给出数据长度提示。
+
+生成成功后，每张图片还会下载保存到 `agent_upload_dir`（默认 `~/.akm/cache`），并在结果项中附带两个资源字段：
+
+- `local_path`：图片在本机的绝对路径，可供 `akm_edit_image` 等按路径读取的工具使用；
+- `http_url`：`http://127.0.0.1:{port}/agent-uploads/{filename}` 形式的访问地址，可直接用于前端展示或下载。
+
+若下载或保存失败，结果项会附带 `save_error` 说明原因，且不影响 `url` 等主结果字段。
 
 #### 图片编辑
 
@@ -407,7 +416,11 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `output_format` | string | 否 | 输出格式，如 `png` 或 `jpeg` |
 | `n` | int | 否 | 生成张数（默认 1） |
 
-文件不存在或读取失败会返回明确错误提示；其余失败（上游错误、无法解析响应等）与 `akm_generate_image` 行为一致。
+文件不存在或读取失败会返回明确错误提示；其余失败（上游错误、无法解析响应等）与 `akm_generate_image` 行为一致。编辑结果与生成结果一样，会附带 `local_path`、`http_url`（`/agent-uploads/...`）资源字段，保存失败时附 `save_error`。
+
+#### 上传目录的 HTTP 访问
+
+服务端提供 `GET /agent-uploads/{filename}` 端点，按文件名提供 `agent_upload_dir` 目录下文件的访问（文件名仅接受单段安全名称，防止路径穿越）。生成、编辑工具返回的 `http_url` 即指向该端点，前端或其他客户端可通过 `http://127.0.0.1:{port}/agent-uploads/{filename}` 直接获取图片。
 
 ### 响应格式
 

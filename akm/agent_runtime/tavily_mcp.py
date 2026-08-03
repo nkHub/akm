@@ -120,7 +120,7 @@ class TavilyMCPClient:
         """执行 MCP 工具调用，返回工具结果 dict。
 
         Args:
-            name: MCP 工具名（如 tavily-search）
+            name: MCP 工具名（如 tavily_search）
             arguments: 工具参数
 
         Returns:
@@ -176,7 +176,7 @@ async def tavily_search(
         search_depth = "basic"
 
     client = TavilyMCPClient(http_client)
-    result = await client.call_tool("tavily-search", {
+    result = await client.call_tool("tavily_search", {
         "query": str(query or ""),
         "max_results": max_results,
         "search_depth": search_depth,

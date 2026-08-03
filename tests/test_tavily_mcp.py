@@ -84,7 +84,7 @@ async def test_call_tool_full_flow():
         }
     )
     client = TavilyMCPClient(http)
-    result = await client.call_tool("tavily-search", {"query": "hello"})
+    result = await client.call_tool("tavily_search", {"query": "hello"})
 
     assert result["content"][0]["text"] == '["result one", "result two"]'
     methods = [call["json"]["method"] for call in http.calls]
@@ -94,7 +94,7 @@ async def test_call_tool_full_flow():
     assert http.calls[2]["headers"].get("Mcp-Session-Id") == "sess-1"
     # tools/call 参数透传
     assert http.calls[2]["json"]["params"] == {
-        "name": "tavily-search",
+        "name": "tavily_search",
         "arguments": {"query": "hello"},
     }
 
