@@ -161,6 +161,9 @@ async def agent(request: Request):
     model = str(body.get("model", "") or "")
     tools = body.get("tools")
     instructions = str(body.get("instructions", "") or "")
+    if not instructions:
+        # 客户端未提供指令时回填 config.json 的默认系统指令（agent_default_instructions）
+        instructions = str(load_config().get("agent_default_instructions") or "").strip()
     api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
     stream = bool(body.get("stream", False))
     try:

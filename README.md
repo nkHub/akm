@@ -221,6 +221,7 @@ akm-menubar
   "agent_max_turns": 20,
   "agent_upload_dir": "~/.akm/cache",
   "agent_translate_mcp": "~/.agents/plugins/translate-mcp.py",
+  "agent_default_instructions": "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。",
   "tavily_api_key": "",
   "rate_limit_cooldown_sec": 60,
   "audit_queue_maxsize": 512,
@@ -263,6 +264,7 @@ akm-menubar
 | `agent_max_turns` | `20` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
 | `agent_translate_mcp` | `~/.agents/plugins/translate-mcp.py` | Agent 翻译工具使用的翻译 MCP 脚本路径（`uv run` 执行），路径支持 `~` 展开 |
+| `agent_default_instructions` | KaTeX 公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
 ### 出站代理
