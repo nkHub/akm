@@ -53,8 +53,12 @@ async def test_multipart_text_file_appended_as_user_message():
 
 
 @pytest.mark.asyncio
-async def test_multipart_image_appended_as_image_url():
+async def test_multipart_image_appended_as_image_url(monkeypatch, tmp_path):
     """multipart 上传图片应转为 base64 data URL 的 image_url 内容块，并提示保存路径。"""
+    # 隔离上传目录到临时目录，避免测试写入真实 ~/.akm/cache
+    from akm.agent_runtime import router as router_module
+
+    monkeypatch.setattr(router_module, "load_config", lambda: {"agent_upload_dir": str(tmp_path / "cache")})
     loop = app.state.agent_loop
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
     transport = ASGITransport(app=app)
@@ -109,7 +113,11 @@ async def test_uploaded_image_saved_to_default_dir_when_unconfigured(monkeypatch
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
     path = Path(_save_uploaded_image(png_bytes, "image/png"))
 
-    assert str(path).startswith(str(Path.home() / ".akm" / "cache"))
+    try:
+        assert str(path).startswith(str(Path.home() / ".akm" / "cache"))
+    finally:
+        # 回落默认目录会写到真实家目录，测试后清理，避免污染用户环境
+        path.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
