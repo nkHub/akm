@@ -2818,7 +2818,7 @@ class Plugin(PluginBase):
         注：hit_count 中有 1 次来自创建时的伪命中，排除后才得到真实检索命中数。
         """
         settings = getattr(self, "config", {}) or {}
-        cleanup_enabled = bool(settings.get("organize_cleanup_enabled", True))
+        cleanup_enabled = bool(settings.get("organize_cleanup_enabled", False))
         if not cleanup_enabled:
             return
         memory_threshold = _safe_float(settings.get("organize_cleanup_memory_threshold"), 0.05)
@@ -2923,7 +2923,7 @@ class Plugin(PluginBase):
             # 自动整理记忆配置
             "organize_interval_hours": _safe_float(cfg.get("organize_interval_hours"), 24.0),
             "organize_message_threshold": max(1, _safe_int(cfg.get("organize_message_threshold"), 50)),
-            "organize_cleanup_enabled": bool(cfg.get("organize_cleanup_enabled", True)),
+            "organize_cleanup_enabled": bool(cfg.get("organize_cleanup_enabled", False)),
             "organize_cleanup_memory_threshold": _safe_float(cfg.get("organize_cleanup_memory_threshold"), 0.05),
             "organize_cleanup_keep_days": _safe_int(cfg.get("organize_cleanup_keep_days"), 7),
             # 去重合并配置

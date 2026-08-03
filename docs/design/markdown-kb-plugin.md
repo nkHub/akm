@@ -914,7 +914,7 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - 记忆系统：`kb_chunk_memory` 表，艾宾浩斯衰减曲线、多源 boost 分层叠加，高记忆值 chunk 豁免 score_threshold 独立放行
 - 自动整理记忆（organizer）：消息计数 + 定时周期双触发
 - 向量去重合并：新 chunk 入库时按 embedding 余弦相似度与存量 chunk 比对；相似时仍保留新 chunk 以保证文档索引完整，并通过 LLM 判断是否有补充信息，有则合并存量文本并重新 embedding，同时 boost 存量记忆值
-- 无价值记忆自动清理：`organize_cleanup_enabled` 默认开启，自动清理长期未被检索的 `.learn.md` 文档
+- 无价值记忆自动清理：`organize_cleanup_enabled` 默认关闭，需手动开启后自动清理长期未被检索的 `.learn.md` 文档
 - 知识库页面不再内置独立配置弹窗，配置统一收口到插件列表页弹窗
 - `markdown_kb` 的模型配置使用 `/v1/models` 驱动的动态下拉
 - `sqlite-vec` 优先的第一阶段向量粗召回已经落地到 `SqliteKbIndexStore`

@@ -54,7 +54,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 
 ## 配置项
 
-`embedding_model`（必填）、`reranker_model`（可选），检索参数：`top_k`（默认 4）、`score_threshold`（0~1，默认 0.7）、`semantic_weight / keyword_weight / memory_weight`。记忆参数：`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours`。去重参数：`dedup_similarity_threshold`（默认 0.92，相似 chunk 会保留新文档内容并 boost 存量记忆）。清理参数：`organize_cleanup_enabled`（默认 true）、`organize_cleanup_memory_threshold`（默认 0.05）、`organize_cleanup_keep_days`（默认 7）。
+`embedding_model`（必填）、`reranker_model`（可选），检索参数：`top_k`（默认 4）、`score_threshold`（0~1，默认 0.7）、`semantic_weight / keyword_weight / memory_weight`。记忆参数：`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours`。去重参数：`dedup_similarity_threshold`（默认 0.92，相似 chunk 会保留新文档内容并 boost 存量记忆）。清理参数：`organize_cleanup_enabled`（默认 false，需手动开启）、`organize_cleanup_memory_threshold`（默认 0.05）、`organize_cleanup_keep_days`（默认 7）。
 
 ## 显式检索与问答链路
 

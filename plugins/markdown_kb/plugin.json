@@ -100,8 +100,8 @@
       "key": "organize_cleanup_enabled",
       "label": "自动清理无价值记忆",
       "type": "boolean",
-      "default": true,
-      "description": "启用后，长时间未被检索的 learn 文档会在自动整理时被清理。"
+      "default": false,
+      "description": "默认关闭。开启后，长时间未被检索的 learn 文档会在自动整理时被清理。"
     },
     {
       "key": "organize_cleanup_memory_threshold",
