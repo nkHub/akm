@@ -28,6 +28,15 @@ _MCP_PROTOCOL_VERSION = "2025-06-18"
 _MCP_CALL_TIMEOUT_SEC = 90.0
 # 默认翻译 MCP 脚本路径，可通过 config.json 的 agent_translate_mcp 覆盖
 _DEFAULT_TRANSLATE_MCP = "~/.agents/plugins/translate-mcp.py"
+# 打包后的 .app 从 GUI 启动时 PATH 可能不含用户级安装目录，因此除 PATH
+# 外还显式探测这些常见位置（相对路径以 HOME 为基准）
+_UV_CANDIDATE_DIRS = (
+    ".local/bin",
+    ".cargo/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/opt/uv/bin",
+)
 
 
 class TranslateMCPError(RuntimeError):
@@ -42,9 +51,27 @@ def resolve_translate_script() -> str:
     return str(Path(raw).expanduser())
 
 
+def resolve_uv_path() -> str | None:
+    """解析 uv 可执行文件路径。
+
+    优先走 ``shutil.which``（依赖 PATH）；GUI 启动的 .app 环境 PATH 往往
+    不含 ``~/.local/bin`` 等目录，找不到时再逐个探测常见安装位置。返回
+    完整可执行路径；全部找不到时返回 None。
+    """
+    found = shutil.which("uv")
+    if found:
+        return found
+    home = Path.home()
+    for rel in _UV_CANDIDATE_DIRS:
+        cand = Path(rel) if rel.startswith("/") else home / rel
+        if (cand / "uv").is_file():
+            return str(cand / "uv")
+    return None
+
+
 def uv_available() -> bool:
-    """返回运行环境是否具备 uv 命令。"""
-    return shutil.which("uv") is not None
+    """返回运行环境是否具备 uv 命令（PATH 或常见安装目录）。"""
+    return resolve_uv_path() is not None
 
 
 async def _write_json(stream, payload: dict) -> None:
@@ -86,9 +113,12 @@ async def _mcp_call(script: str, tool_name: str, arguments: dict) -> dict:
     流程：initialize → notifications/initialized → tools/call。每次调用
     起一个新子进程，结束时无论成败都终止进程，避免残留 uv/python 进程。
     """
+    uv_path = resolve_uv_path()
+    if not uv_path:
+        raise TranslateMCPError("运行环境缺少 uv 命令，无法使用翻译工具")
     try:
         proc = await asyncio.create_subprocess_exec(
-            "uv", "run", script,
+            uv_path, "run", script,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
