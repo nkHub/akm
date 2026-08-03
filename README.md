@@ -421,6 +421,7 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
   - `upstream_response_body`：上游返回的原始响应体（协议转换前，受 `log_response_body` 控制）
   - 与既有 `request_body`（上游请求体）、`response_body`（发给客户端、转换后的响应）共同组成完整链路；`clean-bodies` 清理时会一并清空 `client_request_body` 与 `upstream_response_body`。
 - 日志页详情抽屉提供「对话视图 / 客户端请求体 / 上游响应」三个常驻标签页，分别对应聊天视图、`client_request_body`（客户端原始请求体）与 `upstream_response_body`（上游原始响应体）；发生协议转换时（客户端原始请求体与上游请求体、上游原始响应体与返回响应内容 JSON 不一致）会追加「转换请求体」（`request_body`，实际发往上游的内容）与「转换响应体」（`response_body`，发给客户端的转换后内容）两个标签页。任一侧数据因未开启保存而缺失时保守保留转换标签页。
+- 对话视图的渲染约定：markdown 标题统一收敛到 1.15em 以内（避免 `<h1>` 等默认字号把气泡撑大），代码块/引用/表格有独立底色边框；纯工具调用轮次（`tool_calls` / `function_call` / SSE `delta.tool_calls` / responses `output_text.done`）渲染为「🔧 调用工具 xxx」摘要，避免显示成空回复。
 - 流式请求的插件 `on_response` 生命周期会等到 SSE 真正结束后才触发，避免并发计数过早回收导致慢 key 持续拥塞
 - 流式响应的内存捕获已改为有界模式：默认最多保留 `256KB`（配置项 `stream_capture_max_bytes`），超出后仅保留头尾两段并追加截断标记，日志 flags 会记录 `stream_capture_truncated`
 

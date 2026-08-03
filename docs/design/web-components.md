@@ -38,6 +38,13 @@
   - 常用属性：`title`、`max-width`
   - 常用方法：`open()`、`close()`、`setTitle(text)`
 
+- `akm-chat-viewer`（`akm/static/chat-viewer.js`）
+  - 用途：日志详情抽屉的对话视图，消息气泡级虚拟列表（动态测量高度，按可视区渲染）
+  - 数据契约：`setItems(items)`，`items[]` 为 `{ role, html }`；`role` 支持 `user` / `assistant` / `system` / `meta`
+  - 常用方法：`setItems(items)`、`setLoading(text)`、`clear()`
+  - 样式约定：使用 Shadow DOM；`.md` 内已收敛 markdown 标题（`h1`~`h6` ≤ 1.15em）、代码块/引用/表格底色与边框、长单词 `overflow-wrap:anywhere`。注意：**对话框气泡字号与 markdown 样式均在此组件内维护**，页面侧勿再引入全局 markdown 样式，避免双重控制。
+  - 来源：独立于 `akm-ui.js`，随日志页单独 `<script>` 引入。
+
 ## 使用原则
 
 1. 组件只负责 UI 壳和基础交互，不承载具体业务请求。
