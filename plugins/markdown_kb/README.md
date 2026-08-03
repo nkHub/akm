@@ -124,8 +124,23 @@ flowchart LR
 
 | 工具 | 参数 | 说明 |
 |------|------|------|
-| `search_kb` | `question`（必填）、`top_k`（1-20，默认 5）、`embedding_model`、`reranker_model` | 调用 `POST /api/markdown-kb/query` 做语义检索，返回命中文档片段列表（标题、文件名、相关度分数、内容片段） |
-| `ask_kb` | `question`（必填）、`chat_model` | 调用 `POST /api/markdown-kb/ask` 做问答，返回答案与引用来源列表 |
+| `search_kb` | `question`（必填）、`top_k`（1-20，默认 5）、`embedding_model`、`reranker_model`、`workspace_root`（可选） | 调用 `POST /api/markdown-kb/query` 做语义检索，返回命中文档片段列表（标题、文件名、相关度分数、内容片段）。未传 `workspace_root` 时检索全部文档 |
+| `ask_kb` | `question`（必填）、`chat_model`、`workspace_root`（可选） | 调用 `POST /api/markdown-kb/ask` 做问答，返回答案与引用来源列表。未传 `workspace_root` 时基于全部文档作答 |
+
+### 文档维护工具
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `list_kb_files` | — | 调用 `GET /api/markdown-kb/files`，列出已入库文档 |
+| `kb_status` | — | 调用 `GET /api/markdown-kb/status`，查看索引与 vec 状态 |
+| `bind_kb_workspace` | `file_name`（必填）、`workspace_root`（必填）、`doc_id` | 调用 `POST /api/markdown-kb/files/bind-workspace`，为文档绑定工作目录 |
+| `delete_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `POST /api/markdown-kb/files/delete`，删除文档 |
+| `rebuild_kb` | — | 调用 `POST /api/markdown-kb/rebuild`，全量重建索引 |
+| `rebuild_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `POST /api/markdown-kb/rebuild-file`，重建单个文档索引 |
+| `clear_kb` | `delete_docs`（bool，默认 true） | 调用 `POST /api/markdown-kb/clear`，清空索引（可同时删除文档） |
+| `sync_kb` | `apply`（bool） | 调用 `POST /api/markdown-kb/sync`，按 docs 目录做增量同步 |
+| `learn_kb` | `source`（必填）、`trigger_phase`（必填）、`session_id`（必填）、`dedupe_key`（必填）、`workspace_root`、`title_hint`、`user_prompt`、`assistant_excerpt`、`conversation_excerpt`、`learn_keyword`、`turn_id` | 调用 `POST /api/markdown-kb/learn`，把一次协作会话提炼为知识入库 |
+| `scan_kb_sessions` | `since_hours`（默认 24）、`max_sessions`（默认 5）、`learn_enabled`（默认 true）、`memory_enabled`（默认 true） | 调用 `POST /api/markdown-kb/scan-sessions`，扫描 Codex/Claude 会话文件并归纳知识 |
 
 > `{port}` 端口的服务必须是正在运行的 AKM 实例（管理台 / 服务）。请求会经本机 HTTP 转发到插件真实路由。
 

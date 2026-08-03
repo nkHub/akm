@@ -230,12 +230,14 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         top_k: int = 5,
         embedding_model: str = "",
         reranker_model: str = "",
+        workspace_root: str = "",
     ) -> str:
         """通过 markdown-kb 插件 HTTP 接口检索知识库，返回精选命中片段。
 
         以 HTTP 方式请求本机服务的 /api/markdown-kb/query 端点，与插件内部
         逻辑解耦。为控制模型上下文体积，每个命中只回传标题、文件名、相关度
         分数与截断后的正文摘要（前 500 字符），不会把完整 chunk 全量塞回。
+        未指定 workspace_root 时检索全部文档（不受工作域过滤限制）。
         """
         question = str(question or "").strip()
         if not question:
@@ -247,6 +249,11 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             payload["embedding_model"] = str(embedding_model).strip()
         if str(reranker_model or "").strip():
             payload["reranker_model"] = str(reranker_model).strip()
+        workspace_root = str(workspace_root or "").strip()
+        if workspace_root:
+            payload["workspace_root"] = workspace_root
+        else:
+            payload["ignore_workspace"] = True
         url = f"{_akm_api_base_url()}/api/markdown-kb/query"
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
@@ -476,6 +483,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     "top_k": {"type": "integer", "description": "返回命中条数，1 到 20，默认 5"},
                     "embedding_model": {"type": "string", "description": "向量模型，默认取插件配置"},
                     "reranker_model": {"type": "string", "description": "重排模型，默认取插件配置"},
+                    "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；不传时检索全部文档）"},
                 },
                 "required": ["question"],
             },

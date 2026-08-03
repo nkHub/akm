@@ -73,10 +73,26 @@ async def test_mcp_tools_list(monkeypatch):
     assert resp.status_code == 200
     tools = resp.json()["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {"search_kb", "ask_kb"}
+    assert {"search_kb", "ask_kb"} <= names
     search = next(t for t in tools if t["name"] == "search_kb")
     assert search["inputSchema"]["required"] == ["question"]
     assert "top_k" in search["inputSchema"]["properties"]
+    # 文档维护类工具也应全部注册
+    for maint in (
+        "list_kb_files",
+        "kb_status",
+        "bind_kb_workspace",
+        "delete_kb_file",
+        "rebuild_kb",
+        "rebuild_kb_file",
+        "clear_kb",
+        "sync_kb",
+        "learn_kb",
+        "scan_kb_sessions",
+    ):
+        assert maint in names
+    learn = next(t for t in tools if t["name"] == "learn_kb")
+    assert learn["inputSchema"]["required"] == ["source", "trigger_phase", "session_id", "dedupe_key"]
 
 
 @pytest.mark.asyncio
@@ -116,6 +132,7 @@ async def test_mcp_tools_call_search_kb(monkeypatch):
     assert captured["endpoint"] == "query"
     assert captured["payload"]["question"] == "如何安装"
     assert captured["payload"]["top_k"] == 3
+    assert captured["payload"]["ignore_workspace"] is True  # 未指定 workspace 时默认全库
     # chunk_text 已截断到 800 字
     assert len(text) < 2000
 
@@ -148,6 +165,37 @@ async def test_mcp_tools_call_ask_kb(monkeypatch):
     assert "akm_search_kb" in text
     assert "引用来源" in text and "FAQ" in text
     assert captured["endpoint"] == "ask"
+    assert captured["payload"]["ignore_workspace"] is True  # ask_kb 同样默认全库
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_call_passes_workspace_root(monkeypatch):
+    """指定 workspace_root 时应透传且不再附加 ignore_workspace。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        return {"ok": True, "hits": []}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {
+                "name": "search_kb",
+                "arguments": {
+                    "question": "组件",
+                    "workspace_root": "/Users/nk/Desktop/Ecology/ccs",
+                },
+            },
+        )
+    assert resp.status_code == 200
+    assert captured["payload"]["workspace_root"] == "/Users/nk/Desktop/Ecology/ccs"
+    assert "ignore_workspace" not in captured["payload"]
 
 
 @pytest.mark.asyncio
@@ -242,3 +290,199 @@ async def test_mcp_options_preflight():
         resp = await client.options("/api/markdown-kb/mcp")
     assert resp.status_code == 204
     assert resp.headers.get("access-control-allow-methods") == "POST, OPTIONS"
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_delete_kb_file_payload(monkeypatch):
+    """delete_kb_file 应透传 file_name / workspace_root / doc_id 到 files/delete。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        captured["method"] = method
+        return {"ok": True, "deleted": "old.md"}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "delete_kb_file", "arguments": {"file_name": "old.md", "workspace_root": "/proj"}},
+        )
+    assert resp.status_code == 200
+    text = resp.json()["result"]["content"][0]["text"]
+    assert '"deleted": "old.md"' in text
+    assert captured["endpoint"] == "files/delete"
+    assert captured["method"] == "POST"
+    assert captured["payload"] == {"file_name": "old.md", "workspace_root": "/proj"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_list_files_uses_get(monkeypatch):
+    """list_kb_files 应以 GET 调 files 端点且无请求体。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        captured["method"] = method
+        return {"files": [{"file_name": "a.md"}, {"file_name": "b.md"}]}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(client, "tools/call", {"name": "list_kb_files", "arguments": {}})
+    assert resp.status_code == 200
+    text = resp.json()["result"]["content"][0]["text"]
+    assert "a.md" in text
+    assert captured["endpoint"] == "files"
+    assert captured["method"] == "GET"
+    assert captured["payload"] is None
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_clear_and_sync_defaults(monkeypatch):
+    """clear_kb 应透传 delete_docs，sync_kb 应透传 apply。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured.setdefault("calls", []).append((endpoint, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "clear_kb", "arguments": {"delete_docs": True}},
+        )
+        assert resp.status_code == 200
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "sync_kb", "arguments": {"apply": True}},
+        )
+        assert resp.status_code == 200
+    assert captured["calls"] == [("clear", {"delete_docs": True}), ("sync", {"apply": True})]
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_learn_requires_fields(monkeypatch):
+    """learn_kb 缺少必填字段时应返回 -32603 且不调插件。"""
+    called = []
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        called.append(endpoint)
+        return {"ok": True}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "learn_kb", "arguments": {"source": "codex"}},
+        )
+    assert resp.status_code == 200
+    err = resp.json()["error"]
+    assert err["code"] == -32603
+    assert "trigger_phase 不能为空" in err["message"]
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_learn_kb_full_payload(monkeypatch):
+    """learn_kb 完整参数应组装成 learn 请求体。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        return {"ok": True, "ignored": False, "dedupe_key": "k-1"}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {
+                "name": "learn_kb",
+                "arguments": {
+                    "source": "codex",
+                    "trigger_phase": "stop",
+                    "session_id": "s-1",
+                    "dedupe_key": "k-1",
+                    "workspace_root": "/proj",
+                    "user_prompt": "什么是 X",
+                    "conversation_excerpt": [{"role": "user", "text": "什么是 X"}, {"role": "assistant", "text": "X 是…"}],
+                },
+            },
+        )
+    assert resp.status_code == 200
+    assert captured["endpoint"] == "learn"
+    payload = captured["payload"]
+    assert payload["source"] == "codex"
+    assert payload["trigger_phase"] == "stop"
+    assert payload["session_id"] == "s-1"
+    assert payload["dedupe_key"] == "k-1"
+    assert payload["workspace_root"] == "/proj"
+    assert payload["user_prompt"] == "什么是 X"
+    assert len(payload["conversation_excerpt"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_scan_sessions_converts_types(monkeypatch):
+    """scan_kb_sessions 应做类型转换（since_hours 转 float、max_sessions 转 int）。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        return {"ok": True, "processed": 3}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "scan_kb_sessions", "arguments": {"since_hours": 24, "max_sessions": 3}},
+        )
+    assert resp.status_code == 200
+    assert captured["endpoint"] == "scan-sessions"
+    payload = captured["payload"]
+    assert payload["since_hours"] == 24.0
+    assert payload["max_sessions"] == 3
+    assert "learn_enabled" not in payload  # 未传时省略，交给插件默认值
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_ok_false_raises(monkeypatch):
+    """插件返回 ok=false 时应转为 MCP 错误（-32603）。"""
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        return {"ok": False, "error": "索引未构建"}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "rebuild_kb", "arguments": {}},
+        )
+    assert resp.status_code == 200
+    err = resp.json()["error"]
+    assert err["code"] == -32603
+    assert "索引未构建" in err["message"]
