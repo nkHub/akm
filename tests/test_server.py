@@ -3869,3 +3869,56 @@ async def test_api_logs_normalizes_messages_usage_before_render(monkeypatch):
     assert row["cached_tokens"] == 21632
     assert row["net_prompt_tokens"] == 12121
     assert row["total_tokens"] == 33912
+
+
+# ── /agent-uploads 上传目录 HTTP 访问 ──
+
+
+@pytest.mark.asyncio
+async def test_agent_uploads_serves_file(monkeypatch, tmp_path):
+    """GET /agent-uploads/{filename} 返回 agent_upload_dir 下的文件内容。"""
+    import akm.server as server_module
+
+    target = tmp_path / "cache"
+    target.mkdir()
+    file = target / "abc123.png"
+    file.write_bytes(b"\x89PNG\x00\x01")
+    monkeypatch.setattr(
+        server_module, "load_config", lambda: {"agent_upload_dir": str(target)}
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/agent-uploads/abc123.png")
+    assert resp.status_code == 200
+    assert resp.content == b"\x89PNG\x00\x01"
+    assert "image/png" in resp.headers.get("content-type", "")
+
+
+@pytest.mark.asyncio
+async def test_agent_uploads_rejects_path_traversal(monkeypatch, tmp_path):
+    """路径穿越形式的文件名应被拒绝，不能读取目录外文件。"""
+    import akm.server as server_module
+    from akm.server import agent_upload_file
+
+    monkeypatch.setattr(
+        server_module, "load_config", lambda: {"agent_upload_dir": str(tmp_path)}
+    )
+
+    resp = await agent_upload_file("../config.json")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_agent_uploads_missing_file_404(monkeypatch, tmp_path):
+    """目录中不存在的文件返回 404。"""
+    import akm.server as server_module
+
+    monkeypatch.setattr(
+        server_module, "load_config", lambda: {"agent_upload_dir": str(tmp_path)}
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/agent-uploads/nope.png")
+    assert resp.status_code == 404

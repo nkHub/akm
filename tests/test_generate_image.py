@@ -10,12 +10,34 @@ from akm.agent_runtime import tools as tools_module
 from akm.agent_runtime.tools import build_builtin_tools
 
 
+class FakeResp:
+    """模拟 httpx 图片下载响应。"""
+
+    def __init__(self, content, content_type):
+        self.content = content
+        self.headers = {"content-type": content_type}
+
+    def raise_for_status(self):
+        pass
+
+
+class FakeImageClient:
+    """模拟可下载图片的连接池 client。"""
+
+    def __init__(self, content=b"\x89PNG\r\n\x1a\ngenerated", content_type="image/png"):
+        self.content = content
+        self.content_type = content_type
+
+    async def get(self, url):
+        return FakeResp(self.content, self.content_type)
+
+
 class FakePool:
     """记录 get_client 参数并返回假 client 的连接池。"""
 
     is_route_pool = True
 
-    def __init__(self, client="fake-client"):
+    def __init__(self, client: object = "fake-client"):
         self.calls = []
         self.client = client
 
@@ -54,8 +76,10 @@ def test_builtin_tools_register_generate_image(image_app):
 
 
 @pytest.mark.asyncio
-async def test_generate_image_success(monkeypatch):
-    """成功时返回 URL 列表，model 未指定时回填配置首项。"""
+async def test_generate_image_success(monkeypatch, tmp_path):
+    """成功时返回 URL 列表并落盘到上传目录，附 local_path 与 http_url。"""
+    from pathlib import Path
+
     captured = {}
 
     async def fake_forward(body, client, **kwargs):
@@ -69,23 +93,31 @@ async def test_generate_image_success(monkeypatch):
         }
 
     app = FastAPI()
-    app.state.http_client = FakePool()
-    monkeypatch.setattr(
-        tools_module, "load_config", lambda: {"image_supported_models": "dall-e-3"}
-    )
+    app.state.http_client = FakePool(client=FakeImageClient())
+    upload_dir = tmp_path / "uploads"
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(upload_dir),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
     monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
 
     tool = _image_tool(app)
     text = await tool.handler(prompt="a red apple", size="1024x1024", quality="hd", n=2)
 
     result = json.loads(text)
-    assert result == {
-        "images": [
-            {"index": 0, "url": "https://img/1.png"},
-            {"index": 1, "url": "https://img/2.png"},
-        ]
-    }
-    assert captured["client"] == "fake-client"
+    assert result["images"][0]["url"] == "https://img/1.png"
+    assert result["images"][1]["url"] == "https://img/2.png"
+    for entry in result["images"]:
+        assert Path(entry["local_path"]).exists()
+        assert entry["local_path"].startswith(str(upload_dir))
+        assert entry["http_url"].startswith("http://127.0.0.1:8800/agent-uploads/")
+        assert "save_error" not in entry
+    assert isinstance(captured["client"], FakeImageClient)
     assert captured["body"]["model"] == "dall-e-3"
     assert captured["body"]["prompt"] == "a red apple"
     assert captured["body"]["n"] == 2
@@ -113,8 +145,10 @@ async def test_generate_image_defaults_model_and_omits_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_image_b64_fallback(monkeypatch):
-    """上游只返回 b64_json 时给出长度提示而不是回传大字符串。"""
+async def test_generate_image_b64_fallback(monkeypatch, tmp_path):
+    """上游只返回 b64_json 时解码落盘并给出长度提示而不是回传大字符串。"""
+    from pathlib import Path
+
     async def fake_forward(body, client, **kwargs):
         return {
             "status_code": 200,
@@ -124,14 +158,22 @@ async def test_generate_image_b64_fallback(monkeypatch):
 
     app = FastAPI()
     app.state.http_client = FakePool()
-    monkeypatch.setattr(tools_module, "load_config", lambda: {})
+    upload_dir = tmp_path / "uploads"
+
+    def fake_config():
+        return {"agent_upload_dir": str(upload_dir), "server_port": 8800}
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
     monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
 
     tool = _image_tool(app)
     text = await tool.handler(prompt="x")
-    assert json.loads(text) == {
-        "images": [{"index": 0, "b64_json_hint": "base64 数据，长度 4"}]
-    }
+    result = json.loads(text)
+    assert result["images"][0]["b64_json_hint"] == "base64 数据，长度 4"
+    local_path = Path(result["images"][0]["local_path"])
+    assert local_path.exists()
+    assert local_path.read_bytes() == b"ABC"
+    assert result["images"][0]["http_url"].startswith("http://127.0.0.1:8800/agent-uploads/")
 
 
 # ── 失败路径 ──
@@ -228,10 +270,23 @@ def test_builtin_tools_register_edit_image(edit_app):
 
 
 @pytest.mark.asyncio
-async def test_edit_image_success(edit_app, monkeypatch):
-    """成功时返回 URL 列表，multipart 结构与 /v1/images/edits 一致。"""
+async def test_edit_image_success(edit_app, monkeypatch, tmp_path):
+    """成功时返回 URL 列表并落盘，multipart 结构与 /v1/images/edits 一致。"""
+    from pathlib import Path
+
     app, image_path = edit_app
+    app.state.http_client = FakePool(client=FakeImageClient())
+    upload_dir = tmp_path / "uploads"
     captured = {}
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(upload_dir),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
 
     async def fake_forward(body, client, **kwargs):
         captured["body"] = body
@@ -247,7 +302,11 @@ async def test_edit_image_success(edit_app, monkeypatch):
     tool = _edit_tool(app)
     text = await tool.handler(image_path=image_path, prompt="make it blue")
 
-    assert json.loads(text) == {"images": [{"index": 0, "url": "https://img/edited.png"}]}
+    result = json.loads(text)
+    entry = result["images"][0]
+    assert entry["url"] == "https://img/edited.png"
+    assert Path(entry["local_path"]).exists()
+    assert entry["http_url"].startswith("http://127.0.0.1:8800/agent-uploads/")
     body = captured["body"]
     assert body["__akm_multipart__"] is True
     assert body["model"] == "dall-e-3"
@@ -262,10 +321,22 @@ async def test_edit_image_success(edit_app, monkeypatch):
 @pytest.mark.asyncio
 async def test_edit_image_with_mask(edit_app, monkeypatch, tmp_path):
     """提供 mask_path 时同时上传 image 与 mask 两个文件。"""
+    from pathlib import Path
+
     app, image_path = edit_app
+    app.state.http_client = FakePool(client=FakeImageClient())
     mask = tmp_path / "mask.png"
     mask.write_bytes(b"\x89PNGmask")
     captured = {}
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(tmp_path / "uploads"),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
 
     async def fake_forward(body, client, **kwargs):
         captured["body"] = body
@@ -279,10 +350,41 @@ async def test_edit_image_with_mask(edit_app, monkeypatch, tmp_path):
 
     tool = _edit_tool(app)
     text = await tool.handler(image_path=image_path, prompt="redraw", mask_path=str(mask))
-    assert "edited.png" in text
+    result = json.loads(text)
+    assert result["images"][0]["url"] == "https://img/edited.png"
+    assert Path(result["images"][0]["local_path"]).exists()
     files = captured["body"]["__akm_form_files__"]
     assert set(files.keys()) == {"image", "mask"}
     assert files["mask"][1] == b"\x89PNGmask"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_save_failure_reports_error(monkeypatch, tmp_path):
+    """下载/保存图片失败时不阻断主结果，附 save_error 说明。"""
+    app = FastAPI()
+    # 默认 FakePool client 是字符串，没有 get 方法，触发保存失败
+    app.state.http_client = FakePool()
+    monkeypatch.setattr(
+        tools_module,
+        "load_config",
+        lambda: {"image_supported_models": "dall-e-3", "agent_upload_dir": str(tmp_path / "uploads")},
+    )
+
+    async def fake_forward(body, client, **kwargs):
+        return {
+            "status_code": 200,
+            "body": json.dumps({"data": [{"url": "https://img/1.png"}]}),
+            "error": "",
+        }
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    tool = _image_tool(app)
+    text = await tool.handler(prompt="x")
+    entry = json.loads(text)["images"][0]
+    assert entry["url"] == "https://img/1.png"
+    assert "save_error" in entry
+    assert "local_path" not in entry
 
 
 @pytest.mark.asyncio

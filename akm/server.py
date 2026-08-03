@@ -2148,6 +2148,27 @@ async def plugin_save_config(name: str, request: Request):
     return pm.set_config(name, body)
 
 
+@app.get("/agent-uploads/{filename}")
+async def agent_upload_file(filename: str):
+    """提供 Agent 上传文件（图片）的 HTTP 访问。
+
+    Agent 上传的图片会保存到 agent_upload_dir 配置目录（默认
+    ~/.akm/cache）。此路由允许按文件名访问该目录下的文件，便于前端或
+    其他工具通过 http://127.0.0.1:{port}/agent-uploads/{filename} 获取。
+    文件名仅接受单段安全名称（随机 UUID 加扩展名），防止路径穿越读取
+    目录外的任意文件。
+    """
+    name = os.path.basename(filename)
+    if not name or name in (".", "..") or name != filename:
+        return JSONResponse({"error": "非法文件名"}, status_code=400)
+    raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
+    upload_dir = os.path.expanduser(raw)
+    file_path = os.path.join(upload_dir, name)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(file_path)
+
+
 @app.get("/logs")
 async def log_viewer(request: Request):
     """审计日志查看页面"""

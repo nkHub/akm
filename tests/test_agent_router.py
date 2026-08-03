@@ -54,7 +54,7 @@ async def test_multipart_text_file_appended_as_user_message():
 
 @pytest.mark.asyncio
 async def test_multipart_image_appended_as_image_url():
-    """multipart 上传图片应转为 base64 data URL 的 image_url 内容块。"""
+    """multipart 上传图片应转为 base64 data URL 的 image_url 内容块，并提示保存路径。"""
     loop = app.state.agent_loop
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
     transport = ASGITransport(app=app)
@@ -71,6 +71,45 @@ async def test_multipart_image_appended_as_image_url():
     assert isinstance(content, list)
     expected_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
     assert content[1] == {"type": "image_url", "image_url": {"url": expected_url}}
+    # 文本提示应包含临时落盘路径，供 akm_edit_image 使用
+    assert "图片已保存至：" in content[0]["text"]
+    assert "akm_edit_image" in content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_uploaded_image_saved_to_akm_cache(monkeypatch, tmp_path):
+    """上传的图片应真实落盘到默认的 ~/.akm/cache，且内容与扩展名正确。"""
+    from pathlib import Path
+
+    from akm.agent_runtime import router as router_module
+    from akm.agent_runtime.router import _save_uploaded_image
+
+    monkeypatch.setattr(
+        router_module, "load_config", lambda: {"agent_upload_dir": str(tmp_path / "cache")}
+    )
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
+    path = Path(_save_uploaded_image(png_bytes, "image/png"))
+
+    assert str(path).startswith(str(tmp_path / "cache"))
+    assert path.suffix == ".png"
+    assert path.read_bytes() == png_bytes
+
+
+@pytest.mark.asyncio
+async def test_uploaded_image_saved_to_default_dir_when_unconfigured(monkeypatch):
+    """未配置 agent_upload_dir 时应回落到 ~/.akm/cache 默认目录。"""
+    from pathlib import Path
+
+    from akm.agent_runtime import router as router_module
+    from akm.agent_runtime.router import _save_uploaded_image
+
+    monkeypatch.setattr(router_module, "load_config", lambda: {})
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
+    path = Path(_save_uploaded_image(png_bytes, "image/png"))
+
+    assert str(path).startswith(str(Path.home() / ".akm" / "cache"))
 
 
 @pytest.mark.asyncio

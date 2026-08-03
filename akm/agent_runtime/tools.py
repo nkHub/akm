@@ -1,9 +1,11 @@
 """供 Agent Loop 使用的 AKM 内置只读调试工具。"""
 
+import base64
 import datetime
 import json
 import logging
 import mimetypes
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,58 @@ def _read_image_file(path: str) -> tuple[str, bytes, str]:
     content = file_path.read_bytes()
     content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     return file_path.name, content, content_type
+
+
+def _persist_image(data: bytes, content_type: str, source: str = "") -> tuple[str, str, str]:
+    """把图片字节保存到 agent_upload_dir，返回 (文件名, 本地路径, HTTP URL)。
+
+    content_type 为空时尝试从来源 URL 后缀推断；扩展名取 mimetypes 映射，
+    无匹配时回退 .bin。HTTP URL 指向 /agent-uploads/{filename}，由服务端
+    按 agent_upload_dir 提供访问，供前端或外部工具直接拉取。
+    """
+    raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
+    upload_dir = Path(raw).expanduser()
+    upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not content_type:
+        content_type = mimetypes.guess_type(source.split("?", 1)[0])[0] or ""
+    ext = mimetypes.guess_extension(content_type or "") or ".bin"
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    filename = f"{uuid.uuid4().hex}{ext}"
+    local_path = str(upload_dir / filename)
+    with open(local_path, "wb") as fh:
+        fh.write(data)
+    port = int(load_config().get("server_port", 8800) or 8800)
+    http_url = f"http://127.0.0.1:{port}/agent-uploads/{filename}"
+    return filename, local_path, http_url
+
+
+async def _save_generated_image(item: dict[str, Any], client) -> None:
+    """把生成/编辑结果的图片保存到上传目录，并填充 local_path/http_url。
+
+    有 url 时通过连接池 client 下载；只有 b64_json 时直接解码。保存成功
+    附加 local_path 与 http_url 字段，失败附加 save_error，均不影响主结果。
+    """
+    try:
+        url = item.get("url")
+        if url:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+            content_type = (resp.headers or {}).get("content-type", "")
+        else:
+            b64 = item.pop("b64_json", None)
+            if not b64:
+                item["save_error"] = "无可用图片数据"
+                return
+            data = base64.b64decode(b64)
+            content_type = ""
+        _, local_path, http_url = _persist_image(data, content_type, url or "")
+        item["local_path"] = local_path
+        item["http_url"] = http_url
+    except Exception as exc:
+        logger.warning("[AgentTool] 保存生成图片失败: %s", exc)
+        item["save_error"] = str(exc)
 
 
 def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
@@ -167,12 +221,15 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         quality: str = "",
         n: int = 1,
     ) -> str:
-        """调用上游图片生成接口生成图片，返回图片 URL 列表。
+        """调用上游图片生成接口生成图片，返回图片资源列表。
 
         复用连接池并走 forward_request，与 /v1/images/generations 端点共用
         同一套 key 选择与故障切换逻辑。模型未指定时取 image_supported_models
         首项，保证能匹配到可用 Key。为避免把体积巨大的 base64 数据塞进模型
-        上下文，只回传 URL；上游未返回 URL 时给出数据长度提示。
+        上下文，只回传 URL；生成成功后还会把图片下载保存到 agent_upload_dir
+        （默认 ~/.akm/cache），并在结果中附带 local_path 与 http_url
+        （http://127.0.0.1:{port}/agent-uploads/{filename}）指向该资源；
+        保存失败时附带 save_error 说明原因。
         """
         pool = getattr(app.state, "http_client", None)
         if pool is None or not getattr(pool, "is_route_pool", False):
@@ -222,6 +279,9 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 entry["b64_json_hint"] = (
                     f"base64 数据，长度 {len(b64)}" if b64 else "无可用数据"
                 )
+                if b64:
+                    entry["b64_json"] = b64
+            await _save_generated_image(entry, client)
             images.append(entry)
         return json.dumps({"images": images}, ensure_ascii=False)
 
@@ -235,11 +295,13 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         output_format: str = "",
         n: int = 1,
     ) -> str:
-        """读取本地图片并按提示词编辑，返回编辑后的图片 URL 列表。
+        """读取本地图片并按提示词编辑，返回编辑后的图片资源列表。
 
         与 akm_generate_image 共用图片转发链路（forward_request + images/edits），
         图片通过本地路径传入，handler 读取后按与 /v1/images/edits 一致的
         multipart 结构组装请求体，避免把 base64 大对象塞进模型上下文。
+        编辑结果同样会下载保存到 agent_upload_dir，并附带 local_path 与
+        http_url 指向资源，保存失败时附带 save_error 说明原因。
         """
         pool = getattr(app.state, "http_client", None)
         if pool is None or not getattr(pool, "is_route_pool", False):
@@ -306,6 +368,9 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 entry["b64_json_hint"] = (
                     f"base64 数据，长度 {len(b64)}" if b64 else "无可用数据"
                 )
+                if b64:
+                    entry["b64_json"] = b64
+            await _save_generated_image(entry, client)
             images.append(entry)
         return json.dumps({"images": images}, ensure_ascii=False)
 
@@ -344,7 +409,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         ),
         ToolDef(
             "akm_generate_image",
-            "调用 AKM 配置的图片生成模型生成图片，返回图片 URL 列表。需要配置 image_supported_models 对应的可用 API Key",
+            "调用 AKM 配置的图片生成模型生成图片，返回图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要配置 image_supported_models 对应的可用 API Key",
             {
                 "type": "object",
                 "properties": {
@@ -360,7 +425,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         ),
         ToolDef(
             "akm_edit_image",
-            "读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片 URL 列表。需要提供服务器可访问的图片路径，以及配置了对应模型的可用 API Key",
+            "读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要提供服务器可访问的图片路径，以及配置了对应模型的可用 API Key",
             {
                 "type": "object",
                 "properties": {

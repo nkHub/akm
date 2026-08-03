@@ -2,20 +2,49 @@
 
 import base64
 import json
+import logging
+import mimetypes
+import os
+import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from akm.config import load_config
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _save_uploaded_image(data: bytes, content_type: str) -> str:
+    """把上传的图片落盘到配置的保存目录，返回可被工具读取的绝对路径。
+
+    上传的图片会先转成 base64 的 image_url 进入对话，同时落盘一份到
+    config.json 的 agent_upload_dir 配置的目录（默认 ~/.akm/cache），供
+    akm_edit_image 等按路径读取的工具使用。文件名使用随机 UUID 防止覆盖
+    同名文件。
+    """
+    raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
+    upload_dir = Path(raw).expanduser()
+    os.makedirs(upload_dir, mode=0o700, exist_ok=True)
+    ext = mimetypes.guess_extension(content_type or "") or ".bin"
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    path = upload_dir / f"{uuid.uuid4().hex}{ext}"
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return str(path)
 
 
 async def _append_file_messages(messages: list[dict], files: list) -> tuple[list[dict] | None, str]:
     """读取上传文件，并作为独立的 user 消息追加到对话末尾。
 
-    图片（image/*）→ 转为 base64 data URL 的 image_url 内容块；
-    其他文件 → 尝试以 UTF-8 读取为文本内容；解码失败则拒绝。
+    图片（image/*）→ 转为 base64 data URL 的 image_url 内容块，并把图片
+    落盘到临时目录，在文本提示中给出绝对路径，方便模型调用 akm_edit_image
+    编辑该图片；其他文件 → 尝试以 UTF-8 读取为文本内容；解码失败则拒绝。
 
     Returns:
         (新 messages, "") 或 (None, 错误信息)
@@ -27,10 +56,22 @@ async def _append_file_messages(messages: list[dict], files: list) -> tuple[list
         data = await f.read()
         if content_type.startswith("image/"):
             b64 = base64.b64encode(data).decode("ascii")
+            saved_path = ""
+            try:
+                saved_path = _save_uploaded_image(data, content_type)
+            except OSError as exc:
+                # 落盘失败不影响图片进入上下文，只是不提供编辑路径
+                logger.warning("[Agent] 保存上传图片失败: %s", exc)
+            text = f"用户上传了图片文件：{filename}"
+            if saved_path:
+                text += (
+                    f"\n图片已保存至：{saved_path}，如需编辑该图片，"
+                    f"可调用 akm_edit_image 工具并传入 image_path={saved_path}。"
+                )
             new_messages.append({
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"用户上传了图片文件：{filename}"},
+                    {"type": "text", "text": text},
                     {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}},
                 ],
             })
