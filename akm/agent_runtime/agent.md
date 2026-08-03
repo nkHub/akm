@@ -99,7 +99,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 内置的 `akm_translate` / `akm_detect_language` 工具通过 `uv run` 拉起全局翻译 MCP 脚本提供多语言翻译与语言检测能力。脚本默认位于 `~/.agents/plugins/translate-mcp.py`，可用 config.json 的 `agent_translate_mcp` 配置（路径支持 `~` 展开）。脚本基于 mcp + translators 库，多引擎自动 fallback（bing / google / baidu / alibaba），支持 100+ 种语言。
 
-脚本自带 `# /// script` 依赖声明，`uv run` 会为其自动建立隔离环境，因此 AKM 自身（及打包后的 .app）无需携带翻译依赖，但运行环境需具备 `uv` 命令。脚本不可用或 uv 缺失时，工具调用会返回明确错误提示。
+脚本自带 `# /// script` 依赖声明，`uv run` 会为其自动建立隔离环境，因此 AKM 自身（及打包后的 .app）无需携带翻译依赖，但运行环境需具备 `uv` 命令。AKM 会自动在 PATH 与常见安装目录（`~/.local/bin`、`~/.cargo/bin`、Homebrew 等）中探测 `uv`。脚本不可用或 uv 缺失时，工具调用会返回明确错误提示。
 
 `akm_translate` 参数如下：
 

@@ -65,11 +65,52 @@ def _install_fake_exec(monkeypatch, stdout_lines, written=None):
         created["proc"] = proc
         return proc
 
+    # _mcp_call 内部先解析 uv 路径，测试环境固定为 "uv"，保证启动不受影响
+    monkeypatch.setattr(translate_mcp, "resolve_uv_path", lambda: "uv")
     monkeypatch.setattr(translate_mcp.asyncio, "create_subprocess_exec", fake_exec)
     return created
 
 
 # ── 协议层：_mcp_call / translate_text / detect_language ──
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_raises_when_uv_missing(monkeypatch):
+    """resolve_uv_path 返回 None 时直接抛错，不启动子进程。"""
+    monkeypatch.setattr(translate_mcp, "resolve_uv_path", lambda: None)
+
+    with pytest.raises(translate_mcp.TranslateMCPError, match="uv 命令"):
+        await translate_mcp.translate_text("你好")
+
+
+def test_resolve_uv_path_falls_back_to_common_dirs(monkeypatch, tmp_path):
+    """PATH 找不到 uv 时回退探测常见安装目录。"""
+    uv_bin = tmp_path / ".local" / "bin"
+    uv_bin.mkdir(parents=True)
+    (uv_bin / "uv").write_text("#!/bin/sh\n", encoding="utf-8")
+    (uv_bin / "uv").chmod(0o755)
+
+    monkeypatch.setattr(translate_mcp.shutil, "which", lambda name: None)
+    monkeypatch.setattr(translate_mcp.Path, "home", lambda: tmp_path)
+
+    assert translate_mcp.resolve_uv_path() == str(uv_bin / "uv")
+    assert translate_mcp.uv_available()
+
+
+def test_resolve_uv_path_prefers_path(monkeypatch):
+    """PATH 中存在 uv 时优先返回 which 结果。"""
+    monkeypatch.setattr(translate_mcp.shutil, "which", lambda name: "/tmp/uv")
+
+    assert translate_mcp.resolve_uv_path() == "/tmp/uv"
+
+
+def test_resolve_uv_path_none_when_unavailable(monkeypatch, tmp_path):
+    """PATH 与常见目录都没有 uv 时返回 None。"""
+    monkeypatch.setattr(translate_mcp.shutil, "which", lambda name: None)
+    monkeypatch.setattr(translate_mcp.Path, "home", lambda: tmp_path)
+
+    assert translate_mcp.resolve_uv_path() is None
+    assert not translate_mcp.uv_available()
 
 
 @pytest.mark.asyncio
