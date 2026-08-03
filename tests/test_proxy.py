@@ -143,7 +143,7 @@ async def test_forward_uses_route_scoped_client_after_key_selection(monkeypatch)
         "provider": "deepseek",
         "key_alias": "gs",
         "model": "deepseek-v4-pro",
-        "api_path": "chat/completions",
+        "api_path": "responses",
     }]
     assert send_calls[0]["stream"] is False
 
@@ -1399,8 +1399,8 @@ async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_test_key_connectivity_deepseek_prefers_chat(monkeypatch):
-    """deepseek 不支持 responses，测试时应直接选择 chat/completions。"""
+async def test_test_key_connectivity_deepseek_prefers_responses(monkeypatch):
+    """deepseek 已支持 responses，测试时应首选 responses。"""
 
     called_urls = []
 
@@ -1426,9 +1426,9 @@ async def test_test_key_connectivity_deepseek_prefers_chat(monkeypatch):
     })
 
     assert result["ok"] is True
-    assert result["api_path"] == "chat/completions"
-    assert result["attempted_paths"] == ["chat/completions"]
-    assert called_urls == ["https://api.deepseek.com/v1/chat/completions"]
+    assert result["api_path"] == "responses"
+    assert result["attempted_paths"] == ["responses"]
+    assert called_urls == ["https://api.deepseek.com/v1/responses"]
 
 
 @pytest.mark.asyncio

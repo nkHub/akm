@@ -473,10 +473,10 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
 | 供应商 | Chat | Responses | Messages | 说明 |
 |--------|------|-----------|----------|------|
 | openai | ✓ | ✓ | - | 原生支持 Chat + Responses |
-| deepseek | ✓ | - | ✓ | 支持 Messages（DeepSeek 官方 Claude 兼容入口） |
+| deepseek | ✓ | ✓ | ✓ | 原生支持 Chat + Responses；Messages 走 DeepSeek 官方 Claude 兼容入口 |
 | anthropic | - | - | ✓ | 不支持 Chat，自动转 Messages |
 
-当 Key 的供应商不支持请求的 API 协议时，akm 自动进行格式转换，对客户端透明。例如 Codex CLI 通过 `/v1/responses` 调用 DeepSeek Key 时内部自动转为 `/v1/chat/completions`。
+当 Key 的供应商不支持请求的 API 协议时，akm 自动进行格式转换，对客户端透明。例如 Codex CLI 通过 `/v1/responses` 调用 Anthropic Key 时内部自动转为 `/v1/messages`。
 
 供应商代理管理新增了 `Messages -> /anthropic` 开关：
 
