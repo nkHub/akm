@@ -43,6 +43,7 @@ DEFAULTS = {
     # Agent Loop
     "agent_max_turns": 20,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
     "agent_upload_dir": "~/.akm/cache", # Agent 上传文件（图片）的保存目录，路径支持 ~ 展开
+    "agent_translate_mcp": "~/.agents/plugins/translate-mcp.py",  # Agent 翻译工具使用的翻译 MCP 脚本路径（uv run 执行），路径支持 ~ 展开
     "tavily_api_key": "",               # Tavily 联网搜索 API Key（Agent 内置 tavily_search 工具使用）
     # Key 管理
     "rate_limit_cooldown_sec": 60,      # 限流冷却秒数，被 429 后多久恢复可用

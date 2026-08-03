@@ -1,10 +1,12 @@
 """供 Agent Loop 使用的 AKM 内置只读调试工具。"""
 
+import asyncio
 import base64
 import datetime
 import json
 import logging
 import mimetypes
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,13 @@ from fastapi import FastAPI
 
 from akm.agent_runtime.loop import ToolDef
 from akm.agent_runtime.tavily_mcp import tavily_search
+from akm.agent_runtime.translate_mcp import (
+    TranslateMCPError,
+    detect_language,
+    resolve_translate_script,
+    translate_text,
+    uv_available,
+)
 from akm.audit import list_logs_async
 from akm.config import load_config
 from akm.key_pool import key_model_list, list_keys
@@ -214,6 +223,48 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             logger.warning("[AgentTool] tavily_search 失败: %s", exc)
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
+    async def translate_tool(
+        text: str,
+        dest: str = "zh-cn",
+        src: str = "auto",
+    ) -> str:
+        """通过 uv 拉起全局翻译 MCP 脚本翻译文本，返回脚本结果或错误提示。
+
+        翻译脚本顶部自带 ``# /// script`` 依赖声明，uv run 会为其自动建立
+        隔离环境，因此 AKM 本身不携带翻译依赖，只需运行环境具备 uv 命令
+        且脚本路径（config.json 的 agent_translate_mcp，默认
+        ~/.agents/plugins/translate-mcp.py）可访问。脚本已做多引擎 fallback
+        与源语言检测，翻译失败时脚本自身会返回以「翻译失败」开头的文本。
+        """
+        if not uv_available():
+            return json.dumps({"error": "运行环境缺少 uv 命令，无法使用翻译工具"}, ensure_ascii=False)
+        script = resolve_translate_script()
+        if not Path(script).is_file():
+            return json.dumps({"error": f"翻译脚本不存在: {script}"}, ensure_ascii=False)
+        try:
+            result = await translate_text(text, dest=dest, src=src)
+            return result or json.dumps({"error": "翻译脚本返回空结果"}, ensure_ascii=False)
+        except (TranslateMCPError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning("[AgentTool] akm_translate 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    async def detect_language_tool(text: str) -> str:
+        """通过 uv 拉起全局翻译 MCP 脚本检测语言，返回脚本结果或错误提示。
+
+        与 translate_tool 依赖相同：需要 uv 命令与可访问的翻译脚本路径。
+        """
+        if not uv_available():
+            return json.dumps({"error": "运行环境缺少 uv 命令，无法使用翻译工具"}, ensure_ascii=False)
+        script = resolve_translate_script()
+        if not Path(script).is_file():
+            return json.dumps({"error": f"翻译脚本不存在: {script}"}, ensure_ascii=False)
+        try:
+            result = await detect_language(text)
+            return result or json.dumps({"error": "翻译脚本返回空结果"}, ensure_ascii=False)
+        except (TranslateMCPError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning("[AgentTool] akm_detect_language 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
     async def generate_image_tool(
         prompt: str,
         model: str = "",
@@ -406,6 +457,32 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "required": ["query"],
             },
             tavily_search_tool,
+        ),
+        ToolDef(
+            "akm_translate",
+            "将文本翻译为目标语言，支持 100+ 种语言，多引擎自动切换。需要运行环境具备 uv 命令，翻译脚本路径可通过 config.json 的 agent_translate_mcp 配置",
+            {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "需要翻译的文本内容"},
+                    "dest": {"type": "string", "description": "目标语言代码，如 zh-cn(简体中文)、zh-tw(繁体中文)、en(英语)、ja(日语)、ko(韩语)、fr(法语)、de(德语)、es(西班牙语) 等，默认 zh-cn", "default": "zh-cn"},
+                    "src": {"type": "string", "description": "源语言代码，默认 auto 自动检测", "default": "auto"},
+                },
+                "required": ["text"],
+            },
+            translate_tool,
+        ),
+        ToolDef(
+            "akm_detect_language",
+            "检测一段文本的语言，返回语言代码与置信度。同样依赖 uv 命令与全局翻译 MCP 脚本",
+            {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "需要检测语言的文本内容"},
+                },
+                "required": ["text"],
+            },
+            detect_language_tool,
         ),
         ToolDef(
             "akm_generate_image",

@@ -15,6 +15,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
 | `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
+| `akm_translate` | 将文本翻译为目标语言，支持 100+ 种语言，多引擎自动切换；需运行环境具备 `uv` 命令与翻译 MCP 脚本 |
+| `akm_detect_language` | 检测文本的语言，返回语言代码与置信度；依赖同上 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需提供服务器可访问的图片路径 |
 
@@ -92,6 +94,22 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `search_depth` | string | 否 | 搜索深度 `basic` 或 `advanced`（默认 `basic`） |
 
 请求会经 AKM 的按路由隔离 HTTP 连接池发往 `https://mcp.tavily.com/mcp/`（Key 通过查询参数注入），遵循出站代理设置。未配置 `tavily_api_key` 时工具调用会返回明确错误提示。
+
+## 翻译与语言检测
+
+内置的 `akm_translate` / `akm_detect_language` 工具通过 `uv run` 拉起全局翻译 MCP 脚本提供多语言翻译与语言检测能力。脚本默认位于 `~/.agents/plugins/translate-mcp.py`，可用 config.json 的 `agent_translate_mcp` 配置（路径支持 `~` 展开）。脚本基于 mcp + translators 库，多引擎自动 fallback（bing / google / baidu / alibaba），支持 100+ 种语言。
+
+脚本自带 `# /// script` 依赖声明，`uv run` 会为其自动建立隔离环境，因此 AKM 自身（及打包后的 .app）无需携带翻译依赖，但运行环境需具备 `uv` 命令。脚本不可用或 uv 缺失时，工具调用会返回明确错误提示。
+
+`akm_translate` 参数如下：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `text` | string | 是 | 需要翻译的文本内容 |
+| `dest` | string | 否 | 目标语言代码，如 `zh-cn`、`en`、`ja` 等，默认 `zh-cn` |
+| `src` | string | 否 | 源语言代码，默认 `auto` 自动检测 |
+
+`akm_detect_language` 只需 `text` 参数，返回语言代码与置信度。
 
 ## 图片生成
 
