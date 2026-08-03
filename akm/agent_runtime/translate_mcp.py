@@ -121,7 +121,7 @@ async def _mcp_call(script: str, tool_name: str, arguments: dict) -> dict:
             uv_path, "run", script,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
         raise TranslateMCPError(f"无法启动翻译脚本: {exc}") from exc
@@ -146,6 +146,19 @@ async def _mcp_call(script: str, tool_name: str, arguments: dict) -> dict:
             "params": {"name": tool_name, "arguments": arguments},
         })
         return await _read_response(proc.stdout, 1)
+    except TranslateMCPError as exc:
+        # 子进程提前退出等场景，把 uv/脚本的 stderr 拼进错误信息，
+        # 便于定位「uv run 启动失败」的真实原因
+        stderr_text = ""
+        try:
+            stderr_text = (
+                await asyncio.wait_for(proc.stderr.read(), timeout=3.0)
+            ).decode("utf-8", errors="replace").strip()
+        except Exception:
+            stderr_text = ""
+        if stderr_text:
+            raise TranslateMCPError(f"{exc}（uv 输出: {stderr_text[-500:]}）") from exc
+        raise
     finally:
         # 无论成败都终止子进程，避免残留 uv/python 进程
         try:

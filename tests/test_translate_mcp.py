@@ -32,13 +32,20 @@ class FakeStream:
             return b""
         return self._buf.pop(0)
 
+    async def read(self):
+        # 模拟 stderr 读取：返回剩余全部字节后清空
+        data = b"".join(self._buf)
+        self._buf.clear()
+        return data
+
 
 class FakeProc:
     """模拟 asyncio.create_subprocess_exec 返回的进程对象。"""
 
-    def __init__(self, stdin, stdout):
+    def __init__(self, stdin, stdout, stderr=None):
         self.stdin = stdin
         self.stdout = stdout
+        self.stderr = stderr if stderr is not None else FakeStream()
         self.terminated = False
         self.waited = False
 
@@ -197,6 +204,28 @@ async def test_translate_text_raises_when_script_exits_early(monkeypatch):
 
     with pytest.raises(translate_mcp.TranslateMCPError, match="提前退出"):
         await translate_mcp.translate_text("x")
+
+
+@pytest.mark.asyncio
+async def test_early_exit_appends_uv_stderr(monkeypatch):
+    """脚本提前退出时，把 uv/脚本的 stderr 并入错误信息便于定位原因。"""
+    monkeypatch.setattr(translate_mcp, "load_config", lambda: {})
+    created = {}
+    stderr_lines = [b"error: No Python found at /Users/nk/nope"]
+
+    async def fake_exec(*args, **kwargs):
+        stdin = FakeStream()
+        proc = FakeProc(stdin, FakeStream([]), FakeStream(list(stderr_lines)))
+        created["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(translate_mcp, "resolve_uv_path", lambda: "uv")
+    monkeypatch.setattr(translate_mcp.asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(translate_mcp.TranslateMCPError) as excinfo:
+        await translate_mcp.translate_text("x")
+    assert "提前退出" in str(excinfo.value)
+    assert "No Python found" in str(excinfo.value)
 
 
 # ── build_builtin_tools 注册与 handler ──
