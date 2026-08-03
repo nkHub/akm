@@ -15,6 +15,12 @@ from akm.config import load_config
 
 logger = logging.getLogger("akm.agent_runtime.loop")
 
+# 未传 tools 时默认不注入的内置工具（联网搜索、图片生成/编辑，
+# 涉及外部服务调用与资源消耗；客户端如需使用须在 tools 中显式声明）
+_DEFAULT_EXCLUDED_TOOLS: frozenset[str] = frozenset(
+    {"tavily_search", "akm_generate_image", "akm_edit_image"}
+)
+
 # Agent Loop 最大迭代次数，防止工具调用无限循环（可通过 config.json 覆盖）
 
 
@@ -628,9 +634,20 @@ class AgentLoop:
             else:
                 working_messages.insert(0, {"role": "system", "content": instructions})
 
-        # 合并调用方传入的工具定义和注册中心的工具定义
+        # 工具注入策略（白名单）：调用方显式传 tools 时只注入调用方声明的工具
+        # （未声明的内置工具如 tavily_search / akm_search_kb 不注入，LLM 不会自主调用）；
+        # 显式传空数组 [] 表示不注入任何工具；未传 tools（None）时注入除
+        # _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）外的全部内置工具。
         registered_tools = self._tool_registry.list_tools()
-        all_tools = list(tools or []) + registered_tools
+        if tools is not None:
+            all_tools = list(tools)
+        else:
+            all_tools = [
+                t
+                for t in registered_tools
+                if (t.get("function", {}) or {}).get("name", "")
+                not in _DEFAULT_EXCLUDED_TOOLS
+            ]
         # 按 function name 去重，优先保留调用方传入的（允许覆盖注册中心）
         seen_names: set[str] = set()
         deduped_tools: list[dict] = []
@@ -840,8 +857,20 @@ class AgentLoop:
             else:
                 working_messages.insert(0, {"role": "system", "content": instructions})
 
+        # 工具注入策略（白名单）：调用方显式传 tools 时只注入调用方声明的工具
+        # （未声明的内置工具不注入）；显式传空数组 [] 表示不注入任何工具；
+        # 未传 tools（None）时注入除 _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）
+        # 外的全部内置工具。
         registered_tools = self._tool_registry.list_tools()
-        all_tools = list(tools or []) + registered_tools
+        if tools is not None:
+            all_tools = list(tools)
+        else:
+            all_tools = [
+                t
+                for t in registered_tools
+                if (t.get("function", {}) or {}).get("name", "")
+                not in _DEFAULT_EXCLUDED_TOOLS
+            ]
         seen_names: set[str] = set()
         deduped_tools: list[dict] = []
         for t in all_tools:
