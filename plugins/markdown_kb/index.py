@@ -2930,7 +2930,9 @@ class Plugin(PluginBase):
             # 分类加权配置
             "category_bonus": _safe_float(cfg.get("category_bonus"), 0.10),
             "category_list": category_list,
-            # 自动整理记忆配置
+            # 自动整理记忆配置（auto_organize_enabled 默认关闭：开启后才会在
+            # 检索时按消息计数/定时周期异步触发自动整理（扫描会话、生成知识、清理记忆））
+            "auto_organize_enabled": bool(cfg.get("auto_organize_enabled", False)),
             "organize_interval_hours": _safe_float(cfg.get("organize_interval_hours"), 24.0),
             "organize_message_threshold": max(1, _safe_int(cfg.get("organize_message_threshold"), 50)),
             "organize_cleanup_enabled": bool(cfg.get("organize_cleanup_enabled", False)),
@@ -3305,8 +3307,9 @@ class Plugin(PluginBase):
         if memory_enabled:
             asyncio.create_task(self._trigger_lazy_scan())
 
-        # 自动整理记忆触发（消息计数 + 定时周期）
-        asyncio.create_task(self._trigger_organize())
+        # 自动整理记忆触发（默认关闭，需插件配置 auto_organize_enabled 开启）
+        if settings.get("auto_organize_enabled"):
+            asyncio.create_task(self._trigger_organize())
 
         # 记忆启用时跳过缓存（记忆值随时间衰减，缓存会导致 stale score）
         if not memory_enabled:
