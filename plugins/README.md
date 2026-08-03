@@ -17,8 +17,10 @@
 | `usage_quota_guard` | matcher | 关 | 按 Key/模型限制窗口内请求次数与 Token |
 | `budget_gate` | filter | 关 | 按全局/模型/用户累计估算费用，超预算阻断 |
 | `fallback_router` | handler | 关 | 失败后切到备用模型并重选 Key |
+| `key_source_guard` | matcher | 关 | 按客户端 UA 绑定 Key，来源不匹配则跳过 |
 | `response_schema_guard` | post | 关 | 校验调用方声明的 JSON Schema |
 | `webhook_notifier` | post | 关 | 失败/安全/慢请求异步 Webhook + 原生 App 通知 |
+| `frontend_static_server` | app | 关 | 托管前端构建产物与 SPA History 回退 |
 | `provider_health_probe` | app | 关 | Key 连通性探测与状态快照 API |
 | `mcp_tool_gateway` | app | 关 | 本地 HTTP 工具注册、可选注入 tools、受控调用 API |
 | `markdown_kb` | app | 关 | 本地 Markdown 知识库（上传/状态） |
@@ -121,3 +123,31 @@
 | `mcp_tool_gateway.injected` / `stripped` | mcp_tool_gateway | 本请求注入/剥离的工具名 |
 
 Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `ctx.set_skip_key`。更完整说明见 `docs/design/plugin-system.md` §8。
+
+---
+
+## 各插件独立文档
+
+> 每个插件的配置项速查（类型、默认值、说明）已拆分到各插件目录下的 `README.md`。配置统一存于 `~/.akm/config.json` 的 `plugin_configs`（键为插件名），管理台「插件」页可编辑，修改后多数插件热读生效。
+
+| 插件 | 文档 | 配置项数 |
+|------|------|:----:|
+| `budget_gate` | [plugins/budget_gate/README.md](budget_gate/README.md) | 10 |
+| `cache_proxy` | [plugins/cache_proxy/README.md](cache_proxy/README.md) | 7 |
+| `data_filter_guard` | [plugins/data_filter_guard/README.md](data_filter_guard/README.md) | 14 |
+| `fallback_router` | [plugins/fallback_router/README.md](fallback_router/README.md) | 5 |
+| `frontend_static_server` | [plugins/frontend_static_server/README.md](frontend_static_server/README.md) | 4 |
+| `key_source_guard` | [plugins/key_source_guard/README.md](key_source_guard/README.md) | 3 |
+| `markdown_kb` | [plugins/markdown_kb/README.md](markdown_kb/README.md) | 17 |
+| `mcp_tool_gateway` | [plugins/mcp_tool_gateway/README.md](mcp_tool_gateway/README.md) | 8 |
+| `prompt_booster` | [plugins/prompt_booster/README.md](prompt_booster/README.md) | 2 |
+| `prompt_profiles` | [plugins/prompt_profiles/README.md](prompt_profiles/README.md) | 2 |
+| `protocol_converter` | [plugins/protocol_converter/README.md](protocol_converter/README.md) | 0 |
+| `provider_health_probe` | [plugins/provider_health_probe/README.md](provider_health_probe/README.md) | 3 |
+| `rate_limit_guard` | [plugins/rate_limit_guard/README.md](rate_limit_guard/README.md) | 6 |
+| `response_schema_guard` | [plugins/response_schema_guard/README.md](response_schema_guard/README.md) | 3 |
+| `tool_policy_guard` | [plugins/tool_policy_guard/README.md](tool_policy_guard/README.md) | 6 |
+| `usage_quota_guard` | [plugins/usage_quota_guard/README.md](usage_quota_guard/README.md) | 6 |
+| `webhook_notifier` | [plugins/webhook_notifier/README.md](webhook_notifier/README.md) | 11 |
+
+---
