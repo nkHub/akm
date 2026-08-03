@@ -38,6 +38,11 @@
   - 常用属性：`title`、`max-width`
   - 常用方法：`open()`、`close()`、`setTitle(text)`
 
+- `akm-tooltip`
+  - 用途：包裹任意触发行内元素（如信息图标），hover 时在页面级显示多行说明浮层
+  - 常用属性：`content`（提示文本，支持 `\n` 换行）
+  - 约定：浮层为 fixed 定位挂载在 `body` 下，避免被表格等容器的 `overflow` 裁剪；组件以 `inline-block` 行内展示，不影响宿主行高
+
 - `akm-chat-viewer`（`akm/static/chat-viewer.js`）
   - 用途：日志详情抽屉的对话视图，消息气泡级虚拟列表（动态测量高度，按可视区渲染）
   - 数据契约：`setItems(items)`，`items[]` 为 `{ role, html }`；`role` 支持 `user` / `assistant` / `system` / `meta`

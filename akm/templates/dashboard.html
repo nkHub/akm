@@ -64,11 +64,11 @@
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
   <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
     <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按 Key</div>
-    <div class="overflow-x-auto"><table class="w-full text-sm table-fixed"><colgroup><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-provider"></tbody></table></div>
+    <div class="overflow-x-auto"><table class="w-full text-sm table-fixed"><colgroup id="cg-provider"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-provider"></tbody></table></div>
   </div>
   <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
     <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按模型</div>
-    <div class="overflow-x-auto"><table class="w-full text-sm table-fixed"><colgroup><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-model"></tbody></table></div>
+    <div class="overflow-x-auto"><table class="w-full text-sm table-fixed"><colgroup id="cg-model"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-model"></tbody></table></div>
   </div>
 </div>
 <div id="daily-section" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
@@ -98,6 +98,37 @@ function fmtMoney(n) {
 }
 function fmtCost(n, currency, costsByCurrency) {
   return '$' + fmtMoney(n);
+}
+// 费用明细 tooltip 文本：输入未命中缓存 / 缓存命中 / 输出 的 token 数与价格
+// tooltip 内的价格保留 4 位小数，方便观察小额明细（表格内的费用仍保持 2 位）。
+function fmtCostDetailTip(v) {
+  // 局部格式化：费用保留 4 位小数
+  var fmt4 = function(n) { var x = Number(n || 0); return Number.isFinite(x) ? x.toFixed(4) : '0.0000'; };
+  var d = (v && v.cost_detail) || {};
+  var get = function(k) { return (d[k] || { tokens: 0, cost: 0 }); };
+  var im = get('input_missed');
+  var ic = get('input_cached');
+  var op = get('output');
+  return '输入: ' + fmtNum(im.tokens) + ' / $' + fmt4(im.cost) + '\n'
+    + '缓存: ' + fmtNum(ic.tokens) + ' / $' + fmt4(ic.cost) + '\n'
+    + '输出: ' + fmtNum(op.tokens) + ' / $' + fmt4(op.cost);
+}
+// 信息图标 SVG：由 akm-tooltip 组件包裹，hover 时显示费用明细浮层
+function costTipIcon(v) {
+  var tip = fmtCostDetailTip(v);
+  return '<akm-tooltip content="' + esc(tip) + '">'
+    + '<svg class="w-3.5 h-3.5 ml-1 inline-block align-[-2px] cursor-help text-gray-500 hover:text-rose-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4M12 8h.01"/></svg>'
+    + '</akm-tooltip>';
+}
+// 根据是否开启费用估算，动态生成按 Key / 按模型表格的 colgroup 列宽
+function syncTableCols(costOn) {
+  var html = costOn
+    ? '<col style="width:30%"><col style="width:12%"><col style="width:28%"><col style="width:30%">'
+    : '<col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%">';
+  var cgP = document.getElementById('cg-provider');
+  var cgM = document.getElementById('cg-model');
+  if (cgP) cgP.innerHTML = html;
+  if (cgM) cgM.innerHTML = html;
 }
 
 var _currentDays = 1;
@@ -171,16 +202,22 @@ async function loadDashboard() {
     var html = '';
     Object.entries(s.by_key||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
+      html += costOn
+        ? '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-rose-300 whitespace-nowrap">'+esc(fmtCost(v.cost, v.currency, v.costs_by_currency))+costTipIcon(v)+'</td></tr>'
+        : '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
-    document.getElementById('tbl-provider').innerHTML = html || '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
+    document.getElementById('tbl-provider').innerHTML = html || '<tr><td colspan="'+(costOn?4:6)+'" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
 
     html = '';
     Object.entries(s.by_model||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
       var k=e[0], v=e[1];
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
+      html += costOn
+        ? '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-rose-300 whitespace-nowrap">'+esc(fmtCost(v.cost, v.currency, v.costs_by_currency))+costTipIcon(v)+'</td></tr>'
+        : '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
     });
-    document.getElementById('tbl-model').innerHTML = html || '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
+    document.getElementById('tbl-model').innerHTML = html || '<tr><td colspan="'+(costOn?4:6)+'" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
+
+    syncTableCols(costOn);
 
     var dailyEntries = Object.entries(s.daily||{});
     document.getElementById('daily-section').classList.toggle('hidden', dailyEntries.length === 0);

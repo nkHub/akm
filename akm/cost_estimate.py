@@ -77,6 +77,52 @@ def match_price(
     return fallback
 
 
+def estimate_row_cost_detail(
+    *,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int,
+    cache_creation_tokens: int,
+    rules: list[tuple[str, float, float, float]],
+) -> tuple[float, str, dict]:
+    """估算单条请求费用，并拆分输入未命中缓存 / 缓存命中 / 输出三部分明细。
+
+    返回 (cost, currency, detail)，其中 detail 结构为：
+        {
+            "input_missed": {"tokens": int, "cost": float},   # 输入未命中缓存（含缓存写入）
+            "input_cached": {"tokens": int, "cost": float},   # 输入缓存命中
+            "output":      {"tokens": int, "cost": float},    # 输出
+        }
+    三部分 cost 之和与返回的总 cost 严格一致，供前端 tooltip 逐项展示。
+    """
+    prompt = max(0, int(prompt_tokens or 0))
+    completion = max(0, int(completion_tokens or 0))
+    cached = max(0, int(cached_tokens or 0))
+    creation = max(0, int(cache_creation_tokens or 0))
+    if cached > prompt > 0:
+        cached = prompt
+    non_cached = max(0, prompt - cached) + creation
+    zero_detail = {
+        "input_missed": {"tokens": 0, "cost": 0.0},
+        "input_cached": {"tokens": 0, "cost": 0.0},
+        "output": {"tokens": 0, "cost": 0.0},
+    }
+    if non_cached <= 0 and completion <= 0 and cached <= 0:
+        return 0.0, "$", zero_detail
+
+    inp_price, cache_price, out_price = match_price(model, rules)
+    input_missed_cost = (non_cached / 1_000_000.0) * inp_price
+    input_cached_cost = (cached / 1_000_000.0) * cache_price
+    output_cost = (completion / 1_000_000.0) * out_price
+    cost = input_missed_cost + input_cached_cost + output_cost
+    return float(cost), "$", {
+        "input_missed": {"tokens": non_cached, "cost": input_missed_cost},
+        "input_cached": {"tokens": cached, "cost": input_cached_cost},
+        "output": {"tokens": completion, "cost": output_cost},
+    }
+
+
 def estimate_row_cost(
     *,
     model: str,
@@ -87,23 +133,15 @@ def estimate_row_cost(
     rules: list[tuple[str, float, float, float]],
 ) -> tuple[float, str]:
     """估算单条请求费用。返回 (cost, currency)。"""
-    prompt = max(0, int(prompt_tokens or 0))
-    completion = max(0, int(completion_tokens or 0))
-    cached = max(0, int(cached_tokens or 0))
-    creation = max(0, int(cache_creation_tokens or 0))
-    if cached > prompt > 0:
-        cached = prompt
-    non_cached = max(0, prompt - cached) + creation
-    if non_cached <= 0 and completion <= 0 and cached <= 0:
-        return 0.0, "$"
-
-    inp_price, cache_price, out_price = match_price(model, rules)
-    cost = (
-        (non_cached / 1_000_000.0) * inp_price
-        + (cached / 1_000_000.0) * cache_price
-        + (completion / 1_000_000.0) * out_price
+    cost, currency, _ = estimate_row_cost_detail(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=cached_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+        rules=rules,
     )
-    return float(cost), "$"
+    return cost, currency
 
 
 def add_cost(costs: dict[str, float], currency: str, cost: float) -> None:

@@ -393,3 +393,54 @@ if (!customElements.get('akm-drawer')) {
     }
   });
 }
+
+if (!customElements.get('akm-tooltip')) {
+  customElements.define('akm-tooltip', class extends HTMLElement {
+    connectedCallback() {
+      if (this.__mounted) return;
+      this.__mounted = true;
+      var self = this;
+      // 行内展示，保持与宿主（如表格单元格）文本同基线，不撑高行盒
+      this.style.display = 'inline-block';
+      this.addEventListener('mouseenter', function() { self.show(); });
+      this.addEventListener('mouseleave', function() { self.hide(); });
+    }
+
+    // 惰性创建页面级 fixed 浮层：挂在 body 下，避免被表格等容器的 overflow 裁剪
+    _tip() {
+      if (!this._tipEl) {
+        var tip = document.createElement('div');
+        tip.style.cssText =
+          'position:fixed;z-index:9999;display:none;pointer-events:none;' +
+          'max-width:320px;padding:8px 10px;font-size:11px;line-height:1.7;' +
+          'white-space:pre-line;text-align:left;color:#d1d5db;' +
+          'background:#111827;border:1px solid #374151;border-radius:6px;' +
+          'box-shadow:0 8px 24px rgba(0,0,0,.4);';
+        document.body.appendChild(tip);
+        this._tipEl = tip;
+      }
+      return this._tipEl;
+    }
+
+    show() {
+      var tip = this._tip();
+      tip.textContent = this.getAttribute('content') || '';
+      tip.style.display = 'block';
+      var r = this.getBoundingClientRect();
+      var tr = tip.getBoundingClientRect();
+      // 默认在触发元素下方展示，超出视口下边界时翻转到上方
+      var x = Math.min(r.left, window.innerWidth - tr.width - 8);
+      if (x < 8) x = 8;
+      var y = r.bottom + 8;
+      if (y + tr.height > window.innerHeight - 8) {
+        y = Math.max(8, r.top - tr.height - 8);
+      }
+      tip.style.left = x + 'px';
+      tip.style.top = y + 'px';
+    }
+
+    hide() {
+      if (this._tipEl) this._tipEl.style.display = 'none';
+    }
+  });
+}

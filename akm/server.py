@@ -1558,7 +1558,7 @@ def _get_stats(days: int) -> dict:
 
     from akm.cost_estimate import (
         add_cost,
-        estimate_row_cost,
+        estimate_row_cost_detail,
         finalize_costs,
         parse_pricing,
     )
@@ -1618,6 +1618,11 @@ def _get_stats(days: int) -> dict:
                 "cost": 0.0,
                 "currency": cost_default_currency,
                 "costs_by_currency": {},
+                "cost_detail": {
+                    "input_missed": {"tokens": 0, "cost": 0.0},
+                    "input_cached": {"tokens": 0, "cost": 0.0},
+                    "output": {"tokens": 0, "cost": 0.0},
+                },
             }
         return store[name]
 
@@ -1689,8 +1694,13 @@ def _get_stats(days: int) -> dict:
 
         row_cost = 0.0
         row_currency = cost_default_currency
+        row_cost_detail = {
+            "input_missed": {"tokens": 0, "cost": 0.0},
+            "input_cached": {"tokens": 0, "cost": 0.0},
+            "output": {"tokens": 0, "cost": 0.0},
+        }
         if cost_enabled:
-            row_cost, row_currency = estimate_row_cost(
+            row_cost, row_currency, row_cost_detail = estimate_row_cost_detail(
                 model=str(model or ""),
                 prompt_tokens=int(p or 0),
                 completion_tokens=int(c or 0),
@@ -1712,6 +1722,11 @@ def _get_stats(days: int) -> dict:
                 bucket["cost"] = total_c
                 bucket["currency"] = cur
                 bucket["costs_by_currency"] = cmap
+                for part_name in ("input_missed", "input_cached", "output"):
+                    part = bucket["cost_detail"][part_name]
+                    row_part = row_cost_detail[part_name]
+                    part["tokens"] += row_part["tokens"]
+                    part["cost"] += row_part["cost"]
 
         _bump(_ensure_bucket(by_provider, provider))
         _bump(_ensure_bucket(by_model, model))
@@ -1727,6 +1742,7 @@ def _get_stats(days: int) -> dict:
             out.pop("cost", None)
             out.pop("currency", None)
             out.pop("costs_by_currency", None)
+            out.pop("cost_detail", None)
         daily_sorted[day] = out
 
     def _strip_cost_fields(store: dict) -> dict:
@@ -1738,6 +1754,7 @@ def _get_stats(days: int) -> dict:
             out.pop("cost", None)
             out.pop("currency", None)
             out.pop("costs_by_currency", None)
+            out.pop("cost_detail", None)
             cleaned[name] = out
         return cleaned
 
@@ -1777,7 +1794,7 @@ async def api_logs(
     days: int = Query(default=0, ge=0, le=365),
 ):
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
-    from akm.cost_estimate import estimate_row_cost, parse_pricing
+    from akm.cost_estimate import estimate_row_cost_detail, parse_pricing
 
     logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
     total = await count_logs_async(provider=provider, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
@@ -1814,7 +1831,7 @@ async def api_logs(
         # 因此前端只需要消费一个 net_prompt_tokens 即可。
         log["net_prompt_tokens"] = max(0, p - cached)
         if cost_enabled:
-            log["estimated_cost"], log["cost_currency"] = estimate_row_cost(
+            log["estimated_cost"], log["cost_currency"], log["cost_detail"] = estimate_row_cost_detail(
                 model=str(log.get("model") or ""),
                 prompt_tokens=int(p or 0),
                 completion_tokens=int(c or 0),
