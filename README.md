@@ -144,8 +144,8 @@ akm-menubar
 
 | 页面 | 功能 |
 |------|------|
-| 统计 | Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1d/7d/30d 自然日切换；可在设置开启费用估算后显示总费用与每日费用） |
-| 审计 | 请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags） |
+| 统计 | Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1d/7d/30d 自然日切换；可在设置开启费用估算后显示总费用与每日费用；开启费用时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列带图标，悬停展示输入未命中缓存、输入缓存命中、输出三者的 Token 数与价格明细） |
+| 审计 | 请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用，费用列带图标，悬停展示输入/缓存/输出三者的 Token 数与价格明细；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags） |
 | 管理 | Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示） |
 | 插件 | 插件列表、启用/禁用开关、上传 .zip 安装、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。 |
 | 设置 | 分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关与模型单价表、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除） |
@@ -269,7 +269,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | PATCH | `/api/keys/{alias}/usage-config` | 设置用量查询配置（脚本/间隔） |
 | POST | `/api/keys/{alias}/usage-query` | 手动触发一次用量查询 |
 | POST | `/api/keys/usage-query-all` | 批量触发所有已配置自动查询的 Key |
-| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost`） |
+| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细） |
 | GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
 | POST | `/api/logs/clean-bodies` | 清空请求体/响应体（含客户端原始请求体与上游原始响应体，保留元数据与统计列） |
@@ -539,7 +539,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 
 `tool_policy_guard` 默认关闭，覆盖 Chat/Responses 的工具声明和客户端续接中已存在的工具调用参数，可配置白名单、黑名单与危险参数正则。它保护进入模型代理的工具协议，不能替代客户端本机的工具执行沙箱。`mcp_tool_gateway` 默认关闭，用 `tools_json` 注册本地 HTTP 工具（仅 http/https，默认可调用 host 为 `127.0.0.1`/`localhost`），可选把工具注入请求 `tools` 或剥离未注册声明，并提供 `GET /api/mcp-tools/status`、`GET /api/mcp-tools/list`、`POST /api/mcp-tools/call`；它不自动执行模型返回的 tool_calls 续接，与 `tool_policy_guard` 互补。`response_schema_guard` 默认关闭，仅在请求显式声明 `json_object` 或 `json_schema` 时校验非流式响应，支持 JSON 合法性以及 `type`、`required`、`properties`、`items`、`enum` 等常用 Schema 子集。`provider_health_probe` 默认关闭，提供 `GET /api/provider-health/status` 与 `POST /api/provider-health/probe`；后者可提交 `aliases`、`include_inactive`、`allow_protocol_fallback`，结果不会包含 API Key、上游 URL 或响应正文。
 
-费用估算已并入核心（不再使用 `cost_tracker` 插件）：设置页可开关 `cost_stats_enabled` 并编辑 `cost_pricing_table`（仅 `model=输入/输入缓存/输出`，每 1M tokens，固定美元）。开启后 `GET /api/stats` 与首页在「总请求」左侧以 `$金额` 显示总费用，每日用量增加费用列；审计页会在状态前显示每条请求的估算费用。计费口径与 token 统计同源。估算值不能替代供应商账单。项目本地 `budget_gate` 可基于同一单价口径做进程内日预算/滚动预算硬闸门（默认关闭）：`GET /api/budget-gate/status`、`POST /api/budget-gate/reset`；超预算在入口阻断，重启后计数清零。
+费用估算已并入核心（不再使用 `cost_tracker` 插件）：设置页可开关 `cost_stats_enabled` 并编辑 `cost_pricing_table`（仅 `model=输入/输入缓存/输出`，每 1M tokens，固定美元）。开启后 `GET /api/stats` 与首页在「总请求」左侧以 `$金额` 显示总费用，每日用量增加费用列；同时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列图标悬停可查看输入未命中缓存（含缓存写入）、输入缓存命中、输出三者的 Token 数与价格明细（各 bucket 的 `cost_detail` 字段，三部分价格之和与总费用一致）；审计页会在状态前显示每条请求的估算费用。计费口径与 token 统计同源。估算值不能替代供应商账单。项目本地 `budget_gate` 可基于同一单价口径做进程内日预算/滚动预算硬闸门（默认关闭）：`GET /api/budget-gate/status`、`POST /api/budget-gate/reset`；超预算在入口阻断，重启后计数清零。
 
 更完整的 Hook/字段定义见 `docs/design/plugin-system.md`。
 
