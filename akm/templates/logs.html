@@ -125,6 +125,20 @@ function renderMarkdownSafe(text) {
   return marked.parse(esc(String(text)));
 }
 
+function toolCallsText(toolCalls) {
+  // 把消息里的工具调用（tool_calls / function_call）渲染成可读摘要，避免纯工具轮消息显示为空。
+  if (!toolCalls) return '';
+  var arr = Array.isArray(toolCalls) ? toolCalls : [toolCalls];
+  var names = [];
+  arr.forEach(function(tc) {
+    if (!tc) return;
+    var fn = (tc.function && tc.function.name) || tc.name || 'tool';
+    if (names.indexOf(fn) === -1) names.push(fn);
+  });
+  if (!names.length) return '';
+  return '🔧 调用工具 ' + names.join('、');
+}
+
 function mapConvWarningLabel(code) {
   var m = {
     'responses_include_not_fully_mapped': 'include 未完整映射',
@@ -258,23 +272,33 @@ function buildChatItems(log) {
   msgs.forEach(function(m){
     var content = m.content || '';
     if (Array.isArray(content)) content = content.map(function(c){ return c.text || c.content || ''; }).join('');
-    items.push({ role: (m.role === 'system' || m.role === 'developer') ? 'system' : (m.role === 'user' || m.role === 'human' ? 'user' : 'assistant'), html: renderMarkdownSafe(content) });
+    var toolSummary = toolCallsText(m.tool_calls);
+    var text = content || toolSummary;
+    items.push({ role: (m.role === 'system' || m.role === 'developer') ? 'system' : (m.role === 'user' || m.role === 'human' ? 'user' : 'assistant'), html: renderMarkdownSafe(text) });
   });
 
   var respBody = null;
   try { respBody = JSON.parse(log.response_body || '{}'); } catch(e) {}
   var reasoning = '';
   var reply = '';
+  var toolSummary = '';
   if (respBody) {
     if (respBody.choices && respBody.choices.length) {
       var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
       reasoning = msg.reasoning_content || '';
-      reply = msg.content || '';
+      var respContent = msg.content;
+      if (Array.isArray(respContent)) respContent = respContent.map(function(x){ return x.text || x.content || ''; }).join('');
+      reply = respContent || '';
+      toolSummary = toolCallsText(msg.tool_calls);
     } else if (respBody.output && respBody.output.length) {
       var out = [];
       respBody.output.forEach(function(it){
         if (it.type === 'reasoning' && it.summary && it.summary.length) {
           it.summary.forEach(function(s){ if (s.type === 'summary_text') reasoning += (reasoning ? '\n' : '') + s.text; });
+        }
+        if (it.type === 'function_call' || it.type === 'tool_use') {
+          var fn = it.name || (it.call && it.call.name) || 'tool';
+          toolSummary += (toolSummary ? '、' : '🔧 调用工具 ') + fn;
         }
         if (it.type === 'message' && it.role === 'assistant' && it.content) {
           var arr = Array.isArray(it.content) ? it.content : [it.content];
@@ -296,7 +320,10 @@ function buildChatItems(log) {
           var d = ch.choices[0].delta || {};
           if (d.content) sseContent += d.content;
           if (d.reasoning_content) sseReason += d.reasoning_content;
+          var dts = toolCallsText(d.tool_calls);
+          if (dts) toolSummary += (toolSummary ? '、' : '🔧 调用工具 ') + dts.replace('🔧 调用工具 ', '');
         } else if (ch.type === 'response.output_text.delta') sseContent += (ch.delta || '');
+        else if (ch.type === 'response.output_text.done' && !sseContent && ch.text) sseContent = ch.text;
         else if (ch.type === 'response.reasoning_summary_text.delta') sseReason += (ch.delta || '');
       } catch(e) {}
     });
@@ -304,7 +331,7 @@ function buildChatItems(log) {
     reasoning = sseReason;
   }
   if (reasoning) items.push({ role:'system', html: '<span class="text-amber-300">思考过程</span><br>' + esc(reasoning) });
-  if (reply) items.push({ role:'assistant', html: renderMarkdownSafe(reply) });
+  if (reply || toolSummary) items.push({ role:'assistant', html: renderMarkdownSafe(reply || toolSummary) });
 
   return items;
 }
@@ -662,13 +689,17 @@ function renderChatView(log) {
   try { respBody = JSON.parse(log.response_body||'{}'); } catch(e) {}
   var reasoning = '';
   var reply = '';
+  var toolSummary = '';
 
   if (respBody) {
     // chat/completions 格式
     if (respBody.choices && respBody.choices.length) {
       var msg = respBody.choices[0].message || respBody.choices[0].delta || {};
       reasoning = msg.reasoning_content || '';
-      reply = msg.content || '';
+      var respContent = msg.content;
+      if (Array.isArray(respContent)) respContent = respContent.map(function(x){ return x.text || x.content || ''; }).join('');
+      reply = respContent || '';
+      toolSummary = toolCallsText(msg.tool_calls);
     }
     // responses 格式：从 output 提取文本
     else if (respBody.output && respBody.output.length) {
@@ -679,6 +710,11 @@ function renderChatView(log) {
           item.summary.forEach(function(s){
             if (s.type === 'summary_text') reasoning += (reasoning ? '\n' : '') + s.text;
           });
+        }
+        // 工具调用项
+        if (item.type === 'function_call' || item.type === 'tool_use') {
+          var fn = item.name || (item.call && item.call.name) || 'tool';
+          toolSummary += (toolSummary ? '、' : '🔧 调用工具 ') + fn;
         }
         // message 项
         if (item.type === 'message' && item.role === 'assistant' && item.content) {
@@ -708,10 +744,15 @@ function renderChatView(log) {
           var delta = chunk.choices[0].delta || {};
           if (delta.content) sseContent += delta.content;
           if (delta.reasoning_content) sseReasoning += delta.reasoning_content;
+          var dts = toolCallsText(delta.tool_calls);
+          if (dts) toolSummary += (toolSummary ? '、' : '🔧 调用工具 ') + dts.replace('🔧 调用工具 ', '');
         }
         // responses SSE 格式
         else if (chunk.type === 'response.output_text.delta') {
           sseContent += (chunk.delta || '');
+        }
+        else if (chunk.type === 'response.output_text.done' && !sseContent && chunk.text) {
+          sseContent = chunk.text;
         }
         else if (chunk.type === 'response.reasoning_summary_text.delta') {
           sseReasoning += (chunk.delta || '');
@@ -727,9 +768,9 @@ function renderChatView(log) {
     html += '<details class="group"><summary class="text-xs text-amber-400/70 cursor-pointer hover:text-amber-300 select-none">💭 思考过程</summary><div class="mt-1 bg-amber-950/20 border border-amber-800/30 rounded-lg px-3 py-2 text-xs text-amber-300/70 whitespace-pre-wrap max-w-[90%]">'+esc(reasoning)+'</div></details>';
   }
 
-  // 渲染回复
-  if (reply) {
-    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+renderMarkdownSafe(reply)+'</div></div>';
+  // 渲染回复（含纯工具调用轮次摘要）
+  if (reply || toolSummary) {
+    html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+renderMarkdownSafe(reply || toolSummary)+'</div></div>';
   } else if (!reasoning && (respBody || log.response_body || log.error)) {
     var errCode = log.status_code || 0;
     var errMsg = esc(log.error||'');
