@@ -47,6 +47,7 @@ _SEARCH_SCHEMA: dict[str, Any] = {
         },
         "embedding_model": {"type": "string", "description": "向量化模型（可选，默认用插件配置）"},
         "reranker_model": {"type": "string", "description": "重排模型（可选，默认用插件配置）"},
+        "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；不传时检索全部文档）"},
     },
     "required": ["question"],
 }
@@ -57,6 +58,7 @@ _ASK_SCHEMA: dict[str, Any] = {
     "properties": {
         "question": {"type": "string", "description": "问题"},
         "chat_model": {"type": "string", "description": "问答模型（可选，默认用插件配置）"},
+        "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；不传时检索全部文档）"},
     },
     "required": ["question"],
 }
@@ -80,18 +82,221 @@ def _error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-async def _call_kb(endpoint: str, payload: dict[str, Any], timeout: float = 120.0) -> dict[str, Any]:
-    """通过 AKM 自身的 HTTP 接口调用 markdown-kb 插件的 query / ask。
+async def _call_kb(
+    endpoint: str,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 120.0,
+    method: str = "POST",
+) -> Any:
+    """通过 AKM 自身的 HTTP 接口调用 markdown-kb 插件的各种端点。
 
+    method 支持 POST（默认，json body）与 GET（查询类端点，无 body）。
     httpx 在此处延迟导入，避免与 FastAPI 的启动顺序产生依赖负担。
     """
     import httpx
 
     url = f"{_base_url()}/api/markdown-kb/{endpoint}"
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload)
+        if method == "GET":
+            resp = await client.get(url)
+        else:
+            resp = await client.post(url, json=payload or {})
         resp.raise_for_status()
         return resp.json()
+
+
+# 文档维护类工具规格（数据驱动：tools/list 与 tools/call 共用）
+# 每个规格：name/description/inputSchema/endpoint/method/required。
+# method 为 GET 时无请求体；POST 时按 inputSchema.properties 把非空参数构造为请求体。
+_MAINT_SPECS: list[dict[str, Any]] = [
+    {
+        "name": "list_kb_files",
+        "description": "列出当前知识库中的 Markdown 文件",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "endpoint": "files",
+        "method": "GET",
+    },
+    {
+        "name": "kb_status",
+        "description": "返回知识库插件状态（数据目录、文档目录、Markdown 文件数量、最近上传时间）",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "endpoint": "status",
+        "method": "GET",
+    },
+    {
+        "name": "bind_kb_workspace",
+        "description": "为单个 Markdown 文件绑定工作目录",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_name": {"type": "string", "description": "要绑定的文件名"},
+                "workspace_root": {"type": "string", "description": "绑定的工作目录绝对路径"},
+                "doc_id": {"type": "string", "description": "文档 ID（可选，按文档 ID 精确定位）"},
+            },
+            "required": ["file_name", "workspace_root"],
+        },
+        "endpoint": "files/bind-workspace",
+    },
+    {
+        "name": "delete_kb_file",
+        "description": "按 file_name（可选 doc_id / workspace_root 组合定位）删除 Markdown 文件并同步移除索引",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_name": {"type": "string", "description": "要删除的文件名"},
+                "workspace_root": {"type": "string", "description": "工作目录（与 file_name 组合定位文档）"},
+                "doc_id": {"type": "string", "description": "文档 ID（优先按此删除）"},
+            },
+            "required": ["file_name"],
+        },
+        "endpoint": "files/delete",
+    },
+    {
+        "name": "rebuild_kb",
+        "description": "全量重建知识库索引（重新切片并向量化所有文档）",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "endpoint": "rebuild",
+    },
+    {
+        "name": "rebuild_kb_file",
+        "description": "只重建单个 Markdown 文件的索引",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_name": {"type": "string", "description": "要重建的文件名"},
+                "workspace_root": {"type": "string", "description": "工作目录（可选）"},
+                "doc_id": {"type": "string", "description": "文档 ID（可选）"},
+            },
+            "required": ["file_name"],
+        },
+        "endpoint": "rebuild-file",
+    },
+    {
+        "name": "clear_kb",
+        "description": "清空索引，可选同时删除原始 Markdown 文档",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "delete_docs": {"type": "boolean", "description": "是否同时删除原始 Markdown 文档（默认 false）"},
+            },
+            "required": [],
+        },
+        "endpoint": "clear",
+    },
+    {
+        "name": "sync_kb",
+        "description": "按 docs 目录和索引状态做增量同步；apply 为 true 时真正写入，false 时仅预览差异",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "apply": {"type": "boolean", "description": "是否执行同步写入（默认 false，仅预览）"},
+            },
+            "required": [],
+        },
+        "endpoint": "sync",
+    },
+    {
+        "name": "learn_kb",
+        "description": "把一段对话/材料提炼为 Markdown 知识条目并写回知识库（幂等，重复 dedupe_key 不重复生成）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "enum": ["codex", "claude_code"], "description": "知识来源"},
+                "trigger_phase": {"type": "string", "enum": ["stop", "pre_compact"], "description": "触发阶段"},
+                "session_id": {"type": "string", "description": "会话 ID（用于幂等去重）"},
+                "dedupe_key": {"type": "string", "description": "去重键（相同内容重复调用会返回 deduped 结果）"},
+                "workspace_root": {"type": "string", "description": "知识归属的工作目录（可选）"},
+                "title_hint": {"type": "string", "description": "标题提示（可选）"},
+                "user_prompt": {"type": "string", "description": "用户问题原文（可选）"},
+                "assistant_excerpt": {"type": "string", "description": "回答摘录（可选）"},
+                "conversation_excerpt": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {"type": "string", "description": "消息角色，如 user / assistant"},
+                            "text": {"type": "string", "description": "消息文本"},
+                        },
+                    },
+                    "description": "对话片段数组 [{role, text}]（可选）",
+                },
+                "learn_keyword": {"type": "string", "description": "触发学习的关键词（可选）"},
+                "turn_id": {"type": "string", "description": "轮次 ID（可选）"},
+            },
+            "required": ["source", "trigger_phase", "session_id", "dedupe_key"],
+        },
+        "endpoint": "learn",
+    },
+    {
+        "name": "scan_kb_sessions",
+        "description": "扫描客户端本地会话文件，生成知识并更新记忆",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since_hours": {"type": "number", "description": "扫描多久以内的会话（默认 24）"},
+                "max_sessions": {"type": "integer", "description": "最多处理多少会话（默认 5）"},
+                "learn_enabled": {"type": "boolean", "description": "是否生成 learn 知识（默认 true）"},
+                "memory_enabled": {"type": "boolean", "description": "是否做交叉验证 boost（默认 true）"},
+            },
+            "required": [],
+        },
+        "endpoint": "scan-sessions",
+    },
+]
+
+
+def _build_payload(spec: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    """按工具规格把调用参数构造成插件端点请求体。
+
+    规则：必填字段缺省或为空字符串 → 抛 ValueError；其余按 properties 类型
+    转换（string 去空、boolean/integer/number 数值化、array/object 原样透传），
+    空值字段直接省略（交给插件端点的默认值）。
+    """
+    input_schema = spec.get("inputSchema") or {}
+    for key in input_schema.get("required") or []:
+        if not str(args.get(key) or "").strip():
+            raise ValueError(f"{key} 不能为空")
+    properties = input_schema.get("properties") or {}
+    payload: dict[str, Any] = {}
+    for key, prop in properties.items():
+        value = args.get(key)
+        if value is None:
+            continue
+        prop_type = prop.get("type")
+        if prop_type == "string":
+            text = str(value).strip()
+            if text:
+                payload[key] = text
+        elif prop_type == "boolean":
+            payload[key] = bool(value)
+        elif prop_type == "integer":
+            try:
+                payload[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        elif prop_type == "number":
+            try:
+                payload[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            payload[key] = value
+    return payload
+
+
+async def _call_maintenance(name: str, args: dict[str, Any]) -> str:
+    """执行一个文档维护类工具，返回展示文本（JSON 序列化）。"""
+    spec = next((s for s in _MAINT_SPECS if s["name"] == name), None)
+    if spec is None:
+        raise ValueError(f"未知维护工具: {name}")
+    method = str(spec.get("method") or "POST")
+    payload: dict[str, Any] | None = None
+    if method != "GET":
+        payload = _build_payload(spec, args)
+    data = await _call_kb(str(spec["endpoint"]), payload=payload, method=method)
+    if isinstance(data, dict) and data.get("ok") is False:
+        raise RuntimeError(str(data.get("error") or f"{name} 执行失败"))
+    return json.dumps(data, ensure_ascii=False)
 
 
 def _format_hits(data: dict[str, Any]) -> str:
@@ -146,6 +351,14 @@ async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
                         "inputSchema": _ASK_SCHEMA,
                     },
                 ]
+                + [
+                    {
+                        "name": spec["name"],
+                        "description": spec["description"],
+                        "inputSchema": spec["inputSchema"],
+                    }
+                    for spec in _MAINT_SPECS
+                ]
             },
         )
     if method == "tools/call":
@@ -166,6 +379,12 @@ async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
                     payload["embedding_model"] = str(args["embedding_model"])
                 if args.get("reranker_model"):
                     payload["reranker_model"] = str(args["reranker_model"])
+                workspace_root = str(args.get("workspace_root") or "").strip()
+                if workspace_root:
+                    payload["workspace_root"] = workspace_root
+                else:
+                    # 未指定工作目录时默认检索全部文档，避免受工作域过滤限制
+                    payload["ignore_workspace"] = True
                 data = await _call_kb("query", payload)
                 if not data.get("ok"):
                     raise RuntimeError(str(data.get("error") or "知识库查询失败"))
@@ -177,6 +396,12 @@ async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
                 payload = {"question": question}
                 if args.get("chat_model"):
                     payload["chat_model"] = str(args["chat_model"])
+                workspace_root = str(args.get("workspace_root") or "").strip()
+                if workspace_root:
+                    payload["workspace_root"] = workspace_root
+                else:
+                    # 未指定工作目录时默认检索全部文档，避免受工作域过滤限制
+                    payload["ignore_workspace"] = True
                 data = await _call_kb("ask", payload, timeout=180.0)
                 if not data.get("ok"):
                     raise RuntimeError(str(data.get("error") or "知识库问答失败"))
@@ -187,6 +412,8 @@ async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
                         f"- {c.get('title') or c.get('file_name') or ''}" for c in citations
                     )
                     text += f"\n\n引用来源：\n{refs}"
+            elif name in {spec["name"] for spec in _MAINT_SPECS}:
+                text = await _call_maintenance(str(name), args)
             else:
                 return _error(msg_id, -32601, f"未知工具: {name}")
             return _result(msg_id, {"content": [{"type": "text", "text": text}]})

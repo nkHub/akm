@@ -2273,7 +2273,16 @@ class Plugin(PluginBase):
         reranker_model = str((payload or {}).get("reranker_model") or settings["reranker_model"]).strip()
         project_context = self._extract_project_context(payload)
         selected_doc = self._resolve_selected_doc_scope(payload)
-        hits = await self._retrieve(question, top_k, embedding_model, reranker_model, project_context, selected_doc)
+        ignore_workspace = bool((payload or {}).get("ignore_workspace", False))
+        hits = await self._retrieve(
+            question,
+            top_k,
+            embedding_model,
+            reranker_model,
+            project_context,
+            selected_doc,
+            ignore_workspace=ignore_workspace,
+        )
         return {
             "ok": True,
             "question": question,
@@ -3278,6 +3287,7 @@ class Plugin(PluginBase):
         reranker_model: str,
         project_context: dict | None = None,
         selected_doc: dict | None = None,
+        ignore_workspace: bool = False,
     ) -> list[dict]:
         """执行检索。
 
@@ -3328,6 +3338,8 @@ class Plugin(PluginBase):
             if not all_documents:
                 raise HTTPException(status_code=400, detail="当前知识库为空，请先上传文档并执行重建")
             scoped_documents = self._filter_documents_by_workspace(all_documents, project_context)
+            if ignore_workspace:
+                scoped_documents = all_documents
             if not scoped_documents:
                 raise HTTPException(status_code=400, detail="当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引")
             scoped_documents = self._filter_documents_by_selected_doc(scoped_documents, selected_doc)
