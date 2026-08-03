@@ -206,9 +206,9 @@ def test_build_headers_messages_with_anthropic_path_switch():
 # ───────────────────────────────────────────────
 
 def test_needs_conversion_deepseek_responses():
-    """DeepSeek 不支持 responses → 需转为 chat/completions"""
+    """DeepSeek 已支持 responses → 不需要转换"""
     agent = AGENT_REGISTRY["deepseek"]
-    assert agent.needs_conversion("responses") == "chat/completions"
+    assert agent.needs_conversion("responses") is None
 
 
 def test_needs_conversion_openai_responses():
@@ -265,7 +265,7 @@ def test_registry_deepseek():
     agent = AGENT_REGISTRY["deepseek"]
     assert agent.name == "deepseek"
     assert agent.default_base_url == "https://api.deepseek.com"
-    assert agent.supports_responses is False
+    assert agent.supports_responses is True
     assert agent.supports_chat is True
     assert agent.messages_use_anthropic_path is True
     assert agent.responses_force_thinking_enabled is True

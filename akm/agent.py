@@ -129,7 +129,7 @@ BUILTIN_AGENTS: dict[str, Agent] = {
     "deepseek": Agent(
         name="deepseek",
         default_base_url="https://api.deepseek.com",
-        supports_responses=False,
+        supports_responses=True,
         supports_chat=True,
         supports_messages=True,
         messages_use_anthropic_path=True,
