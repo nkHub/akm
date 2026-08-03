@@ -1,12 +1,51 @@
 """供 Agent Loop 使用的 AKM 内置只读调试工具。"""
 
+import datetime
+import json
+import logging
+import mimetypes
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 
 from akm.agent_runtime.loop import ToolDef
+from akm.agent_runtime.tavily_mcp import tavily_search
 from akm.audit import list_logs_async
+from akm.config import load_config
 from akm.key_pool import key_model_list, list_keys
+
+logger = logging.getLogger(__name__)
+
+
+def _image_default_model() -> str:
+    """返回 config.json 中 image_supported_models 配置的首个模型。
+
+    与 server.py 的 _default_image_generation_model 保持一致；为避免
+    tools 与 server 互相 import 造成循环依赖，这里内联解析配置。
+    """
+    raw = str(load_config().get("image_supported_models") or "gpt-image-2").strip()
+    models = [item.strip() for item in raw.split(",") if item.strip()]
+    return (models or ["gpt-image-2"])[0]
+
+
+def _image_request_timeout() -> float:
+    """返回 config.json 中 image_request_timeout_sec 配置的图片请求超时秒数。"""
+    try:
+        timeout = float(load_config().get("image_request_timeout_sec", 300) or 300)
+    except (TypeError, ValueError):
+        timeout = 300.0
+    return max(30.0, timeout)
+
+
+def _read_image_file(path: str) -> tuple[str, bytes, str]:
+    """读取本地图片文件，返回 (文件名, 字节内容, content_type)。"""
+    file_path = Path(str(path or "")).expanduser()
+    if not file_path.is_file():
+        raise FileNotFoundError(f"图片文件不存在: {file_path}")
+    content = file_path.read_bytes()
+    content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    return file_path.name, content, content_type
 
 
 def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
@@ -54,6 +93,16 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             for key in list_keys()
         ]
 
+    def get_time() -> dict[str, Any]:
+        """返回服务器当前时间，含本地 ISO 时间、UTC 时间、UNIX 时间戳与时区。"""
+        now = datetime.datetime.now().astimezone()
+        return {
+            "iso": now.isoformat(),
+            "utc_iso": now.astimezone(datetime.timezone.utc).isoformat(),
+            "unix": int(now.timestamp()),
+            "timezone": str(now.tzinfo),
+        }
+
     async def get_logs(
         limit: int = 20,
         status: str = "all",
@@ -87,10 +136,184 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             for log in logs
         ]
 
+    async def tavily_search_tool(
+        query: str,
+        max_results: int = 5,
+        search_depth: str = "basic",
+    ) -> str:
+        """通过 Tavily 远程 MCP 端点执行联网搜索，返回序列化结果。"""
+        pool = getattr(app.state, "http_client", None)
+        if pool is None or not getattr(pool, "is_route_pool", False):
+            return json.dumps({"error": "HTTP 连接池未就绪"}, ensure_ascii=False)
+        # 复用按路由隔离的连接池，遵循出站代理设置
+        client = await pool.get_client(
+            provider="tavily", key_alias="mcp", model="", api_path="mcp"
+        )
+        try:
+            return await tavily_search(
+                client,
+                query=query,
+                max_results=max_results,
+                search_depth=search_depth,
+            )
+        except Exception as exc:
+            logger.warning("[AgentTool] tavily_search 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    async def generate_image_tool(
+        prompt: str,
+        model: str = "",
+        size: str = "",
+        quality: str = "",
+        n: int = 1,
+    ) -> str:
+        """调用上游图片生成接口生成图片，返回图片 URL 列表。
+
+        复用连接池并走 forward_request，与 /v1/images/generations 端点共用
+        同一套 key 选择与故障切换逻辑。模型未指定时取 image_supported_models
+        首项，保证能匹配到可用 Key。为避免把体积巨大的 base64 数据塞进模型
+        上下文，只回传 URL；上游未返回 URL 时给出数据长度提示。
+        """
+        pool = getattr(app.state, "http_client", None)
+        if pool is None or not getattr(pool, "is_route_pool", False):
+            return json.dumps({"error": "HTTP 连接池未就绪"}, ensure_ascii=False)
+        cfg = load_config()
+        if not str(model or "").strip():
+            model = _image_default_model()
+        body: dict[str, Any] = {"model": model, "prompt": prompt}
+        if size:
+            body["size"] = size
+        if quality:
+            body["quality"] = quality
+        n = max(1, int(n or 1))
+        if n > 1:
+            body["n"] = n
+        client = await pool.get_client(
+            provider="", key_alias="", model=model, api_path="images/generations"
+        )
+        try:
+            # 函数内导入避免 akm.proxy 与 agent_runtime 之间循环依赖
+            from akm.proxy import forward_request
+
+            result = await forward_request(
+                body,
+                client,
+                api_path="images/generations",
+                request_timeout=_image_request_timeout(),
+            )
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_generate_image 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        if result.get("error") or int(result.get("status_code", 0) or 0) >= 400:
+            err = result.get("error") or f"HTTP {result.get('status_code')}"
+            return json.dumps({"error": err}, ensure_ascii=False)
+        try:
+            data = json.loads(result.get("body") or "{}")
+        except (TypeError, ValueError):
+            return json.dumps({"error": "上游响应不是合法 JSON"}, ensure_ascii=False)
+        images = []
+        for index, item in enumerate(data.get("data") or []):
+            entry: dict[str, Any] = {"index": index}
+            url = item.get("url")
+            if url:
+                entry["url"] = url
+            else:
+                b64 = item.get("b64_json")
+                entry["b64_json_hint"] = (
+                    f"base64 数据，长度 {len(b64)}" if b64 else "无可用数据"
+                )
+            images.append(entry)
+        return json.dumps({"images": images}, ensure_ascii=False)
+
+    async def edit_image_tool(
+        image_path: str,
+        prompt: str,
+        model: str = "",
+        mask_path: str = "",
+        size: str = "",
+        quality: str = "",
+        output_format: str = "",
+        n: int = 1,
+    ) -> str:
+        """读取本地图片并按提示词编辑，返回编辑后的图片 URL 列表。
+
+        与 akm_generate_image 共用图片转发链路（forward_request + images/edits），
+        图片通过本地路径传入，handler 读取后按与 /v1/images/edits 一致的
+        multipart 结构组装请求体，避免把 base64 大对象塞进模型上下文。
+        """
+        pool = getattr(app.state, "http_client", None)
+        if pool is None or not getattr(pool, "is_route_pool", False):
+            return json.dumps({"error": "HTTP 连接池未就绪"}, ensure_ascii=False)
+        if not str(model or "").strip():
+            model = _image_default_model()
+        try:
+            image_file = _read_image_file(image_path)
+        except OSError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        fields: dict[str, str] = {"prompt": prompt, "model": model}
+        if size:
+            fields["size"] = size
+        if quality:
+            fields["quality"] = quality
+        if output_format:
+            fields["output_format"] = output_format
+        n = max(1, int(n or 1))
+        if n > 1:
+            fields["n"] = str(n)
+        files: dict[str, tuple[str, bytes, str]] = {"image": image_file}
+        if str(mask_path or "").strip():
+            try:
+                files["mask"] = _read_image_file(mask_path)
+            except OSError as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        body: dict[str, Any] = {
+            "__akm_multipart__": True,
+            "__akm_form_fields__": fields,
+            "__akm_form_files__": files,
+            "model": model,
+        }
+        client = await pool.get_client(
+            provider="", key_alias="", model=model, api_path="images/edits"
+        )
+        try:
+            # 函数内导入避免 akm.proxy 与 agent_runtime 之间循环依赖
+            from akm.proxy import forward_request
+
+            result = await forward_request(
+                body,
+                client,
+                api_path="images/edits",
+                request_timeout=_image_request_timeout(),
+            )
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_edit_image 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        if result.get("error") or int(result.get("status_code", 0) or 0) >= 400:
+            err = result.get("error") or f"HTTP {result.get('status_code')}"
+            return json.dumps({"error": err}, ensure_ascii=False)
+        try:
+            data = json.loads(result.get("body") or "{}")
+        except (TypeError, ValueError):
+            return json.dumps({"error": "上游响应不是合法 JSON"}, ensure_ascii=False)
+        images = []
+        for index, item in enumerate(data.get("data") or []):
+            entry: dict[str, Any] = {"index": index}
+            url = item.get("url")
+            if url:
+                entry["url"] = url
+            else:
+                b64 = item.get("b64_json")
+                entry["b64_json_hint"] = (
+                    f"base64 数据，长度 {len(b64)}" if b64 else "无可用数据"
+                )
+            images.append(entry)
+        return json.dumps({"images": images}, ensure_ascii=False)
+
     empty_object = {"type": "object", "properties": {}}
     return [
         ToolDef("akm_get_status", "读取 AKM 服务健康、审计队列和插件运行状态", empty_object, get_status),
         ToolDef("akm_list_keys", "列出 AKM 中已配置 Key 的非敏感状态与模型信息，不返回密钥", empty_object, get_keys),
+        ToolDef("akm_get_time", "获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区", empty_object, get_time),
         ToolDef(
             "akm_list_logs",
             "查询近期 AKM 审计日志摘要，不返回请求体、响应体或请求头",
@@ -104,5 +327,54 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 },
             },
             get_logs,
+        ),
+        ToolDef(
+            "tavily_search",
+            "通过 Tavily 实时联网搜索互联网信息，返回包含标题、链接和摘要的搜索结果。需要先在 config.json 中配置 tavily_api_key",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词"},
+                    "max_results": {"type": "integer", "description": "返回结果数量，1 到 20，默认 5"},
+                    "search_depth": {"type": "string", "enum": ["basic", "advanced"], "description": "搜索深度，默认 basic"},
+                },
+                "required": ["query"],
+            },
+            tavily_search_tool,
+        ),
+        ToolDef(
+            "akm_generate_image",
+            "调用 AKM 配置的图片生成模型生成图片，返回图片 URL 列表。需要配置 image_supported_models 对应的可用 API Key",
+            {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "图片描述提示词"},
+                    "model": {"type": "string", "description": "图片生成模型，默认取 image_supported_models 首项"},
+                    "size": {"type": "string", "description": "图片尺寸，如 1024x1024，可选"},
+                    "quality": {"type": "string", "description": "生成质量，如 standard 或 hd，可选"},
+                    "n": {"type": "integer", "description": "生成张数，默认 1"},
+                },
+                "required": ["prompt"],
+            },
+            generate_image_tool,
+        ),
+        ToolDef(
+            "akm_edit_image",
+            "读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片 URL 列表。需要提供服务器可访问的图片路径，以及配置了对应模型的可用 API Key",
+            {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "本地图片文件的绝对路径"},
+                    "prompt": {"type": "string", "description": "编辑指令，描述期望的修改效果"},
+                    "model": {"type": "string", "description": "图片编辑模型，默认取 image_supported_models 首项"},
+                    "mask_path": {"type": "string", "description": "本地蒙版图片路径，用于限定重绘区域，可选"},
+                    "size": {"type": "string", "description": "输出图片尺寸，如 1024x1024，可选"},
+                    "quality": {"type": "string", "description": "生成质量，如 standard 或 hd，可选"},
+                    "output_format": {"type": "string", "description": "输出格式，如 png 或 jpeg，可选"},
+                    "n": {"type": "integer", "description": "生成张数，默认 1"},
+                },
+                "required": ["image_path", "prompt"],
+            },
+            edit_image_tool,
         ),
     ]

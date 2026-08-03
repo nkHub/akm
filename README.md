@@ -300,6 +300,10 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_get_status` | 查询健康监护、审计队列和插件状态 |
 | `akm_list_keys` | 查询 Key 的别名、供应商、状态和模型列表，不返回 API Key 或连接地址 |
 | `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
+| `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
+| `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
+| `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片 URL 列表；需配置 `image_supported_models` 对应的可用 API Key |
+| `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回图片 URL 列表；需提供服务器可访问的图片路径 |
 
 ### 请求格式
 
@@ -341,7 +345,69 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；每个可见文本增量立即推送 `model_delta`，其余阶段推送 Agent 事件 |
 
+### 文件上传
+
+`/v1/agent` 支持 `multipart/form-data` 上传文件。`messages` 改为 JSON 字符串表单字段，`tools` 等其余字段同纯 JSON 方式；`files` 字段可携带多个文件。上传的文件会被读取并作为独立的 user 消息追加到对话末尾：图片（`image/*`）转成 base64 的 `image_url` 内容块，其他文件按 UTF-8 读取为文本内容，无法解码的二进制文件会返回 400。纯 JSON 请求方式保持不变。
+
+```bash
+curl -X POST http://127.0.0.1:8788/v1/agent \
+  -F 'messages=[{"role":"user","content":"请分析这个文件"}]' \
+  -F 'model=gpt-4o' \
+  -F 'files=@./report.txt'
+```
+
 流式 `final` 事件中的 `final_message` 会保留上游 Chat 响应的 `reasoning_content`，以便客户端展示完成后的推理内容。
+
+### 联网搜索
+
+内置的 `tavily_search` 工具通过 Tavily 官方远程 MCP 端点提供实时联网搜索。使用前需要在 `~/.akm/config.json` 中配置 API Key：
+
+```json
+{
+  "tavily_api_key": "tvly-xxxxxxxx"
+}
+```
+
+配置后 Agent 即可调用 `tavily_search`，参数如下：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 搜索关键词 |
+| `max_results` | int | 否 | 返回结果数量（1-20，默认 5） |
+| `search_depth` | string | 否 | 搜索深度 `basic` 或 `advanced`（默认 `basic`） |
+
+请求会经 AKM 的按路由隔离 HTTP 连接池发往 `https://mcp.tavily.com/mcp/`（Key 通过查询参数注入），遵循出站代理设置。未配置 `tavily_api_key` 时工具调用会返回明确错误提示。
+
+### 图片生成
+
+内置的 `akm_generate_image` 工具复用 `/v1/images/generations` 的转发链路，让 Agent 可以直接生成图片。返回结果只含图片 URL，避免体积巨大的 base64 数据占用模型上下文。参数如下：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `prompt` | string | 是 | 图片描述提示词 |
+| `model` | string | 否 | 图片生成模型，默认取 `image_supported_models` 配置首项 |
+| `size` | string | 否 | 图片尺寸，如 `1024x1024` |
+| `quality` | string | 否 | 生成质量，如 `standard` 或 `hd` |
+| `n` | int | 否 | 生成张数（默认 1） |
+
+请求经连接池调用 `forward_request`（`api_path=images/generations`），自动复用 Key 选择、故障切换与图片专用超时（`image_request_timeout_sec`，默认 300 秒）。调用失败时会返回明确错误文本；上游只返回 `b64_json` 时会给出数据长度提示。
+
+#### 图片编辑
+
+内置的 `akm_edit_image` 工具复用 `/v1/images/edits` 的 multipart 纯透传链路。图片通过 `image_path`（服务器可访问的本地绝对路径）传入，工具读取文件后按与 `/v1/images/edits` 一致的 multipart 结构组装请求，`image` 与可选的 `mask` 作为文件字段上传。参数如下：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `image_path` | string | 是 | 服务器本地图片文件的绝对路径 |
+| `prompt` | string | 是 | 编辑指令，描述期望的修改效果 |
+| `model` | string | 否 | 图片编辑模型，默认取 `image_supported_models` 配置首项 |
+| `mask_path` | string | 否 | 本地蒙版图片路径，用于限定重绘区域 |
+| `size` | string | 否 | 输出图片尺寸，如 `1024x1024` |
+| `quality` | string | 否 | 生成质量，如 `standard` 或 `hd` |
+| `output_format` | string | 否 | 输出格式，如 `png` 或 `jpeg` |
+| `n` | int | 否 | 生成张数（默认 1） |
+
+文件不存在或读取失败会返回明确错误提示；其余失败（上游错误、无法解析响应等）与 `akm_generate_image` 行为一致。
 
 ### 响应格式
 

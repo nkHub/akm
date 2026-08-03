@@ -42,6 +42,7 @@ DEFAULTS = {
     "proxy_default_timeout_sec": 120.0,  # 默认转发超时（秒），图片接口另有独立超时
     # Agent Loop
     "agent_max_turns": 20,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
+    "tavily_api_key": "",               # Tavily 联网搜索 API Key（Agent 内置 tavily_search 工具使用）
     # Key 管理
     "rate_limit_cooldown_sec": 60,      # 限流冷却秒数，被 429 后多久恢复可用
     # 审计队列

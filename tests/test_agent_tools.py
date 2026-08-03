@@ -57,3 +57,18 @@ def test_builtin_status_tool_returns_runtime_summaries():
         "audit_queue": {"size": 2, "maxsize": 512, "dropped_count": 1, "failure_count": 0, "worker_alive": True},
         "plugins": [{"name": "guard", "enabled": True, "runtime_ready": True}],
     }
+
+
+def test_builtin_time_tool_returns_current_time_fields():
+    """时间工具返回本地 ISO、UTC ISO、UNIX 时间戳与时区字段。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    result = _handlers(app)["akm_get_time"]()
+
+    assert set(result) == {"iso", "utc_iso", "unix", "timezone"}
+    # ISO 时间可解析，且 unix 时间戳与当前时刻偏差在合理范围内
+    import datetime
+
+    parsed = datetime.datetime.fromisoformat(result["iso"])
+    assert result["utc_iso"].endswith("+00:00")
+    assert abs(result["unix"] - datetime.datetime.now().timestamp()) < 60
