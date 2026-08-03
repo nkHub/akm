@@ -192,3 +192,46 @@ async def test_plain_json_path_still_works():
     assert resp.status_code == 200
     assert len(loop.calls[0]["messages"]) == 1
     assert loop.calls[0]["options"]["tools"][0]["function"]["name"] == "f"
+
+
+@pytest.mark.asyncio
+async def test_default_instructions_used_when_not_provided(monkeypatch):
+    """客户端未传 instructions 时应回填 config.json 的 agent_default_instructions。"""
+    from akm.agent_runtime import router as router_module
+
+    default_instructions = "数学公式请使用 KaTeX 语法返回"
+    monkeypatch.setattr(
+        router_module, "load_config", lambda: {"agent_default_instructions": default_instructions}
+    )
+    loop = app.state.agent_loop
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 200
+    assert loop.calls[0]["options"]["instructions"] == default_instructions
+
+
+@pytest.mark.asyncio
+async def test_custom_instructions_preserved(monkeypatch):
+    """客户端传入 instructions 时优先使用客户端的，不回填默认值。"""
+    from akm.agent_runtime import router as router_module
+
+    monkeypatch.setattr(
+        router_module, "load_config", lambda: {"agent_default_instructions": "默认指令"}
+    )
+    loop = app.state.agent_loop
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "instructions": "自定义指令",
+            },
+        )
+    assert resp.status_code == 200
+    assert loop.calls[0]["options"]["instructions"] == "自定义指令"
