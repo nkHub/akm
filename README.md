@@ -179,7 +179,7 @@ akm-menubar
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉和设置卡片等基础壳组件，供后续页面复用。
 
-仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，提供 Markdown 知识库、RAG 检索增强生成和自动注入能力。详见 [plugins/markdown_kb/README.md](plugins/markdown_kb/README.md)。
+仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，提供 Markdown 知识库、RAG 检索增强生成能力。其「自动注入」也**默认关闭**：开启插件并开启插件配置里的 `auto_inject` 后，才会对 `chat / messages / responses` 三类文本请求自动抽取最后一个用户问题检索并注入参考资料；关闭时可使用管理台 query / ask 或 `/api/markdown-kb/query`、`ask` 手动使用知识库。该插件的检索接口还以 **MCP（HTTP）** 方式暴露，配置为 `{"type": "http", "url": "http://127.0.0.1:{port}/api/markdown-kb/mcp"}` 即可接入支持 HTTP 的 MCP 客户端（如 Claude Desktop / Cursor）。详见 [plugins/markdown_kb/README.md](plugins/markdown_kb/README.md)。
 
 ## 配置
 
@@ -392,7 +392,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、响应格式与 SSE 流式事件。
 
-服务启动后会自动为每次 Agent 请求注入内置 AKM 调试工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配。
+服务启动后会自动为每次 Agent 请求注入内置 AKM 调试工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配。
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
 

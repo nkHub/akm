@@ -72,3 +72,126 @@ def test_builtin_time_tool_returns_current_time_fields():
     parsed = datetime.datetime.fromisoformat(result["iso"])
     assert result["utc_iso"].endswith("+00:00")
     assert abs(result["unix"] - datetime.datetime.now().timestamp()) < 60
+
+
+class _FakeKbResponse:
+    """模拟 httpx 响应：raise_for_status + json。"""
+
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self._status = status_code
+
+    def raise_for_status(self):
+        if self._status >= 400:
+            raise RuntimeError(f"HTTP {self._status}")
+
+    def json(self):
+        return self._payload
+
+
+class _FakeKbClient:
+    """模拟 httpx.AsyncClient：async 上下文管理器 + post，记录调用参数。"""
+
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self._status = status_code
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None):
+        self.calls.append({"url": url, "json": json})
+        return _FakeKbResponse(self._payload, self._status)
+
+
+def _install_fake_kb_client(monkeypatch, payload, status_code=200):
+    """把 tools.httpx.AsyncClient 换成 fake，返回客户端实例供断言。"""
+    import httpx as real_httpx
+
+    client = _FakeKbClient(payload, status_code)
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.httpx",
+        SimpleNamespace(AsyncClient=lambda timeout: client),
+    )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_builtin_kb_search_returns_trimmed_hits(monkeypatch):
+    """知识库查询工具应把完整 chunk 精简为标题/文件名/分数/截断正文。"""
+    long_text = "长" * 900
+    client = _install_fake_kb_client(
+        monkeypatch,
+        {
+            "ok": True,
+            "hits": [
+                {
+                    "title": "使用说明",
+                    "file_name": "docs/usage.md",
+                    "score": 0.91,
+                    "chunk_text": long_text,
+                    "vector_score": 0.9,
+                },
+                {"file_name": "notes.md", "chunk_text": "没有标题的片段", "vector_score": 0.5},
+            ],
+        },
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    result = await _handlers(app)["akm_search_kb"](question="怎么用？")
+
+    assert client.calls[0]["url"].endswith("/api/markdown-kb/query")
+    assert client.calls[0]["json"]["question"] == "怎么用？"
+    payload = _handlers(app) and client.calls[0]["json"]
+    assert payload["top_k"] == 5
+    results = __import__("json").loads(result)["results"]
+    assert results[0]["title"] == "使用说明"
+    assert results[0]["file_name"] == "docs/usage.md"
+    assert results[0]["score"] == 0.91
+    assert len(results[0]["content"]) == 500
+    assert results[1]["title"] == "notes.md"
+    assert results[1]["score"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_builtin_kb_search_clamps_top_k_and_requires_question(monkeypatch):
+    """top_k 应被钳制到 1..20，空 question 直接返回错误且不发起请求。"""
+    client = _install_fake_kb_client(monkeypatch, {"ok": True, "hits": []})
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_search_kb"]
+
+    await handler(question="查询", top_k=999)
+    assert client.calls[0]["json"]["top_k"] == 20
+
+    await handler(question="", top_k=3)
+    assert client.calls[0]["json"]["top_k"] == 20  # 未发起第二次请求
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_builtin_kb_search_error_paths(monkeypatch):
+    """HTTP 异常与接口返回 ok=false 时应返回结构化错误。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_search_kb"]
+
+    _install_fake_kb_client(monkeypatch, {"error": "知识库未初始化"}, status_code=200)
+    out = await handler(question="x")
+    assert "知识库未初始化" in out
+
+    _install_fake_kb_client(monkeypatch, {}, status_code=500)
+    out = await handler(question="x")
+    assert "error" in __import__("json").loads(out)
+
+
+@pytest.mark.asyncio
+async def test_builtin_kb_search_registers_tool():
+    """akm_search_kb 应注册为工具，question 必填。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+    assert "akm_search_kb" in tools
+    assert tools["akm_search_kb"].parameters["required"] == ["question"]
+    assert tools["akm_search_kb"].parameters["properties"]["top_k"]["description"]

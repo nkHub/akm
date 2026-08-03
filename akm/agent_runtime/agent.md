@@ -15,6 +15,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
 | `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
+| `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需提供服务器可访问的图片路径 |
 
@@ -92,6 +93,19 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `search_depth` | string | 否 | 搜索深度 `basic` 或 `advanced`（默认 `basic`） |
 
 请求会经 AKM 的按路由隔离 HTTP 连接池发往 `https://mcp.tavily.com/mcp/`（Key 通过查询参数注入），遵循出站代理设置。未配置 `tavily_api_key` 时工具调用会返回明确错误提示。
+
+## 知识库查询（markdown-kb）
+
+内置的 `akm_search_kb` 工具通过本机 `POST /api/markdown-kb/query` 接口检索 `markdown_kb` 插件索引的 Markdown 知识库，让 Agent 可以主动查询项目文档。工具经本机 HTTP 调用，不依赖插件内部实现。参数如下：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `question` | string | 是 | 检索关键词 / 问题描述 |
+| `top_k` | int | 否 | 返回的检索结果数量（1-20，默认 5） |
+| `embedding_model` | string | 否 | 指定向量模型，默认取插件配置 |
+| `reranker_model` | string | 否 | 指定重排模型，默认取插件配置 |
+
+返回结果为命中文档片段列表（每项含标题、文件名、相关度分数与截断后的内容片段），避免全文撑爆上下文。知识库未初始化或未命中时返回明确提示。该工具的 HTTP 端点同时提供 MCP 访问方式（见 `plugins/markdown_kb/README.md`）。
 
 ## 图片生成
 

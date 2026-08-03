@@ -2904,6 +2904,7 @@ class Plugin(PluginBase):
             "embedding_model": str(cfg.get("embedding_model") or "text-embedding-3-small").strip() or "text-embedding-3-small",
             "reranker_model": str(cfg.get("reranker_model") or "").strip(),
             "chat_model": str(cfg.get("chat_model") or "").strip(),
+            "auto_inject": bool(cfg.get("auto_inject", False)),  # 是否自动注入参考资料，默认关闭
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "top_k": top_k,
@@ -4526,7 +4527,9 @@ class Plugin(PluginBase):
 
         当前规则：
         1. 仅处理 `chat / messages / responses` 三类文本请求；
-        2. 默认对这三类请求都尝试抽取最后一个用户问题并执行检索；
+        2. 默认不自动注入，需在插件配置开启 `auto_inject` 后才尝试抽取最后一个
+           用户问题并执行检索（关闭时直接透传，可在管理台用 query / ask 或
+           `/api/markdown-kb/query`、`ask` 手动使用知识库）；
         3. 只有检索命中非空时才真正注入参考资料；
         4. 请求里的模型名不再承担知识库开关语义，保持原样继续下游转发；
         5. 没命中、抽不到问题或检索失败时都直接透传。
@@ -4535,6 +4538,10 @@ class Plugin(PluginBase):
         request = ctx.request
         if not isinstance(request, dict):
             return None
+
+        settings = self._settings()
+        if not settings["auto_inject"]:
+            return request
 
         protocol = self._detect_request_protocol(request)
         if not protocol:
@@ -4554,7 +4561,6 @@ class Plugin(PluginBase):
 
         project_context = self._extract_project_context(request)
 
-        settings = self._settings()
         try:
             hits = await self._retrieve(
                 question,

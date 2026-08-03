@@ -44,6 +44,13 @@
       "options_source": "/v1/models"
     },
     {
+      "key": "auto_inject",
+      "label": "自动注入参考资料",
+      "type": "boolean",
+      "default": false,
+      "description": "默认关闭。开启后，对 chat / messages / responses 三类文本请求自动抽取最后一个用户问题检索知识库并注入参考资料；关闭时可使用管理台 query / ask 或 /api/markdown-kb/query、ask 手动使用知识库。"
+    },
+    {
       "key": "chunk_size",
       "label": "切片大小",
       "type": "number",

@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI
 
 from akm.agent_runtime.loop import ToolDef
@@ -18,6 +19,16 @@ from akm.config import load_config
 from akm.key_pool import key_model_list, list_keys
 
 logger = logging.getLogger(__name__)
+
+
+def _akm_api_base_url() -> str:
+    """返回本机 AKM 服务地址，供工具以 HTTP 调用内部接口（如 markdown-kb）。
+
+    与 akm/markdown_kb_hook.py 的约定保持一致：走 127.0.0.1 + server_port
+    配置项，避免依赖外部可访问地址。
+    """
+    port = int(load_config().get("server_port", 8800) or 8800)
+    return f"http://127.0.0.1:{port}"
 
 
 def _image_default_model() -> str:
@@ -214,6 +225,54 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             logger.warning("[AgentTool] tavily_search 失败: %s", exc)
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
+    async def search_kb_tool(
+        question: str,
+        top_k: int = 5,
+        embedding_model: str = "",
+        reranker_model: str = "",
+    ) -> str:
+        """通过 markdown-kb 插件 HTTP 接口检索知识库，返回精选命中片段。
+
+        以 HTTP 方式请求本机服务的 /api/markdown-kb/query 端点，与插件内部
+        逻辑解耦。为控制模型上下文体积，每个命中只回传标题、文件名、相关度
+        分数与截断后的正文摘要（前 500 字符），不会把完整 chunk 全量塞回。
+        """
+        question = str(question or "").strip()
+        if not question:
+            return json.dumps({"error": "question 不能为空"}, ensure_ascii=False)
+        payload: dict[str, Any] = {"question": question}
+        top_k = max(1, min(int(top_k or 5), 20))
+        payload["top_k"] = top_k
+        if str(embedding_model or "").strip():
+            payload["embedding_model"] = str(embedding_model).strip()
+        if str(reranker_model or "").strip():
+            payload["reranker_model"] = str(reranker_model).strip()
+        url = f"{_akm_api_base_url()}/api/markdown-kb/query"
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_search_kb 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        if not data.get("ok"):
+            err = data.get("error") or data.get("message") or "知识库查询失败"
+            return json.dumps({"error": err}, ensure_ascii=False)
+        hits = data.get("hits") or []
+        results = []
+        for hit in hits:
+            text = str(hit.get("chunk_text") or "").strip()
+            results.append(
+                {
+                    "title": hit.get("title") or hit.get("file_name") or "",
+                    "file_name": hit.get("file_name") or "",
+                    "score": hit.get("score") or hit.get("vector_score") or 0,
+                    "content": text[:500],
+                }
+            )
+        return json.dumps({"results": results}, ensure_ascii=False)
+
     async def generate_image_tool(
         prompt: str,
         model: str = "",
@@ -406,6 +465,21 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "required": ["query"],
             },
             tavily_search_tool,
+        ),
+        ToolDef(
+            "akm_search_kb",
+            "通过 markdown-kb 知识库检索与问题最相关的文档片段，返回命中内容的标题、文件名、相关度分数与正文摘要。需要 markdown-kb 插件已启用且已学习文档",
+            {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "检索问题"},
+                    "top_k": {"type": "integer", "description": "返回命中条数，1 到 20，默认 5"},
+                    "embedding_model": {"type": "string", "description": "向量模型，默认取插件配置"},
+                    "reranker_model": {"type": "string", "description": "重排模型，默认取插件配置"},
+                },
+                "required": ["question"],
+            },
+            search_kb_tool,
         ),
         ToolDef(
             "akm_generate_image",

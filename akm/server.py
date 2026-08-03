@@ -21,6 +21,7 @@ from akm import __version__
 from akm.proxy import forward_request, test_key_connectivity, redact_headers
 from akm.agent_runtime.router import router as agent_router
 from akm.agent_runtime.service import initialize_agent_runtime
+from akm.markdown_kb_mcp import router as markdown_kb_mcp_router
 from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
@@ -184,6 +185,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
 app.include_router(agent_router)
+app.include_router(markdown_kb_mcp_router, prefix="/api/markdown-kb/mcp")
 
 
 @app.exception_handler(Exception)
