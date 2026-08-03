@@ -54,7 +54,27 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 
 ## 配置项
 
-`embedding_model`（必填）、`reranker_model`（可选），检索参数：`top_k`（默认 4）、`score_threshold`（0~1，默认 0.7）、`semantic_weight / keyword_weight / memory_weight`。记忆参数：`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours`。去重参数：`dedup_similarity_threshold`（默认 0.92，相似 chunk 会保留新文档内容并 boost 存量记忆）。清理参数：`organize_cleanup_enabled`（默认 false，需手动开启）、`organize_cleanup_memory_threshold`（默认 0.05）、`organize_cleanup_keep_days`（默认 7）。
+> 以下为管理台「插件」页可配置的全部配置项（存储于 `~/.akm/config.json` 的 `plugin_configs.markdown_kb`），默认值与插件 `plugin.json` 声明一致。其余记忆系统参数（`memory_enabled`、`memory_boost`、`category_bonus`、`organize_interval_hours` 等）为代码级默认，当前不在管理台暴露。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `embedding_model` | select | `text-embedding-3-small` | 必填。重建索引和检索时调用 AKM `/v1/embeddings` 使用的模型名。 |
+| `reranker_model` | select | `""` | 可选。为空时只使用向量召回；非空时会在向量召回结果上追加一次 AKM `/v1/rerank` 重排。 |
+| `chat_model` | select | `""` | 执行 ask 问答时调用 AKM `/v1/chat/completions` 使用的模型名。 |
+| `auto_inject` | boolean | `False` | 默认关闭。开启后，对 chat / messages / responses 三类文本请求自动抽取最后一个用户问题检索知识库并注入参考资料；关闭时可使用管理台 query / ask 或 `/api/markdown-kb/query`、ask 手动使用。 |
+| `chunk_size` | number | `800` | 单个 chunk 的目标最大字符数。 |
+| `chunk_overlap` | number | `120` | 相邻 chunk 之间保留的重叠字符数。 |
+| `top_k` | number | `4` | query / ask 在未显式传 top_k 时默认返回的片段数量。启用 rerank 后也仍然生效，但只控制最终保留条数。 |
+| `semantic_weight` | number | `1` | 仅在未启用 rerank 时生效。用于控制向量语义分在第一阶段排序中的占比；会和关键词权重按比例归一化。 |
+| `keyword_weight` | number | `0` | 仅在未启用 rerank 时生效。用于补强标题词、英文术语或精确短语匹配。 |
+| `score_threshold` | number | `0.7` | 0~1。最终命中分低于该阈值时直接过滤；未启用 rerank 时使用混合分，启用 rerank 后使用 rerank 分。 |
+| `organize_cleanup_enabled` | boolean | `False` | 默认关闭。开启后，长时间未被检索的 learn 文档会在自动整理时被清理。 |
+| `organize_cleanup_memory_threshold` | number | `0.05` | 记忆值低于此阈值且从未被检索命中的 chunk 所属文档可能被视为无价值。 |
+| `organize_cleanup_keep_days` | number | `7` | 从未被检索命中的 learn 文档至少保活的天数。 |
+| `dedup_similarity_threshold` | number | `0.92` | 新 chunk 与存量 chunk 的向量余弦相似度超过此阈值时视为重复，保留新 chunk 以维持文档完整，并 boost 已有 chunk 的记忆值。 |
+| `learn_summary_system_prompt` | text | 知识提炼提示词 | learn 知识提炼时发给 chat 模型的 system prompt，控制知识归纳的质量和格式。 |
+| `merge_chunks_system_prompt` | text | 知识合并提示词 | 去重合并时发给 chat 模型的 system prompt。 |
+| `merge_chunks_user_prompt` | text | 合并模板 | 去重合并时发给 chat 模型的 user prompt。占位符 `{old_text}` 替换为已有 chunk 文本，`{new_text}` 替换为新 chunk 文本。 |
 
 ## 显式检索与问答链路
 

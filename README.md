@@ -507,7 +507,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 
 每个插件实例拥有独立 `config`；`on_load` 返回 `False` 或抛异常时插件保持未就绪，残留的 API、插件页面和静态资源返回 503；管理台保存配置后调用 `on_config_changed` 刷新缓存状态。
 
-各插件的完整功能、配置项、注意事项与更完整的 Hook/字段定义见 [docs/design/plugin-system.md](docs/design/plugin-system.md)（第十二章「内置插件功能与配置说明」）。
+各插件的完整功能、配置项、注意事项与更完整的 Hook/字段定义见 [docs/design/plugin-system.md](docs/design/plugin-system.md)（第十二章「内置插件功能与配置说明」）。每个插件的配置项速查（类型、默认值、说明）见 `plugins/<插件名>/README.md`（索引见 [plugins/README.md](plugins/README.md)「各插件独立文档」章节）。
 
 #### 协议转换细节
 
