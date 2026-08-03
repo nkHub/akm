@@ -220,7 +220,6 @@ akm-menubar
   "proxy_default_timeout_sec": 120.0,
   "agent_max_turns": 20,
   "agent_upload_dir": "~/.akm/cache",
-  "agent_translate_mcp": "~/.agents/plugins/translate-mcp.py",
   "agent_default_instructions": "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。",
   "tavily_api_key": "",
   "rate_limit_cooldown_sec": 60,
@@ -263,7 +262,6 @@ akm-menubar
 |--------|--------|------|
 | `agent_max_turns` | `20` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
-| `agent_translate_mcp` | `~/.agents/plugins/translate-mcp.py` | Agent 翻译工具使用的翻译 MCP 脚本路径（`uv run` 执行），路径支持 `~` 展开 |
 | `agent_default_instructions` | KaTeX 公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
@@ -394,7 +392,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、响应格式与 SSE 流式事件。
 
-服务启动后会自动为每次 Agent 请求注入内置 AKM 调试工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_translate` / `akm_detect_language` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配。
+服务启动后会自动为每次 Agent 请求注入内置 AKM 调试工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配。
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
 
