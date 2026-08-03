@@ -43,7 +43,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 - **文档管理**：批量上传/列出/删除 `.md` 文件，支持 workspace 绑定
 - **索引**：内置标题树切片器，`sqlite-vec` KNN 粗召回（自动回退 Python），支持全量重建、单文件重建、增量同步
 - **检索与问答**：通过本地 AKM 代理的 `/v1/embeddings`、可选 `/v1/rerank`、`/v1/chat/completions` 完成 `query / ask` 闭环
-- **自动注入**：启用后自动拦截 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三类请求，命中知识库时注入参考资料
+- **自动注入**：默认关闭（插件配置 `auto_inject`），开启后自动拦截 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三类请求，命中知识库时注入参考资料
 - **Hook 学习入库**：通过 Codex/Claude 的 `UserPromptSubmit / Stop / PreCompact` hooks 将会话片段沉淀为 `.learn.md` 知识，自动 workspace 绑定、幂等判重并重建索引；重建文件时自动对新 chunk 做向量相似度比对，相似 chunk 仍保留新文档内容，并通过 LLM 判断是否有补充信息，有补充时合并存量文本并重新 embedding，同时 boost 存量记忆
 - **会话扫描器**：`POST /api/markdown-kb/scan-sessions` 扫描 `~/.codex/sessions/` 和 `~/.claude/projects/*/` 下的 JSONL 会话文件，自动归纳知识并更新记忆
 - **记忆系统**：chunk 级 `hit_count` / `memory_value`，艾宾浩斯衰减曲线驱动，多源 boost（learn_new 0.30 / hook_confirm 0.20 / scan_cross 0.20 / retrieval_hit 0.10），高记忆值 chunk（>0.5）可豁免 score_threshold 独立放行；定时自动整理过期记忆并清理无价值 `.learn.md` 文档
@@ -86,6 +86,28 @@ flowchart LR
 ### Hook 学习入库
 
 `POST /api/markdown-kb/learn`：接收 `Codex` 或 `Claude Code` 在 `Stop / PreCompact` 阶段整理出的候选材料，服务端校验 `source / trigger_phase / session_id / dedupe_key`，调用本地 `/v1/chat/completions` 归纳成结构化结果，包装为 `.learn.md` 写入 `docs_dir`。同一个 `dedupe_key` 通过 `~/.akm/markdown_kb/learn_records.json` 幂等判重；若模型判断无稳定知识可沉淀则返回 `ignored=true` 且不写文档。
+
+## MCP（HTTP）接入
+
+本插件的检索接口以 **MCP streamable HTTP** 方式暴露，端点地址为 `http://127.0.0.1:{port}/api/markdown-kb/mcp`（`{port}` 为配置项 `server_port`，默认 `8800`）。支持 `tools/list` 与 `tools/call`，无需额外安装依赖。
+
+在支持 HTTP MCP 的客户端（如 Claude Desktop、Cursor）中按以下格式配置：
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:8800/api/markdown-kb/mcp"
+}
+```
+
+暴露的工具：
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `search_kb` | `question`（必填）、`top_k`（1-20，默认 5）、`embedding_model`、`reranker_model` | 调用 `POST /api/markdown-kb/query` 做语义检索，返回命中文档片段列表（标题、文件名、相关度分数、内容片段） |
+| `ask_kb` | `question`（必填）、`chat_model` | 调用 `POST /api/markdown-kb/ask` 做问答，返回答案与引用来源列表 |
+
+> `{port}` 端口的服务必须是正在运行的 AKM 实例（管理台 / 服务）。请求会经本机 HTTP 转发到插件真实路由。
 
 ## CLI Hook 子命令
 

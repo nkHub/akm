@@ -49,6 +49,7 @@ async def test_markdown_kb_on_request_injects_hits_for_chat_request(monkeypatch)
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 2,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -88,6 +89,7 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 2,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -109,6 +111,31 @@ async def test_markdown_kb_on_request_skips_when_no_hits(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_markdown_kb_on_request_disabled_by_default(monkeypatch):
+    """auto_inject 默认关闭时，on_request 应直接透传请求、不触发检索。"""
+    from plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 1,
+    }
+
+    async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
+        raise AssertionError("auto_inject 关闭时不应触发检索")
+
+    monkeypatch.setattr(plugin, "_retrieve", fake_retrieve)
+
+    request = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "请根据知识库回答"}],
+    }
+    out = await plugin.on_request(_ctx(request))
+    assert out is request
+
+
+@pytest.mark.asyncio
 async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch):
     from plugins.markdown_kb.index import Plugin
 
@@ -117,6 +144,7 @@ async def test_markdown_kb_on_request_handles_responses_instructions(monkeypatch
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 1,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -150,6 +178,7 @@ async def test_markdown_kb_on_request_handles_messages_system_injection(monkeypa
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 1,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -453,6 +482,7 @@ async def test_markdown_kb_on_request_injects_realistic_project_context(monkeypa
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 1,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -497,6 +527,7 @@ async def test_markdown_kb_on_request_with_workspace_uses_public_and_current_wor
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 1,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -546,6 +577,7 @@ async def test_markdown_kb_on_request_without_workspace_only_uses_unbound_docume
         "embedding_model": "text-embedding-3-small",
         "reranker_model": "",
         "top_k": 1,
+        "auto_inject": True,
     }
 
     async def fake_retrieve(question, top_k, embedding_model, reranker_model, project_context=None):
@@ -607,6 +639,7 @@ async def test_markdown_kb_runs_after_model_matcher_for_plain_aliases(monkeypatc
                 "chunk_size": 800,
                 "chunk_overlap": 120,
                 "top_k": 2,
+                "auto_inject": True,
             },
         },
     }, ensure_ascii=False), "utf-8")
