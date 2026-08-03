@@ -392,7 +392,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、响应格式与 SSE 流式事件。
 
-服务启动后会自动为每次 Agent 请求注入内置 AKM 调试工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配。
+服务启动后会注册内置 AKM 工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。内置工具采用白名单注入：客户端请求显式传入 `tools` 时只注入声明中的工具（内置工具不自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 时不注入任何工具；未传 `tools` 时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` 外的全部内置工具（联网搜索与图片生成涉及外部服务调用，需在 `tools` 中显式声明才能启用）。调用方声明工具时不应使用与内置工具相同的名称，以免工具定义与内置处理器不匹配。
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
 

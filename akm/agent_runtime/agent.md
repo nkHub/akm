@@ -53,7 +53,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 |------|------|------|------|
 | `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
 | `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式），与内置 AKM 调试工具合并；名称必须避免与内置工具冲突 |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` 外的全部内置工具（联网搜索与图片生成涉及外部服务调用，需在 tools 中显式声明才能启用） |
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息；未传时使用 config.json 的 `agent_default_instructions`（默认要求数学公式以 KaTeX 语法返回） |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
