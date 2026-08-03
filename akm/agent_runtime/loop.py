@@ -296,9 +296,20 @@ class _SSEStreamAccumulator:
         self._line_buf = ""  # 行缓冲区，处理跨 chunk 边界的 SSE 行
         self._content_parts: list[str] = []  # 文本增量累积
         self._reasoning_parts: list[str] = []  # 推理内容增量累积 (delta.reasoning_content)
+        self._pending_reasoning: list[str] = []  # 本段 feed 新到的推理增量，供 drain_reasoning_deltas 取走
         self._tool_calls: dict[int, dict] = {}  # index → 累积后的 tool_call
         self._usage: dict = {}
         self._model = ""
+
+    def drain_reasoning_deltas(self) -> list[str]:
+        """取出并清空累积的推理内容增量，供 reasoning_delta 事件实时下发。
+
+        正文增量由 feed() 直接返回，而推理内容（思考过程）不混入正文，
+        由调用方在每次 feed 后主动 drain，保证思考先于正文/工具事件流出。
+        """
+        deltas = self._pending_reasoning
+        self._pending_reasoning = []
+        return deltas
 
     def feed(self, text: str) -> list[str]:
         """喂入一段 SSE 文本，返回本段新解析出的可见文本增量。"""
@@ -373,6 +384,7 @@ class _SSEStreamAccumulator:
             reasoning = delta.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
                 self._reasoning_parts.append(reasoning)
+                self._pending_reasoning.append(reasoning)
             # 工具调用增量（OpenAI Chat 流式 tool_calls 以 delta 形式分片到达）
             tool_calls = delta.get("tool_calls")
             if isinstance(tool_calls, list):
@@ -794,12 +806,17 @@ class AgentLoop:
         """运行 Agent Loop 并流式返回 SSE 事件
 
         事件类型：
-        - ``model_delta``   — LLM 新生成的可见文本片段
-        - ``turn_start``    — 新一轮开始（检测到工具调用时）
-        - ``tool_call``     — 单个工具调用
-        - ``tool_result``   — 单个工具执行结果
-        - ``final``         — Agent 完成，含 final_message / usage / turns
-        - ``error``         — 错误结束，含 error / turns / usage
+        - ``reasoning_delta`` — LLM 思考（推理）过程片段，先于正文/工具实时下发
+        - ``thinking``        — 工具调用轮产生的过程性正文（模型在发起工具前的说明文本），在工具前下发
+        - ``model_delta``     — 最终主体内容的可见文本片段
+        - ``turn_start``      — 新一轮开始（检测到工具调用时）
+        - ``tool_call``       — 单个工具调用
+        - ``tool_result``     — 单个工具执行结果
+        - ``final``           — Agent 完成，含 final_message / usage / turns
+        - ``error``           — 错误结束，含 error / turns / usage
+
+        顺序约定：思考（reasoning_delta）→ 工具（thinking/tool_call/tool_result）→
+        最终主体内容（model_delta），保证主体内容一定在工具/思考之后返回。
 
         每轮 LLM 调用以 ``stream: True`` 发送。上游协议帧只在服务端解析，
         客户端始终收到统一的 Agent SSE 事件。
@@ -851,6 +868,10 @@ class AgentLoop:
                 plugin_manager=self._plugin_manager,
             )
 
+            # 本轮正文增量先暂存，轮结束后判断：最终轮才作为主体
+            # model_delta 下发；工具轮改以 thinking 事件在工具前下发。
+            turn_content_parts: list[str] = []
+
             if result.get("stream"):
                 # Agent 对外协议独立于原始上游协议，不能通过 adapter 转换后再解析。
                 resp = result["response"]
@@ -875,9 +896,14 @@ class AgentLoop:
 
                     async for chunk in resp.aiter_bytes():
                         for content in acc.feed(chunk.decode("utf-8", errors="replace")):
-                            yield _sse_event("model_delta", {"turn": turn, "content": content})
+                            turn_content_parts.append(content)
+                        # 思考（推理）内容独立成 reasoning_delta，先于正文/工具实时下发
+                        for reasoning in acc.drain_reasoning_deltas():
+                            yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
                     for content in acc.finish():
-                        yield _sse_event("model_delta", {"turn": turn, "content": content})
+                        turn_content_parts.append(content)
+                    for reasoning in acc.drain_reasoning_deltas():
+                        yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
                 finally:
                     await resp.aclose()
 
@@ -927,6 +953,9 @@ class AgentLoop:
             tool_calls = _extract_tool_calls_from_response(response_body)
 
             if not tool_calls:
+                # 没有工具调用 → 该轮正文即为最终主体内容，作为 model_delta 下发
+                for content in turn_content_parts:
+                    yield _sse_event("model_delta", {"turn": turn, "content": content})
                 # 没有工具调用 → Agent 完成
                 text_content = _extract_text_content(response_body)
                 final_message = {
@@ -945,6 +974,9 @@ class AgentLoop:
                 })
                 return
 
+            # 有工具调用：本轮正文属于过程性说明，作为 thinking 事件在工具前下发
+            if turn_content_parts:
+                yield _sse_event("thinking", {"turn": turn, "content": "".join(turn_content_parts)})
             # 有工具调用 → emit 事件并执行
             yield _sse_event("turn_start", {"turn": turn})
 

@@ -343,7 +343,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息 |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
-| `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；每个可见文本增量立即推送 `model_delta`，其余阶段推送 Agent 事件 |
+| `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考、工具事件先发，最终主体内容最后以 `model_delta` 推送（详见「SSE 流式事件」） |
 
 ### 文件上传
 
@@ -444,9 +444,13 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ### SSE 流式事件（`stream: true`）
 
+事件顺序约定：**思考（`reasoning_delta`）→ 工具（`thinking`/`turn_start`/`tool_call`/`tool_result`）→ 最终主体内容（`model_delta`）→ `final`**，保证主体内容一定在工具/思考之后返回。
+
 | 事件 | 说明 |
 |------|------|
-| `model_delta` | LLM 新生成的可见文本片段，`data.turn` 为当前轮次，`data.content` 为增量内容 |
+| `reasoning_delta` | LLM 思考（推理）过程片段，`data.turn` 为当前轮次，`data.content` 为增量内容；先于正文/工具实时下发 |
+| `thinking` | 工具调用轮产生的过程性正文（模型发起工具前的说明文本），`data.content` 为整段文本，在工具事件前下发 |
+| `model_delta` | 最终主体内容的可见文本片段，`data.turn` 为当前轮次，`data.content` 为增量内容 |
 | `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
 | `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
@@ -454,14 +458,18 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` |
 
 ```json
-// SSE 示例
-data: {"event":"model_delta","data":{"turn":1,"content":"我来查询"}}
+// SSE 示例（工具轮：思考在前，工具调用轮的正文以 thinking 下发，主体内容最后出现）
+data: {"event":"reasoning_delta","data":{"turn":1,"content":"用户想查天气"}}
+
+data: {"event":"thinking","data":{"turn":1,"content":"我来查询"}}
 
 data: {"event":"turn_start","data":{"turn":1}}
 
 data: {"event":"tool_call","data":{"name":"get_weather","arguments":{"city":"beijing"}}}
 
 data: {"event":"tool_result","data":{"name":"get_weather","result":"{\"city\":\"beijing\",\"temp\":25}"}}
+
+data: {"event":"model_delta","data":{"turn":2,"content":"北京今天..."}}
 
 data: {"event":"final","data":{"final_message":{"role":"assistant","content":"北京今天..."},"turns":2,"usage":{...}}}
 ```

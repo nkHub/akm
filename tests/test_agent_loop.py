@@ -34,7 +34,7 @@ def _events(chunks):
 
 @pytest.mark.asyncio
 async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(monkeypatch):
-    """Chat SSE 必须转换为 model_delta，不能把 choices 等上游字段直接交给客户端。"""
+    """思考（reasoning）应以独立事件先于主体内容下发，正文转为 model_delta。"""
     response = FakeStreamResponse(200, [
         _sse({"model": "test", "choices": [{"delta": {"content": "你", "reasoning_content": "先"}}]}),
         _sse({"choices": [{"delta": {"content": "好", "reasoning_content": "思考"}}]}) + _sse({"usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}}),
@@ -48,8 +48,9 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert [event["event"] for event in events] == ["model_delta", "model_delta", "final"]
-    assert [event["data"]["content"] for event in events[:2]] == ["你", "好"]
+    assert [event["event"] for event in events] == ["reasoning_delta", "reasoning_delta", "model_delta", "model_delta", "final"]
+    assert [event["data"]["content"] for event in events[:2]] == ["先", "思考"]
+    assert [event["data"]["content"] for event in events[2:4]] == ["你", "好"]
     assert events[-1]["data"]["final_message"]["content"] == "你好"
     assert events[-1]["data"]["final_message"]["reasoning_content"] == "先思考"
     assert events[-1]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
@@ -83,6 +84,38 @@ async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
     assert events[2]["data"]["result"] == '{"city": "beijing", "temp": 25}'
     assert calls[1]["messages"][-2]["tool_calls"][0]["function"]["name"] == "get_weather"
     assert calls[1]["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": '{"city": "beijing", "temp": 25}'}
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_stream_emits_thinking_before_tool_and_model_delta_last(monkeypatch):
+    """工具轮的过程性正文应在工具前以 thinking 事件下发，最终主体内容必须最后返回。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    registry.register(ToolDef("get_weather", "weather", {"type": "object"}, lambda city: {"city": city, "temp": 25}))
+    first = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"content": "我来查一下天气", "reasoning_content": "用户想查天气"}}]}),
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"beijing\"}"}}]}}]}),
+    ])
+    second = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "北京晴天"}}]})])
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"stream": True, "response": [first, second][len(calls) - 1], "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "北京天气"}])])
+
+    # 顺序：思考 → 工具轮正文(thinking) → 工具 → 最终主体(model_delta) → final
+    assert [event["event"] for event in events] == [
+        "reasoning_delta", "thinking", "turn_start", "tool_call", "tool_result", "model_delta", "final",
+    ]
+    assert events[0]["data"]["content"] == "用户想查天气"
+    assert events[1]["data"]["content"] == "我来查一下天气"
+    assert events[-2]["data"]["content"] == "北京晴天"
+    assert events[-1]["data"]["final_message"]["content"] == "北京晴天"
     ToolRegistry.reset()
 
 
