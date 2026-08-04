@@ -408,6 +408,87 @@ async def test_edit_image_missing_file(edit_app, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_edit_image_path_fallback_to_upload_dir(edit_app, monkeypatch, tmp_path):
+    """image_path 不存在但文件名在 agent_upload_dir 时按文件名回退查找。
+
+    模型常把 http_url 里的 /agent-uploads/ 前缀误当成本地路径（如
+    /data/agent-uploads/xxx.png），此时只要文件名一致，回退逻辑应命中
+    真实落盘文件。
+    """
+    from pathlib import Path
+
+    app, _ = edit_app
+    app.state.http_client = FakePool(client=FakeImageClient())
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "photo.png").write_bytes(b"\x89PNG\r\n\x1a\nfallback")
+    captured = {}
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(upload_dir),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
+
+    async def fake_forward(body, client, **kwargs):
+        captured["body"] = body
+        return {
+            "status_code": 200,
+            "body": json.dumps({"data": [{"url": "https://img/edited.png"}]}),
+            "error": "",
+        }
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    tool = _edit_tool(app)
+    text = await tool.handler(
+        image_path="/data/agent-uploads/photo.png", prompt="make it blue"
+    )
+    result = json.loads(text)
+    assert result["images"][0]["url"] == "https://img/edited.png"
+    name, content, content_type = captured["body"]["__akm_form_files__"]["image"]
+    assert name == "photo.png"
+    assert content == b"\x89PNG\r\n\x1a\nfallback"
+    assert content_type == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_edit_image_path_fallback_ignores_wrong_directory(edit_app, monkeypatch, tmp_path):
+    """回退查找丢弃传入路径的目录部分，只取文件名在 agent_upload_dir 内查找。"""
+    from pathlib import Path
+
+    app, _ = edit_app
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "photo.png").write_bytes(b"safe")
+    called = {"n": 0}
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(upload_dir),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
+
+    async def fake_forward(body, client, **kwargs):
+        called["n"] += 1
+        return {"status_code": 200, "body": "{}", "error": ""}
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    # 传入带错误目录的路径，回退后只取 basename=photo.png，命中 upload_dir 下的同名文件
+    tool = _edit_tool(app)
+    text = await tool.handler(image_path="/tmp/somewhere/else/photo.png", prompt="x")
+    assert "error" not in json.loads(text)
+    assert called["n"] == 1
+
+
+@pytest.mark.asyncio
 async def test_edit_image_exception(edit_app, monkeypatch):
     """forward_request 抛异常时返回结构化错误。"""
     app, image_path = edit_app

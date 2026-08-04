@@ -151,7 +151,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `image_path` | string | 否* | 服务器本地图片文件的绝对路径，与 `image_base64` 二选一 |
+| `image_path` | string | 否* | 服务器本地图片文件的绝对路径，与 `image_base64` 二选一。若该路径不存在，会提取文件名回退到 `agent_upload_dir`（默认 `~/.akm/cache`）下查找，兼容把 `/agent-uploads/` 访问地址误当成本地路径的传法 |
 | `image_base64` | string | 否* | 图片 base64 数据（可带 `data:image/...;base64,` 前缀，或纯 base64），与 `image_path` 二选一，同时提供时优先 |
 | `prompt` | string | 是 | 编辑指令，描述期望的修改效果 |
 | `model` | string | 否 | 图片编辑模型，默认取 `image_supported_models` 配置首项 |
