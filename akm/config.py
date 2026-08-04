@@ -46,6 +46,10 @@ DEFAULTS = {
     "agent_keep_recent_messages": 10,   # Agent Loop 压缩上下文时保留的最近消息条数（工具调用配对消息会自动完整保留）
     "agent_context_warning_ratio": 0.8, # Agent Loop 上下文占用量超上限该比例时，SSE 下发 context_warning 事件（0 关闭）
     "agent_upload_dir": "~/.akm/cache", # Agent 上传文件（图片）的保存目录，路径支持 ~ 展开
+    "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
+    "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
+    "agent_run_shell_enabled": False,   # 是否启用 Agent 执行 shell 命令工具（独立于写工具，默认关闭）
+    "agent_api_token": "",              # /v1/agent 请求鉴权 token（Bearer）；留空表示不校验
     "agent_default_instructions": (
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
         "独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。"
@@ -148,6 +152,9 @@ def load_config() -> dict:
     merged["agent_max_context_tokens"] = max(0, int(merged.get("agent_max_context_tokens", 30000) or 30000))
     merged["agent_keep_recent_messages"] = max(2, int(merged.get("agent_keep_recent_messages", 10) or 10))
     merged["agent_context_warning_ratio"] = max(0.0, min(1.0, float(merged.get("agent_context_warning_ratio", 0.8) or 0.8)))
+    # Agent 文件工具开关：布尔归一化，防止配置为字符串/数字时误判
+    merged["agent_write_tools_enabled"] = merged.get("agent_write_tools_enabled") is True
+    merged["agent_run_shell_enabled"] = merged.get("agent_run_shell_enabled") is True
     # Key 管理
     merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列
@@ -182,6 +189,8 @@ def save_config(data: dict) -> None:
     current["agent_max_context_tokens"] = max(0, int(current.get("agent_max_context_tokens", 30000) or 30000))
     current["agent_keep_recent_messages"] = max(2, int(current.get("agent_keep_recent_messages", 10) or 10))
     current["agent_context_warning_ratio"] = max(0.0, min(1.0, float(current.get("agent_context_warning_ratio", 0.8) or 0.8)))
+    current["agent_write_tools_enabled"] = current.get("agent_write_tools_enabled") is True
+    current["agent_run_shell_enabled"] = current.get("agent_run_shell_enabled") is True
     # Key 管理
     current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列

@@ -6,7 +6,7 @@
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
 
-服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配：
+服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具与工作区文件工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。工作区文件工具（`akm_read_file` 等）需在 config.json 配置 `agent_workspace_root` 才会注册，写工具与 shell 工具默认不注册（见「工作区文件工具」章节）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配：
 
 | 工具 | 用途 |
 |------|------|
@@ -18,6 +18,16 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；图片可通过本地路径或 base64 数据传入 |
+| `akm_read_file` | 读取工作区内的文本文件（可指定 `offset` / `limit`），返回内容与起始行号 |
+| `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构 |
+| `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表 |
+| `akm_grep` | 在工作区内按正则搜索文件内容，返回命中文件、行号与行内容（限制最多 100 条） |
+| `akm_file_info` | 查询工作区内文件/目录的类型、大小与修改时间 |
+| `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`） |
+| `akm_edit_file` | 精确替换工作区内文件内容（`old_string` → `new_string`，支持 `replace_all`；需开启 `agent_write_tools_enabled`） |
+| `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
+| `akm_delete_file` | 删除工作区内文件或目录（`recursive` 可选，禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
+| `akm_run_shell` | 在工作区目录内执行 shell 命令并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
@@ -55,7 +65,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 |------|------|------|------|
 | `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
 | `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` 外的全部内置工具（联网搜索与图片生成涉及外部服务调用，需在 tools 中显式声明才能启用） |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作与 shell 执行涉及本机写入，需在 tools 中显式声明才能启用） |
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息；未传时使用 config.json 的 `agent_default_instructions`（默认要求数学公式以 KaTeX 语法返回） |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
@@ -90,6 +100,39 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 ```
 
 流式 `final` 事件中的 `final_message` 会保留上游 Chat 响应的 `reasoning_content`，以便客户端展示完成后的推理内容。
+
+## 工作区文件工具与安全边界
+
+工作区文件工具让 Agent 具备读写本机文件、执行 shell 命令的能力，全部受 `agent_workspace_root` 沙箱与配置开关约束。相关配置项如下：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `agent_workspace_root` | `""` | 工作区沙箱根目录，所有文件工具仅能在此目录内读写；留空时文件工具不注册 |
+| `agent_write_tools_enabled` | `false` | 是否注册写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`） |
+| `agent_run_shell_enabled` | `false` | 是否注册 shell 工具（`akm_run_shell`） |
+| `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token，配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头 |
+
+### 读工具（默认可用）
+
+配置 `agent_workspace_root` 后，以下只读工具始终注册：`akm_read_file`、`akm_list_dir`、`akm_glob`、`akm_grep`、`akm_file_info`。它们只读取工作区内的文件，路径越界访问直接返回错误。
+
+### 写工具与 shell（默认禁用）
+
+写工具与 shell 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作与 shell 执行会改动本机状态，应经人工确认后再开放。
+
+### 路径沙箱
+
+所有文件工具的文件路径（相对/绝对路径）都会先解析，并校验解析结果必须位于 `agent_workspace_root` 目录内：
+
+- 绝对路径越界（如 `/etc/passwd`）被拒绝；
+- 相对路径中的 `..` 穿越工作区被拒绝；
+- 软链接指向工作区外时（resolve 后越界）被拒绝。
+
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件。`akm_run_shell` 命令以工作区目录为 cwd 执行，并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，超时命令会被终止。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，避免工具结果撑爆上下文。
+
+### 可选鉴权
+
+`/v1/agent` 支持可选鉴权：配置 `agent_api_token` 后，所有请求（含纯 JSON 与 multipart）必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 `401`。未配置该配置项时不做任何校验，保持向后兼容。在开放了写文件 / shell 工具时建议启用鉴权，限制调用方身份，避免任意本地进程滥用 Agent 权限。
 
 ## 联网搜索
 
