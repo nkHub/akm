@@ -42,6 +42,9 @@ DEFAULTS = {
     "proxy_default_timeout_sec": 120.0,  # 默认转发超时（秒），图片接口另有独立超时
     # Agent Loop
     "agent_max_turns": 20,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
+    "agent_max_context_tokens": 30000,  # Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史（0 表示不压缩）
+    "agent_keep_recent_messages": 10,   # Agent Loop 压缩上下文时保留的最近消息条数（工具调用配对消息会自动完整保留）
+    "agent_context_warning_ratio": 0.8, # Agent Loop 上下文占用量超上限该比例时，SSE 下发 context_warning 事件（0 关闭）
     "agent_upload_dir": "~/.akm/cache", # Agent 上传文件（图片）的保存目录，路径支持 ~ 展开
     "agent_default_instructions": (
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
@@ -142,6 +145,9 @@ def load_config() -> dict:
     merged["proxy_default_timeout_sec"] = max(30.0, float(merged.get("proxy_default_timeout_sec", 120.0) or 120.0))
     # Agent Loop
     merged["agent_max_turns"] = max(1, int(merged.get("agent_max_turns", 20) or 20))
+    merged["agent_max_context_tokens"] = max(0, int(merged.get("agent_max_context_tokens", 30000) or 30000))
+    merged["agent_keep_recent_messages"] = max(2, int(merged.get("agent_keep_recent_messages", 10) or 10))
+    merged["agent_context_warning_ratio"] = max(0.0, min(1.0, float(merged.get("agent_context_warning_ratio", 0.8) or 0.8)))
     # Key 管理
     merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列
@@ -173,6 +179,9 @@ def save_config(data: dict) -> None:
     current["proxy_default_timeout_sec"] = max(30.0, float(current.get("proxy_default_timeout_sec", 120.0) or 120.0))
     # Agent Loop
     current["agent_max_turns"] = max(1, int(current.get("agent_max_turns", 20) or 20))
+    current["agent_max_context_tokens"] = max(0, int(current.get("agent_max_context_tokens", 30000) or 30000))
+    current["agent_keep_recent_messages"] = max(2, int(current.get("agent_keep_recent_messages", 10) or 10))
+    current["agent_context_warning_ratio"] = max(0.0, min(1.0, float(current.get("agent_context_warning_ratio", 0.8) or 0.8)))
     # Key 管理
     current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列

@@ -219,6 +219,9 @@ akm-menubar
   "proxy_retry_backoff_base_sec": 0.5,
   "proxy_default_timeout_sec": 120.0,
   "agent_max_turns": 20,
+  "agent_max_context_tokens": 30000,
+  "agent_keep_recent_messages": 10,
+  "agent_context_warning_ratio": 0.8,
   "agent_upload_dir": "~/.akm/cache",
   "agent_default_instructions": "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。",
   "tavily_api_key": "",
@@ -261,6 +264,9 @@ akm-menubar
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `agent_max_turns` | `20` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
+| `agent_max_context_tokens` | `30000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
+| `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
+| `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
 | `agent_default_instructions` | KaTeX 公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
