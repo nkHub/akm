@@ -17,7 +17,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
-| `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需提供服务器可访问的图片路径 |
+| `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；图片可通过本地路径或 base64 数据传入 |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
@@ -147,20 +147,24 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ### 图片编辑
 
-内置的 `akm_edit_image` 工具复用 `/v1/images/edits` 的 multipart 纯透传链路。图片通过 `image_path`（服务器可访问的本地绝对路径）传入，工具读取文件后按与 `/v1/images/edits` 一致的 multipart 结构组装请求，`image` 与可选的 `mask` 作为文件字段上传。参数如下：
+内置的 `akm_edit_image` 工具复用 `/v1/images/edits` 的 multipart 纯透传链路。图片有两种来源：`image_path`（服务器可访问的本地绝对路径），或 `image_base64`（图片 base64 数据，可直接使用对话中图片的 `data:image/...;base64,` 前缀 data URL，适用于本地无文件的云端场景）。工具按与 `/v1/images/edits` 一致的 multipart 结构组装请求，`image` 与可选的 `mask` 作为文件字段上传。参数如下：
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `image_path` | string | 是 | 服务器本地图片文件的绝对路径 |
+| `image_path` | string | 否* | 服务器本地图片文件的绝对路径，与 `image_base64` 二选一 |
+| `image_base64` | string | 否* | 图片 base64 数据（可带 `data:image/...;base64,` 前缀，或纯 base64），与 `image_path` 二选一，同时提供时优先 |
 | `prompt` | string | 是 | 编辑指令，描述期望的修改效果 |
 | `model` | string | 否 | 图片编辑模型，默认取 `image_supported_models` 配置首项 |
-| `mask_path` | string | 否 | 本地蒙版图片路径，用于限定重绘区域 |
+| `mask_path` | string | 否 | 本地蒙版图片路径，用于限定重绘区域，与 `mask_base64` 二选一 |
+| `mask_base64` | string | 否 | 蒙版图片 base64 数据，与 `mask_path` 二选一，同时提供时优先 |
 | `size` | string | 否 | 输出图片尺寸，如 `1024x1024` |
 | `quality` | string | 否 | 生成质量，如 `standard` 或 `hd` |
 | `output_format` | string | 否 | 输出格式，如 `png` 或 `jpeg` |
 | `n` | int | 否 | 生成张数（默认 1） |
 
-文件不存在或读取失败会返回明确错误提示；其余失败（上游错误、无法解析响应等）与 `akm_generate_image` 行为一致。编辑结果与生成结果一样，会附带 `local_path`、`http_url`（`/agent-uploads/...`）资源字段，保存失败时附 `save_error`。
+*`image_path` 与 `image_base64` 至少提供其一，否则返回错误。
+
+图片文件不存在、base64 解码失败或两种来源都未提供时，会返回明确错误提示；其余失败（上游错误、无法解析响应等）与 `akm_generate_image` 行为一致。编辑结果与生成结果一样，会附带 `local_path`、`http_url`（`/agent-uploads/...`）资源字段，保存失败时附 `save_error`。
 
 ### 上传目录的 HTTP 访问
 

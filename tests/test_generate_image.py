@@ -265,8 +265,10 @@ def _edit_tool(app):
 def test_builtin_tools_register_edit_image(edit_app):
     app, _ = edit_app
     tool = _edit_tool(app)
-    assert tool.parameters["required"] == ["image_path", "prompt"]
+    assert tool.parameters["required"] == ["prompt"]
     assert tool.parameters["properties"]["mask_path"]["type"] == "string"
+    assert tool.parameters["properties"]["image_base64"]["type"] == "string"
+    assert tool.parameters["properties"]["mask_base64"]["type"] == "string"
 
 
 @pytest.mark.asyncio
@@ -418,3 +420,119 @@ async def test_edit_image_exception(edit_app, monkeypatch):
     tool = _edit_tool(app)
     text = await tool.handler(image_path=image_path, prompt="x")
     assert "boom" in json.loads(text)["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_image_base64_data_url(edit_app, monkeypatch, tmp_path):
+    """传入带 data: 前缀的 base64 时直接解码为图片文件，无需本地文件。"""
+    from pathlib import Path
+
+    app, _ = edit_app
+    app.state.http_client = FakePool(client=FakeImageClient())
+    upload_dir = tmp_path / "uploads"
+    captured = {}
+    raw = b"\x89PNG\r\n\x1a\nfromb64"
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(upload_dir),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
+
+    async def fake_forward(body, client, **kwargs):
+        captured["body"] = body
+        return {
+            "status_code": 200,
+            "body": json.dumps({"data": [{"url": "https://img/edited.png"}]}),
+            "error": "",
+        }
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    import base64 as _b64
+
+    data_url = "data:image/png;base64," + _b64.b64encode(raw).decode("ascii")
+    tool = _edit_tool(app)
+    text = await tool.handler(image_base64=data_url, prompt="make it blue")
+
+    result = json.loads(text)
+    assert result["images"][0]["url"] == "https://img/edited.png"
+    name, content, content_type = captured["body"]["__akm_form_files__"]["image"]
+    assert content == raw
+    assert content_type == "image/png"
+    assert name.endswith(".png")
+    assert Path(result["images"][0]["local_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_edit_image_base64_bare(edit_app, monkeypatch, tmp_path):
+    """传入无前缀的裸 base64 时按 image/png 处理。"""
+    from pathlib import Path
+
+    app, _ = edit_app
+    app.state.http_client = FakePool(client=FakeImageClient())
+    upload_dir = tmp_path / "uploads"
+    captured = {}
+    raw = b"PNG-bare"
+
+    def fake_config():
+        return {
+            "image_supported_models": "dall-e-3",
+            "agent_upload_dir": str(upload_dir),
+            "server_port": 8800,
+        }
+
+    monkeypatch.setattr(tools_module, "load_config", fake_config)
+
+    async def fake_forward(body, client, **kwargs):
+        captured["body"] = body
+        return {"status_code": 200, "body": json.dumps({"data": [{"url": "u"}]}), "error": ""}
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    import base64 as _b64
+
+    tool = _edit_tool(app)
+    text = await tool.handler(image_base64=_b64.b64encode(raw).decode("ascii"), prompt="x")
+
+    assert "error" not in json.loads(text)
+    name, content, content_type = captured["body"]["__akm_form_files__"]["image"]
+    assert content == raw
+    assert content_type == "image/png"
+    assert name.endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_edit_image_base64_invalid(edit_app, monkeypatch):
+    """base64 数据非法时返回结构化错误，不触发上游请求。"""
+    app, _ = edit_app
+    called = {"n": 0}
+
+    async def fake_forward(body, client, **kwargs):
+        called["n"] += 1
+        return {"status_code": 200, "body": "{}", "error": ""}
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    tool = _edit_tool(app)
+    text = await tool.handler(image_base64="not!!base64!!", prompt="x")
+    assert "解码失败" in json.loads(text)["error"]
+    assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_edit_image_no_source(edit_app, monkeypatch):
+    """image_path 与 image_base64 都为空时返回结构化错误。"""
+    app, _ = edit_app
+
+    async def fake_forward(body, client, **kwargs):
+        return {"status_code": 200, "body": "{}", "error": ""}
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    tool = _edit_tool(app)
+    text = await tool.handler(prompt="x")
+    assert "必须至少提供一个" in json.loads(text)["error"]

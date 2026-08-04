@@ -61,6 +61,51 @@ def _read_image_file(path: str) -> tuple[str, bytes, str]:
     return file_path.name, content, content_type
 
 
+def _decode_image_base64(raw: str) -> tuple[str, bytes, str]:
+    """解析图片 base64 数据，返回 (文件名, 字节内容, content_type)。
+
+    兼容两种形态：带 ``data:image/png;base64,xxx`` 前缀的 data URL
+    （Agent 对话中 image_url 内容块的形态），或去掉前缀的裸 base64。
+    无前缀时按 image/png 处理；文件名用随机名 + 按 content_type 推断的
+    扩展名，避免直接信任外部文件名。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError("图片 base64 数据为空")
+    content_type = "image/png"
+    if text.startswith("data:"):
+        header, sep, payload = text.partition(",")
+        if not sep:
+            raise ValueError("图片 data URL 格式非法，缺少逗号分隔的 base64 数据")
+        mime = header[5:].split(";", 1)[0].strip()
+        if mime and mime.lower().startswith("image/"):
+            content_type = mime
+        text = payload.strip()
+    try:
+        data = base64.b64decode(text, validate=True)
+    except Exception:
+        raise ValueError("图片 base64 解码失败，请检查数据是否完整")
+    if not data:
+        raise ValueError("图片 base64 数据为空")
+    ext = mimetypes.guess_extension(content_type) or ".png"
+    filename = f"upload-{uuid.uuid4().hex}{ext}"
+    return filename, data, content_type
+
+
+def _resolve_image(image_path: str = "", image_base64: str = "") -> tuple[str, bytes, str]:
+    """按 image_path 或 image_base64 解析图片，返回 (文件名, 字节内容, content_type)。
+
+    image_base64 非空时优先使用 base64 数据（适用于本地无文件的云端场景，
+    AI 可直接把对话中的 data URL 传入）；否则回退读取 image_path 本地文件。
+    两者都为空时抛出 ValueError。
+    """
+    if str(image_base64 or "").strip():
+        return _decode_image_base64(image_base64)
+    if str(image_path or "").strip():
+        return _read_image_file(image_path)
+    raise ValueError("image_path 与 image_base64 必须至少提供一个")
+
+
 def _persist_image(data: bytes, content_type: str, source: str = "") -> tuple[str, str, str]:
     """把图片字节保存到 agent_upload_dir，返回 (文件名, 本地路径, HTTP URL)。
 
@@ -352,22 +397,25 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         return json.dumps({"images": images}, ensure_ascii=False)
 
     async def edit_image_tool(
-        image_path: str,
         prompt: str,
+        image_path: str = "",
+        image_base64: str = "",
         model: str = "",
         mask_path: str = "",
+        mask_base64: str = "",
         size: str = "",
         quality: str = "",
         output_format: str = "",
         n: int = 1,
     ) -> str:
-        """读取本地图片并按提示词编辑，返回编辑后的图片资源列表。
+        """读取本地图片（或 base64 数据）并按提示词编辑，返回编辑后的图片资源列表。
 
-        与 akm_generate_image 共用图片转发链路（forward_request + images/edits），
-        图片通过本地路径传入，handler 读取后按与 /v1/images/edits 一致的
-        multipart 结构组装请求体，避免把 base64 大对象塞进模型上下文。
-        编辑结果同样会下载保存到 agent_upload_dir，并附带 local_path 与
-        http_url 指向资源，保存失败时附带 save_error 说明原因。
+        与 akm_generate_image 共用图片转发链路（forward_request + images/edits）。
+        图片有两种来源：image_path 读取服务器本地文件，或 image_base64 直接传入
+        base64 数据（兼容 data URL 前缀，适用于本地无文件的云端场景，模型可直接
+        使用对话中 image_url 的 data URL）。handler 组装与 /v1/images/edits 一致的
+        multipart 请求体。编辑结果同样会下载保存到 agent_upload_dir，并附带
+        local_path 与 http_url 指向资源，保存失败时附带 save_error 说明原因。
         """
         pool = getattr(app.state, "http_client", None)
         if pool is None or not getattr(pool, "is_route_pool", False):
@@ -375,8 +423,8 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         if not str(model or "").strip():
             model = _image_default_model()
         try:
-            image_file = _read_image_file(image_path)
-        except OSError as exc:
+            image_file = _resolve_image(image_path, image_base64)
+        except (OSError, ValueError) as exc:
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
         fields: dict[str, str] = {"prompt": prompt, "model": model}
         if size:
@@ -389,10 +437,10 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         if n > 1:
             fields["n"] = str(n)
         files: dict[str, tuple[str, bytes, str]] = {"image": image_file}
-        if str(mask_path or "").strip():
+        if str(mask_path or "").strip() or str(mask_base64 or "").strip():
             try:
-                files["mask"] = _read_image_file(mask_path)
-            except OSError as exc:
+                files["mask"] = _resolve_image(mask_path, mask_base64)
+            except (OSError, ValueError) as exc:
                 return json.dumps({"error": str(exc)}, ensure_ascii=False)
         body: dict[str, Any] = {
             "__akm_multipart__": True,
@@ -507,20 +555,22 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         ),
         ToolDef(
             "akm_edit_image",
-            "读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要提供服务器可访问的图片路径，以及配置了对应模型的可用 API Key",
+            "编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。图片来源二选一：image_path 传服务器本地文件绝对路径；或 image_base64 传图片的 base64 数据（可直接使用对话中图片的 data:image/...;base64, 前缀数据，适合本地无文件的场景）。需要配置了对应模型的可用 API Key",
             {
                 "type": "object",
                 "properties": {
-                    "image_path": {"type": "string", "description": "本地图片文件的绝对路径"},
+                    "image_path": {"type": "string", "description": "本地图片文件的绝对路径，与 image_base64 二选一"},
+                    "image_base64": {"type": "string", "description": "图片 base64 数据（可带 data:image/...;base64, 前缀），与 image_path 二选一，优先级更高"},
                     "prompt": {"type": "string", "description": "编辑指令，描述期望的修改效果"},
                     "model": {"type": "string", "description": "图片编辑模型，默认取 image_supported_models 首项"},
                     "mask_path": {"type": "string", "description": "本地蒙版图片路径，用于限定重绘区域，可选"},
+                    "mask_base64": {"type": "string", "description": "蒙版图片的 base64 数据（可带 data:... 前缀），与 mask_path 二选一，优先级更高"},
                     "size": {"type": "string", "description": "输出图片尺寸，如 1024x1024，可选"},
                     "quality": {"type": "string", "description": "生成质量，如 standard 或 hd，可选"},
                     "output_format": {"type": "string", "description": "输出格式，如 png 或 jpeg，可选"},
                     "n": {"type": "integer", "description": "生成张数，默认 1"},
                 },
-                "required": ["image_path", "prompt"],
+                "required": ["prompt"],
             },
             edit_image_tool,
         ),
