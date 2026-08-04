@@ -1,10 +1,14 @@
 """供 Agent Loop 使用的 AKM 内置只读调试工具。"""
 
+import asyncio
 import base64
 import datetime
 import json
 import logging
 import mimetypes
+import re
+import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,6 +23,69 @@ from akm.config import load_config
 from akm.key_pool import key_model_list, list_keys
 
 logger = logging.getLogger(__name__)
+
+# 文件读取工具单次返回的最大字节数，防止超大文件撑爆模型上下文
+_WORKSPACE_READ_MAX_BYTES = 60000
+# grep 工具单次返回的最大命中行数
+_WORKSPACE_GREP_MAX_RESULTS = 100
+# run_shell 工具默认超时（秒）
+_WORKSPACE_SHELL_TIMEOUT_SEC = 60
+
+
+def _workspace_root() -> Path | None:
+    """返回配置的 Agent 工作区沙箱根目录（已展开 ~、已 resolve），未配置时返回 None。
+
+    工作区根目录来自 config.json 的 agent_workspace_root。所有文件读写工具
+    都只能访问该目录内的路径（防止路径穿越读写任意文件）；未配置时文件工具
+    整体不可用。
+    """
+    raw = str(load_config().get("agent_workspace_root") or "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+def _safe_resolve_workspace_path(raw: str, *, must_exist: bool = True) -> Path:
+    """把模型传入的路径解析为工作区内的绝对路径，越界或缺失时抛 ValueError。
+
+    安全约定：
+    - 绝对路径必须位于工作区根目录内，否则拒绝；
+    - 相对路径按工作区根目录拼接后再校验，`..` 等穿越写法会被拦截；
+    - 最终用 resolve() 规范化，防止软链接把目标引到工作区之外；
+    - must_exist 为 True 时目标必须存在（读写场景），False 时允许不存在
+      （新建文件场景，但仍要求其父目录位于工作区内）。
+
+    Returns:
+        规范化后的绝对路径（Path 对象）。
+
+    Raises:
+        ValueError: 未配置工作区、路径越界或（must_exist 时）目标不存在。
+    """
+    root = _workspace_root()
+    if root is None:
+        raise ValueError("未配置 agent_workspace_root，工作区文件工具不可用")
+    raw = str(raw or "").strip()
+    if not raw:
+        raise ValueError("path 不能为空")
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ValueError(f"路径 {raw} 超出工作区范围，禁止访问")
+    if must_exist and not candidate.exists():
+        raise ValueError(f"路径 {raw} 不存在")
+    return candidate
+
+
+async def _check_tool_enabled(flag: str, tool_name: str) -> None:
+    """检查工具开关配置，未启用时抛出带提示的错误（由调用方捕获返回给模型）。"""
+    if not load_config().get(flag):
+        raise PermissionError(
+            f"工具 {tool_name} 未启用：请在 config.json 中设置 {flag}=true"
+        )
 
 
 def _akm_api_base_url() -> str:
@@ -169,6 +236,329 @@ async def _save_generated_image(item: dict[str, Any], client) -> None:
     except Exception as exc:
         logger.warning("[AgentTool] 保存生成图片失败: %s", exc)
         item["save_error"] = str(exc)
+
+
+async def _read_file_tool(
+    path: str,
+    offset: int = 0,
+    limit: int = -1,
+) -> str:
+    """读取工作区内的文本文件，返回内容摘要（含长度限制与分页）。
+
+    仅允许读取工作区根目录内的文件（见 _safe_resolve_workspace_path）。
+    offset/limit 为行级分页：offset 从 0 开始，limit 为返回的最大行数，
+    -1 表示读到文件结尾。单次返回字节数上限为 _WORKSPACE_READ_MAX_BYTES，
+    超长时在结果中标记 truncated。
+    """
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    if not target.is_file():
+        return json.dumps({"error": f"{path} 不是文件"}, ensure_ascii=False)
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
+
+    offset = max(0, int(offset or 0))
+    limit = int(limit if limit is not None else -1)
+    start = min(offset, len(lines))
+    if limit >= 0:
+        lines = lines[start:start + limit]
+    else:
+        lines = lines[start:]
+
+    text = "".join(lines)
+    truncated = False
+    if len(text.encode("utf-8", errors="ignore")) > _WORKSPACE_READ_MAX_BYTES:
+        text = text[:_WORKSPACE_READ_MAX_BYTES]
+        truncated = True
+    return json.dumps({
+        "path": str(target),
+        "start_line": start,
+        "total_lines": len(lines),
+        "truncated": truncated,
+        "content": text,
+    }, ensure_ascii=False)
+
+
+async def _list_dir_tool(path: str = "") -> str:
+    """列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构。"""
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        raw_path = "."
+    try:
+        target = _safe_resolve_workspace_path(raw_path, must_exist=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    if not target.is_dir():
+        return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
+    try:
+        entries = []
+        for item in sorted(target.iterdir(), key=lambda p: p.name):
+            if item.is_dir():
+                kind = "dir"
+                size = None
+            elif item.is_file():
+                kind = "file"
+                try:
+                    size = item.stat().st_size
+                except OSError:
+                    size = None
+            else:
+                kind = "other"
+                size = None
+            entries.append({"name": item.name, "type": kind, "size": size})
+    except OSError as exc:
+        return json.dumps({"error": f"读取目录失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"path": str(target), "entries": entries}, ensure_ascii=False)
+
+
+async def _glob_tool(pattern: str = "") -> str:
+    """在工作区内按 glob 模式匹配文件路径（相对工作区根目录返回）。
+
+    模式如 ``**/*.py``、``src/**/*.ts``。绝对模式或以 ``../`` 开头
+    试图离开工作区的模式会被拒绝。
+    """
+    pattern = str(pattern or "").strip()
+    if not pattern:
+        return json.dumps({"error": "pattern 不能为空"}, ensure_ascii=False)
+    if pattern.startswith("/") or pattern.startswith("../") or ".." in pattern.split("/"):
+        return json.dumps({"error": "模式不允许离开工作区范围"}, ensure_ascii=False)
+    root = _workspace_root()
+    if root is None:
+        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    matches = []
+    try:
+        for p in root.glob(pattern):
+            if p.is_file() or p.is_dir():
+                matches.append(str(p.relative_to(root)))
+    except (OSError, ValueError) as exc:
+        return json.dumps({"error": f"匹配失败: {exc}"}, ensure_ascii=False)
+    matches.sort()
+    return json.dumps({"pattern": pattern, "matches": matches[:_WORKSPACE_GREP_MAX_RESULTS], "total": len(matches)}, ensure_ascii=False)
+
+
+async def _grep_tool(
+    pattern: str = "",
+    path: str = "",
+    case_sensitive: bool = False,
+) -> str:
+    """在工作区内按正则搜索文件内容，返回命中文件与行号。
+
+    默认递归搜索整个工作区；path 指定时仅搜索该目录/文件（仍限工作区内）。
+    结果条数上限为 _WORKSPACE_GREP_MAX_RESULTS。
+    """
+    pattern = str(pattern or "").strip()
+    if not pattern:
+        return json.dumps({"error": "pattern 不能为空"}, ensure_ascii=False)
+    try:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        rx = re.compile(pattern, flags)
+    except re.error as exc:
+        return json.dumps({"error": f"正则表达式非法: {exc}"}, ensure_ascii=False)
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        raw_path = "."
+    try:
+        root = _safe_resolve_workspace_path(raw_path, must_exist=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    if not root.is_dir():
+        return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
+
+    results = []
+    try:
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            # 跳过隐藏目录与常见二进制/版本库目录，避免命中无意义内容
+            rel = p.relative_to(root)
+            parts = rel.parts
+            if any(part.startswith(".") or part in ("node_modules", ".git", "__pycache__", "venv", ".venv", "build", "dist") for part in parts):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                    for lineno, line in enumerate(fh, start=1):
+                        if rx.search(line):
+                            results.append({
+                                "file": str(rel),
+                                "line": lineno,
+                                "content": line.rstrip("\n")[:_WORKSPACE_READ_MAX_BYTES],
+                            })
+                            break
+            except OSError:
+                continue
+            if len(results) >= _WORKSPACE_GREP_MAX_RESULTS:
+                break
+    except OSError as exc:
+        return json.dumps({"error": f"搜索失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"pattern": pattern, "results": results, "total": len(results)}, ensure_ascii=False)
+
+
+async def _file_info_tool(path: str) -> str:
+    """返回工作区内文件或目录的元信息（类型、大小、修改时间）。"""
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    try:
+        stat = target.stat()
+        kind = "dir" if target.is_dir() else "file"
+        return json.dumps({
+            "path": str(target),
+            "type": kind,
+            "size": stat.st_size,
+            "mtime": datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        }, ensure_ascii=False)
+    except OSError as exc:
+        return json.dumps({"error": f"读取文件信息失败: {exc}"}, ensure_ascii=False)
+
+
+async def _write_file_tool(
+    path: str,
+    content: str,
+    mode: str = "overwrite",
+) -> str:
+    """写文件：新建或覆盖工作区内的文本文件。仅 agent_write_tools_enabled=true 时可用。"""
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_write_file")
+    mode = str(mode or "overwrite").strip()
+    if mode not in ("overwrite", "append"):
+        return json.dumps({"error": "mode 只能是 overwrite 或 append"}, ensure_ascii=False)
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=(mode == "append"))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    if target.exists() and target.is_dir():
+        return json.dumps({"error": f"{path} 是目录，不能写入"}, ensure_ascii=False)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a" if mode == "append" else "w", encoding="utf-8") as fh:
+            fh.write(str(content or ""))
+    except OSError as exc:
+        return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "path": str(target), "mode": mode, "bytes_written": len(str(content or "").encode("utf-8"))}, ensure_ascii=False)
+
+
+async def _edit_file_tool(
+    path: str,
+    old_string: str,
+    new_string: str = "",
+    replace_all: bool = False,
+) -> str:
+    """编辑工作区内的文本文件：用新字符串替换旧字符串。仅 agent_write_tools_enabled=true 时可用。"""
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_edit_file")
+    old_string = str(old_string or "")
+    if not old_string:
+        return json.dumps({"error": "old_string 不能为空"}, ensure_ascii=False)
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    if not target.is_file():
+        return json.dumps({"error": f"{path} 不是文件"}, ensure_ascii=False)
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
+    count = content.count(old_string)
+    if count == 0:
+        return json.dumps({"error": "old_string 未在文件中找到"}, ensure_ascii=False)
+    if not replace_all:
+        count = 1
+    new_content = content.replace(old_string, new_string, count)
+    try:
+        target.write_text(new_content, encoding="utf-8")
+    except OSError as exc:
+        return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "path": str(target), "replaced": count}, ensure_ascii=False)
+
+
+async def _make_dir_tool(path: str) -> str:
+    """在工作区内创建目录（含父目录）。仅 agent_write_tools_enabled=true 时可用。"""
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_make_dir")
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=False)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return json.dumps({"error": f"创建目录失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "path": str(target)}, ensure_ascii=False)
+
+
+async def _delete_tool(path: str, recursive: bool = False) -> str:
+    """删除工作区内的文件或（recursive=true 时）目录。仅 agent_write_tools_enabled=true 时可用。
+
+    出于安全考虑，始终拒绝删除工作区根目录本身。
+    """
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_delete_file")
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=True)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    root = _workspace_root()
+    if target == root:
+        return json.dumps({"error": "禁止删除工作区根目录"}, ensure_ascii=False)
+    try:
+        if target.is_dir():
+            if not recursive:
+                return json.dumps({"error": "删除目录需要 recursive=true"}, ensure_ascii=False)
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    except OSError as exc:
+        return json.dumps({"error": f"删除失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "path": str(target)}, ensure_ascii=False)
+
+
+async def _run_shell_tool(command: str, timeout: int = 0) -> str:
+    """在工作区根目录下执行 shell 命令，返回 stdout+stderr。
+
+    仅 agent_run_shell_enabled=true 时可用。命令以工作区根目录为 cwd，
+    用 subprocess 运行，默认超时 _WORKSPACE_SHELL_TIMEOUT_SEC 秒。
+    出于安全考虑，调用方需自行确认命令内容与影响范围。
+    """
+    await _check_tool_enabled("agent_run_shell_enabled", "akm_run_shell")
+    command = str(command or "").strip()
+    if not command:
+        return json.dumps({"error": "command 不能为空"}, ensure_ascii=False)
+    root = _workspace_root()
+    if root is None:
+        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
+    loop = asyncio.get_running_loop()
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            return json.dumps({"error": f"命令执行超时（{timeout} 秒），已终止"}, ensure_ascii=False)
+        text = output.decode("utf-8", errors="replace")
+        truncated = False
+        if len(text) > _WORKSPACE_READ_MAX_BYTES:
+            text = text[:_WORKSPACE_READ_MAX_BYTES]
+            truncated = True
+        return json.dumps({
+            "exit_code": proc.returncode,
+            "truncated": truncated,
+            "output": text,
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"执行命令失败: {exc}"}, ensure_ascii=False)
 
 
 def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
@@ -588,3 +978,155 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             edit_image_tool,
         ),
     ]
+
+
+def build_workspace_tools() -> list[ToolDef]:
+    """创建工作区文件工具（读 + 写 + shell）。
+
+    安全设计：
+    - 读工具（read/list/glob/grep/info）始终注册，但目标必须位于
+      agent_workspace_root 工作区内；未配置工作区时执行返回明确错误。
+    - 写工具（write/edit/make_dir/delete）默认禁用，仅当 config.json
+      设置 ``agent_write_tools_enabled=true`` 时才注册，模型不可见即不可调。
+    - shell 工具默认禁用，仅当 ``agent_run_shell_enabled=true`` 时才注册，
+      且以工作区根目录为 cwd 执行，独立开关避免写文件与执行命令同权。
+    """
+    tools: list[ToolDef] = [
+        ToolDef(
+            "akm_read_file",
+            "读取工作区内文本文件的内容（带行级分页与长度限制）。仅能访问 agent_workspace_root 配置的工作区目录",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "工作区内的文件路径（绝对路径或相对工作区根目录的路径）"},
+                    "offset": {"type": "integer", "description": "起始行号（从 0 开始），默认 0"},
+                    "limit": {"type": "integer", "description": "返回的最大行数，-1 表示读到结尾，默认 -1"},
+                },
+                "required": ["path"],
+            },
+            _read_file_tool,
+        ),
+        ToolDef(
+            "akm_list_dir",
+            "列出工作区内目录下的条目（名称、类型、大小），用于感知工作区结构",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "工作区内的目录路径，留空表示工作区根目录"},
+                },
+            },
+            _list_dir_tool,
+        ),
+        ToolDef(
+            "akm_glob",
+            "在工作区内按 glob 模式匹配文件或目录路径（相对工作区根目录返回），如 **/*.py",
+            {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "glob 匹配模式，如 **/*.py"},
+                },
+                "required": ["pattern"],
+            },
+            _glob_tool,
+        ),
+        ToolDef(
+            "akm_grep",
+            "在工作区内按正则搜索文件内容，返回命中的文件、行号与行内容",
+            {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "要搜索的正则表达式"},
+                    "path": {"type": "string", "description": "限定搜索的目录或文件（工作区内），留空递归搜索整个工作区"},
+                    "case_sensitive": {"type": "boolean", "description": "是否区分大小写，默认 false"},
+                },
+                "required": ["pattern"],
+            },
+            _grep_tool,
+        ),
+        ToolDef(
+            "akm_file_info",
+            "返回工作区内文件或目录的元信息（类型、大小、修改时间）",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "工作区内的文件或目录路径"},
+                },
+                "required": ["path"],
+            },
+            _file_info_tool,
+        ),
+    ]
+
+    # 写工具与 shell 工具：默认禁用，仅在对应配置开关开启时注册
+    if load_config().get("agent_write_tools_enabled"):
+        tools.extend([
+            ToolDef(
+                "akm_write_file",
+                "新建或覆盖工作区内的文本文件（mode=overwrite 覆盖 / append 追加）。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区内的文件路径（相对工作区根目录的路径）"},
+                        "content": {"type": "string", "description": "要写入的文本内容"},
+                        "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "overwrite 覆盖（默认）或 append 追加"},
+                    },
+                    "required": ["path", "content"],
+                },
+                _write_file_tool,
+            ),
+            ToolDef(
+                "akm_edit_file",
+                "编辑工作区内的文本文件：将 old_string 替换为 new_string。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区内的文件路径"},
+                        "old_string": {"type": "string", "description": "要被替换的原文片段"},
+                        "new_string": {"type": "string", "description": "替换后的新文本，可留空表示删除"},
+                        "replace_all": {"type": "boolean", "description": "是否替换所有匹配（默认只替换第一处）"},
+                    },
+                    "required": ["path", "old_string"],
+                },
+                _edit_file_tool,
+            ),
+            ToolDef(
+                "akm_make_dir",
+                "在工作区内创建目录（含所需父目录）。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区内的目录路径"},
+                    },
+                    "required": ["path"],
+                },
+                _make_dir_tool,
+            ),
+            ToolDef(
+                "akm_delete_file",
+                "删除工作区内的文件，或（recursive=true 时）目录。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区内的文件或目录路径"},
+                        "recursive": {"type": "boolean", "description": "删除目录时需设为 true"},
+                    },
+                    "required": ["path"],
+                },
+                _delete_tool,
+            ),
+        ])
+    if load_config().get("agent_run_shell_enabled"):
+        tools.append(ToolDef(
+            "akm_run_shell",
+            "在工作区根目录下执行 shell 命令并返回 stdout+stderr。仅 agent_run_shell_enabled=true 时可用；命令有超时限制（默认 60 秒，最大 300 秒）",
+            {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的 shell 命令"},
+                    "timeout": {"type": "integer", "description": "超时秒数，1-300，默认 60"},
+                },
+                "required": ["command"],
+            },
+            _run_shell_tool,
+        ))
+    return tools

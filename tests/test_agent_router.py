@@ -243,3 +243,113 @@ async def test_custom_instructions_preserved(monkeypatch):
         )
     assert resp.status_code == 200
     assert loop.calls[0]["options"]["instructions"] == "自定义指令"
+
+
+# ── Agent 可选鉴权 ──
+
+
+class _FakeRequest:
+    """模拟带请求头的 Request 对象（仅暴露 _check_agent_auth 需要的字段）。
+
+    headers 使用普通 dict；测试中键统一用小写，与 starlette Headers
+    大小写不敏感行为对齐。
+    """
+
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+
+
+@pytest.mark.asyncio
+async def test_auth_skipped_when_token_unconfigured(monkeypatch):
+    """未配置 agent_api_token 时鉴权应直接放行。"""
+    from akm.agent_runtime.router import _check_agent_auth
+
+    monkeypatch.setattr("akm.agent_runtime.router.load_config", lambda: {})
+    request = _FakeRequest(headers={})
+    assert await _check_agent_auth(request) is None
+
+
+@pytest.mark.asyncio
+async def test_auth_rejects_missing_token(monkeypatch):
+    """配置了 token 但请求未携带时应返回 401。"""
+    from akm.agent_runtime.router import _check_agent_auth
+
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    request = _FakeRequest(headers={})
+    resp = await _check_agent_auth(request)
+    assert resp is not None
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_rejects_wrong_token(monkeypatch):
+    """配置了 token 但请求携带错误 token 时应返回 401。"""
+    from akm.agent_runtime.router import _check_agent_auth
+
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    request = _FakeRequest(headers={"authorization": "Bearer wrong"})
+    resp = await _check_agent_auth(request)
+    assert resp is not None
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_accepts_bearer_token(monkeypatch):
+    """配置了 token 且请求携带正确 Bearer token 时应放行。"""
+    from akm.agent_runtime.router import _check_agent_auth
+
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    request = _FakeRequest(headers={"authorization": "Bearer secret123"})
+    assert await _check_agent_auth(request) is None
+
+
+@pytest.mark.asyncio
+async def test_auth_accepts_x_agent_token_header(monkeypatch):
+    """配置了 token 且请求通过 X-Agent-Token 头携带时应放行。"""
+    from akm.agent_runtime.router import _check_agent_auth
+
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    request = _FakeRequest(headers={"x-agent-token": "secret123"})
+    assert await _check_agent_auth(request) is None
+
+
+@pytest.mark.asyncio
+async def test_auth_rejects_endpoint_request_without_token(monkeypatch):
+    """端点级集成：配置 token 后无 token 请求应返回 401。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 401
+    assert "未授权" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_auth_accepts_endpoint_request_with_token(monkeypatch):
+    """端点级集成：配置 token 后携带正确 Bearer token 应正常执行。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    loop = app.state.agent_loop
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer secret123"},
+        )
+    assert resp.status_code == 200
+    assert len(loop.calls[0]["messages"]) == 1

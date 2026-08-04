@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from akm.agent_runtime.loop import AgentLoop, ToolRegistry
-from akm.agent_runtime.tools import build_builtin_tools
+from akm.agent_runtime.tools import build_builtin_tools, build_workspace_tools
 
 
 async def initialize_agent_runtime(
@@ -25,6 +25,8 @@ async def initialize_agent_runtime(
     )
     tool_registry = ToolRegistry.instance()
     for tool in build_builtin_tools(app):
+        tool_registry.register(tool)
+    for tool in build_workspace_tools():
         tool_registry.register(tool)
     app.state.agent_loop = agent_loop
     logger.info("[Server] Agent Loop 已初始化，审计日志已就绪，已注册 %d 个内置调试工具", len(tool_registry))

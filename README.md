@@ -268,6 +268,10 @@ akm-menubar
 | `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
+| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；留空则文件工具不可用 |
+| `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`），默认关闭需显式开启 |
+| `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启 |
+| `agent_api_token` | `""` | `/v1/agent` 的可选鉴权 token，配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头；留空则不校验 |
 | `agent_default_instructions` | KaTeX 公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
@@ -396,11 +400,13 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
-完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、响应格式与 SSE 流式事件。
+完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
 
-服务启动后会注册内置 AKM 工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。内置工具采用白名单注入：客户端请求显式传入 `tools` 时只注入声明中的工具（内置工具不自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 时不注入任何工具；未传 `tools` 时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` 外的全部内置工具（联网搜索与图片生成涉及外部服务调用，需在 `tools` 中显式声明才能启用）。调用方声明工具时不应使用与内置工具相同的名称，以免工具定义与内置处理器不匹配。
+服务启动后会注册内置 AKM 工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`）以及工作区文件工具（`akm_read_file` / `akm_list_dir` / `akm_glob` / `akm_grep` / `akm_file_info`，配置 `agent_workspace_root` 后可用；写工具 `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` 与 shell 工具 `akm_run_shell` 需分别开启 `agent_write_tools_enabled` / `agent_run_shell_enabled` 才会注册），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。内置工具采用白名单注入：客户端请求显式传入 `tools` 时只注入声明中的工具（内置工具不自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 时不注入任何工具；未传 `tools` 时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作与 shell 执行涉及本机写入，需在 `tools` 中显式声明才能启用）。调用方声明工具时不应使用与内置工具相同的名称，以免工具定义与内置处理器不匹配。
 
-Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
+工作区文件工具受沙箱约束：所有路径（含 `..` 穿越、绝对路径、软链接）在解析后都会被校验必须在 `agent_workspace_root` 目录内，越界访问直接返回错误，不会读写工作区之外的任何文件。`/v1/agent` 可选鉴权：配置 `agent_api_token` 后，请求必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 401。
+
+Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化。
 
 ## 故障切换策略
 

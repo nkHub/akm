@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _check_agent_auth(request: Request) -> JSONResponse | None:
+    """校验 /v1/agent 请求的可选鉴权 token（agent_api_token）。
+
+    config.json 未配置 agent_api_token 时不做任何校验（返回 None）；
+    配置后要求请求携带 ``Authorization: Bearer <token>`` 或
+    ``X-Agent-Token: <token>`` 头，不匹配返回 401。用于在开放了写文件 /
+    shell 工具时限制调用方身份，避免任意本地进程滥用 Agent 权限。
+    """
+    token = str(load_config().get("agent_api_token") or "").strip()
+    if not token:
+        return None
+    auth = request.headers.get("authorization", "")
+    provided = ""
+    if auth.lower().startswith("bearer "):
+        provided = auth[7:].strip()
+    if not provided:
+        provided = str(request.headers.get("x-agent-token") or "").strip()
+    if provided != token:
+        return JSONResponse(status_code=401, content={"detail": "未授权：Agent token 缺失或不匹配"})
+    return None
+
+
 def _save_uploaded_image(data: bytes, content_type: str) -> str:
     """把上传的图片落盘到配置的保存目录，返回可被工具读取的绝对路径。
 
@@ -151,8 +173,12 @@ async def agent(request: Request):
     1. 纯 JSON：messages 等字段直接放在请求体中。
     2. multipart/form-data：messages 为 JSON 字符串表单字段，files 为
        文件字段（支持多个）；上传的文件会被读取并作为独立的 user 消息
-       追加到对话末尾（图片转 image_url、其他文件转文本）。
+        追加到对话末尾（图片转 image_url、其他文件转文本）。
     """
+    auth_error = await _check_agent_auth(request)
+    if auth_error is not None:
+        return auth_error
+
     body, error = await _parse_agent_body(request)
     if error is not None:
         return error
