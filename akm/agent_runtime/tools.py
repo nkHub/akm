@@ -52,10 +52,23 @@ def _image_request_timeout() -> float:
 
 
 def _read_image_file(path: str) -> tuple[str, bytes, str]:
-    """读取本地图片文件，返回 (文件名, 字节内容, content_type)。"""
+    """读取本地图片文件，返回 (文件名, 字节内容, content_type)。
+
+    先按传入的 image_path 直接读取；若该路径不存在，则提取文件名回退到
+    agent_upload_dir（默认 ~/.akm/cache）目录下查找。这样即使模型把
+    http_url 中的 /agent-uploads/ 前缀误当成本地路径（例如编造出
+    /data/agent-uploads/xxx.png），只要文件名一致仍能命中真实落盘文件。
+    回退查找仅取文件名（basename），不会拼接目录，防止路径穿越。
+    """
     file_path = Path(str(path or "")).expanduser()
     if not file_path.is_file():
-        raise FileNotFoundError(f"图片文件不存在: {file_path}")
+        raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
+        upload_dir = Path(raw).expanduser()
+        fallback = upload_dir / file_path.name
+        if fallback.is_file():
+            file_path = fallback
+        else:
+            raise FileNotFoundError(f"图片文件不存在: {file_path}")
     content = file_path.read_bytes()
     content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     return file_path.name, content, content_type
