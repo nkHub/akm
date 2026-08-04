@@ -134,7 +134,7 @@ async def test_run_stream_reports_streaming_http_error_and_closes_response(monke
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry(), audit_submitter=audit)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert events == [{"event": "error", "data": {"error": "rate limited", "turns": 1, "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}}]
+    assert events == [{"event": "error", "data": {"error": "rate limited", "turns": 1, "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, "compacted": 0}}]
     assert response.closed is True
     assert audits[-1]["status_code"] == 429
     assert audits[-1]["error"] == "rate limited"
@@ -155,12 +155,13 @@ async def test_run_includes_registered_tools_in_upstream_request(monkeypatch):
     result = await AgentLoop(http_client=None, tool_registry=registry).run([{"role": "user", "content": "状态"}])
 
     assert result.ok is True
-    assert requests[0]["tools"] == [registry.list_tools()[0]]
+    names = [t["function"]["name"] for t in requests[0]["tools"]]
+    assert names == ["akm_get_status", "akm_context_status", "akm_compact_context"]
 
 
 @pytest.mark.asyncio
 async def test_run_whitelist_injects_only_client_declared_tools(monkeypatch):
-    """客户端显式声明 tools 时，只注入客户端声明的工具（未声明的内置工具不注入）。"""
+    """客户端显式声明 tools 时，只注入客户端声明的工具 + 上下文管理框架工具。"""
     registry = ToolRegistry()
     registry.register(ToolDef("akm_get_status", "读取 AKM 状态", {"type": "object", "properties": {}}, lambda: {}))
     client_tool = {"type": "function", "function": {"name": "my_search", "description": "自定义搜索", "parameters": {"type": "object", "properties": {}}}}
@@ -177,13 +178,13 @@ async def test_run_whitelist_injects_only_client_declared_tools(monkeypatch):
 
     assert result.ok is True
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["my_search"]
+    assert names == ["my_search", "akm_context_status", "akm_compact_context"]
     assert "akm_get_status" not in names
 
 
 @pytest.mark.asyncio
 async def test_run_stream_whitelist_injects_only_client_declared_tools(monkeypatch):
-    """流式路径同样遵循白名单：客户端未声明 tools 时才注入内置工具。"""
+    """流式路径同样遵循白名单：客户端声明 tools 时注入声明工具 + 框架工具。"""
     registry = ToolRegistry()
     registry.register(ToolDef("akm_get_time", "获取时间", {"type": "object", "properties": {}}, lambda: {}))
     client_tool = {"type": "function", "function": {"name": "my_tool", "description": "自定义", "parameters": {"type": "object", "properties": {}}}}
@@ -201,7 +202,7 @@ async def test_run_stream_whitelist_injects_only_client_declared_tools(monkeypat
         break
 
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["my_tool"]
+    assert names == ["my_tool", "akm_context_status", "akm_compact_context"]
     assert "akm_get_time" not in names
 
 
@@ -291,7 +292,7 @@ async def test_run_explicit_tools_can_override_excluded(monkeypatch):
 
     assert result.ok is True
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["tavily_search"]
+    assert names == ["tavily_search", "akm_context_status", "akm_compact_context"]
 
 
 @pytest.mark.asyncio
@@ -338,3 +339,141 @@ def _extract_calls(response_body):
     from akm.agent_runtime.loop import _extract_tool_calls_from_response
 
     return _extract_tool_calls_from_response(response_body)
+
+
+def _small_config():
+    """返回一个把上下文阈值调小、便于触发压缩/告警的配置。"""
+    return {
+        "agent_max_turns": 20,
+        "agent_max_context_tokens": 60,
+        "agent_keep_recent_messages": 2,
+        "agent_context_warning_ratio": 0.8,
+    }
+
+
+def _big_config():
+    """返回一个关闭自动压缩兜底（阈值极大）的配置，用于单独验证 AI 主动压缩。"""
+    return {
+        "agent_max_turns": 20,
+        "agent_max_context_tokens": 999999,
+        "agent_keep_recent_messages": 2,
+        "agent_context_warning_ratio": 0.8,
+    }
+
+
+@staticmethod
+def _long_cjk_message(n: int) -> list[dict]:
+    """构造一个足够长的多轮对话，使其 token 估算超过阈值。"""
+    return [
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": "字" * n},
+        {"role": "assistant", "content": "字" * n},
+        {"role": "user", "content": "字" * n},
+        {"role": "assistant", "content": "字" * n},
+        {"role": "user", "content": "当前问题"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_ai_compact_context_tool_compresses_history(monkeypatch):
+    """AI 主动调用 akm_compact_context 时应强制压缩早期历史并回传压缩结果。
+
+    使用极大阈值关闭自动压缩兜底，确保只有 AI 主动调用触发压缩。
+    """
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", _big_config)
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        if body["messages"][0].get("content") == "你是一个对话摘要助手。":
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":"早前对话摘要"}}]}'}
+        calls.append(body)
+        if len(calls) == 1:
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"akm_compact_context","arguments":"{}"}}]}}]}'}
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"完成"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run(_long_cjk_message(100))
+
+    assert result.ok is True
+    # 第二轮请求里，早期历史应被一条 system 摘要替换，且 AI 压缩结果工具消息完整保留
+    second_messages = calls[1]["messages"]
+    assert second_messages[0]["role"] == "system"
+    assert "摘要" in second_messages[0]["content"]
+    tool_msg = [m for m in second_messages if m.get("role") == "tool"]
+    assert tool_msg, "第二轮应包含 AI 压缩工具的结果消息"
+    assert json.loads(tool_msg[-1]["content"])["compacted"] is True
+    assert result.compacted >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_akm_context_status_reports_estimate(monkeypatch):
+    """akm_context_status 工具应返回当前上下文的 token 估算与剩余空间。"""
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", _small_config)
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        if body["messages"][0].get("content") == "你是一个对话摘要助手。":
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":"摘要"}}]}'}
+        calls.append(body)
+        if len(calls) == 1:
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"akm_context_status","arguments":"{}"}}]}}]}'}
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"完成"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run(_long_cjk_message(10))
+
+    assert result.ok is True
+    tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    payload = json.loads(tool_msgs[0]["content"])
+    assert "estimated_tokens" in payload
+    assert payload["max_tokens"] == 60
+    assert payload["remaining_tokens"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_run_auto_compact_fallback_still_active(monkeypatch):
+    """即使 AI 未主动压缩，超限时服务端自动压缩兜底仍应触发（compacted 计数）。"""
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", _small_config)
+    registry = ToolRegistry()
+    registry.register(ToolDef("get_weather", "天气", {"type": "object"}, lambda city: {"city": city, "temp": 25}))
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        if body["messages"][0].get("content") == "你是一个对话摘要助手。":
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":"摘要"}}]}'}
+        calls.append(body)
+        if len(calls) == 1:
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":\\"beijing\\"}"}}]}}]}'}
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"完成"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    result = await loop.run(_long_cjk_message(100))
+
+    assert result.ok is True
+    assert result.compacted >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_stream_emits_context_warning_when_over_ratio(monkeypatch):
+    """上下文占用超过上限的 agent_context_warning_ratio 时，应下发 context_warning 事件。"""
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", _small_config)
+    response = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "好了"}}]}), "data: [DONE]\n\n"])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream(_long_cjk_message(100))])
+
+    warning_events = [e for e in events if e["event"] == "context_warning"]
+    assert warning_events, "应至少下发一次 context_warning 事件"
+    data = warning_events[0]["data"]
+    assert data["estimated_tokens"] > 0
+    assert data["max_tokens"] == 60
+    assert data["remaining_tokens"] >= 0
+    assert "ratio" in data

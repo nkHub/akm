@@ -21,6 +21,35 @@ _DEFAULT_EXCLUDED_TOOLS: frozenset[str] = frozenset(
     {"tavily_search", "akm_generate_image", "akm_edit_image"}
 )
 
+# 上下文管理框架工具：LLM 可主动查询上下文占用或触发压缩。
+# 与业务工具不同，这两个工具不注册到 ToolRegistry（其 handler 需要访问
+# 当前运行的 AgentLoop 上下文），而是由 AgentLoop 在 run/run_stream 内部
+# 内联拦截处理。默认模式下随内置工具注入；白名单模式下需客户端显式声明。
+_AGENT_CONTEXT_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "akm_context_status",
+            "description": (
+                "查询当前对话上下文的 token 占用情况：返回估算的已用 token 数、"
+                "上限与剩余空间，用于判断是否需要压缩早期历史。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "akm_compact_context",
+            "description": (
+                "主动压缩当前对话的早期历史为一段摘要，保留最近约 agent_keep_recent_messages 条消息"
+                "（工具调用与配对消息会自动完整保留），用于在上下文接近上限时释放空间，不丢失关键信息。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+]
+
 # Agent Loop 最大迭代次数，防止工具调用无限循环（可通过 config.json 覆盖）
 
 
@@ -259,6 +288,50 @@ def _extract_reasoning_content(response_body: str) -> str:
     return reasoning if isinstance(reasoning, str) else ""
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """粗略估算一段文本的 token 数（不含消息结构开销）
+
+    中文等 CJK 字符约 1 token/字符，其余字符约 4 字符 ≈ 1 token。
+    仅用于触发上下文压缩的粗粒度判断，不追求精确。
+    """
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    other = len(text) - cjk
+    return cjk + other // 4
+
+
+def _estimate_messages_tokens(messages: list[dict]) -> int:
+    """粗略估算整个对话历史的 token 数
+
+    兼容 content 为字符串或内容块列表（text / image_url 等）两种形态，
+    并把 tool_calls 参数 JSON 计入；每条消息额外加少量固定结构开销。
+    """
+    total = 0
+    for msg in messages or []:
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += _estimate_text_tokens(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    total += _estimate_text_tokens(str(block.get("text", "")))
+                elif block.get("type") == "image_url":
+                    # 图片内容按固定 token 估算，避免 base64 数据撑爆估算
+                    total += 1000
+                else:
+                    total += _estimate_text_tokens(json.dumps(block, ensure_ascii=False))
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    total += _estimate_text_tokens(json.dumps(tc, ensure_ascii=False))
+        total += 4  # 每条消息固定结构开销
+    return total
+
+
 class AgentResult:
     """Agent Loop 运行结果"""
 
@@ -270,6 +343,7 @@ class AgentResult:
         turns: int = 0,
         error: str = "",
         usage: dict | None = None,
+        compacted: int = 0,
     ):
         self.ok = ok
         self.final_message = final_message or {}
@@ -277,6 +351,7 @@ class AgentResult:
         self.turns = turns
         self.error = error
         self.usage = usage or {}
+        self.compacted = compacted  # 本次运行中上下文被压缩的次数
 
     def to_dict(self) -> dict:
         """转为可序列化的 dict"""
@@ -287,6 +362,7 @@ class AgentResult:
             "turns": self.turns,
             "error": self.error,
             "usage": self.usage,
+            "compacted": self.compacted,
         }
 
 
@@ -547,6 +623,15 @@ class AgentLoop:
         self._plugin_manager = plugin_manager
         self._tool_registry = tool_registry or ToolRegistry.instance()
         self._max_turns = max(1, int(load_config().get("agent_max_turns", 20) or 20))
+        self._max_context_tokens = max(
+            0, int(load_config().get("agent_max_context_tokens", 30000) or 30000)
+        )
+        self._keep_recent_messages = max(
+            2, int(load_config().get("agent_keep_recent_messages", 10) or 10)
+        )
+        self._context_warning_ratio = max(
+            0.0, min(1.0, float(load_config().get("agent_context_warning_ratio", 0.8) or 0.8))
+        )
         self._audit_submitter = audit_submitter
 
     async def _try_audit(
@@ -596,6 +681,186 @@ class AgentLoop:
         except Exception:
             logger.warning("[AgentLoop] 审计日志写入失败", exc_info=True)
 
+    async def _summarize_history(
+        self,
+        messages: list[dict],
+        model: str,
+        api_path: str,
+    ) -> str:
+        """让 LLM 把一段历史消息压缩成一段简短摘要，供上下文压缩复用。
+
+        复用 forward_request 的 Key 选择 / 协议转换 / 重试链路，用非流式调用，
+        不注入任何工具，避免模型自主调用工具。摘要失败（HTTP 错误、空内容等）
+        时返回空字符串，由调用方决定降级策略。
+
+        Args:
+            messages: 需要被压缩的历史消息（Chat 格式）
+            model: 当前主循环使用的模型
+            api_path: 上游协议格式（与主循环一致）
+
+        Returns:
+            压缩后的摘要文本；失败或为空时返回 ""
+        """
+        from akm.proxy import forward_request
+
+        # 把历史序列化成易读的对话回放，交给模型总结
+        history = json.dumps(messages, ensure_ascii=False, default=str)
+        prompt = (
+            "下面是一段多轮对话历史，请用简洁的中文要点总结其中已发生的关键内容："
+            "用户的核心诉求、已完成的工具调用及其结果、已经得出的结论。"
+            "保留后续仍可能需要的细节（如文件路径、数值、已确认的事实）。"
+            "直接输出总结，不要复述原文，不要添加额外说明。\n\n"
+            f"对话历史：\n{history}"
+        )
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "你是一个对话摘要助手。"},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+        }
+        result = await forward_request(
+            body,
+            self._http_client,
+            api_path=api_path,
+            plugin_manager=self._plugin_manager,
+        )
+        status_code = int(result.get("status_code", 0) or 0)
+        response_body = str(result.get("body", "") or "")
+        if status_code < 200 or status_code >= 300:
+            logger.warning("[AgentLoop] 上下文摘要调用失败: HTTP %s", status_code)
+            return ""
+        summary = _extract_text_content(response_body).strip()
+        if not summary:
+            logger.warning("[AgentLoop] 上下文摘要调用返回空内容")
+            return ""
+        return summary
+
+    async def _compact_context(
+        self,
+        working_messages: list[dict],
+        model: str,
+        api_path: str,
+        force: bool = False,
+    ) -> tuple[list[dict], int]:
+        """估算上下文 token 数，超过阈值时压缩早期历史。
+
+        保留最近的 agent_keep_recent_messages 条消息（工具消息与其配对的
+        assistant tool_calls 整体保留），更早的历史用一次 LLM 摘要替换；
+        摘要失败时降级为直接截断。未超阈值或配置为 0（禁用）时原样返回。
+
+        Args:
+            working_messages: 当前对话历史（Chat 格式）
+            model: 当前主循环使用的模型
+            api_path: 上游协议格式（与主循环一致）
+            force: True 时跳过阈值判断，强制压缩（供 AI 主动压缩工具使用）
+
+        Returns:
+            (压缩后的 messages 列表, 被压缩移除的旧消息条数；未压缩时为 (原列表, 0))
+        """
+        if self._max_context_tokens <= 0:
+            return working_messages, 0
+        if not force and _estimate_messages_tokens(working_messages) <= self._max_context_tokens:
+            return working_messages, 0
+
+        keep_recent = self._keep_recent_messages
+
+        # 定位保留边界：从尾部向前取 keep_recent 条，但工具消息必须与其
+        # 配对的 assistant tool_calls 消息一起保留，避免产生游离 tool 消息。
+        split = len(working_messages)
+        keep_count = 0
+        i = len(working_messages) - 1
+        while i >= 0 and keep_count < keep_recent:
+            msg = working_messages[i]
+            # 遇到 tool 消息时向前找到配对的 assistant（带 tool_calls），整组保留
+            if msg.get("role") == "tool":
+                j = i
+                while j >= 0 and working_messages[j].get("role") != "assistant":
+                    j -= 1
+                # 保护：若找不到配对 assistant，则最多保留到该 tool 为止
+                if j >= 0 and working_messages[j].get("tool_calls"):
+                    keep_count += i - j + 1
+                    i = j - 1
+                    continue
+            keep_count += 1
+            i -= 1
+        split = i + 1
+
+        # 至少保留首条 system（instructions 所在），且必须真的压缩掉一些内容
+        if split <= 1 or split >= len(working_messages):
+            return working_messages, 0
+
+        old_head = working_messages[:split]
+        kept_tail = working_messages[split:]
+        summary = ""
+        summary_msg: list[dict] = []
+        if old_head:
+            summary = await self._summarize_history(old_head, model, api_path)
+        if summary:
+            # 摘要成功：用一条 system 摘要消息替换旧历史（放在保留区之前）
+            summary_msg = [{"role": "system", "content": f"以下是对较早对话历史的摘要：\n{summary}"}]
+        else:
+            # 摘要失败：降级为直接丢弃旧历史，只保留最近的 keep_recent 条
+            logger.warning("[AgentLoop] 上下文摘要失败，降级为截断旧历史（丢弃 %d 条）", len(old_head))
+        new_messages = summary_msg + kept_tail
+        return new_messages, len(old_head)
+
+    async def _execute_context_tool(
+        self,
+        tc_name: str,
+        tc_args: dict,
+        working_messages: list[dict],
+        model: str,
+        api_path: str,
+        compacted_count: int,
+    ) -> tuple[Optional[str], list[dict], int]:
+        """处理上下文管理框架工具（akm_context_status / akm_compact_context）。
+
+        这两个工具不注册到 ToolRegistry，由 AgentLoop 在工具执行处内联拦截：
+        - akm_context_status：返回当前上下文 token 估算、上限与剩余空间
+        - akm_compact_context：强制压缩早期历史，返回压缩结果
+
+        Args:
+            tc_name: 工具名
+            tc_args: 工具参数（框架工具无参数，保留字段兼容）
+            working_messages: 当前对话历史（Chat 格式）
+            model: 当前主循环使用的模型
+            api_path: 上游协议格式（与主循环一致）
+            compacted_count: 本轮已累计的压缩次数
+
+        Returns:
+            (工具结果字符串 或 None, 可能被压缩替换后的 messages, 更新后的压缩次数)；
+            非框架工具返回 (None, working_messages, compacted_count)，由调用方走 ToolRegistry。
+        """
+        if tc_name == "akm_context_status":
+            estimated = _estimate_messages_tokens(working_messages)
+            result = json.dumps({
+                "estimated_tokens": estimated,
+                "max_tokens": self._max_context_tokens,
+                "remaining_tokens": max(0, self._max_context_tokens - estimated),
+                "message_count": len(working_messages),
+            }, ensure_ascii=False)
+            return result, working_messages, compacted_count
+
+        if tc_name == "akm_compact_context":
+            new_messages, removed = await self._compact_context(
+                working_messages, model, api_path, force=True
+            )
+            if removed:
+                compacted_count += 1
+                logger.info(
+                    "[AgentLoop] AI 主动压缩上下文（移除 %d 条旧消息）", removed
+                )
+            result = json.dumps({
+                "compacted": bool(removed),
+                "removed_messages": removed,
+                "estimated_tokens": _estimate_messages_tokens(new_messages),
+            }, ensure_ascii=False)
+            return result, new_messages, compacted_count
+
+        return None, working_messages, compacted_count
+
     async def run(
         self,
         messages: list[dict],
@@ -638,9 +903,13 @@ class AgentLoop:
         # （未声明的内置工具如 tavily_search / akm_search_kb 不注入，LLM 不会自主调用）；
         # 显式传空数组 [] 表示不注入任何工具；未传 tools（None）时注入除
         # _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）外的全部内置工具。
+        # 上下文管理框架工具（akm_context_status / akm_compact_context）始终注入，
+        # 除非显式传空数组 []；非空白名单时也追加，保证 AI 主动压缩能力可用。
         registered_tools = self._tool_registry.list_tools()
         if tools is not None:
             all_tools = list(tools)
+            if tools:
+                all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
                 t
@@ -648,6 +917,7 @@ class AgentLoop:
                 if (t.get("function", {}) or {}).get("name", "")
                 not in _DEFAULT_EXCLUDED_TOOLS
             ]
+            all_tools.extend(_AGENT_CONTEXT_TOOLS)
         # 按 function name 去重，优先保留调用方传入的（允许覆盖注册中心）
         seen_names: set[str] = set()
         deduped_tools: list[dict] = []
@@ -658,8 +928,22 @@ class AgentLoop:
                 deduped_tools.append(t)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        compacted_count = 0
 
         for turn in range(1, _max_turns + 1):
+            # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
+            compacted_messages, removed = await self._compact_context(
+                working_messages, model, api_path
+            )
+            if removed:
+                working_messages = compacted_messages
+                compacted_count += 1
+                logger.info(
+                    "[AgentLoop] 上下文已自动压缩（turn=%d，移除 %d 条旧消息）",
+                    turn,
+                    removed,
+                )
+
             body: dict[str, Any] = {
                 "model": model,
                 "messages": working_messages,
@@ -684,6 +968,7 @@ class AgentLoop:
                     turns=turn,
                     error="内部调用返回了流式响应，Agent Loop 不支持内部流式",
                     usage=total_usage,
+                    compacted=compacted_count,
                 )
 
             status_code = int(result.get("status_code", 0) or 0)
@@ -702,6 +987,7 @@ class AgentLoop:
                     turns=turn,
                     error=error_msg,
                     usage=total_usage,
+                    compacted=compacted_count,
                 )
 
             # 累加 token 用量
@@ -750,6 +1036,7 @@ class AgentLoop:
                     messages=working_messages,
                     turns=turn,
                     usage=total_usage,
+                    compacted=compacted_count,
                 )
 
             # 有工具调用 → 构建 assistant 消息并执行工具
@@ -780,8 +1067,20 @@ class AgentLoop:
                     },
                 })
 
-                # 执行工具
-                tool_result = await self._tool_registry.execute(tc_name, tc_args)
+                # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
+                # 其余委托 ToolRegistry 执行
+                tool_result, working_messages, compacted_count = (
+                    await self._execute_context_tool(
+                        tc_name,
+                        tc_args,
+                        working_messages,
+                        model,
+                        api_path,
+                        compacted_count,
+                    )
+                )
+                if tool_result is None:
+                    tool_result = await self._tool_registry.execute(tc_name, tc_args)
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -808,6 +1107,7 @@ class AgentLoop:
             turns=_max_turns,
             error=f"达到最大轮次限制 ({_max_turns})",
             usage=total_usage,
+            compacted=compacted_count,
         )
 
     async def run_stream(
@@ -828,6 +1128,8 @@ class AgentLoop:
         - ``turn_start``      — 新一轮开始（检测到工具调用时）
         - ``tool_call``       — 单个工具调用
         - ``tool_result``     — 单个工具执行结果
+        - ``context_warning`` — 上下文占用接近上限（超过 agent_context_warning_ratio 比例），
+                                data 含 estimated_tokens / max_tokens / remaining_tokens / ratio / compacted
         - ``final``           — Agent 完成，含 final_message / usage / turns
         - ``error``           — 错误结束，含 error / turns / usage
 
@@ -860,10 +1162,12 @@ class AgentLoop:
         # 工具注入策略（白名单）：调用方显式传 tools 时只注入调用方声明的工具
         # （未声明的内置工具不注入）；显式传空数组 [] 表示不注入任何工具；
         # 未传 tools（None）时注入除 _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）
-        # 外的全部内置工具。
+        # 外的全部内置工具。上下文管理框架工具始终注入，除非显式传空数组 []。
         registered_tools = self._tool_registry.list_tools()
         if tools is not None:
             all_tools = list(tools)
+            if tools:
+                all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
                 t
@@ -871,6 +1175,7 @@ class AgentLoop:
                 if (t.get("function", {}) or {}).get("name", "")
                 not in _DEFAULT_EXCLUDED_TOOLS
             ]
+            all_tools.extend(_AGENT_CONTEXT_TOOLS)
         seen_names: set[str] = set()
         deduped_tools: list[dict] = []
         for t in all_tools:
@@ -880,8 +1185,38 @@ class AgentLoop:
                 deduped_tools.append(t)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        compacted_count = 0
 
         for turn in range(1, _max_turns + 1):
+            # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
+            compacted_messages, removed = await self._compact_context(
+                working_messages, model, api_path
+            )
+            if removed:
+                working_messages = compacted_messages
+                compacted_count += 1
+                logger.info(
+                    "[AgentLoop] 上下文已自动压缩（turn=%d，移除 %d 条旧消息）",
+                    turn,
+                    removed,
+                )
+
+            # 上下文占用警告：估算 token 超过上限的 warning_ratio 时，下发
+            # context_warning 事件，供客户端提前感知并提示 AI 主动压缩
+            if (
+                self._max_context_tokens > 0
+                and self._context_warning_ratio > 0
+            ):
+                estimated = _estimate_messages_tokens(working_messages)
+                if estimated >= self._max_context_tokens * self._context_warning_ratio:
+                    yield _sse_event("context_warning", {
+                        "estimated_tokens": estimated,
+                        "max_tokens": self._max_context_tokens,
+                        "remaining_tokens": max(0, self._max_context_tokens - estimated),
+                        "ratio": round(estimated / self._max_context_tokens, 4),
+                        "compacted": compacted_count,
+                    })
+
             body: dict[str, Any] = {
                 "model": model,
                 "messages": working_messages,
@@ -918,7 +1253,7 @@ class AgentLoop:
                             result, model, body, response_body, status_code,
                             0, 0, 0, error=error_msg,
                         )
-                        yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
+                        yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage, "compacted": compacted_count})
                         return
 
                     async for chunk in resp.aiter_bytes():
@@ -953,7 +1288,7 @@ class AgentLoop:
                         result, model, body, response_body, status_code,
                         0, 0, 0, error=error_msg,
                     )
-                    yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage})
+                    yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage, "compacted": compacted_count})
                     return
 
                 prompt_tokens = 0
@@ -999,6 +1334,7 @@ class AgentLoop:
                     "messages": working_messages,
                     "turns": turn,
                     "usage": total_usage,
+                    "compacted": compacted_count,
                 })
                 return
 
@@ -1035,7 +1371,20 @@ class AgentLoop:
                     },
                 })
 
-                tool_result = await self._tool_registry.execute(tc_name, tc_args)
+                # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
+                # 其余委托 ToolRegistry 执行
+                tool_result, working_messages, compacted_count = (
+                    await self._execute_context_tool(
+                        tc_name,
+                        tc_args,
+                        working_messages,
+                        model,
+                        api_path,
+                        compacted_count,
+                    )
+                )
+                if tool_result is None:
+                    tool_result = await self._tool_registry.execute(tc_name, tc_args)
                 yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
 
                 tool_result_msgs.append({

@@ -18,6 +18,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 读取本地图片并编辑（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需提供服务器可访问的图片路径 |
+| `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
+| `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
 ## 请求格式
 
@@ -58,6 +60,21 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考与正文均实时以 `reasoning_delta` / `model_delta` 推送，工具调用事件按上游输出顺序穿插，`final` 收尾（详见「SSE 流式事件」） |
+
+## 上下文压缩
+
+长对话可能导致上下文超出模型窗口。Agent Loop 提供两层保障，均由 config.json 控制：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `agent_max_context_tokens` | `30000` | 上下文 token 估算上限，超过后自动压缩早期历史；`0` 关闭自动压缩 |
+| `agent_keep_recent_messages` | `10` | 压缩时保留的最近消息条数，工具调用与其配对的 `tool_calls` 消息整组完整保留 |
+| `agent_context_warning_ratio` | `0.8` | 上下文占用超过上限该比例时，SSE 流式下发 `context_warning` 事件；`0` 关闭警告 |
+
+1. **自动压缩兜底**：每轮开始前估算上下文 token（CJK 字符按 1 token/字符，其余按 4 字符≈1 token，图片块固定估算），超过 `agent_max_context_tokens` 时把早期历史交给 LLM 总结为摘要并替换（保留最近 `agent_keep_recent_messages` 条消息与工具调用配对组），保证上下文不爆掉；摘要生成失败时降级为直接丢弃早期历史。
+2. **AI 主动压缩**：模型可调用 `akm_context_status` 查询当前 token 占用、`akm_compact_context` 主动压缩早期历史。`akm_compact_context` 优先采用摘要替换，不丢失关键信息。`agent_context_warning_ratio` 触发的 `context_warning` SSE 事件即用于提示客户端 / 模型接近上限。
+
+压缩只作用于早期历史，最近消息与所有工具调用配对始终完整保留；`final` / `error` / `context_warning` 事件的 `compacted` 字段表示本次运行累计压缩次数。
 
 ## 文件上传
 
@@ -160,6 +177,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
   },
   "messages": [...],
   "turns": 2,
+  "compacted": 1,
   "error": "",
   "usage": {
     "prompt_tokens": 1200,
@@ -177,11 +195,12 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 |------|------|
 | `reasoning_delta` | LLM 思考（推理）过程片段，`data.turn` 为当前轮次，`data.content` 为增量内容；实时下发，先于同段正文 |
 | `model_delta` | 可见正文片段，`data.turn` 为当前轮次，`data.content` 为增量内容；实时下发（含工具轮过程性正文与最终主体内容） |
+| `context_warning` | 上下文占用接近上限（估算 token 超过 `agent_max_context_tokens` × `agent_context_warning_ratio`）时下发，`data` 含 `estimated_tokens` / `max_tokens` / `remaining_tokens` / `ratio` / `compacted`，供客户端提前感知并提示 AI 调用 `akm_compact_context` 主动压缩 |
 | `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
 | `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
-| `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` |
-| `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` |
+| `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |
+| `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` / `data.compacted` |
 
 ```json
 // SSE 示例（工具轮：思考与正文实时下发，工具事件随后，最终主体实时流式）
