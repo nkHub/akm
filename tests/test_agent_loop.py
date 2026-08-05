@@ -1,9 +1,9 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from akm.agent_runtime.loop import AgentLoop, ToolDef, ToolRegistry, _SSEStreamAccumulator
-
 
 class FakeStreamResponse:
     """提供可分块读取的最小流响应，便于验证 Agent 不透传上游帧。"""
@@ -477,3 +477,74 @@ async def test_run_stream_emits_context_warning_when_over_ratio(monkeypatch):
     assert data["max_tokens"] == 60
     assert data["remaining_tokens"] >= 0
     assert "ratio" in data
+
+
+@pytest.mark.asyncio
+async def test_run_passes_request_workspace_root_to_tools(monkeypatch):
+    """请求级 workspace_root 应在工具执行期间生效，让工具看到请求指定的工作区。"""
+    from akm.agent_runtime.tools import _workspace_root
+
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    captured: dict = {}
+
+    def probe_ws():
+        captured["root"] = str(_workspace_root())
+        return "ok"
+
+    registry.register(ToolDef("probe_ws", "探针", {"type": "object"}, probe_ws))
+
+    first = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "probe_ws", "arguments": "{}"}}]}}], "usage": {}}
+    second = {"choices": [{"message": {"content": "完成", "tool_calls": None}}], "usage": {}}
+    responses = iter([
+        {"status_code": 200, "body": json.dumps(first), "provider": "t", "key_alias": "k"},
+        {"status_code": 200, "body": json.dumps(second), "provider": "t", "key_alias": "k"},
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return next(responses)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", lambda: {})
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"})
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+
+    result = await loop.run([{"role": "user", "content": "hi"}], workspace_root="/req/ws")
+
+    assert result.ok is True
+    assert captured["root"] == str(Path("/req/ws").resolve())
+
+
+@pytest.mark.asyncio
+async def test_run_stream_passes_request_workspace_root_to_tools(monkeypatch):
+    """流式模式同样应在工具执行期间注入请求级 workspace_root。"""
+    from akm.agent_runtime.tools import _workspace_root
+
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    captured: dict = {}
+
+    def probe_ws():
+        captured["root"] = str(_workspace_root())
+        return "ok"
+
+    registry.register(ToolDef("probe_ws", "探针", {"type": "object"}, probe_ws))
+
+    first = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": "probe_ws", "arguments": "{}"}}]}}]}),
+    ])
+    second = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "完成"}}]}), "data: [DONE]\n\n"])
+    responses = iter([first, second])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": next(responses), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", lambda: {})
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"})
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}], workspace_root="/req/ws")])
+
+    assert events[-1]["event"] == "final"
+    assert captured["root"] == str(Path("/req/ws").resolve())

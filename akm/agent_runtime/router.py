@@ -160,6 +160,7 @@ async def _parse_agent_body(request: Request) -> tuple[dict[str, Any], JSONRespo
         "api_path": str(form.get("api_path", "chat/completions") or "chat/completions"),
         "stream": stream_raw in ("1", "true", "yes", "on"),
         "max_turns": form.get("max_turns"),
+        "workspace_root": str(form.get("workspace_root", "") or ""),
     }
     return body, None
 
@@ -192,6 +193,7 @@ async def agent(request: Request):
         instructions = str(load_config().get("agent_default_instructions") or "").strip()
     api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
     stream = bool(body.get("stream", False))
+    workspace_root = str(body.get("workspace_root", "") or "")
     try:
         max_turns = int(body.get("max_turns", 0) or 0)
     except (TypeError, ValueError):
@@ -207,6 +209,7 @@ async def agent(request: Request):
         "instructions": instructions,
         "max_turns": max_turns,
         "api_path": api_path,
+        "workspace_root": workspace_root,
     }
     if stream:
         return StreamingResponse(

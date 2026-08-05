@@ -10,6 +10,8 @@ from akm.agent_runtime.tools import (
     build_workspace_tools,
     _safe_resolve_workspace_path,
     _workspace_root,
+    reset_request_workspace_root,
+    set_request_workspace_root,
 )
 
 # 供测试复用的工作区配置
@@ -81,6 +83,34 @@ def test_workspace_root_returns_none_when_unconfigured(monkeypatch):
         "akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": ""}
     )
     assert _workspace_root() is None
+
+
+def test_request_workspace_root_override(monkeypatch):
+    """请求级 workspace_root 覆盖应优先于全局配置，恢复后回退全局配置。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"}
+    )
+    assert str(_workspace_root()) == str(Path("/global/ws").resolve())
+
+    token = set_request_workspace_root("/req/ws")
+    try:
+        assert str(_workspace_root()) == str(Path("/req/ws").resolve())
+    finally:
+        reset_request_workspace_root(token)
+
+    assert str(_workspace_root()) == str(Path("/global/ws").resolve())
+
+
+def test_request_workspace_root_empty_keeps_global(monkeypatch):
+    """空字符串的请求级覆盖不应生效，仍使用全局配置。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"}
+    )
+    token = set_request_workspace_root("")
+    try:
+        assert str(_workspace_root()) == str(Path("/global/ws").resolve())
+    finally:
+        reset_request_workspace_root(token)
 
 
 # ── 读工具 ──

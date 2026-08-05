@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -31,15 +32,38 @@ _WORKSPACE_GREP_MAX_RESULTS = 100
 # run_shell 工具默认超时（秒）
 _WORKSPACE_SHELL_TIMEOUT_SEC = 60
 
+# 请求级工作区覆盖：由 AgentLoop 在单次请求执行工具期间设置，优先于
+# config.json 的全局 agent_workspace_root；空字符串表示不使用覆盖。
+# 用 ContextVar 保证并发请求之间互不影响（每个请求独立的 asyncio 上下文）。
+_request_workspace_root: ContextVar[str] = ContextVar("agent_request_workspace_root", default="")
+
+
+def set_request_workspace_root(root: str):
+    """设置本次请求执行工具期间的工作区覆盖，返回用于恢复的 token。
+
+    Args:
+        root: 覆盖的工作区根目录绝对路径；空字符串表示不覆盖（走全局配置）。
+    """
+    return _request_workspace_root.set(str(root or "").strip())
+
+
+def reset_request_workspace_root(token) -> None:
+    """恢复 set_request_workspace_root 之前的工作区上下文。"""
+    _request_workspace_root.reset(token)
+
 
 def _workspace_root() -> Path | None:
-    """返回配置的 Agent 工作区沙箱根目录（已展开 ~、已 resolve），未配置时返回 None。
+    """返回当前请求的 Agent 工作区沙箱根目录（已展开 ~、已 resolve），未配置时返回 None。
 
-    工作区根目录来自 config.json 的 agent_workspace_root。所有文件读写工具
-    都只能访问该目录内的路径（防止路径穿越读写任意文件）；未配置时文件工具
-    整体不可用。
+    工作区根目录优先取请求级覆盖（/v1/agent 请求的 workspace_root 字段，
+    由 AgentLoop 执行工具前设置），否则回退 config.json 的全局
+    agent_workspace_root。所有文件读写工具都只能访问该目录内的路径
+    （防止路径穿越读写任意文件）；未配置时文件工具整体不可用。
     """
-    raw = str(load_config().get("agent_workspace_root") or "").strip()
+    raw = (
+        _request_workspace_root.get().strip()
+        or str(load_config().get("agent_workspace_root") or "").strip()
+    )
     if not raw:
         return None
     return Path(raw).expanduser().resolve()

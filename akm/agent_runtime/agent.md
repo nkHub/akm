@@ -70,6 +70,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考与正文均实时以 `reasoning_delta` / `model_delta` 推送，工具调用事件按上游输出顺序穿插，`final` 收尾（详见「SSE 流式事件」） |
+| `workspace_root` | string | 否 | 本次请求的工作区沙箱根目录（绝对路径），覆盖 config.json 的全局 `agent_workspace_root`，仅对本次请求的工作区文件工具生效；不传或传空字符串时使用全局配置。CLI 等客户端可在每次请求时把它指向当前工作目录，而不影响其他客户端（如 Web 聊天）的全局工作区 |
 
 ## 上下文压缩
 
