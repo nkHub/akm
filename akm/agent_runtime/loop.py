@@ -133,6 +133,10 @@ class ToolRegistry:
         tool = self._tools.get(name)
         return tool.handler if tool else None
 
+    def get_definition(self, name: str) -> Optional[ToolDef]:
+        """获取服务端注册的完整工具定义，供覆盖同名客户端声明。"""
+        return self._tools.get(name)
+
     def list_tools(self) -> list[dict]:
         """以 OpenAI 格式返回所有已注册工具的定义"""
         return [t.to_openai() for t in self._tools.values()]
@@ -647,6 +651,9 @@ class AgentLoop:
         self._tool_retry_max = max(
             0, int(load_config().get("agent_tool_retry_max_retries", 1) or 0)
         )
+        self._max_tool_calls = max(
+            1, int(load_config().get("agent_max_tool_calls", 30) or 30)
+        )
         self._audit_submitter = audit_submitter
 
     async def _try_audit(
@@ -960,8 +967,16 @@ class AgentLoop:
         # 除非显式传空数组 []；非空白名单时也追加，保证 AI 主动压缩能力可用。
         registered_tools = self._tool_registry.list_tools()
         if tools is not None:
-            all_tools = list(tools)
-            if tools:
+            all_tools = []
+            for declared in tools:
+                if not isinstance(declared, dict):
+                    continue
+                name = (declared.get("function", {}) or {}).get("name", "")
+                registered = self._tool_registry.get_definition(name)
+                # 内置/插件已注册工具必须使用服务端 schema，不能由客户端伪造
+                # 同名参数描述误导模型，再由本地 handler 按另一份契约执行。
+                all_tools.append(registered.to_openai() if registered is not None else declared)
+            if all_tools:
                 all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
@@ -971,7 +986,8 @@ class AgentLoop:
                 not in _DEFAULT_EXCLUDED_TOOLS
             ]
             all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        # 按 function name 去重，优先保留调用方传入的（允许覆盖注册中心）
+        # 按 function name 去重；已注册的同名工具在构建 all_tools 时已被服务端
+        # schema 替换，客户端只能声明授权，不能覆盖服务端参数契约。
         seen_names: set[str] = set()
         deduped_tools: list[dict] = []
         for t in all_tools:
@@ -979,12 +995,16 @@ class AgentLoop:
             if name and name not in seen_names:
                 seen_names.add(name)
                 deduped_tools.append(t)
+        # 工具定义同时也是本次请求的执行授权名单。不能只控制发给模型的
+        # tools 字段，否则模型仍可伪造一个未声明的 tool_call 触发注册处理器。
+        allowed_tool_names = seen_names
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
         # 自愈重试计数：记录本次请求已注入的修正提示次数，必须为局部变量
         # （AgentLoop 是共享单例，不能把状态放到实例属性上，避免跨请求串扰）
         retry_error_count = 0
+        tool_call_count = 0
 
         for turn in range(1, _max_turns + 1):
             # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
@@ -1125,20 +1145,33 @@ class AgentLoop:
                     },
                 })
 
-                # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
-                # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
-                tool_result, working_messages, compacted_count = (
-                    await self._execute_context_tool(
-                        tc_name,
-                        tc_args,
-                        working_messages,
-                        model,
-                        api_path,
-                        compacted_count,
+                if tool_call_count >= self._max_tool_calls:
+                    tool_result = json.dumps(
+                        {"error": f"工具调用次数超过本次请求上限 ({self._max_tool_calls})"},
+                        ensure_ascii=False,
                     )
-                )
-                if tool_result is None:
-                    tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
+                elif tc_name not in allowed_tool_names:
+                    tool_call_count += 1
+                    tool_result = json.dumps(
+                        {"error": f"工具未获本次请求授权: {tc_name}"},
+                        ensure_ascii=False,
+                    )
+                else:
+                    tool_call_count += 1
+                    # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
+                    # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
+                    tool_result, working_messages, compacted_count = (
+                        await self._execute_context_tool(
+                            tc_name,
+                            tc_args,
+                            working_messages,
+                            model,
+                            api_path,
+                            compacted_count,
+                        )
+                    )
+                    if tool_result is None:
+                        tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -1248,8 +1281,14 @@ class AgentLoop:
         # 外的全部内置工具。上下文管理框架工具始终注入，除非显式传空数组 []。
         registered_tools = self._tool_registry.list_tools()
         if tools is not None:
-            all_tools = list(tools)
-            if tools:
+            all_tools = []
+            for declared in tools:
+                if not isinstance(declared, dict):
+                    continue
+                name = (declared.get("function", {}) or {}).get("name", "")
+                registered = self._tool_registry.get_definition(name)
+                all_tools.append(registered.to_openai() if registered is not None else declared)
+            if all_tools:
                 all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
@@ -1266,12 +1305,15 @@ class AgentLoop:
             if name and name not in seen_names:
                 seen_names.add(name)
                 deduped_tools.append(t)
+        # 与非流式路径保持一致：未注入的工具绝不能仅凭模型返回的名称执行。
+        allowed_tool_names = seen_names
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
         # 自愈重试计数：记录本次请求已注入的修正提示次数，必须为局部变量
         # （AgentLoop 是共享单例，不能把状态放到实例属性上，避免跨请求串扰）
         retry_error_count = 0
+        tool_call_count = 0
 
         for turn in range(1, _max_turns + 1):
             # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
@@ -1459,20 +1501,33 @@ class AgentLoop:
                     },
                 })
 
-                # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
-                # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
-                tool_result, working_messages, compacted_count = (
-                    await self._execute_context_tool(
-                        tc_name,
-                        tc_args,
-                        working_messages,
-                        model,
-                        api_path,
-                        compacted_count,
+                if tool_call_count >= self._max_tool_calls:
+                    tool_result = json.dumps(
+                        {"error": f"工具调用次数超过本次请求上限 ({self._max_tool_calls})"},
+                        ensure_ascii=False,
                     )
-                )
-                if tool_result is None:
-                    tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
+                elif tc_name not in allowed_tool_names:
+                    tool_call_count += 1
+                    tool_result = json.dumps(
+                        {"error": f"工具未获本次请求授权: {tc_name}"},
+                        ensure_ascii=False,
+                    )
+                else:
+                    tool_call_count += 1
+                    # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
+                    # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
+                    tool_result, working_messages, compacted_count = (
+                        await self._execute_context_tool(
+                            tc_name,
+                            tc_args,
+                            working_messages,
+                            model,
+                            api_path,
+                            compacted_count,
+                        )
+                    )
+                    if tool_result is None:
+                        tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
                 yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
                 # 记录工具失败信息，供自愈重试注入修正提示（只保留第一个错误文本）
                 if not tool_error_text:

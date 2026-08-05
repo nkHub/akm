@@ -223,6 +223,12 @@ akm-menubar
   "agent_keep_recent_messages": 10,
   "agent_context_warning_ratio": 0.8,
   "agent_upload_dir": "~/.akm/cache",
+  "agent_workspace_root": "",
+  "agent_write_tools_enabled": false,
+  "agent_run_shell_enabled": false,
+  "agent_shell_tasks": {},
+  "agent_git_enabled": false,
+  "agent_max_tool_calls": 30,
   "agent_default_instructions": "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。",
   "tavily_api_key": "",
   "rate_limit_cooldown_sec": 60,
@@ -268,12 +274,14 @@ akm-menubar
 | `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
-| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；留空则文件工具不可用 |
+| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
 | `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`），默认关闭需显式开启 |
 | `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启 |
-| `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅在工作区内执行 `git` 命令），默认关闭需显式开启 |
+| `agent_shell_tasks` | `{}` | `akm_run_shell` 可执行的管理员预定义任务，格式为任务名到 argv 字符串数组的映射；模型只能传任务名 |
+| `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
+| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
 | `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
-| `agent_api_token` | `""` | `/v1/agent` 的可选鉴权 token，配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头；留空则不校验 |
+| `agent_api_token` | `""` | `/v1/agent` 鉴权 token；启用写入、shell 或 git 工具时必须配置，其他只读场景可留空 |
 | `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
@@ -404,9 +412,9 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
 
-服务启动后会注册内置 AKM 工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`）以及工作区文件工具（`akm_read_file` / `akm_list_dir` / `akm_glob` / `akm_grep` / `akm_file_info`，配置 `agent_workspace_root` 后可用；写工具 `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`、shell 工具 `akm_run_shell` 与 git 工具 `akm_run_git` 需分别开启 `agent_write_tools_enabled` / `agent_run_shell_enabled` / `agent_git_enabled` 才会注册），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。内置工具采用白名单注入：客户端请求显式传入 `tools` 时只注入声明中的工具（内置工具不自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 时不注入任何工具；未传 `tools` 时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` / `akm_run_git` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作、shell 执行与 git 操作涉及本机写入，需在 `tools` 中显式声明才能启用）。调用方声明工具时不应使用与内置工具相同的名称，以免工具定义与内置处理器不匹配。`akm_edit_file` 支持结构化编辑（行号模式：`start_line` / `end_line` 行区间替换为 `new_content`，可配 `old_string` 锚点校验；内容模式：`old_string` → `new_string`）。工具调用失败时，Agent Loop 会按 `agent_tool_retry_max_retries`（默认 1）注入 `system` 修正提示强制模型重试，流式模式下先下发 `tool_retry` 事件。
+服务启动后会注册内置 AKM 工具（`akm_get_status` / `akm_list_keys` / `akm_list_logs` / `akm_get_time` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image`）以及工作区文件工具（`akm_read_file` / `akm_list_dir` / `akm_glob` / `akm_grep` / `akm_file_info`，配置 `agent_workspace_root` 后可用；写工具 `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`、shell 工具 `akm_run_shell` 与 git 工具 `akm_run_git` 需分别开启 `agent_write_tools_enabled` / `agent_run_shell_enabled` / `agent_git_enabled` 才会注册），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。内置工具采用白名单注入与执行校验：客户端请求显式传入 `tools` 时，只会向模型暴露并执行声明中的工具；同名的服务端注册工具始终使用服务端 schema，客户端不能篡改其参数契约；显式传空数组 `[]` 时不注入也不执行任何工具；未传 `tools` 时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` / `akm_run_git` 外的全部内置工具。`akm_edit_file` 支持结构化编辑（行号模式：`start_line` / `end_line` 行区间替换为 `new_content`，可配 `old_string` 锚点校验；内容模式：`old_string` → `new_string`）。工具调用失败时，Agent Loop 会按 `agent_tool_retry_max_retries`（默认 1）注入 `system` 修正提示强制模型重试，流式模式下先下发 `tool_retry` 事件。
 
-工作区文件工具受沙箱约束：所有路径（含 `..` 穿越、绝对路径、软链接）在解析后都会被校验必须在 `agent_workspace_root` 目录内，越界访问直接返回错误，不会读写工作区之外的任何文件。`akm_run_git` 同样以工作区为 cwd 执行且命令必须 `git` 开头、禁止 shell 拼接字符，并强制 `--no-pager` 输出。`/v1/agent` 可选鉴权：配置 `agent_api_token` 后，请求必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 401。
+文件工具受工作区沙箱约束：所有路径（含 `..` 穿越、绝对路径、软链接）在解析后都会被校验必须在 `agent_workspace_root` 目录内；请求级 `workspace_root` 只能选用该根目录的子目录。`/v1/agent` 的 multipart 附件单次最多 8 个、总大小最多 20MB。图片编辑仅能读取工作区或 `agent_upload_dir` 内、且不超过 20MB 的文件或 Base64 数据。`akm_run_git` 只接受 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch` 等固定 operation，不接受自由命令。`akm_run_shell` 只能执行 `agent_shell_tasks` 中管理员配置的 argv 任务，仍是显式开启的主机级进程执行能力，`cwd` 只决定初始目录，不能作为文件系统沙箱。启用写入、shell 或 git 工具时，必须配置 `agent_api_token`，请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头。
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化。
 
@@ -425,7 +433,7 @@ akm agent session rm 会话名      # 删除会话
 - 默认启动 rich 逐行 REPL：每次发送后流式渲染回复，支持内建斜杠命令；适合任何终端（含 SSH / 管道）。
 - 交互模式下支持内建斜杠命令：`/model`（切换模型）、`/workspace`（切换工作区）、`/instructions`（覆盖系统指令）、`/sessions` / `/resume`（历史会话）、`/clear`（清空消息）、`/quit`（退出）等，输入 `/help` 查看全部。
 - 会话多轮历史持久化到 `~/.akm/agent_sessions/*.json`，服务端 `/v1/agent` 保持无状态，客户端在每轮请求时全量回传 `messages`。
-- `--workspace-root` 缺省为当前目录，作为文件工具沙箱根（等价于请求级 `workspace_root` 覆盖）。
+- `--workspace-root` 缺省为当前目录，作为文件工具工作区；配置了全局 `agent_workspace_root` 时，该目录必须位于全局工作区内。
 - 交互模式需要本地代理服务运行（`akm serve`）。
 - 输出基于 `rich` 渲染：交互终端下流式回复使用三区实时面板（思考区 / 工具区 / 正文区，rich Live），正文区每个增量到达即重渲染 markdown（粗体 / 列表 / 代码语法高亮），思考与正文逐字出现；内容超出终端高度时自动裁剪、始终跟随最新回复（等同自动滚动到底部）；工具调用与状态提示为轻量 ANSI 短行。非 TTY（管道 / 重定向）自动退化为逐行打印。颜色缺省按是否 TTY 自动开启，可用 `--no-color` 关闭。
 - 模型的思考过程（`reasoning_delta`）默认折叠，只显示「思考中…」提示，避免 token 流刷屏；需要查看详细思考时用 `--show-reasoning` 开启。

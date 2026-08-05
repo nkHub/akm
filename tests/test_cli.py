@@ -152,6 +152,21 @@ def test_config_set_bool(monkeypatch):
     assert load_config()["auto_open_admin"] is False
 
 
+def test_load_config_normalizes_agent_tool_limits(monkeypatch):
+    """Agent 新增工具调用上限应容错，且上下文上限保留 0 的关闭语义。"""
+    tmpdir = _setup_tmp_env(monkeypatch)
+    config_path = Path(tmpdir) / "config.json"
+    config_path.write_text(json.dumps({
+        "agent_max_tool_calls": [],
+        "agent_max_context_tokens": 0,
+    }), encoding="utf-8")
+
+    config = load_config()
+
+    assert config["agent_max_tool_calls"] == 30
+    assert config["agent_max_context_tokens"] == 0
+
+
 def test_plugin_list_enable_disable(monkeypatch):
     """插件列表和启停命令应基于 plugin manager 正常工作。"""
     _setup_tmp_env(monkeypatch)

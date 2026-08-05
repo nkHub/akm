@@ -13,6 +13,7 @@ from akm.agent_runtime.tools import (
     reset_request_workspace_root,
     set_request_workspace_root,
 )
+from akm.config import normalize_agent_shell_tasks
 
 # 供测试复用的工作区配置
 WORKSPACE = "/tmp/akm-test-workspace"
@@ -24,6 +25,10 @@ def _workspace_cfg(**overrides):
         "agent_workspace_root": WORKSPACE,
         "agent_write_tools_enabled": True,
         "agent_run_shell_enabled": True,
+        "agent_shell_tasks": {
+            "diagnose": ["sh", "-c", "pwd && echo ok"],
+            "slow": ["sleep", "5"],
+        },
     }
     cfg.update(overrides)
     return cfg
@@ -35,6 +40,16 @@ def _handlers(monkeypatch, **cfg):
         "akm.agent_runtime.tools.load_config", lambda: _workspace_cfg(**cfg)
     )
     return {t.name: t.handler for t in build_workspace_tools()}
+
+
+def test_normalize_agent_shell_tasks_only_keeps_safe_argv_mapping():
+    """任务配置只接受安全任务名与非空字符串 argv，避免坏配置扩大执行入口。"""
+    assert normalize_agent_shell_tasks({
+        "lint": ["yarn", "lint"],
+        "bad task": ["yarn", "test"],
+        "empty": [],
+        "mixed": ["yarn", 1],
+    }) == {"lint": ["yarn", "lint"]}
 
 
 @pytest.fixture(autouse=True)
@@ -86,19 +101,32 @@ def test_workspace_root_returns_none_when_unconfigured(monkeypatch):
 
 
 def test_request_workspace_root_override(monkeypatch):
-    """请求级 workspace_root 覆盖应优先于全局配置，恢复后回退全局配置。"""
+    """请求级 workspace_root 只能选择全局工作区内的子目录。"""
     monkeypatch.setattr(
         "akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"}
     )
     assert str(_workspace_root()) == str(Path("/global/ws").resolve())
 
-    token = set_request_workspace_root("/req/ws")
+    token = set_request_workspace_root("/global/ws/project")
     try:
-        assert str(_workspace_root()) == str(Path("/req/ws").resolve())
+        assert str(_workspace_root()) == str(Path("/global/ws/project").resolve())
     finally:
         reset_request_workspace_root(token)
 
     assert str(_workspace_root()) == str(Path("/global/ws").resolve())
+
+
+def test_request_workspace_root_rejects_outside_global_root(monkeypatch):
+    """请求级工作区不得把文件工具的沙箱范围扩大到全局根目录之外。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"}
+    )
+    token = set_request_workspace_root("/other/ws")
+    try:
+        with pytest.raises(ValueError, match="必须位于"):
+            _workspace_root()
+    finally:
+        reset_request_workspace_root(token)
 
 
 def test_request_workspace_root_empty_keeps_global(monkeypatch):
@@ -192,6 +220,19 @@ async def test_grep_searches_content(_workspace, monkeypatch):
     assert out["total"] == 1
     assert out["results"][0]["file"] == "code.py"
     assert out["results"][0]["line"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_symlink_outside_workspace(_workspace, monkeypatch, tmp_path):
+    """grep 必须逐项校验软链接真实路径，不能读取工作区外的文件内容。"""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret marker", encoding="utf-8")
+    (_workspace / "outside-link.txt").symlink_to(outside)
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_grep"](pattern="secret marker"))
+
+    assert out["total"] == 0
 
 
 @pytest.mark.asyncio
@@ -354,10 +395,10 @@ async def test_run_shell_requires_enabled_flag(_workspace, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_shell_executes_with_workspace_cwd(_workspace, monkeypatch):
-    """shell 工具应以工作区为 cwd 执行并返回输出与退出码。"""
+    """shell 工具只能执行配置的任务，且以工作区为 cwd。"""
     handlers = _handlers(monkeypatch)
 
-    out = json.loads(await handlers["akm_run_shell"](command="pwd && echo ok"))
+    out = json.loads(await handlers["akm_run_shell"](task="diagnose"))
 
     assert out["exit_code"] == 0
     assert str(_workspace) in out["output"]
@@ -366,10 +407,10 @@ async def test_run_shell_executes_with_workspace_cwd(_workspace, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_shell_timeout(_workspace, monkeypatch):
-    """shell 工具超时应终止命令并返回错误。"""
+    """预定义任务超时应被终止并返回错误。"""
     handlers = _handlers(monkeypatch)
 
-    out = json.loads(await handlers["akm_run_shell"](command="sleep 5", timeout=1))
+    out = json.loads(await handlers["akm_run_shell"](task="slow", timeout=1))
 
     assert "超时" in out["error"]
 
@@ -394,32 +435,43 @@ async def test_run_git_status_in_workspace(_workspace, monkeypatch):
     (_workspace / "a.txt").write_text("x", encoding="utf-8")
     handlers = _handlers(monkeypatch, agent_git_enabled=True)
 
-    out = json.loads(await handlers["akm_run_git"](command="git status --short"))
+    out = json.loads(await handlers["akm_run_git"](operation="status"))
 
     assert out["exit_code"] == 0
     assert "a.txt" in out["output"]
 
 
 @pytest.mark.asyncio
-async def test_run_git_rejects_shell_metacharacters(_workspace, monkeypatch):
-    """git 命令含 shell 元字符应被拒绝，防止命令拼接注入。"""
+async def test_run_git_rejects_unknown_operation(_workspace, monkeypatch):
+    """Git 工具只支持服务端定义的结构化操作。"""
     handlers = _handlers(monkeypatch, agent_git_enabled=True)
 
-    out = json.loads(await handlers["akm_run_git"](command="git status; rm -rf /"))
+    out = json.loads(await handlers["akm_run_git"](operation="clone"))
 
     assert "error" in out
-    assert "非法字符" in out["error"]
+    assert "不支持" in out["error"]
 
 
 @pytest.mark.asyncio
-async def test_run_git_requires_git_prefix(_workspace, monkeypatch):
-    """命令不以 git 开头应被拒绝。"""
+async def test_run_git_rejects_paths_outside_workspace(_workspace, monkeypatch):
+    """Git 路径参数不能通过绝对路径或 .. 逃离工作区。"""
     handlers = _handlers(monkeypatch, agent_git_enabled=True)
 
-    out = json.loads(await handlers["akm_run_git"](command="ls -la"))
+    out = json.loads(await handlers["akm_run_git"](operation="add", paths=["../outside.txt"]))
 
     assert "error" in out
-    assert "必须以 git 开头" in out["error"]
+    assert "工作区内的相对路径" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_git_commit_requires_message(_workspace, monkeypatch):
+    """提交操作必须提供受限长度的提交说明。"""
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out = json.loads(await handlers["akm_run_git"](operation="commit"))
+
+    assert "error" in out
+    assert "message" in out["error"]
 
 
 # ── 工具注册集合 ──
@@ -458,3 +510,19 @@ def test_workspace_tools_registration(monkeypatch):
     assert "akm_delete_file" in names
     assert "akm_run_shell" in names
     assert "akm_run_git" in names
+
+
+def test_shell_and_git_schema_exclude_free_command(monkeypatch):
+    """危险工具的公开 schema 不得重新暴露自由命令字符串入口。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: _workspace_cfg(agent_git_enabled=True),
+    )
+    tools = {tool.name: tool for tool in build_workspace_tools()}
+
+    shell_properties = tools["akm_run_shell"].parameters["properties"]
+    git_properties = tools["akm_run_git"].parameters["properties"]
+    assert "task" in shell_properties
+    assert "command" not in shell_properties
+    assert "operation" in git_properties
+    assert "command" not in git_properties

@@ -48,8 +48,10 @@ DEFAULTS = {
     "agent_upload_dir": "~/.akm/cache", # Agent 上传文件（图片）的保存目录，路径支持 ~ 展开
     "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
     "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
-    "agent_run_shell_enabled": False,   # 是否启用 Agent 执行 shell 命令工具（独立于写工具，默认关闭）
-    "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅在工作区目录内执行 git 命令）
+    "agent_run_shell_enabled": False,   # 是否启用 Agent 预定义任务执行工具（独立于写工具，默认关闭）
+    "agent_shell_tasks": {},            # Agent 允许执行的预定义任务：任务名 -> argv 字符串数组
+    "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅执行固定 operation）
+    "agent_max_tool_calls": 30,         # 单次 Agent 请求最多执行的工具调用数，限制循环与资源消耗
     "agent_tool_retry_max_retries": 1,  # Agent 工具失败后的最大自愈修正轮次（0 关闭：失败结果照常回传，模型自主决定）
     "agent_api_token": "",              # /v1/agent 请求鉴权 token（Bearer）；留空表示不校验
     "agent_default_instructions": (
@@ -84,6 +86,44 @@ def normalize_http_proxy_url(raw: object) -> str:
     if "://" not in text and text[0].isalnum():
         return f"http://{text}"
     return text
+
+
+def normalize_agent_shell_tasks(raw: object) -> dict[str, list[str]]:
+    """规范化 Agent 预定义 shell 任务，拒绝无法安全传给 exec 的配置形态。
+
+    任务命令由管理员写入配置，模型仅能选择任务名，不能在请求中拼接命令。
+    每项必须是非空字符串 argv 数组；任务名仅接受字母、数字、下划线与连字符，
+    防止配置歧义与文档展示时注入不可见字符。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, list[str]] = {}
+    for name, argv in raw.items():
+        task_name = str(name or "").strip()
+        if not task_name or not task_name.replace("_", "").replace("-", "").isalnum():
+            continue
+        if not isinstance(argv, list):
+            continue
+        args = [str(item) for item in argv if isinstance(item, str) and item]
+        if args and len(args) == len(argv):
+            normalized[task_name] = args
+    return normalized
+
+
+def _safe_int(raw: object, default: int) -> int:
+    """将配置值转为整数；类型错误时回退默认值，避免手工配置阻断服务启动。"""
+    try:
+        return default if raw is None or raw == "" else int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(raw: object, default: float) -> float:
+    """将配置值转为浮点数；类型错误时回退默认值，和整数配置保持一致。"""
+    try:
+        return default if raw is None or raw == "" else float(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def resolve_http_proxy_url(cfg: dict | None = None) -> str | None:
@@ -150,15 +190,17 @@ def load_config() -> dict:
     merged["proxy_retry_backoff_base_sec"] = max(0.1, float(merged.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
     merged["proxy_default_timeout_sec"] = max(30.0, float(merged.get("proxy_default_timeout_sec", 120.0) or 120.0))
     # Agent Loop
-    merged["agent_max_turns"] = max(1, int(merged.get("agent_max_turns", 100) or 100))
-    merged["agent_max_context_tokens"] = max(0, int(merged.get("agent_max_context_tokens", 272000) or 272000))
-    merged["agent_keep_recent_messages"] = max(2, int(merged.get("agent_keep_recent_messages", 10) or 10))
-    merged["agent_context_warning_ratio"] = max(0.0, min(1.0, float(merged.get("agent_context_warning_ratio", 0.8) or 0.8)))
+    merged["agent_max_turns"] = max(1, _safe_int(merged.get("agent_max_turns"), 100))
+    merged["agent_max_context_tokens"] = max(0, _safe_int(merged.get("agent_max_context_tokens"), 272000))
+    merged["agent_keep_recent_messages"] = max(2, _safe_int(merged.get("agent_keep_recent_messages"), 10))
+    merged["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(merged.get("agent_context_warning_ratio"), 0.8)))
     # Agent 文件工具开关：布尔归一化，防止配置为字符串/数字时误判
     merged["agent_write_tools_enabled"] = merged.get("agent_write_tools_enabled") is True
     merged["agent_run_shell_enabled"] = merged.get("agent_run_shell_enabled") is True
     merged["agent_git_enabled"] = merged.get("agent_git_enabled") is True
-    merged["agent_tool_retry_max_retries"] = max(0, int(merged.get("agent_tool_retry_max_retries", 1) or 0))
+    merged["agent_shell_tasks"] = normalize_agent_shell_tasks(merged.get("agent_shell_tasks"))
+    merged["agent_max_tool_calls"] = max(1, _safe_int(merged.get("agent_max_tool_calls"), 30))
+    merged["agent_tool_retry_max_retries"] = max(0, _safe_int(merged.get("agent_tool_retry_max_retries"), 1))
     # Key 管理
     merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列
@@ -189,14 +231,16 @@ def save_config(data: dict) -> None:
     current["proxy_retry_backoff_base_sec"] = max(0.1, float(current.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
     current["proxy_default_timeout_sec"] = max(30.0, float(current.get("proxy_default_timeout_sec", 120.0) or 120.0))
     # Agent Loop
-    current["agent_max_turns"] = max(1, int(current.get("agent_max_turns", 100) or 100))
-    current["agent_max_context_tokens"] = max(0, int(current.get("agent_max_context_tokens", 272000) or 272000))
-    current["agent_keep_recent_messages"] = max(2, int(current.get("agent_keep_recent_messages", 10) or 10))
-    current["agent_context_warning_ratio"] = max(0.0, min(1.0, float(current.get("agent_context_warning_ratio", 0.8) or 0.8)))
+    current["agent_max_turns"] = max(1, _safe_int(current.get("agent_max_turns"), 100))
+    current["agent_max_context_tokens"] = max(0, _safe_int(current.get("agent_max_context_tokens"), 272000))
+    current["agent_keep_recent_messages"] = max(2, _safe_int(current.get("agent_keep_recent_messages"), 10))
+    current["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(current.get("agent_context_warning_ratio"), 0.8)))
     current["agent_write_tools_enabled"] = current.get("agent_write_tools_enabled") is True
     current["agent_run_shell_enabled"] = current.get("agent_run_shell_enabled") is True
     current["agent_git_enabled"] = current.get("agent_git_enabled") is True
-    current["agent_tool_retry_max_retries"] = max(0, int(current.get("agent_tool_retry_max_retries", 1) or 0))
+    current["agent_shell_tasks"] = normalize_agent_shell_tasks(current.get("agent_shell_tasks"))
+    current["agent_max_tool_calls"] = max(1, _safe_int(current.get("agent_max_tool_calls"), 30))
+    current["agent_tool_retry_max_retries"] = max(0, _safe_int(current.get("agent_tool_retry_max_retries"), 1))
     # Key 管理
     current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列

@@ -1,6 +1,7 @@
 """插件管理器 — 扫描、加载、生命周期管理、配置读写、Hook 管道执行"""
 import json
 import logging
+import re
 import traceback
 import zipfile
 import shutil
@@ -17,6 +18,35 @@ from .context import RequestContext
 from akm.error_log import write_error_log
 
 logger = logging.getLogger("akm.plugin_manager")
+
+# 插件会在 AKM 进程内执行，安装包仅接受扁平的、安全名称；同时限制压缩包，
+# 避免管理接口被异常归档占满内存、临时目录或磁盘。
+_PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_PLUGIN_ARCHIVE_MAX_BYTES = 20 * 1024 * 1024
+_PLUGIN_ARCHIVE_MAX_FILES = 500
+_PLUGIN_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+
+
+def _validate_plugin_archive(zf: zipfile.ZipFile) -> None:
+    """校验上传归档的成员路径与解压预算，异常时在写盘前拒绝。"""
+    members = zf.infolist()
+    if len(members) > _PLUGIN_ARCHIVE_MAX_FILES:
+        raise ValueError(f"压缩包文件数不能超过 {_PLUGIN_ARCHIVE_MAX_FILES}")
+    total_size = 0
+    for info in members:
+        member = Path(info.filename)
+        if member.is_absolute() or ".." in member.parts:
+            raise ValueError("压缩包包含非法路径")
+        total_size += info.file_size
+        if total_size > _PLUGIN_ARCHIVE_MAX_UNCOMPRESSED_BYTES:
+            raise ValueError(
+                f"压缩包解压后总大小不能超过 {_PLUGIN_ARCHIVE_MAX_UNCOMPRESSED_BYTES // (1024 * 1024)}MB"
+            )
+
+
+def _is_valid_plugin_name(name: str) -> bool:
+    """只接受用于目录、URL 和模块标识的安全插件名，拒绝绝对路径和穿越片段。"""
+    return bool(_PLUGIN_NAME_RE.fullmatch(str(name or "")))
 
 
 class _PluginStaticFiles(StaticFiles):
@@ -543,12 +573,21 @@ class PluginManager:
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            content = await file.read()
+            content = await file.read(_PLUGIN_ARCHIVE_MAX_BYTES + 1)
+            if len(content) > _PLUGIN_ARCHIVE_MAX_BYTES:
+                return {
+                    "ok": False,
+                    "error": f"压缩包不能超过 {_PLUGIN_ARCHIVE_MAX_BYTES // (1024 * 1024)}MB",
+                }
             zippath = tmp / "plugin.zip"
             zippath.write_bytes(content)
 
-            with zipfile.ZipFile(zippath, "r") as zf:
-                zf.extractall(tmp)
+            try:
+                with zipfile.ZipFile(zippath, "r") as zf:
+                    _validate_plugin_archive(zf)
+                    zf.extractall(tmp)
+            except (ValueError, zipfile.BadZipFile) as exc:
+                return {"ok": False, "error": f"插件压缩包无效: {exc}"}
 
             # 查找 plugin.json
             json_candidates = list(tmp.rglob("plugin.json"))
@@ -571,6 +610,8 @@ class PluginManager:
                 return {"ok": False, "error": "plugin.json 格式错误"}
 
             name = meta.name
+            if not _is_valid_plugin_name(name):
+                return {"ok": False, "error": "插件名只能包含字母、数字、下划线和连字符"}
 
             # ── 重名检测 ──
             dest = self._third_party_dir / name
