@@ -353,3 +353,66 @@ async def test_auth_accepts_endpoint_request_with_token(monkeypatch):
         )
     assert resp.status_code == 200
     assert len(loop.calls[0]["messages"]) == 1
+
+
+def test_render_default_instructions_replaces_placeholders():
+    """默认指令中的占位符应按运行时路径替换。"""
+    from akm.agent_runtime.router import _render_default_instructions
+
+    sample = (
+        "{AKM_SOURCE_DIR} | {CURRENT_WORKING_DIRECTORY} | "
+        "{USER_AGENTS_MD_PATH} | {USER_AGENTS_SKILLS_DIR} | {USER_PI_NPM_DIR}"
+    )
+    out = _render_default_instructions(sample, "/tmp/myws")
+
+    # AKM 源码根：akm/__init__.py 的父目录的父目录
+    import akm
+    from pathlib import Path as P
+
+    assert str(P(akm.__file__).resolve().parent.parent) in out
+    # 请求级工作区优先
+    assert "/tmp/myws" in out
+    # 本机用户路径（存在才替换，不存在替换为空）
+    home = P.home()
+    if (home / ".config/opencode/AGENTS.md").exists():
+        assert str(home / ".config/opencode/AGENTS.md") in out
+    else:
+        assert out.startswith("{USER_AGENTS_MD_PATH}")
+    # 不存在的用户目录替换为空字符串
+    assert "  | {USER_PI_NPM_DIR}" not in out
+
+
+def test_render_default_instructions_empty_returns_empty():
+    """空指令原样返回。"""
+    from akm.agent_runtime.router import _render_default_instructions
+
+    assert _render_default_instructions("", "/tmp") == ""
+
+
+@pytest.mark.asyncio
+async def test_default_instructions_placeholder_replaced_in_request(monkeypatch):
+    """未传 instructions 时回填默认指令，且占位符在注入前被替换。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config",
+        lambda: {"agent_default_instructions": "源码 {AKM_SOURCE_DIR}，工作区 {CURRENT_WORKING_DIRECTORY}"},
+    )
+    loop = app.state.agent_loop
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "workspace_root": "/tmp/ws",
+            },
+        )
+    assert resp.status_code == 200
+    options = loop.calls[0]["options"]
+    import akm
+    from pathlib import Path as P
+
+    assert str(P(akm.__file__).resolve().parent.parent) in options["instructions"]
+    assert "/tmp/ws" in options["instructions"]
+    assert "{AKM_SOURCE_DIR}" not in options["instructions"]
+    assert "{CURRENT_WORKING_DIRECTORY}" not in options["instructions"]
