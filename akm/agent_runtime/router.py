@@ -12,11 +12,48 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import akm
 from akm.config import load_config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _render_default_instructions(text: str, workspace_root: str = "") -> str:
+    """替换默认系统指令中的占位符（{...}）为运行时实际路径。
+
+    占位符仅当文本中出现时才替换，未出现的保持原样：
+    - {AKM_SOURCE_DIR}          → akm 包源码根目录（akm/__init__.py 所在目录的父目录）
+    - {CURRENT_WORKING_DIRECTORY} → 本次请求的工作区根目录（未传时取当前进程目录）
+    - {USER_AGENTS_MD_PATH}     → 用户全局 AGENTS.md（~/.config/opencode/AGENTS.md，存在才替换）
+    - {USER_AGENTS_SKILLS_DIR}  → 用户 skills 目录（~/.agents/skills，存在才替换）
+    - {USER_PI_NPM_DIR}         → pi 依赖目录（~/.pi/node_modules，存在才替换）
+    不存在的路径（如用户未配置 skills）替换为空字符串，避免注入无效路径。
+    """
+    if not text:
+        return text
+
+    # akm 包源码根目录：akm/__init__.py 的上一级（即项目根）
+    source_dir = str(Path(akm.__file__).resolve().parent.parent)
+
+    # 当前工作目录：优先请求级 workspace_root，否则进程当前目录
+    cwd = str(workspace_root or "").strip() or os.getcwd()
+
+    # 用户环境路径探测：仅替换存在的路径，避免注入误导性路径
+    home = Path.home()
+    candidates = {
+        "{USER_AGENTS_MD_PATH}": home / ".config/opencode/AGENTS.md",
+        "{USER_AGENTS_SKILLS_DIR}": home / ".agents/skills",
+        "{USER_PI_NPM_DIR}": home / ".pi/node_modules",
+    }
+
+    out = text
+    out = out.replace("{AKM_SOURCE_DIR}", source_dir)
+    out = out.replace("{CURRENT_WORKING_DIRECTORY}", cwd)
+    for placeholder, path in candidates.items():
+        out = out.replace(placeholder, str(path) if path.exists() else "")
+    return out
 
 
 async def _check_agent_auth(request: Request) -> JSONResponse | None:
@@ -194,6 +231,8 @@ async def agent(request: Request):
     api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
     stream = bool(body.get("stream", False))
     workspace_root = str(body.get("workspace_root", "") or "")
+    # 回填的默认指令包含 {AKM_SOURCE_DIR} 等占位符，注入前替换为运行时实际路径
+    instructions = _render_default_instructions(instructions, workspace_root)
     try:
         max_turns = int(body.get("max_turns", 0) or 0)
     except (TypeError, ValueError):
