@@ -24,10 +24,11 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_grep` | 在工作区内按正则搜索文件内容，返回命中文件、行号与行内容（限制最多 100 条） |
 | `akm_file_info` | 查询工作区内文件/目录的类型、大小与修改时间 |
 | `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`） |
-| `akm_edit_file` | 精确替换工作区内文件内容（`old_string` → `new_string`，支持 `replace_all`；需开启 `agent_write_tools_enabled`） |
+| `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内文件或目录（`recursive` 可选，禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
 | `akm_run_shell` | 在工作区目录内执行 shell 命令并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
+| `akm_run_git` | 在工作区目录内执行 git 命令并返回输出与退出码（命令必须以 `git` 开头，禁止 shell 拼接字符；需开启 `agent_git_enabled`） |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
@@ -65,7 +66,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 |------|------|------|------|
 | `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
 | `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作与 shell 执行涉及本机写入，需在 tools 中显式声明才能启用） |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` / `akm_run_git` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作、shell 执行与 git 操作涉及本机写入，需在 tools 中显式声明才能启用） |
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息；未传时使用 config.json 的 `agent_default_instructions`（默认要求数学公式以 KaTeX 语法返回） |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
@@ -111,15 +112,16 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `agent_workspace_root` | `""` | 工作区沙箱根目录，所有文件工具仅能在此目录内读写；留空时文件工具不注册 |
 | `agent_write_tools_enabled` | `false` | 是否注册写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`） |
 | `agent_run_shell_enabled` | `false` | 是否注册 shell 工具（`akm_run_shell`） |
+| `agent_git_enabled` | `false` | 是否注册 git 工具（`akm_run_git`，仅在工作区内执行 git 命令） |
 | `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token，配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头 |
 
 ### 读工具（默认可用）
 
 配置 `agent_workspace_root` 后，以下只读工具始终注册：`akm_read_file`、`akm_list_dir`、`akm_glob`、`akm_grep`、`akm_file_info`。它们只读取工作区内的文件，路径越界访问直接返回错误。
 
-### 写工具与 shell（默认禁用）
+### 写工具、shell 与 git（默认禁用）
 
-写工具与 shell 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作与 shell 执行会改动本机状态，应经人工确认后再开放。
+写工具、shell 与 git 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作、shell 执行与 git 操作会改动本机状态，应经人工确认后再开放。
 
 ### 路径沙箱
 
@@ -129,7 +131,17 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 - 相对路径中的 `..` 穿越工作区被拒绝；
 - 软链接指向工作区外时（resolve 后越界）被拒绝。
 
-越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件。`akm_run_shell` 命令以工作区目录为 cwd 执行，并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，超时命令会被终止。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，避免工具结果撑爆上下文。
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件。`akm_run_shell` 命令以工作区目录为 cwd 执行，并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，超时命令会被终止；`akm_run_git` 同样以工作区为 cwd、命令必须 `git` 开头且不允许 shell 拼接字符（`;` `|` `&&` `||` 等），并强制 `--no-pager` 输出。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，避免工具结果撑爆上下文。
+
+## 自愈重试
+
+工具调用失败时（工具返回含 `error` 字段的结果，如路径越界、文件未找到、git 命令执行失败等），Agent Loop 会**注入一条 `system` 修正提示**，强制模型基于错误信息修正工具参数后重新调用，避免模型收到失败结果后敷衍了事或死循环。重试同样占用轮次，超过上限后错误结果照常回传，由模型自主决定。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `agent_tool_retry_max_retries` | `1` | 工具失败后的最大自愈修正轮次；`0` 关闭（失败结果直接回传，模型自行决定是否修正） |
+
+SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事件（`data` 含 `turn` / `retry_count` / `max_retries` / `error`），便于客户端感知服务端已介入重试。
 
 ### 可选鉴权
 
@@ -247,6 +259,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
 | `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
+| `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
 | `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |
 | `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` / `data.compacted` |
 
