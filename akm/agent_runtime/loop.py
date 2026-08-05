@@ -871,6 +871,26 @@ class AgentLoop:
 
         return None, working_messages, compacted_count
 
+    async def _execute_registered_tool(self, tc_name: str, tc_args: dict, workspace_root: str) -> str:
+        """执行注册在 ToolRegistry 中的普通工具，期间注入请求级工作区覆盖。
+
+        文件/写/shell 等工具通过 tools._workspace_root() 读取工作区根目录，
+        默认取全局配置 agent_workspace_root。这里在工具执行期间临时把
+        请求级的 workspace_root 写入 ContextVar，使 /v1/agent 请求可以按
+        请求指定工作区（如 CLI 指向当前目录），执行完立即恢复，避免泄漏
+        到并发请求。延迟导入 tools 避免循环依赖（tools 顶层导入本模块的 ToolDef）。
+        """
+        from akm.agent_runtime.tools import (
+            reset_request_workspace_root,
+            set_request_workspace_root,
+        )
+
+        ws_token = set_request_workspace_root(workspace_root)
+        try:
+            return await self._tool_registry.execute(tc_name, tc_args)
+        finally:
+            reset_request_workspace_root(ws_token)
+
     async def run(
         self,
         messages: list[dict],
@@ -880,6 +900,7 @@ class AgentLoop:
         instructions: str = "",
         max_turns: int = 0,
         api_path: str = "chat/completions",
+        workspace_root: str = "",
     ) -> AgentResult:
         """运行 Agent Loop
 
@@ -891,6 +912,8 @@ class AgentLoop:
             instructions: 系统级指令，注入到 messages 首条 system 消息
             max_turns: 最大迭代轮次，传入 0 使用默认值 MAX_AGENT_TURNS
             api_path: LLM 调用协议格式（chat/completions / responses / messages）
+            workspace_root: 本次请求的工作区沙箱根目录（覆盖全局配置），
+                            空字符串时使用 config.json 的 agent_workspace_root
 
         Returns:
             AgentResult 包含 ok、final_message、完整 messages 历史等
@@ -1078,7 +1101,7 @@ class AgentLoop:
                 })
 
                 # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
-                # 其余委托 ToolRegistry 执行
+                # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
                 tool_result, working_messages, compacted_count = (
                     await self._execute_context_tool(
                         tc_name,
@@ -1090,7 +1113,7 @@ class AgentLoop:
                     )
                 )
                 if tool_result is None:
-                    tool_result = await self._tool_registry.execute(tc_name, tc_args)
+                    tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -1129,6 +1152,7 @@ class AgentLoop:
         instructions: str = "",
         max_turns: int = 0,
         api_path: str = "chat/completions",
+        workspace_root: str = "",
     ) -> AsyncGenerator[str, None]:
         """运行 Agent Loop 并流式返回 SSE 事件
 
@@ -1382,7 +1406,7 @@ class AgentLoop:
                 })
 
                 # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
-                # 其余委托 ToolRegistry 执行
+                # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
                 tool_result, working_messages, compacted_count = (
                     await self._execute_context_tool(
                         tc_name,
@@ -1394,7 +1418,7 @@ class AgentLoop:
                     )
                 )
                 if tool_result is None:
-                    tool_result = await self._tool_registry.execute(tc_name, tc_args)
+                    tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
                 yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
 
                 tool_result_msgs.append({
