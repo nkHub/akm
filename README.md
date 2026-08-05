@@ -223,7 +223,7 @@ akm-menubar
   "agent_keep_recent_messages": 10,
   "agent_context_warning_ratio": 0.8,
   "agent_upload_dir": "~/.akm/cache",
-  "agent_default_instructions": "你是运行在 AKM Agent CLI（akm agent）中的专家编程助手……",
+  "agent_default_instructions": "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。",
   "tavily_api_key": "",
   "rate_limit_cooldown_sec": 60,
   "audit_queue_maxsize": 512,
@@ -274,7 +274,7 @@ akm-menubar
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅在工作区内执行 `git` 命令），默认关闭需显式开启 |
 | `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
 | `agent_api_token` | `""` | `/v1/agent` 的可选鉴权 token，配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头；留空则不校验 |
-| `agent_default_instructions` | AKM Agent CLI 专家编程助手提示词 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认定义工具清单、使用指南、沙箱约束与技能说明（含 `{AKM_SOURCE_DIR}` 等运行时占位符，由部署侧替换） |
+| `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
 ### 出站代理
