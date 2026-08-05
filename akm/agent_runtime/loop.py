@@ -28,6 +28,7 @@ _DEFAULT_EXCLUDED_TOOLS: frozenset[str] = frozenset(
         "akm_make_dir",
         "akm_delete_file",
         "akm_run_shell",
+        "akm_run_git",
     }
 )
 
@@ -642,6 +643,10 @@ class AgentLoop:
         self._context_warning_ratio = max(
             0.0, min(1.0, float(load_config().get("agent_context_warning_ratio", 0.8) or 0.8))
         )
+        # 自愈重试：工具调用失败后允许强制模型修正参数再试的最大轮次（0 关闭）
+        self._tool_retry_max = max(
+            0, int(load_config().get("agent_tool_retry_max_retries", 1) or 0)
+        )
         self._audit_submitter = audit_submitter
 
     async def _try_audit(
@@ -891,6 +896,21 @@ class AgentLoop:
         finally:
             reset_request_workspace_root(ws_token)
 
+    @staticmethod
+    def _tool_error_text(result_text: str) -> str:
+        """判断工具结果是否为失败：结果是含非空 error 字段的 JSON 时返回错误文本，否则返回空串。
+
+        工具内部统一用 {"error": "..."} 表示失败（路径越界、开关未启用、命令失败等），
+        自愈重试据此识别失败，并把它作为修正提示反馈给模型。
+        """
+        try:
+            data = json.loads(result_text)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])
+        return ""
+
     async def run(
         self,
         messages: list[dict],
@@ -962,6 +982,9 @@ class AgentLoop:
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
+        # 自愈重试计数：记录本次请求已注入的修正提示次数，必须为局部变量
+        # （AgentLoop 是共享单例，不能把状态放到实例属性上，避免跨请求串扰）
+        retry_error_count = 0
 
         for turn in range(1, _max_turns + 1):
             # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
@@ -1079,6 +1102,8 @@ class AgentLoop:
                 "tool_calls": [],
             }
             tool_results: list[dict] = []
+            # 本轮工具失败信息（首个错误文本），用于自愈重试判断
+            tool_error_text = ""
             for tc in tool_calls:
                 tc_id = tc["id"]
                 tc_name = tc["name"]
@@ -1119,6 +1144,9 @@ class AgentLoop:
                     "tool_call_id": tc_id,
                     "content": tool_result,
                 })
+                # 记录工具失败信息，供自愈重试注入修正提示（只保留第一个错误文本）
+                if not tool_error_text:
+                    tool_error_text = self._tool_error_text(tool_result)
 
                 logger.info(
                     "[AgentLoop] turn=%d 执行工具 %s(%s) → %d chars",
@@ -1131,6 +1159,24 @@ class AgentLoop:
             # assistant 消息中包含所有 tool_calls，tool 结果紧跟其后
             working_messages.append(assistant_msg)
             working_messages.extend(tool_results)
+
+            # 自愈重试：本轮存在工具失败且未超过修正上限时，注入一条 system 修正提示，
+            # 强制模型基于错误信息修正工具参数后继续（比让模型自行决定更可靠）
+            if tool_error_text and self._tool_retry_max > 0 and retry_error_count < self._tool_retry_max:
+                retry_error_count += 1
+                working_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"上一步工具调用失败：{tool_error_text}\n"
+                        "请修正工具参数后重新调用；若确认无法完成，请直接向用户说明原因。"
+                    ),
+                })
+                logger.info(
+                    "[AgentLoop] 工具失败，注入自愈重试提示（第 %d/%d 次）",
+                    retry_error_count,
+                    self._tool_retry_max,
+                )
+                continue
 
         # 达到最大轮次
         logger.warning("[AgentLoop] 达到最大轮次限制 %d", _max_turns)
@@ -1162,6 +1208,9 @@ class AgentLoop:
         - ``turn_start``      — 新一轮开始（检测到工具调用时）
         - ``tool_call``       — 单个工具调用
         - ``tool_result``     — 单个工具执行结果
+        - ``tool_retry``      — 工具调用失败触发的自愈重试（agent_tool_retry_max_retries>0 时），
+                                data 含 turn / retry_count / max_retries / error；随后服务端注入
+                                一条 system 修正提示并强制模型修正参数后重新调用
         - ``context_warning`` — 上下文占用接近上限（超过 agent_context_warning_ratio 比例），
                                 data 含 estimated_tokens / max_tokens / remaining_tokens / ratio / compacted
         - ``final``           — Agent 完成，含 final_message / usage / turns
@@ -1220,6 +1269,9 @@ class AgentLoop:
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
+        # 自愈重试计数：记录本次请求已注入的修正提示次数，必须为局部变量
+        # （AgentLoop 是共享单例，不能把状态放到实例属性上，避免跨请求串扰）
+        retry_error_count = 0
 
         for turn in range(1, _max_turns + 1):
             # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
@@ -1382,6 +1434,8 @@ class AgentLoop:
                 "tool_calls": [],
             }
             tool_result_msgs: list[dict] = []
+            # 本轮工具失败信息（首个错误文本），用于自愈重试判断
+            tool_error_text = ""
             for tc in tool_calls:
                 tc_id = tc["id"]
                 tc_name = tc["name"]
@@ -1420,6 +1474,9 @@ class AgentLoop:
                 if tool_result is None:
                     tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
                 yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
+                # 记录工具失败信息，供自愈重试注入修正提示（只保留第一个错误文本）
+                if not tool_error_text:
+                    tool_error_text = self._tool_error_text(tool_result)
 
                 tool_result_msgs.append({
                     "role": "tool",
@@ -1429,6 +1486,30 @@ class AgentLoop:
 
             working_messages.append(assistant_msg)
             working_messages.extend(tool_result_msgs)
+
+            # 自愈重试：本轮存在工具失败且未超过修正上限时，下发 tool_retry 事件
+            # 并注入一条 system 修正提示，强制模型修正工具参数后继续
+            if tool_error_text and self._tool_retry_max > 0 and retry_error_count < self._tool_retry_max:
+                retry_error_count += 1
+                yield _sse_event("tool_retry", {
+                    "turn": turn,
+                    "retry_count": retry_error_count,
+                    "max_retries": self._tool_retry_max,
+                    "error": tool_error_text,
+                })
+                working_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"上一步工具调用失败：{tool_error_text}\n"
+                        "请修正工具参数后重新调用；若确认无法完成，请直接向用户说明原因。"
+                    ),
+                })
+                logger.info(
+                    "[AgentLoop] 工具失败，注入自愈重试提示（第 %d/%d 次）",
+                    retry_error_count,
+                    self._tool_retry_max,
+                )
+                continue
 
         logger.warning("[AgentLoop] 达到最大轮次限制 %d", _max_turns)
         yield _sse_event("error", {

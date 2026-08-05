@@ -548,3 +548,124 @@ async def test_run_stream_passes_request_workspace_root_to_tools(monkeypatch):
 
     assert events[-1]["event"] == "final"
     assert captured["root"] == str(Path("/req/ws").resolve())
+
+
+@pytest.mark.asyncio
+async def test_run_self_healing_retry_injects_correction(monkeypatch):
+    """工具返回 error 时应注入 system 修正提示并强制模型再试。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+
+    def failing_tool():
+        return json.dumps({"error": "old_string 未在文件中找到"})
+
+    registry.register(ToolDef("akm_failing", "故障探针", {"type": "object"}, failing_tool))
+
+    first = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "akm_failing", "arguments": "{}"}}]}}], "usage": {}}
+    second = {"choices": [{"message": {"content": "已修正完成", "tool_calls": None}}], "usage": {}}
+    responses = iter([
+        {"status_code": 200, "body": json.dumps(first), "provider": "t", "key_alias": "k"},
+        {"status_code": 200, "body": json.dumps(second), "provider": "t", "key_alias": "k"},
+    ])
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        # body["messages"] 引用的是正在被不断追加的 working_messages，
+        # 需深拷贝快照，否则后续轮次的追加会污染已保存的请求记录
+        calls.append(json.loads(json.dumps(body)))
+        return next(responses)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", lambda: {"agent_tool_retry_max_retries": 1})
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+
+    result = await loop.run([{"role": "user", "content": "改一下"}])
+
+    assert result.ok is True
+    assert len(calls) == 2
+    # 第二轮请求末尾应包含注入的 system 修正提示
+    assert calls[1]["messages"][-1]["role"] == "system"
+    assert "上一步工具调用失败" in calls[1]["messages"][-1]["content"]
+    assert "old_string 未在文件中找到" in calls[1]["messages"][-1]["content"]
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_self_healing_respects_max_retries(monkeypatch):
+    """超过修正上限后不再注入提示，错误结果照常回传由模型自主决定。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+
+    def failing_tool():
+        return json.dumps({"error": "总是失败"})
+
+    registry.register(ToolDef("akm_failing", "故障探针", {"type": "object"}, failing_tool))
+
+    first = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "akm_failing", "arguments": "{}"}}]}}], "usage": {}}
+    done = {"choices": [{"message": {"content": "放弃", "tool_calls": None}}], "usage": {}}
+    responses = iter([
+        {"status_code": 200, "body": json.dumps(first), "provider": "t", "key_alias": "k"},
+        {"status_code": 200, "body": json.dumps(first), "provider": "t", "key_alias": "k"},
+        {"status_code": 200, "body": json.dumps(done), "provider": "t", "key_alias": "k"},
+    ])
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(json.loads(json.dumps(body)))
+        return next(responses)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", lambda: {"agent_tool_retry_max_retries": 1})
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+
+    result = await loop.run([{"role": "user", "content": "hi"}])
+
+    assert result.ok is True
+    assert len(calls) == 3
+    # 全程只注入了一次修正提示（第一轮失败时）
+    system_msgs = [
+        m for m in calls[2]["messages"]
+        if m.get("role") == "system" and "上一步工具调用失败" in str(m.get("content", ""))
+    ]
+    assert len(system_msgs) == 1
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_stream_self_healing_emits_tool_retry(monkeypatch):
+    """流式路径工具失败应下发 tool_retry 事件并注入修正提示。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+
+    def failing_tool():
+        return json.dumps({"error": "命令包含非法字符"})
+
+    registry.register(ToolDef("akm_failing", "故障探针", {"type": "object"}, failing_tool))
+
+    first = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": "akm_failing", "arguments": "{}"}}]}}]}),
+    ])
+    second = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "好了"}}]}), "data: [DONE]\n\n"])
+    responses = iter([first, second])
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(json.loads(json.dumps(body)))
+        return {"stream": True, "response": next(responses), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", lambda: {"agent_tool_retry_max_retries": 1})
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
+
+    retry_events = [e for e in events if e["event"] == "tool_retry"]
+    assert retry_events, "应下发 tool_retry 事件"
+    assert retry_events[0]["data"]["error"] == "命令包含非法字符"
+    assert retry_events[0]["data"]["retry_count"] == 1
+    assert retry_events[0]["data"]["max_retries"] == 1
+    # 第二轮请求末尾是注入的 system 修正提示
+    assert calls[1]["messages"][-1]["role"] == "system"
+    assert "上一步工具调用失败" in calls[1]["messages"][-1]["content"]
+    assert events[-1]["event"] == "final"
+    ToolRegistry.reset()

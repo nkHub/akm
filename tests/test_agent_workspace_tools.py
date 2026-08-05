@@ -233,6 +233,77 @@ async def test_write_file_and_edit(_workspace, monkeypatch):
     assert (_workspace / "code.py").read_text(encoding="utf-8") == "print('new')\n"
 
 
+# ── 结构化编辑（行号模式）──
+
+
+@pytest.mark.asyncio
+async def test_edit_file_line_mode_replaces_range(_workspace, monkeypatch):
+    """行号模式应按行区间整体替换并返回行数变化。"""
+    f = _workspace / "code.py"
+    f.write_text("line1\nline2\nline3\nline4\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_edit_file"](path="code.py", start_line=2, end_line=3, new_content="A\nB"))
+
+    assert out["ok"] is True
+    assert out["old_lines"] == 2
+    assert out["new_lines"] == 2
+    assert f.read_text(encoding="utf-8") == "line1\nA\nB\nline4\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_line_mode_single_line_without_end(_workspace, monkeypatch):
+    """行号模式不传 end_line 时应只替换一行，且保留尾部换行风格。"""
+    f = _workspace / "code.py"
+    f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_edit_file"](path="code.py", start_line=2, new_content="two"))
+
+    assert out["ok"] is True
+    assert out["old_lines"] == 1
+    assert f.read_text(encoding="utf-8") == "line1\ntwo\nline3\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_line_mode_anchor_mismatch_rejected(_workspace, monkeypatch):
+    """行号模式锚点校验失败应拒绝编辑，防止行号漂移后改错位置。"""
+    f = _workspace / "code.py"
+    f.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_edit_file"](path="code.py", start_line=2, end_line=3, old_string="不存在的锚点", new_content="x"))
+
+    assert "error" in out
+    assert "锚点校验失败" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_file_line_mode_out_of_range_rejected(_workspace, monkeypatch):
+    """行号越界应被拒绝并给出文件实际行数。"""
+    f = _workspace / "code.py"
+    f.write_text("a\nb\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_edit_file"](path="code.py", start_line=5, new_content="x"))
+
+    assert "error" in out
+    assert "越界" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_file_content_mode_still_works(_workspace, monkeypatch):
+    """内容模式（旧参数）应保持原有替换行为。"""
+    f = _workspace / "code.py"
+    f.write_text("print('old')\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_edit_file"](path="code.py", old_string="old", new_string="new"))
+
+    assert out["replaced"] == 1
+    assert f.read_text(encoding="utf-8") == "print('new')\n"
+
+
 @pytest.mark.asyncio
 async def test_write_file_rejects_outside_workspace(_workspace, monkeypatch):
     """写文件到工作区外应被拒绝。"""
@@ -303,23 +374,73 @@ async def test_run_shell_timeout(_workspace, monkeypatch):
     assert "超时" in out["error"]
 
 
+# ── git 工具 ──
+
+
+@pytest.mark.asyncio
+async def test_run_git_requires_enabled_flag(_workspace, monkeypatch):
+    """agent_git_enabled=false 时 git 工具不注册。"""
+    handlers = _handlers(monkeypatch, agent_git_enabled=False)
+
+    assert "akm_run_git" not in handlers
+
+
+@pytest.mark.asyncio
+async def test_run_git_status_in_workspace(_workspace, monkeypatch):
+    """git 工具应以工作区为 cwd 执行 git 命令并返回输出与退出码。"""
+    import subprocess as _sp
+
+    _sp.run(["git", "init"], cwd=str(_workspace), capture_output=True, text=True)
+    (_workspace / "a.txt").write_text("x", encoding="utf-8")
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out = json.loads(await handlers["akm_run_git"](command="git status --short"))
+
+    assert out["exit_code"] == 0
+    assert "a.txt" in out["output"]
+
+
+@pytest.mark.asyncio
+async def test_run_git_rejects_shell_metacharacters(_workspace, monkeypatch):
+    """git 命令含 shell 元字符应被拒绝，防止命令拼接注入。"""
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out = json.loads(await handlers["akm_run_git"](command="git status; rm -rf /"))
+
+    assert "error" in out
+    assert "非法字符" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_git_requires_git_prefix(_workspace, monkeypatch):
+    """命令不以 git 开头应被拒绝。"""
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out = json.loads(await handlers["akm_run_git"](command="ls -la"))
+
+    assert "error" in out
+    assert "必须以 git 开头" in out["error"]
+
+
 # ── 工具注册集合 ──
 
 
 def test_workspace_tools_registration(monkeypatch):
-    """写工具与 shell 工具按开关注册；读工具始终注册。"""
+    """写工具、shell 工具与 git 工具按开关注册；读工具始终注册。"""
     monkeypatch.setattr(
         "akm.agent_runtime.tools.load_config",
         lambda: {
             "agent_workspace_root": WORKSPACE,
             "agent_write_tools_enabled": False,
             "agent_run_shell_enabled": False,
+            "agent_git_enabled": False,
         },
     )
     names = {t.name for t in build_workspace_tools()}
     assert {"akm_read_file", "akm_list_dir", "akm_glob", "akm_grep", "akm_file_info"} <= names
     assert "akm_write_file" not in names
     assert "akm_run_shell" not in names
+    assert "akm_run_git" not in names
 
     monkeypatch.setattr(
         "akm.agent_runtime.tools.load_config",
@@ -327,6 +448,7 @@ def test_workspace_tools_registration(monkeypatch):
             "agent_workspace_root": WORKSPACE,
             "agent_write_tools_enabled": True,
             "agent_run_shell_enabled": True,
+            "agent_git_enabled": True,
         },
     )
     names = {t.name for t in build_workspace_tools()}
@@ -335,3 +457,4 @@ def test_workspace_tools_registration(monkeypatch):
     assert "akm_make_dir" in names
     assert "akm_delete_file" in names
     assert "akm_run_shell" in names
+    assert "akm_run_git" in names

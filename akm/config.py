@@ -49,6 +49,8 @@ DEFAULTS = {
     "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
     "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
     "agent_run_shell_enabled": False,   # 是否启用 Agent 执行 shell 命令工具（独立于写工具，默认关闭）
+    "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅在工作区目录内执行 git 命令）
+    "agent_tool_retry_max_retries": 1,  # Agent 工具失败后的最大自愈修正轮次（0 关闭：失败结果照常回传，模型自主决定）
     "agent_api_token": "",              # /v1/agent 请求鉴权 token（Bearer）；留空表示不校验
     "agent_default_instructions": (
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
@@ -155,6 +157,8 @@ def load_config() -> dict:
     # Agent 文件工具开关：布尔归一化，防止配置为字符串/数字时误判
     merged["agent_write_tools_enabled"] = merged.get("agent_write_tools_enabled") is True
     merged["agent_run_shell_enabled"] = merged.get("agent_run_shell_enabled") is True
+    merged["agent_git_enabled"] = merged.get("agent_git_enabled") is True
+    merged["agent_tool_retry_max_retries"] = max(0, int(merged.get("agent_tool_retry_max_retries", 1) or 0))
     # Key 管理
     merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列
@@ -191,6 +195,8 @@ def save_config(data: dict) -> None:
     current["agent_context_warning_ratio"] = max(0.0, min(1.0, float(current.get("agent_context_warning_ratio", 0.8) or 0.8)))
     current["agent_write_tools_enabled"] = current.get("agent_write_tools_enabled") is True
     current["agent_run_shell_enabled"] = current.get("agent_run_shell_enabled") is True
+    current["agent_git_enabled"] = current.get("agent_git_enabled") is True
+    current["agent_tool_retry_max_retries"] = max(0, int(current.get("agent_tool_retry_max_retries", 1) or 0))
     # Key 管理
     current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列

@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import re
+import shlex
 import shutil
 import subprocess
 import uuid
@@ -468,15 +469,26 @@ async def _write_file_tool(
 
 async def _edit_file_tool(
     path: str,
-    old_string: str,
+    old_string: str = "",
     new_string: str = "",
     replace_all: bool = False,
+    start_line: int = 0,
+    end_line: int = 0,
+    new_content: str = "",
 ) -> str:
-    """编辑工作区内的文本文件：用新字符串替换旧字符串。仅 agent_write_tools_enabled=true 时可用。"""
+    """结构化编辑工作区内的文本文件。仅 agent_write_tools_enabled=true 时可用。
+
+    支持两种定位方式：
+    - 行号模式：传入 start_line（1-based），把 [start_line, end_line] 行区间
+      整体替换为 new_content；同时传 old_string 时作为锚点校验（确认原文
+      确实位于目标行区间内），防止模型行号漂移后改错位置。推荐在读完文件、
+      拿到精确行号后使用，比长字符串匹配更可靠。
+    - 内容模式（默认，兼容旧行为）：将 old_string 替换为 new_string，
+      replace_all 控制是否替换全部匹配。
+
+    返回 old_lines / new_lines 或 replaced，便于模型感知编辑后的行数变化。
+    """
     await _check_tool_enabled("agent_write_tools_enabled", "akm_edit_file")
-    old_string = str(old_string or "")
-    if not old_string:
-        return json.dumps({"error": "old_string 不能为空"}, ensure_ascii=False)
     try:
         target = _safe_resolve_workspace_path(path, must_exist=True)
     except ValueError as exc:
@@ -487,14 +499,60 @@ async def _edit_file_tool(
         content = target.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
+
+    # ── 行号模式：基于行区间的结构化编辑 ──
+    start_line = int(start_line or 0)
+    end_line = int(end_line or 0)
+    if start_line > 0:
+        if start_line < 1:
+            return json.dumps({"error": "start_line 必须 >= 1"}, ensure_ascii=False)
+        if end_line and end_line < start_line:
+            return json.dumps({"error": "end_line 不能小于 start_line"}, ensure_ascii=False)
+        lines = content.splitlines()
+        effective_end = end_line or start_line
+        if effective_end > len(lines):
+            return json.dumps(
+                {"error": f"行号越界：文件共 {len(lines)} 行，请求编辑到第 {effective_end} 行"},
+                ensure_ascii=False,
+            )
+        # 锚点校验：若同时提供 old_string，确认其恰好位于目标行区间内，
+        # 防止模型基于旧快照的行号漂移后改错位置
+        old_string = str(old_string or "")
+        if old_string:
+            target_slice = "\n".join(lines[start_line - 1:effective_end])
+            if old_string not in target_slice:
+                return json.dumps(
+                    {"error": f"锚点校验失败：old_string 未在第 {start_line}-{effective_end} 行区间内找到"},
+                    ensure_ascii=False,
+                )
+        new_lines = lines[: start_line - 1] + str(new_content or "").splitlines() + lines[effective_end:]
+        new_text = "\n".join(new_lines)
+        # 保留原文件尾部换行风格，避免无谓的全文件 diff
+        if content.endswith("\n") and not new_text.endswith("\n"):
+            new_text += "\n"
+        try:
+            target.write_text(new_text, encoding="utf-8")
+        except OSError as exc:
+            return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
+        return json.dumps({
+            "ok": True,
+            "path": str(target),
+            "old_lines": effective_end - start_line + 1,
+            "new_lines": len(str(new_content or "").splitlines()),
+        }, ensure_ascii=False)
+
+    # ── 内容模式：旧字符串替换（兼容原有行为）──
+    old_string = str(old_string or "")
+    if not old_string:
+        return json.dumps({"error": "old_string 不能为空"}, ensure_ascii=False)
     count = content.count(old_string)
     if count == 0:
         return json.dumps({"error": "old_string 未在文件中找到"}, ensure_ascii=False)
     if not replace_all:
         count = 1
-    new_content = content.replace(old_string, new_string, count)
+    new_text = content.replace(old_string, str(new_string or ""), count)
     try:
-        target.write_text(new_content, encoding="utf-8")
+        target.write_text(new_text, encoding="utf-8")
     except OSError as exc:
         return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
     return json.dumps({"ok": True, "path": str(target), "replaced": count}, ensure_ascii=False)
@@ -583,6 +641,64 @@ async def _run_shell_tool(command: str, timeout: int = 0) -> str:
         }, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": f"执行命令失败: {exc}"}, ensure_ascii=False)
+
+
+async def _run_git_tool(command: str, timeout: int = 0) -> str:
+    """在工作区根目录执行 git 命令，返回输出与退出码。
+
+    仅 agent_git_enabled=true 时可用。命令必须以 git 开头，且不允许包含
+    shell 元字符（; | && || ` $() 等），通过参数列表方式执行，避免 shell
+    注入；以工作区根目录为 cwd，默认超时 _WORKSPACE_SHELL_TIMEOUT_SEC 秒。
+    """
+    await _check_tool_enabled("agent_git_enabled", "akm_run_git")
+    command = str(command or "").strip()
+    if not command:
+        return json.dumps({"error": "command 不能为空"}, ensure_ascii=False)
+    root = _workspace_root()
+    if root is None:
+        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    # 拒绝 shell 元字符，只允许纯 git 子命令，防止命令拼接注入
+    for token in (";", "|", "&&", "||", "`", "$(", ">", "<"):
+        if token in command:
+            return json.dumps({"error": f"命令包含非法字符 {token}，只允许纯 git 子命令"}, ensure_ascii=False)
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return json.dumps({"error": f"命令解析失败: {exc}"}, ensure_ascii=False)
+    if not argv or argv[0] != "git":
+        return json.dumps({"error": "command 必须以 git 开头"}, ensure_ascii=False)
+    # 强制 --no-pager 与纯文本输出，避免 git 调用分页器阻塞或输出控制符干扰模型读取
+    argv = ["git", "-c", "core.pager=cat", "-c", "color.ui=false", "--no-pager"] + argv[1:]
+    timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
+    loop = asyncio.get_running_loop()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            return json.dumps({"error": f"命令执行超时（{timeout} 秒），已终止"}, ensure_ascii=False)
+        text = output.decode("utf-8", errors="replace")
+        truncated = False
+        if len(text) > _WORKSPACE_READ_MAX_BYTES:
+            text = text[:_WORKSPACE_READ_MAX_BYTES]
+            truncated = True
+        return json.dumps({
+            "exit_code": proc.returncode,
+            "truncated": truncated,
+            "output": text,
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"执行 git 命令失败: {exc}"}, ensure_ascii=False)
 
 
 def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
@@ -1100,16 +1216,19 @@ def build_workspace_tools() -> list[ToolDef]:
             ),
             ToolDef(
                 "akm_edit_file",
-                "编辑工作区内的文本文件：将 old_string 替换为 new_string。仅 agent_write_tools_enabled=true 时可用",
+                "结构化编辑工作区内的文本文件，支持两种定位方式：行号模式传 start_line（1-based，可配 end_line）把行区间替换为 new_content，推荐先读文件拿到行号后用，另可配 old_string 做锚点校验防止改错位置；内容模式将 old_string 替换为 new_string。仅 agent_write_tools_enabled=true 时可用",
                 {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "工作区内的文件路径"},
-                        "old_string": {"type": "string", "description": "要被替换的原文片段"},
-                        "new_string": {"type": "string", "description": "替换后的新文本，可留空表示删除"},
-                        "replace_all": {"type": "boolean", "description": "是否替换所有匹配（默认只替换第一处）"},
+                        "old_string": {"type": "string", "description": "行号模式下作为目标行区间的锚点校验内容（可选）；内容模式下为要被替换的原文片段"},
+                        "new_string": {"type": "string", "description": "内容模式下的替换文本，可留空表示删除（仅内容模式使用）"},
+                        "replace_all": {"type": "boolean", "description": "内容模式下是否替换所有匹配（默认只替换第一处）"},
+                        "start_line": {"type": "integer", "description": "行号模式起始行号（1-based）；传此字段进入行号模式，把 [start_line, end_line] 区间整体替换为 new_content"},
+                        "end_line": {"type": "integer", "description": "行号模式结束行号（含，默认等于 start_line，只替换一行）"},
+                        "new_content": {"type": "string", "description": "行号模式下的新内容（可多行），替换目标行区间"},
                     },
-                    "required": ["path", "old_string"],
+                    "required": ["path"],
                 },
                 _edit_file_tool,
             ),
@@ -1152,5 +1271,19 @@ def build_workspace_tools() -> list[ToolDef]:
                 "required": ["command"],
             },
             _run_shell_tool,
+        ))
+    if load_config().get("agent_git_enabled"):
+        tools.append(ToolDef(
+            "akm_run_git",
+            "在工作区根目录下执行 git 命令并返回输出与退出码。命令必须以 git 开头，只允许纯 git 子命令（禁止 shell 拼接字符），用于查看状态、diff、提交等版本控制操作。仅 agent_git_enabled=true 时可用；命令有超时限制（默认 60 秒，最大 300 秒）",
+            {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的 git 命令（以 git 开头），如 git status --short"},
+                    "timeout": {"type": "integer", "description": "超时秒数，1-300，默认 60"},
+                },
+                "required": ["command"],
+            },
+            _run_git_tool,
         ))
     return tools
