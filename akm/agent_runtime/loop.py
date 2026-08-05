@@ -633,9 +633,9 @@ class AgentLoop:
         self._http_client = http_client
         self._plugin_manager = plugin_manager
         self._tool_registry = tool_registry or ToolRegistry.instance()
-        self._max_turns = max(1, int(load_config().get("agent_max_turns", 20) or 20))
+        self._max_turns = max(1, int(load_config().get("agent_max_turns", 100) or 100))
         self._max_context_tokens = max(
-            0, int(load_config().get("agent_max_context_tokens", 30000) or 30000)
+             0, int(load_config().get("agent_max_context_tokens", 272000) or 272000)
         )
         self._keep_recent_messages = max(
             2, int(load_config().get("agent_keep_recent_messages", 10) or 10)

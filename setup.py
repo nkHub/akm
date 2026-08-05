@@ -34,6 +34,7 @@ DATA_FILES = [
         "akm/templates/plugin_host.html",
     )),
     ("static", (
+        "akm/static/akm-ui.js",
         "akm/static/marked.min.js",
         "akm/static/tailwindcss.js",
         "akm/static/chat-viewer.js",
@@ -46,7 +47,7 @@ OPTIONS = {
     "argv_emulation": False,
     "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "anyio", "sqlite_vec", "objc"],
     "includes": ["akm.server", "akm.db", "akm.key_pool", "akm.proxy", "akm.audit", "akm.models", "akm.config", "akm.agent", "akm.adapter", "akm.cli", "sqlite_vec", "_cffi_backend"],
-    "excludes": ["tkinter", "PyQt5", "PySide2", "wx", "jieba3", "numpy", "numpy._core", "numpy.linalg", "numpy.fft", "numpy.random", "numpy.distutils", "numpy.lib", "numpy.ma", "numpy.matrixlib", "numpy.polynomial", "numpy.testing", "numpy.typing", "docutils", "pygments", "PIL"],
+    "excludes": ["tkinter", "PyQt5", "PySide2", "wx", "jieba3", "numpy", "numpy._core", "numpy.linalg", "numpy.fft", "numpy.random", "numpy.distutils", "numpy.lib", "numpy.ma", "numpy.matrixlib", "numpy.polynomial", "numpy.testing", "numpy.typing", "docutils", "PIL", "rich", "pygments"],
     "iconfile": "logo.icns",
     "plist": {
         "CFBundleName": "AI Key Manager",

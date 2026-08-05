@@ -1986,6 +1986,23 @@ async def api_list_agents():
     return {"data": list_agents()}
 
 
+@app.get("/api/agent-tools")
+async def api_list_agent_tools():
+    """列出 Agent 运行时已注册的工具名（只读，供客户端展示）。
+
+    数据来源为 ToolRegistry 单例；若服务刚启动尚未初始化，
+    返回空列表而非报错，客户端可稍后重试。
+    """
+    try:
+        from akm.agent_runtime.loop import ToolRegistry
+
+        tools = ToolRegistry.instance().list_tools()
+        names = sorted(str(t["function"]["name"]) for t in tools if isinstance(t, dict))
+        return {"data": names}
+    except Exception as exc:  # noqa: BLE001
+        return {"data": [], "error": str(exc)}
+
+
 @app.post("/api/agents")
 async def api_add_agent(request: Request):
     """添加自定义 Agent"""

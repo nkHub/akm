@@ -218,8 +218,8 @@ akm-menubar
   "proxy_max_retries_per_key": 2,
   "proxy_retry_backoff_base_sec": 0.5,
   "proxy_default_timeout_sec": 120.0,
-  "agent_max_turns": 20,
-  "agent_max_context_tokens": 30000,
+  "agent_max_turns": 100,
+  "agent_max_context_tokens": 272000,
   "agent_keep_recent_messages": 10,
   "agent_context_warning_ratio": 0.8,
   "agent_upload_dir": "~/.akm/cache",
@@ -263,8 +263,8 @@ akm-menubar
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `agent_max_turns` | `20` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
-| `agent_max_context_tokens` | `30000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
+| `agent_max_turns` | `100` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
+| `agent_max_context_tokens` | `272000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
 | `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
@@ -409,6 +409,26 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 工作区文件工具受沙箱约束：所有路径（含 `..` 穿越、绝对路径、软链接）在解析后都会被校验必须在 `agent_workspace_root` 目录内，越界访问直接返回错误，不会读写工作区之外的任何文件。`akm_run_git` 同样以工作区为 cwd 执行且命令必须 `git` 开头、禁止 shell 拼接字符，并强制 `--no-pager` 输出。`/v1/agent` 可选鉴权：配置 `agent_api_token` 后，请求必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 401。
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化。
+
+### Agent 交互式 CLI（`akm agent`）
+
+内置基于本地 `/v1/agent` 的轻量终端客户端（`akm/agent_cli/`），提供交互式会话与历史管理：
+
+```bash
+akm agent                       # 进入交互式会话（rich 逐行 REPL）
+akm agent --resume 会话名        # 从历史会话继续
+akm agent session list          # 列出历史会话
+akm agent session show 会话名    # 查看会话摘要与最近消息
+akm agent session rm 会话名      # 删除会话
+```
+
+- 默认启动 rich 逐行 REPL：每次发送后流式渲染回复，支持内建斜杠命令；适合任何终端（含 SSH / 管道）。
+- 交互模式下支持内建斜杠命令：`/model`（切换模型）、`/workspace`（切换工作区）、`/instructions`（覆盖系统指令）、`/sessions` / `/resume`（历史会话）、`/clear`（清空消息）、`/quit`（退出）等，输入 `/help` 查看全部。
+- 会话多轮历史持久化到 `~/.akm/agent_sessions/*.json`，服务端 `/v1/agent` 保持无状态，客户端在每轮请求时全量回传 `messages`。
+- `--workspace-root` 缺省为当前目录，作为文件工具沙箱根（等价于请求级 `workspace_root` 覆盖）。
+- 交互模式需要本地代理服务运行（`akm serve`）。
+- 输出基于 `rich` 渲染：交互终端下流式回复使用三区实时面板（思考区 / 工具区 / 正文区，rich Live），正文区每个增量到达即重渲染 markdown（粗体 / 列表 / 代码语法高亮），思考与正文逐字出现；内容超出终端高度时自动裁剪、始终跟随最新回复（等同自动滚动到底部）；工具调用与状态提示为轻量 ANSI 短行。非 TTY（管道 / 重定向）自动退化为逐行打印。颜色缺省按是否 TTY 自动开启，可用 `--no-color` 关闭。
+- 模型的思考过程（`reasoning_delta`）默认折叠，只显示「思考中…」提示，避免 token 流刷屏；需要查看详细思考时用 `--show-reasoning` 开启。
 
 ## 故障切换策略
 
