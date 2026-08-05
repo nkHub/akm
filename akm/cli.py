@@ -368,12 +368,19 @@ def main():
       2. 查看列表:   akm key list
       3. 启动服务:   akm serve
       4. 查看日志:   akm log list
+      5. Agent 会话: akm agent            （交互式）
+                     akm agent "提问"     （一次性）
 
     服务启动后，将 opencode / cursor / 其他 OpenAI 兼容客户端的
     base_url 指向 http://127.0.0.1:8800/v1 即可。
 
     所有子命令均支持 --help，如: akm key add --help"""
     _ensure_db()
+
+
+# 注册 agent 交互子命令（延迟 import，避免额外依赖）
+from akm.agent_cli import agent as _agent_group  # noqa: E402
+main.add_command(_agent_group)
 
 
 @main.command("status")

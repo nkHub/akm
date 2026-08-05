@@ -79,7 +79,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `agent_max_context_tokens` | `30000` | 上下文 token 估算上限，超过后自动压缩早期历史；`0` 关闭自动压缩 |
+| `agent_max_context_tokens` | `272000` | 上下文 token 估算上限，超过后自动压缩早期历史；`0` 关闭自动压缩 |
 | `agent_keep_recent_messages` | `10` | 压缩时保留的最近消息条数，工具调用与其配对的 `tool_calls` 消息整组完整保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用超过上限该比例时，SSE 流式下发 `context_warning` 事件；`0` 关闭警告 |
 
@@ -146,6 +146,11 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 ### 可选鉴权
 
 `/v1/agent` 支持可选鉴权：配置 `agent_api_token` 后，所有请求（含纯 JSON 与 multipart）必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 `401`。未配置该配置项时不做任何校验，保持向后兼容。在开放了写文件 / shell 工具时建议启用鉴权，限制调用方身份，避免任意本地进程滥用 Agent 权限。
+
+### 管理接口：`GET /api/agent-tools`
+
+ 只读返回当前服务已注册的 Agent 工具名称列表（`{"data": ["akm_read_file", ...]}`），供 `akm agent` 客户端展示。接口位于管理端点，不经过 `/v1/agent` 的鉴权与工具注入逻辑。
+
 
 ## 联网搜索
 
