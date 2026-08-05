@@ -6,7 +6,7 @@
 
 Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
 
-服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具与工作区文件工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。工作区文件工具（`akm_read_file` 等）需在 config.json 配置 `agent_workspace_root` 才会注册，写工具与 shell 工具默认不注册（见「工作区文件工具」章节）。调用方不应使用相同名称，以免工具定义与内置处理器不匹配：
+服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具与工作区文件工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。工作区文件工具（`akm_read_file` 等）需在 config.json 配置 `agent_workspace_root` 才会注册，写工具与 shell 工具默认不注册（见「工作区文件工具」章节）。客户端显式声明同名已注册工具时，服务端会保留客户端的授权意图，但始终使用服务端工具定义，避免参数契约不一致：
 
 | 工具 | 用途 |
 |------|------|
@@ -17,7 +17,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
-| `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；图片可通过本地路径或 base64 数据传入 |
+| `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；本地路径仅允许工作区或上传目录，亦可传入 base64 数据 |
 | `akm_read_file` | 读取工作区内的文本文件（可指定 `offset` / `limit`），返回内容与起始行号 |
 | `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构 |
 | `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表 |
@@ -27,8 +27,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内文件或目录（`recursive` 可选，禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
-| `akm_run_shell` | 在工作区目录内执行 shell 命令并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
-| `akm_run_git` | 在工作区目录内执行 git 命令并返回输出与退出码（命令必须以 `git` 开头，禁止 shell 拼接字符；需开启 `agent_git_enabled`） |
+| `akm_run_shell` | 执行管理员预定义的工作区任务并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
+| `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
@@ -66,12 +66,12 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 |------|------|------|------|
 | `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
 | `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` / `akm_run_git` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作、shell 执行与 git 操作涉及本机写入，需在 tools 中显式声明才能启用） |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；若名称与服务端已注册工具相同，服务端会覆盖客户端给出的 description 和 parameters；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` / `akm_run_git` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作、shell 执行与 git 操作涉及本机写入，需在 tools 中显式声明才能启用） |
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息；未传时使用 config.json 的 `agent_default_instructions`（默认要求数学公式以 KaTeX 语法返回）。其中 `{AKM_SOURCE_DIR}`、`{CURRENT_WORKING_DIRECTORY}`、`{USER_AGENTS_MD_PATH}`、`{USER_AGENTS_SKILLS_DIR}`、`{USER_PI_NPM_DIR}` 占位符在注入前自动替换为运行时实际路径（源码根目录、请求工作区、用户环境路径；用户路径不存在时替换为空字符串） |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考与正文均实时以 `reasoning_delta` / `model_delta` 推送，工具调用事件按上游输出顺序穿插，`final` 收尾（详见「SSE 流式事件」） |
-| `workspace_root` | string | 否 | 本次请求的工作区沙箱根目录（绝对路径），覆盖 config.json 的全局 `agent_workspace_root`，仅对本次请求的工作区文件工具生效；不传或传空字符串时使用全局配置。CLI 等客户端可在每次请求时把它指向当前工作目录，而不影响其他客户端（如 Web 聊天）的全局工作区 |
+| `workspace_root` | string | 否 | 本次请求的工作区根目录（绝对路径），只能指定为全局 `agent_workspace_root` 的子目录；不传或传空字符串时使用全局配置 |
 
 ## 上下文压缩
 
@@ -82,6 +82,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_max_context_tokens` | `272000` | 上下文 token 估算上限，超过后自动压缩早期历史；`0` 关闭自动压缩 |
 | `agent_keep_recent_messages` | `10` | 压缩时保留的最近消息条数，工具调用与其配对的 `tool_calls` 消息整组完整保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用超过上限该比例时，SSE 流式下发 `context_warning` 事件；`0` 关闭警告 |
+| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
 
 1. **自动压缩兜底**：每轮开始前估算上下文 token（CJK 字符按 1 token/字符，其余按 4 字符≈1 token，图片块固定估算），超过 `agent_max_context_tokens` 时把早期历史交给 LLM 总结为摘要并替换（保留最近 `agent_keep_recent_messages` 条消息与工具调用配对组），保证上下文不爆掉；摘要生成失败时降级为直接丢弃早期历史。
 2. **AI 主动压缩**：模型可调用 `akm_context_status` 查询当前 token 占用、`akm_compact_context` 主动压缩早期历史。`akm_compact_context` 优先采用摘要替换，不丢失关键信息。`agent_context_warning_ratio` 触发的 `context_warning` SSE 事件即用于提示客户端 / 模型接近上限。
@@ -90,7 +91,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 
 ## 文件上传
 
-`/v1/agent` 支持 `multipart/form-data` 上传文件。`messages` 改为 JSON 字符串表单字段，`tools` 等其余字段同纯 JSON 方式；`files` 字段可携带多个文件。上传的文件会被读取并作为独立的 user 消息追加到对话末尾：图片（`image/*`）转成 base64 的 `image_url` 内容块，其他文件按 UTF-8 读取为文本内容，无法解码的二进制文件会返回 400。纯 JSON 请求方式保持不变。
+`/v1/agent` 支持 `multipart/form-data` 上传文件。`messages` 改为 JSON 字符串表单字段，`tools` 等其余字段同纯 JSON 方式；`files` 字段可携带多个文件，但单次最多 8 个、总大小最多 20MB。上传的文件会被读取并作为独立的 user 消息追加到对话末尾：图片（`image/*`）转成 base64 的 `image_url` 内容块，其他文件按 UTF-8 读取为文本内容，无法解码的二进制文件会返回 400。纯 JSON 请求方式保持不变。
 
 上传的图片还会同时落盘到 `agent_upload_dir` 配置的目录（默认 `~/.akm/cache`，可通过 `~/.akm/config.json` 修改，支持 `~` 展开；文件名为随机 UUID），并在追加的 user 消息文本中给出绝对路径提示。模型可据此调用 `akm_edit_image` 传入 `image_path` 编辑该图片。该目录不会自动清理，请根据运行环境定期清理。
 
@@ -105,15 +106,17 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ## 工作区文件工具与安全边界
 
-工作区文件工具让 Agent 具备读写本机文件、执行 shell 命令的能力，全部受 `agent_workspace_root` 沙箱与配置开关约束。相关配置项如下：
+工作区文件工具受 `agent_workspace_root` 沙箱与配置开关约束。shell 是单独开启的主机级执行能力，`cwd` 不能提供文件系统隔离。相关配置项如下：
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `agent_workspace_root` | `""` | 工作区沙箱根目录，所有文件工具仅能在此目录内读写；留空时文件工具不注册 |
 | `agent_write_tools_enabled` | `false` | 是否注册写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`） |
 | `agent_run_shell_enabled` | `false` | 是否注册 shell 工具（`akm_run_shell`） |
-| `agent_git_enabled` | `false` | 是否注册 git 工具（`akm_run_git`，仅在工作区内执行 git 命令） |
-| `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token，配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头 |
+| `agent_shell_tasks` | `{}` | shell 预定义任务，格式为任务名到 argv 字符串数组的映射；模型只能传任务名，不能传命令字符串 |
+| `agent_git_enabled` | `false` | 是否注册 git 工具（`akm_run_git`，仅允许固定 operation） |
+| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
+| `agent_api_token` | `""` | `/v1/agent` 鉴权 token；启用写工具、shell 或 git 工具时必须配置 |
 
 ### 读工具（默认可用）
 
@@ -123,6 +126,21 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 写工具、shell 与 git 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作、shell 执行与 git 操作会改动本机状态，应经人工确认后再开放。
 
+`akm_run_shell` 不接受 `command` 参数。管理员需在配置中定义可用任务，例如：
+
+```json
+{
+  "agent_shell_tasks": {
+    "test": ["yarn", "test"],
+    "lint": ["yarn", "lint"]
+  }
+}
+```
+
+模型调用时只传 `{"task": "test"}`，服务端以配置的 argv 和当前工作区作为 cwd 执行。该机制避免模型拼接任意 shell 命令，但任务本身仍由主机进程执行，不能视为文件系统沙箱。
+
+`akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。
+
 ### 路径沙箱
 
 所有文件工具的文件路径（相对/绝对路径）都会先解析，并校验解析结果必须位于 `agent_workspace_root` 目录内：
@@ -131,7 +149,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 - 相对路径中的 `..` 穿越工作区被拒绝；
 - 软链接指向工作区外时（resolve 后越界）被拒绝。
 
-越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件。`akm_run_shell` 命令以工作区目录为 cwd 执行，并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，超时命令会被终止；`akm_run_git` 同样以工作区为 cwd、命令必须 `git` 开头且不允许 shell 拼接字符（`;` `|` `&&` `||` 等），并强制 `--no-pager` 输出。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，避免工具结果撑爆上下文。
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 执行预定义任务并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信。`akm_run_git` 只构造固定 operation 对应的 argv。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
 
 ## 自愈重试
 
@@ -143,9 +161,9 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事件（`data` 含 `turn` / `retry_count` / `max_retries` / `error`），便于客户端感知服务端已介入重试。
 
-### 可选鉴权
+### 鉴权
 
-`/v1/agent` 支持可选鉴权：配置 `agent_api_token` 后，所有请求（含纯 JSON 与 multipart）必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 `401`。未配置该配置项时不做任何校验，保持向后兼容。在开放了写文件 / shell 工具时建议启用鉴权，限制调用方身份，避免任意本地进程滥用 Agent 权限。
+`/v1/agent` 在只读工具场景支持无 token 调用。只要启用写文件、shell 或 git 工具，就必须配置 `agent_api_token`；缺失时接口返回 `503`，避免危险工具以无鉴权状态暴露。配置后，所有请求（含纯 JSON 与 multipart）必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 `401`。
 
 ### 管理接口：`GET /api/agent-tools`
 
@@ -183,7 +201,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `embedding_model` | string | 否 | 指定向量模型，默认取插件配置 |
 | `reranker_model` | string | 否 | 指定重排模型，默认取插件配置 |
 
-返回结果为命中文档片段列表（每项含标题、文件名、相关度分数与截断后的内容片段），避免全文撑爆上下文。知识库未初始化或未命中时返回明确提示。该工具的 HTTP 端点同时提供 MCP 访问方式（见 `plugins/markdown_kb/README.md`）。
+返回结果为命中文档片段列表（每项含标题、文件名、相关度分数与截断后的内容片段），避免全文撑爆上下文。Agent 请求存在有效工作区时，检索范围固定为当前请求工作区，模型不能通过工具参数指定其他工作区；未配置工作区时仍检索公共索引。知识库未初始化或未命中时返回明确提示。该工具的 HTTP 端点同时提供 MCP 访问方式（见 `plugins/markdown_kb/README.md`）。
 
 ## 图片生成
 
@@ -197,7 +215,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `quality` | string | 否 | 生成质量，如 `standard` 或 `hd` |
 | `n` | int | 否 | 生成张数（默认 1） |
 
-请求经连接池调用 `forward_request`（`api_path=images/generations`），自动复用 Key 选择、故障切换与图片专用超时（`image_request_timeout_sec`，默认 300 秒）。调用失败时会返回明确错误文本；上游只返回 `b64_json` 时会给出数据长度提示。
+请求经连接池调用 `forward_request`（`api_path=images/generations`），自动复用 Key 选择、故障切换与图片专用超时（`image_request_timeout_sec`，默认 300 秒）。调用失败时会返回明确错误文本；上游只返回 `b64_json` 时，服务端会落盘并只回传数据长度提示和资源路径，不会将完整 Base64 数据回灌模型上下文。
 
 生成成功后，每张图片还会下载保存到 `agent_upload_dir`（默认 `~/.akm/cache`），并在结果项中附带两个资源字段：
 
@@ -208,11 +226,11 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 
 ### 图片编辑
 
-内置的 `akm_edit_image` 工具复用 `/v1/images/edits` 的 multipart 纯透传链路。图片有两种来源：`image_path`（服务器可访问的本地绝对路径），或 `image_base64`（图片 base64 数据，可直接使用对话中图片的 `data:image/...;base64,` 前缀 data URL，适用于本地无文件的云端场景）。工具按与 `/v1/images/edits` 一致的 multipart 结构组装请求，`image` 与可选的 `mask` 作为文件字段上传。参数如下：
+内置的 `akm_edit_image` 工具复用 `/v1/images/edits` 的 multipart 纯透传链路。图片有两种来源：`image_path`（仅限工作区或 `agent_upload_dir` 内的本地绝对路径），或 `image_base64`（图片 base64 数据，可直接使用对话中图片的 `data:image/...;base64,` 前缀 data URL，适用于本地无文件的云端场景）。工具按与 `/v1/images/edits` 一致的 multipart 结构组装请求，`image` 与可选的 `mask` 作为文件字段上传。参数如下：
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `image_path` | string | 否* | 服务器本地图片文件的绝对路径，与 `image_base64` 二选一。若该路径不存在，会提取文件名回退到 `agent_upload_dir`（默认 `~/.akm/cache`）下查找，兼容把 `/agent-uploads/` 访问地址误当成本地路径的传法 |
+| `image_path` | string | 否* | 工作区或 `agent_upload_dir` 内图片文件的绝对路径，与 `image_base64` 二选一。若该路径不存在，会提取文件名回退到 `agent_upload_dir`（默认 `~/.akm/cache`）下查找，兼容把 `/agent-uploads/` 访问地址误当成本地路径的传法 |
 | `image_base64` | string | 否* | 图片 base64 数据（可带 `data:image/...;base64,` 前缀，或纯 base64），与 `image_path` 二选一，同时提供时优先 |
 | `prompt` | string | 是 | 编辑指令，描述期望的修改效果 |
 | `model` | string | 否 | 图片编辑模型，默认取 `image_supported_models` 配置首项 |

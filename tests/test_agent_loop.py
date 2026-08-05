@@ -207,6 +207,123 @@ async def test_run_stream_whitelist_injects_only_client_declared_tools(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_run_replaces_client_schema_for_registered_tool(monkeypatch):
+    """同名已注册工具必须使用服务端 schema，避免客户端参数误导本地处理器。"""
+    registry = ToolRegistry()
+    server_tool = ToolDef(
+        "akm_sensitive",
+        "服务端受控工具",
+        {"type": "object", "properties": {"safe": {"type": "string"}}, "required": ["safe"]},
+        lambda safe: {"safe": safe},
+    )
+    registry.register(server_tool)
+    requests = []
+
+    async def forward(body, *_args, **_kwargs):
+        requests.append(json.loads(json.dumps(body)))
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"ok"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    forged = {
+        "type": "function",
+        "function": {
+            "name": "akm_sensitive",
+            "description": "伪造说明",
+            "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+        },
+    }
+
+    result = await AgentLoop(http_client=None, tool_registry=registry).run(
+        [{"role": "user", "content": "hi"}], tools=[forged]
+    )
+
+    assert result.ok is True
+    injected = requests[0]["tools"][0]
+    assert injected == server_tool.to_openai()
+
+
+@pytest.mark.asyncio
+async def test_run_limits_total_tool_calls(monkeypatch):
+    """单次请求超过工具调用上限时，后续调用必须返回错误且不执行。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.loop.load_config",
+        lambda: {"agent_max_tool_calls": 1, "agent_tool_retry_max_retries": 0},
+    )
+    registry = ToolRegistry()
+    executed = {"count": 0}
+
+    def counted_tool():
+        executed["count"] += 1
+        return {"ok": True}
+
+    registry.register(ToolDef("counted", "计数工具", {"type": "object"}, counted_tool))
+    first = {
+        "choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "counted", "arguments": "{}"}},
+            {"id": "c2", "type": "function", "function": {"name": "counted", "arguments": "{}"}},
+        ]}}],
+    }
+    responses = iter([
+        {"status_code": 200, "body": json.dumps(first)},
+        {"status_code": 200, "body": '{"choices":[{"message":{"content":"完成"}}]}'},
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return next(responses)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    result = await AgentLoop(http_client=None, tool_registry=registry).run(
+        [{"role": "user", "content": "hi"}]
+    )
+
+    assert result.ok is True
+    assert executed["count"] == 1
+    tool_messages = [message for message in result.messages if message.get("role") == "tool"]
+    assert len(tool_messages) == 2
+    assert "次数超过本次请求上限" in tool_messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_stream_limits_total_tool_calls(monkeypatch):
+    """流式路径同样不得在达到上限后继续执行工具。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.loop.load_config",
+        lambda: {"agent_max_tool_calls": 1, "agent_tool_retry_max_retries": 0},
+    )
+    registry = ToolRegistry()
+    executed = {"count": 0}
+
+    def counted_tool():
+        executed["count"] += 1
+        return {"ok": True}
+
+    registry.register(ToolDef("counted", "计数工具", {"type": "object"}, counted_tool))
+    first = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c1", "type": "function", "function": {"name": "counted", "arguments": "{}"}},
+            {"index": 1, "id": "c2", "type": "function", "function": {"name": "counted", "arguments": "{}"}},
+        ]}}]}),
+    ])
+    second = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "完成"}}]})])
+    responses = iter([first, second])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": next(responses), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    events = _events([
+        item async for item in AgentLoop(http_client=None, tool_registry=registry).run_stream(
+            [{"role": "user", "content": "hi"}]
+        )
+    ])
+
+    assert executed["count"] == 1
+    results = [event["data"]["result"] for event in events if event["event"] == "tool_result"]
+    assert len(results) == 2
+    assert "次数超过本次请求上限" in results[1]
+
+
+@pytest.mark.asyncio
 async def test_run_empty_tools_injects_no_tools(monkeypatch):
     """显式传空数组 [] 时不注入任何工具（既不注入内置工具，也不带上游 tools 字段）。"""
     registry = ToolRegistry()
@@ -224,6 +341,40 @@ async def test_run_empty_tools_injects_no_tools(monkeypatch):
 
     assert result.ok is True
     assert "tools" not in requests[0]
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_registered_tool_not_authorized_by_request(monkeypatch):
+    """模型伪造已注册工具名时，空白名单不能让处理器仍被执行。"""
+    registry = ToolRegistry()
+    executed = {"count": 0}
+
+    def sensitive_tool():
+        executed["count"] += 1
+        return {"ok": True}
+
+    registry.register(ToolDef("akm_sensitive", "敏感工具", {"type": "object"}, sensitive_tool))
+    responses = iter([
+        {
+            "status_code": 200,
+            "body": json.dumps({"choices": [{"message": {"content": None, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "akm_sensitive", "arguments": "{}"}}]}}]}),
+        },
+        {"status_code": 200, "body": '{"choices":[{"message":{"content":"完成"}}]}'},
+    ])
+    requests = []
+
+    async def forward(body, *_args, **_kwargs):
+        requests.append(json.loads(json.dumps(body)))
+        return next(responses)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    result = await AgentLoop(http_client=None, tool_registry=registry).run(
+        [{"role": "user", "content": "hi"}], tools=[]
+    )
+
+    assert result.ok is True
+    assert executed["count"] == 0
+    assert "工具未获本次请求授权" in requests[1]["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -245,6 +396,38 @@ async def test_run_stream_empty_tools_injects_no_tools(monkeypatch):
         break
 
     assert "tools" not in requests[0]
+
+
+@pytest.mark.asyncio
+async def test_run_stream_rejects_registered_tool_not_authorized_by_request(monkeypatch):
+    """流式路径也必须拒绝模型伪造的、未在请求中声明的已注册工具。"""
+    registry = ToolRegistry()
+    executed = {"count": 0}
+
+    def sensitive_tool():
+        executed["count"] += 1
+        return {"ok": True}
+
+    registry.register(ToolDef("akm_sensitive", "敏感工具", {"type": "object"}, sensitive_tool))
+    first = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "akm_sensitive", "arguments": "{}"}}]}}]}),
+    ])
+    second = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "完成"}}]}), "data: [DONE]\\n\\n"])
+    responses = iter([first, second])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": next(responses), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    events = _events([
+        item async for item in AgentLoop(http_client=None, tool_registry=registry).run_stream(
+            [{"role": "user", "content": "hi"}], tools=[]
+        )
+    ])
+
+    tool_result = next(event for event in events if event["event"] == "tool_result")
+    assert executed["count"] == 0
+    assert "工具未获本次请求授权" in tool_result["data"]["result"]
 
 
 @pytest.mark.asyncio
@@ -509,10 +692,10 @@ async def test_run_passes_request_workspace_root_to_tools(monkeypatch):
     monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"})
     loop = AgentLoop(http_client=None, tool_registry=registry)
 
-    result = await loop.run([{"role": "user", "content": "hi"}], workspace_root="/req/ws")
+    result = await loop.run([{"role": "user", "content": "hi"}], workspace_root="/global/ws/request")
 
     assert result.ok is True
-    assert captured["root"] == str(Path("/req/ws").resolve())
+    assert captured["root"] == str(Path("/global/ws/request").resolve())
 
 
 @pytest.mark.asyncio
@@ -544,10 +727,10 @@ async def test_run_stream_passes_request_workspace_root_to_tools(monkeypatch):
     monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: {"agent_workspace_root": "/global/ws"})
     loop = AgentLoop(http_client=None, tool_registry=registry)
 
-    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}], workspace_root="/req/ws")])
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}], workspace_root="/global/ws/request")])
 
     assert events[-1]["event"] == "final"
-    assert captured["root"] == str(Path("/req/ws").resolve())
+    assert captured["root"] == str(Path("/global/ws/request").resolve())
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,6 @@ import json
 import logging
 import mimetypes
 import re
-import shlex
 import shutil
 import subprocess
 import uuid
@@ -30,13 +29,19 @@ logger = logging.getLogger(__name__)
 _WORKSPACE_READ_MAX_BYTES = 60000
 # grep 工具单次返回的最大命中行数
 _WORKSPACE_GREP_MAX_RESULTS = 100
+# 目录工具单次返回的最大条目数
+_WORKSPACE_DIR_MAX_RESULTS = 500
+# 图片生成/编辑单次允许请求的最大张数，限制异常参数造成的上游费用放大
+_AGENT_IMAGE_MAX_COUNT = 4
+# 图片编辑单个本地文件或 base64 解码后的最大字节数，避免工具调用占满进程内存。
+_AGENT_IMAGE_MAX_INPUT_BYTES = 20 * 1024 * 1024
 # run_shell 工具默认超时（秒）
 _WORKSPACE_SHELL_TIMEOUT_SEC = 60
 
 # 请求级工作区覆盖：由 AgentLoop 在单次请求执行工具期间设置，优先于
 # config.json 的全局 agent_workspace_root；空字符串表示不使用覆盖。
 # 用 ContextVar 保证并发请求之间互不影响（每个请求独立的 asyncio 上下文）。
-_request_workspace_root: ContextVar[str] = ContextVar("agent_request_workspace_root", default="")
+_request_workspace_root: ContextVar[str | None] = ContextVar("agent_request_workspace_root", default=None)
 
 
 def set_request_workspace_root(root: str):
@@ -61,13 +66,38 @@ def _workspace_root() -> Path | None:
     agent_workspace_root。所有文件读写工具都只能访问该目录内的路径
     （防止路径穿越读写任意文件）；未配置时文件工具整体不可用。
     """
-    raw = (
-        _request_workspace_root.get().strip()
-        or str(load_config().get("agent_workspace_root") or "").strip()
-    )
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
+    configured_raw = str(load_config().get("agent_workspace_root") or "").strip()
+    configured_root = Path(configured_raw).expanduser().resolve() if configured_raw else None
+    request_raw = _request_workspace_root.get()
+    if request_raw is None or not request_raw.strip():
+        return configured_root
+    if configured_root is None:
+        raise ValueError("未配置 agent_workspace_root，请求级工作区不可用")
+    requested_root = Path(request_raw).expanduser().resolve()
+    try:
+        requested_root.relative_to(configured_root)
+    except ValueError:
+        raise ValueError("请求级 workspace_root 必须位于 agent_workspace_root 内")
+    return requested_root
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    """判断已 resolve 的路径是否位于指定根目录内。"""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _allowed_image_path(path: Path) -> bool:
+    """校验 Agent 请求读取的图片只能来自工作区或 Agent 上传目录。"""
+    upload_raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
+    upload_root = Path(upload_raw).expanduser().resolve()
+    if _path_is_under(path, upload_root):
+        return True
+    workspace_root = _workspace_root()
+    return workspace_root is not None and _path_is_under(path, workspace_root)
 
 
 def _safe_resolve_workspace_path(raw: str, *, must_exist: bool = True) -> Path:
@@ -146,21 +176,33 @@ def _image_request_timeout() -> float:
 def _read_image_file(path: str) -> tuple[str, bytes, str]:
     """读取本地图片文件，返回 (文件名, 字节内容, content_type)。
 
-    先按传入的 image_path 直接读取；若该路径不存在，则提取文件名回退到
-    agent_upload_dir（默认 ~/.akm/cache）目录下查找。这样即使模型把
+    路径只能位于当前工作区或 agent_upload_dir。若传入路径不存在，则提取
+    文件名回退到 agent_upload_dir（默认 ~/.akm/cache）目录下查找。这样即使模型把
     http_url 中的 /agent-uploads/ 前缀误当成本地路径（例如编造出
     /data/agent-uploads/xxx.png），只要文件名一致仍能命中真实落盘文件。
     回退查找仅取文件名（basename），不会拼接目录，防止路径穿越。
     """
-    file_path = Path(str(path or "")).expanduser()
+    file_path = Path(str(path or "")).expanduser().resolve()
     if not file_path.is_file():
         raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
         upload_dir = Path(raw).expanduser()
-        fallback = upload_dir / file_path.name
+        fallback = (upload_dir / file_path.name).resolve()
         if fallback.is_file():
             file_path = fallback
         else:
             raise FileNotFoundError(f"图片文件不存在: {file_path}")
+    # 直接传入的路径必须经过真实路径校验，避免借图片编辑能力读取并上传
+    # 工作区或 Agent 上传目录之外的本机文件。
+    if _request_workspace_root.get() is not None and not _allowed_image_path(file_path):
+        raise ValueError("图片路径必须位于工作区或 agent_upload_dir 内")
+    try:
+        file_size = file_path.stat().st_size
+    except OSError as exc:
+        raise OSError(f"读取图片文件信息失败: {exc}")
+    if file_size > _AGENT_IMAGE_MAX_INPUT_BYTES:
+        raise ValueError(
+            f"图片文件超过 {_AGENT_IMAGE_MAX_INPUT_BYTES // (1024 * 1024)}MB 限制"
+        )
     content = file_path.read_bytes()
     content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
     return file_path.name, content, content_type
@@ -186,12 +228,23 @@ def _decode_image_base64(raw: str) -> tuple[str, bytes, str]:
         if mime and mime.lower().startswith("image/"):
             content_type = mime
         text = payload.strip()
+    # base64 的编码尺寸最多约为原始字节数的 4/3；先按字符长度拒绝，
+    # 防止 b64decode 为明显超限的输入分配大量内存。
+    max_encoded_length = ((_AGENT_IMAGE_MAX_INPUT_BYTES + 2) // 3) * 4
+    if len(text) > max_encoded_length:
+        raise ValueError(
+            f"图片 base64 数据超过 {_AGENT_IMAGE_MAX_INPUT_BYTES // (1024 * 1024)}MB 限制"
+        )
     try:
         data = base64.b64decode(text, validate=True)
     except Exception:
         raise ValueError("图片 base64 解码失败，请检查数据是否完整")
     if not data:
         raise ValueError("图片 base64 数据为空")
+    if len(data) > _AGENT_IMAGE_MAX_INPUT_BYTES:
+        raise ValueError(
+            f"图片 base64 数据超过 {_AGENT_IMAGE_MAX_INPUT_BYTES // (1024 * 1024)}MB 限制"
+        )
     ext = mimetypes.guess_extension(content_type) or ".png"
     filename = f"upload-{uuid.uuid4().hex}{ext}"
     return filename, data, content_type
@@ -287,6 +340,7 @@ async def _read_file_tool(
     except OSError as exc:
         return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
 
+    total_lines = len(lines)
     offset = max(0, int(offset or 0))
     limit = int(limit if limit is not None else -1)
     start = min(offset, len(lines))
@@ -297,13 +351,14 @@ async def _read_file_tool(
 
     text = "".join(lines)
     truncated = False
-    if len(text.encode("utf-8", errors="ignore")) > _WORKSPACE_READ_MAX_BYTES:
-        text = text[:_WORKSPACE_READ_MAX_BYTES]
+    encoded = text.encode("utf-8", errors="ignore")
+    if len(encoded) > _WORKSPACE_READ_MAX_BYTES:
+        text = encoded[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore")
         truncated = True
     return json.dumps({
         "path": str(target),
         "start_line": start,
-        "total_lines": len(lines),
+        "total_lines": total_lines,
         "truncated": truncated,
         "content": text,
     }, ensure_ascii=False)
@@ -322,7 +377,11 @@ async def _list_dir_tool(path: str = "") -> str:
         return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
     try:
         entries = []
+        total = 0
         for item in sorted(target.iterdir(), key=lambda p: p.name):
+            total += 1
+            if len(entries) >= _WORKSPACE_DIR_MAX_RESULTS:
+                continue
             if item.is_dir():
                 kind = "dir"
                 size = None
@@ -338,7 +397,7 @@ async def _list_dir_tool(path: str = "") -> str:
             entries.append({"name": item.name, "type": kind, "size": size})
     except OSError as exc:
         return json.dumps({"error": f"读取目录失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"path": str(target), "entries": entries}, ensure_ascii=False)
+    return json.dumps({"path": str(target), "entries": entries, "total": total}, ensure_ascii=False)
 
 
 async def _glob_tool(pattern: str = "") -> str:
@@ -356,14 +415,17 @@ async def _glob_tool(pattern: str = "") -> str:
     if root is None:
         return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
     matches = []
+    total = 0
     try:
         for p in root.glob(pattern):
             if p.is_file() or p.is_dir():
-                matches.append(str(p.relative_to(root)))
+                total += 1
+                if len(matches) < _WORKSPACE_GREP_MAX_RESULTS:
+                    matches.append(str(p.relative_to(root)))
     except (OSError, ValueError) as exc:
         return json.dumps({"error": f"匹配失败: {exc}"}, ensure_ascii=False)
     matches.sort()
-    return json.dumps({"pattern": pattern, "matches": matches[:_WORKSPACE_GREP_MAX_RESULTS], "total": len(matches)}, ensure_ascii=False)
+    return json.dumps({"pattern": pattern, "matches": matches, "total": total}, ensure_ascii=False)
 
 
 async def _grep_tool(
@@ -399,6 +461,13 @@ async def _grep_tool(
         for p in root.rglob("*"):
             if not p.is_file():
                 continue
+            # rglob 会返回工作区内指向外部文件的软链接，必须逐项 resolve
+            # 后再次校验，不能只校验 grep 的起始目录。
+            try:
+                if not _path_is_under(p.resolve(), root):
+                    continue
+            except OSError:
+                continue
             # 跳过隐藏目录与常见二进制/版本库目录，避免命中无意义内容
             rel = p.relative_to(root)
             parts = rel.parts
@@ -411,7 +480,7 @@ async def _grep_tool(
                             results.append({
                                 "file": str(rel),
                                 "line": lineno,
-                                "content": line.rstrip("\n")[:_WORKSPACE_READ_MAX_BYTES],
+                                "content": line.rstrip("\n").encode("utf-8")[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore"),
                             })
                             break
             except OSError:
@@ -597,80 +666,9 @@ async def _delete_tool(path: str, recursive: bool = False) -> str:
     return json.dumps({"ok": True, "path": str(target)}, ensure_ascii=False)
 
 
-async def _run_shell_tool(command: str, timeout: int = 0) -> str:
-    """在工作区根目录下执行 shell 命令，返回 stdout+stderr。
-
-    仅 agent_run_shell_enabled=true 时可用。命令以工作区根目录为 cwd，
-    用 subprocess 运行，默认超时 _WORKSPACE_SHELL_TIMEOUT_SEC 秒。
-    出于安全考虑，调用方需自行确认命令内容与影响范围。
-    """
-    await _check_tool_enabled("agent_run_shell_enabled", "akm_run_shell")
-    command = str(command or "").strip()
-    if not command:
-        return json.dumps({"error": "command 不能为空"}, ensure_ascii=False)
-    root = _workspace_root()
-    if root is None:
-        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+async def _run_workspace_argv(argv: list[str], root: Path, timeout: int, label: str) -> str:
+    """在工作区执行已经由服务端构造的 argv，并统一限制时间与输出大小。"""
     timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
-    loop = asyncio.get_running_loop()
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        try:
-            output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
-            return json.dumps({"error": f"命令执行超时（{timeout} 秒），已终止"}, ensure_ascii=False)
-        text = output.decode("utf-8", errors="replace")
-        truncated = False
-        if len(text) > _WORKSPACE_READ_MAX_BYTES:
-            text = text[:_WORKSPACE_READ_MAX_BYTES]
-            truncated = True
-        return json.dumps({
-            "exit_code": proc.returncode,
-            "truncated": truncated,
-            "output": text,
-        }, ensure_ascii=False)
-    except Exception as exc:
-        return json.dumps({"error": f"执行命令失败: {exc}"}, ensure_ascii=False)
-
-
-async def _run_git_tool(command: str, timeout: int = 0) -> str:
-    """在工作区根目录执行 git 命令，返回输出与退出码。
-
-    仅 agent_git_enabled=true 时可用。命令必须以 git 开头，且不允许包含
-    shell 元字符（; | && || ` $() 等），通过参数列表方式执行，避免 shell
-    注入；以工作区根目录为 cwd，默认超时 _WORKSPACE_SHELL_TIMEOUT_SEC 秒。
-    """
-    await _check_tool_enabled("agent_git_enabled", "akm_run_git")
-    command = str(command or "").strip()
-    if not command:
-        return json.dumps({"error": "command 不能为空"}, ensure_ascii=False)
-    root = _workspace_root()
-    if root is None:
-        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
-    # 拒绝 shell 元字符，只允许纯 git 子命令，防止命令拼接注入
-    for token in (";", "|", "&&", "||", "`", "$(", ">", "<"):
-        if token in command:
-            return json.dumps({"error": f"命令包含非法字符 {token}，只允许纯 git 子命令"}, ensure_ascii=False)
-    try:
-        argv = shlex.split(command)
-    except ValueError as exc:
-        return json.dumps({"error": f"命令解析失败: {exc}"}, ensure_ascii=False)
-    if not argv or argv[0] != "git":
-        return json.dumps({"error": "command 必须以 git 开头"}, ensure_ascii=False)
-    # 强制 --no-pager 与纯文本输出，避免 git 调用分页器阻塞或输出控制符干扰模型读取
-    argv = ["git", "-c", "core.pager=cat", "-c", "color.ui=false", "--no-pager"] + argv[1:]
-    timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
-    loop = asyncio.get_running_loop()
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -682,23 +680,98 @@ async def _run_git_tool(command: str, timeout: int = 0) -> str:
             output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
-            return json.dumps({"error": f"命令执行超时（{timeout} 秒），已终止"}, ensure_ascii=False)
+            await proc.wait()
+            return json.dumps({"error": f"{label}执行超时（{timeout} 秒），已终止"}, ensure_ascii=False)
         text = output.decode("utf-8", errors="replace")
-        truncated = False
-        if len(text) > _WORKSPACE_READ_MAX_BYTES:
-            text = text[:_WORKSPACE_READ_MAX_BYTES]
-            truncated = True
-        return json.dumps({
-            "exit_code": proc.returncode,
-            "truncated": truncated,
-            "output": text,
-        }, ensure_ascii=False)
+        encoded = text.encode("utf-8")
+        truncated = len(encoded) > _WORKSPACE_READ_MAX_BYTES
+        if truncated:
+            text = encoded[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore")
+        return json.dumps({"exit_code": proc.returncode, "truncated": truncated, "output": text}, ensure_ascii=False)
     except Exception as exc:
-        return json.dumps({"error": f"执行 git 命令失败: {exc}"}, ensure_ascii=False)
+        return json.dumps({"error": f"执行{label}失败: {exc}"}, ensure_ascii=False)
+
+
+async def _run_shell_tool(task: str, timeout: int = 0) -> str:
+    """执行配置中预定义的工作区任务，模型不能传入或拼接任意 shell 命令。"""
+    await _check_tool_enabled("agent_run_shell_enabled", "akm_run_shell")
+    task = str(task or "").strip()
+    tasks = load_config().get("agent_shell_tasks") or {}
+    argv = tasks.get(task) if isinstance(tasks, dict) else None
+    if not isinstance(argv, list) or not argv:
+        return json.dumps({"error": f"未找到允许执行的任务: {task}"}, ensure_ascii=False)
+    root = _workspace_root()
+    if root is None:
+        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    return await _run_workspace_argv([str(item) for item in argv], root, timeout, f"任务 {task}")
+
+
+def _git_paths(paths: list[str] | None) -> list[str]:
+    """规范化 git 路径参数，防止通过路径穿越让 git 操作工作区外文件。"""
+    if paths is None:
+        return []
+    if not isinstance(paths, list) or len(paths) > 100:
+        raise ValueError("paths 必须是最多 100 项的数组")
+    normalized = []
+    for raw in paths:
+        path = str(raw or "").strip()
+        candidate = Path(path)
+        if not path or candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError("paths 只能包含工作区内的相对路径")
+        normalized.append(path)
+    return normalized
+
+
+async def _run_git_tool(
+    operation: str,
+    paths: list[str] | None = None,
+    message: str = "",
+    revision: str = "",
+    staged: bool = False,
+    limit: int = 20,
+    timeout: int = 0,
+) -> str:
+    """执行固定集合的结构化 git 操作，不接受自由命令字符串。"""
+    await _check_tool_enabled("agent_git_enabled", "akm_run_git")
+    root = _workspace_root()
+    if root is None:
+        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    operation = str(operation or "").strip()
+    try:
+        safe_paths = _git_paths(paths)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    if operation == "status":
+        command = ["status", "--short"]
+    elif operation == "diff":
+        command = ["diff"] + (["--staged"] if staged else []) + (["--"] + safe_paths if safe_paths else [])
+    elif operation == "log":
+        command = ["log", f"-n{max(1, min(int(limit or 20), 100))}", "--oneline"]
+    elif operation == "show":
+        revision = str(revision or "HEAD").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._/@^~:-]+", revision):
+            return json.dumps({"error": "revision 包含不允许的字符"}, ensure_ascii=False)
+        command = ["show", revision]
+    elif operation in {"add", "restore", "reset"}:
+        if not safe_paths:
+            return json.dumps({"error": f"{operation} 必须提供 paths"}, ensure_ascii=False)
+        command = [operation, "--"] + safe_paths
+    elif operation == "commit":
+        message = str(message or "").strip()
+        if not message or len(message) > 500:
+            return json.dumps({"error": "commit 必须提供不超过 500 字符的 message"}, ensure_ascii=False)
+        command = ["commit", "-m", message]
+    elif operation == "branch":
+        command = ["branch", "--show-current"]
+    else:
+        return json.dumps({"error": f"不支持的 git operation: {operation}"}, ensure_ascii=False)
+
+    argv = [
+        "git", "-c", "core.pager=cat", "-c", "color.ui=false",
+        "-c", "core.hooksPath=/dev/null", "--no-pager",
+    ] + command
+    return await _run_workspace_argv(argv, root, timeout, f"git {operation}")
 
 
 def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
@@ -818,14 +891,14 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         top_k: int = 5,
         embedding_model: str = "",
         reranker_model: str = "",
-        workspace_root: str = "",
     ) -> str:
         """通过 markdown-kb 插件 HTTP 接口检索知识库，返回精选命中片段。
 
         以 HTTP 方式请求本机服务的 /api/markdown-kb/query 端点，与插件内部
         逻辑解耦。为控制模型上下文体积，每个命中只回传标题、文件名、相关度
         分数与截断后的正文摘要（前 500 字符），不会把完整 chunk 全量塞回。
-        未指定 workspace_root 时检索全部文档（不受工作域过滤限制）。
+        Agent 请求存在有效工作区时，检索范围固定为当前工作区，避免模型通过
+        参数扩大到其他工作域；未配置工作区时仍可检索公共索引。
         """
         question = str(question or "").strip()
         if not question:
@@ -837,9 +910,17 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             payload["embedding_model"] = str(embedding_model).strip()
         if str(reranker_model or "").strip():
             payload["reranker_model"] = str(reranker_model).strip()
-        workspace_root = str(workspace_root or "").strip()
-        if workspace_root:
-            payload["workspace_root"] = workspace_root
+        if _request_workspace_root.get() is not None:
+            try:
+                workspace_root = _workspace_root()
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False)
+            if workspace_root is not None:
+                payload["workspace_root"] = str(workspace_root)
+            else:
+                # AgentLoop 即使未传 workspace_root 也会设置空的请求上下文。
+                # 此时沿用公共索引检索，不能因此禁用原本无需工作区的知识库。
+                payload["ignore_workspace"] = True
         else:
             payload["ignore_workspace"] = True
         url = f"{_akm_api_base_url()}/api/markdown-kb/query"
@@ -896,7 +977,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             body["size"] = size
         if quality:
             body["quality"] = quality
-        n = max(1, int(n or 1))
+        n = max(1, min(int(n or 1), _AGENT_IMAGE_MAX_COUNT))
         if n > 1:
             body["n"] = n
         client = await pool.get_client(
@@ -934,6 +1015,8 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     f"base64 数据，长度 {len(b64)}" if b64 else "无可用数据"
                 )
                 if b64:
+                    # 仅在内部交给落盘函数，_save_generated_image 会立即移除，
+                    # 不能把原始 base64 回传到模型上下文。
                     entry["b64_json"] = b64
             await _save_generated_image(entry, client)
             images.append(entry)
@@ -976,7 +1059,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             fields["quality"] = quality
         if output_format:
             fields["output_format"] = output_format
-        n = max(1, int(n or 1))
+        n = max(1, min(int(n or 1), _AGENT_IMAGE_MAX_COUNT))
         if n > 1:
             fields["n"] = str(n)
         files: dict[str, tuple[str, bytes, str]] = {"image": image_file}
@@ -1026,6 +1109,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     f"base64 数据，长度 {len(b64)}" if b64 else "无可用数据"
                 )
                 if b64:
+                    # 同生成工具：只用于本地保存，完成后不保留在工具响应。
                     entry["b64_json"] = b64
             await _save_generated_image(entry, client)
             images.append(entry)
@@ -1074,7 +1158,6 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     "top_k": {"type": "integer", "description": "返回命中条数，1 到 20，默认 5"},
                     "embedding_model": {"type": "string", "description": "向量模型，默认取插件配置"},
                     "reranker_model": {"type": "string", "description": "重排模型，默认取插件配置"},
-                    "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；不传时检索全部文档）"},
                 },
                 "required": ["question"],
             },
@@ -1128,8 +1211,8 @@ def build_workspace_tools() -> list[ToolDef]:
       agent_workspace_root 工作区内；未配置工作区时执行返回明确错误。
     - 写工具（write/edit/make_dir/delete）默认禁用，仅当 config.json
       设置 ``agent_write_tools_enabled=true`` 时才注册，模型不可见即不可调。
-    - shell 工具默认禁用，仅当 ``agent_run_shell_enabled=true`` 时才注册，
-      且以工作区根目录为 cwd 执行，独立开关避免写文件与执行命令同权。
+    - shell 工具默认禁用，仅当 ``agent_run_shell_enabled=true`` 时才注册；
+      模型只能选择 ``agent_shell_tasks`` 中由管理员配置的任务名，不能传自由命令。
     """
     tools: list[ToolDef] = [
         ToolDef(
@@ -1259,30 +1342,36 @@ def build_workspace_tools() -> list[ToolDef]:
             ),
         ])
     if load_config().get("agent_run_shell_enabled"):
+        task_names = sorted((load_config().get("agent_shell_tasks") or {}).keys())
         tools.append(ToolDef(
             "akm_run_shell",
-            "在工作区根目录下执行 shell 命令并返回 stdout+stderr。仅 agent_run_shell_enabled=true 时可用；命令有超时限制（默认 60 秒，最大 300 秒）",
+            "执行管理员预定义的工作区任务并返回 stdout+stderr。仅 agent_run_shell_enabled=true 时可用；模型只能从已配置任务中选择，不能传入任意 shell 命令。可用任务：" + ("、".join(task_names) or "无"),
             {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "要执行的 shell 命令"},
+                    "task": {"type": "string", "enum": task_names, "description": "管理员配置的任务名"},
                     "timeout": {"type": "integer", "description": "超时秒数，1-300，默认 60"},
                 },
-                "required": ["command"],
+                "required": ["task"],
             },
             _run_shell_tool,
         ))
     if load_config().get("agent_git_enabled"):
         tools.append(ToolDef(
             "akm_run_git",
-            "在工作区根目录下执行 git 命令并返回输出与退出码。命令必须以 git 开头，只允许纯 git 子命令（禁止 shell 拼接字符），用于查看状态、diff、提交等版本控制操作。仅 agent_git_enabled=true 时可用；命令有超时限制（默认 60 秒，最大 300 秒）",
+            "在工作区执行结构化 git 操作并返回输出与退出码。仅支持 status、diff、log、show、add、restore、reset、commit、branch；不接受自由命令字符串。仅 agent_git_enabled=true 时可用",
             {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "要执行的 git 命令（以 git 开头），如 git status --short"},
+                    "operation": {"type": "string", "enum": ["status", "diff", "log", "show", "add", "restore", "reset", "commit", "branch"], "description": "要执行的 git 操作"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "add、restore、reset 必填；diff 可选的工作区相对路径"},
+                    "message": {"type": "string", "description": "commit 操作必填的提交说明"},
+                    "revision": {"type": "string", "description": "show 操作的 revision，默认 HEAD"},
+                    "staged": {"type": "boolean", "description": "diff 是否查看暂存区，默认 false"},
+                    "limit": {"type": "integer", "description": "log 返回条数，1-100，默认 20"},
                     "timeout": {"type": "integer", "description": "超时秒数，1-300，默认 60"},
                 },
-                "required": ["command"],
+                "required": ["operation"],
             },
             _run_git_tool,
         ))

@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from akm.agent_runtime.tools import build_builtin_tools
+from akm.agent_runtime.tools import (
+    build_builtin_tools,
+    reset_request_workspace_root,
+    set_request_workspace_root,
+)
 
 
 def _handlers(app):
@@ -141,14 +145,18 @@ async def test_builtin_kb_search_returns_trimmed_hits(monkeypatch):
         },
     )
     app = SimpleNamespace(state=SimpleNamespace())
-
-    result = await _handlers(app)["akm_search_kb"](question="怎么用？")
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: {})
+    token = set_request_workspace_root("")
+    try:
+        result = await _handlers(app)["akm_search_kb"](question="怎么用？")
+    finally:
+        reset_request_workspace_root(token)
 
     assert client.calls[0]["url"].endswith("/api/markdown-kb/query")
     assert client.calls[0]["json"]["question"] == "怎么用？"
     payload = _handlers(app) and client.calls[0]["json"]
     assert payload["top_k"] == 5
-    assert payload["ignore_workspace"] is True  # 未指定 workspace 时默认全库检索
+    assert payload["ignore_workspace"] is True  # 空请求工作区时仍默认全库检索
     results = __import__("json").loads(result)["results"]
     assert results[0]["title"] == "使用说明"
     assert results[0]["file_name"] == "docs/usage.md"
@@ -174,16 +182,23 @@ async def test_builtin_kb_search_clamps_top_k_and_requires_question(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_builtin_kb_search_passes_workspace_root(monkeypatch):
-    """指定 workspace_root 时应透传给插件，且不再附加 ignore_workspace。"""
+async def test_builtin_kb_search_uses_current_request_workspace(monkeypatch):
+    """Agent 请求中的知识库检索必须固定为当前工作区，不能由模型指定路径。"""
     client = _install_fake_kb_client(monkeypatch, {"ok": True, "hits": []})
     app = SimpleNamespace(state=SimpleNamespace())
     handler = _handlers(app)["akm_search_kb"]
-
-    await handler(question="组件", workspace_root="/Users/nk/Desktop/Ecology/ccs")
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_workspace_root": "/global/workspace"},
+    )
+    token = set_request_workspace_root("/global/workspace")
+    try:
+        await handler(question="组件")
+    finally:
+        reset_request_workspace_root(token)
 
     payload = client.calls[0]["json"]
-    assert payload["workspace_root"] == "/Users/nk/Desktop/Ecology/ccs"
+    assert payload["workspace_root"] == "/global/workspace"
     assert "ignore_workspace" not in payload
 
 

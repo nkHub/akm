@@ -464,6 +464,46 @@ async def test_install_plugin_checks_zip_builtin_names(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_install_plugin_rejects_unsafe_metadata_name(monkeypatch, tmp_path):
+    """插件名不能逃逸第三方插件根目录，即使 ZIP 内部路径本身合法。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("plugin/plugin.json", '{"name":"../../outside","version":"1.0.0"}')
+        zf.writestr("plugin/index.py", "from akm.plugins import PluginBase\nclass Plugin(PluginBase): pass\n")
+
+    manager = PluginManager()
+    manager._third_party_dir = tmp_path / "third_party"
+    result = await manager.install_plugin(
+        UploadFile(filename="unsafe.zip", file=BytesIO(archive.getvalue()))
+    )
+
+    assert result["ok"] is False
+    assert "插件名" in result["error"]
+    assert not (tmp_path / "outside").exists()
+
+
+@pytest.mark.asyncio
+async def test_install_plugin_rejects_archive_expansion_over_budget(monkeypatch, tmp_path):
+    """高度压缩的大文件必须在 extractall 前按解压预算拒绝。"""
+    import akm.plugins.plugin_manager as manager_module
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(manager_module, "_PLUGIN_ARCHIVE_MAX_UNCOMPRESSED_BYTES", 3)
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("plugin/plugin.json", '{"name":"safe","version":"1.0.0"}')
+        zf.writestr("plugin/index.py", "1234")
+
+    result = await PluginManager().install_plugin(
+        UploadFile(filename="large.zip", file=BytesIO(archive.getvalue()))
+    )
+
+    assert result["ok"] is False
+    assert "解压后总大小" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_plugin_import_failure_does_not_block_later_plugins(monkeypatch, tmp_path):
     """单个第三方插件的模块导入失败时，后续插件仍应完成加载。"""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))

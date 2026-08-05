@@ -101,7 +101,7 @@ async def test_uploaded_image_saved_to_akm_cache(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_uploaded_image_saved_to_default_dir_when_unconfigured(monkeypatch):
+async def test_uploaded_image_saved_to_default_dir_when_unconfigured(monkeypatch, tmp_path):
     """未配置 agent_upload_dir 时应回落到 ~/.akm/cache 默认目录。"""
     from pathlib import Path
 
@@ -109,6 +109,8 @@ async def test_uploaded_image_saved_to_default_dir_when_unconfigured(monkeypatch
     from akm.agent_runtime.router import _save_uploaded_image
 
     monkeypatch.setattr(router_module, "load_config", lambda: {})
+    # 默认目录位于用户目录；测试必须使用临时 HOME，避免向开发机真实缓存目录落盘。
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
     path = Path(_save_uploaded_image(png_bytes, "image/png"))
@@ -139,6 +141,24 @@ async def test_multipart_multiple_files_all_appended():
     assert len(messages) == 3
     assert "alpha" in messages[1]["content"]
     assert "beta" in messages[2]["content"]
+
+
+@pytest.mark.asyncio
+async def test_multipart_files_reject_total_size_over_limit(monkeypatch):
+    """附件在读取和 Base64 编码前必须拒绝超过总量上限的输入。"""
+    from akm.agent_runtime import router as router_module
+
+    monkeypatch.setattr(router_module, "_AGENT_UPLOAD_MAX_BYTES", 3)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            data={"messages": json.dumps([{"role": "user", "content": "hi"}])},
+            files=[("files", ("large.txt", b"1234", "text/plain"))],
+        )
+
+    assert resp.status_code == 400
+    assert "总大小" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -267,6 +287,23 @@ async def test_auth_skipped_when_token_unconfigured(monkeypatch):
     monkeypatch.setattr("akm.agent_runtime.router.load_config", lambda: {})
     request = _FakeRequest(headers={})
     assert await _check_agent_auth(request) is None
+
+
+@pytest.mark.asyncio
+async def test_auth_requires_token_when_dangerous_tools_enabled(monkeypatch):
+    """写入、shell 或 git 工具启用后，不能以无鉴权状态暴露 Agent 端点。"""
+    from akm.agent_runtime.router import _check_agent_auth
+
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config",
+        lambda: {"agent_run_shell_enabled": True, "agent_api_token": ""},
+    )
+
+    resp = await _check_agent_auth(_FakeRequest(headers={}))
+
+    assert resp is not None
+    assert resp.status_code == 503
+    assert "必须配置 agent_api_token" in resp.body.decode("utf-8")
 
 
 @pytest.mark.asyncio

@@ -170,10 +170,23 @@ async def test_generate_image_b64_fallback(monkeypatch, tmp_path):
     text = await tool.handler(prompt="x")
     result = json.loads(text)
     assert result["images"][0]["b64_json_hint"] == "base64 数据，长度 4"
+    assert "b64_json" not in result["images"][0]
     local_path = Path(result["images"][0]["local_path"])
     assert local_path.exists()
     assert local_path.read_bytes() == b"ABC"
     assert result["images"][0]["http_url"].startswith("http://127.0.0.1:8800/agent-uploads/")
+
+
+def test_image_input_size_limit_rejects_before_reading(monkeypatch, tmp_path):
+    """图片输入超过上限时应在读取或解码前拒绝，避免工具调用耗尽内存。"""
+    monkeypatch.setattr(tools_module, "_AGENT_IMAGE_MAX_INPUT_BYTES", 3)
+    image_path = tmp_path / "too-large.png"
+    image_path.write_bytes(b"ABCD")
+
+    with pytest.raises(ValueError, match="超过"):
+        tools_module._read_image_file(str(image_path))
+    with pytest.raises(ValueError, match="超过"):
+        tools_module._decode_image_base64("QUJDRA==")
 
 
 # ── 失败路径 ──
@@ -239,6 +252,29 @@ async def test_generate_image_without_pool():
     tool = _image_tool(app)
     text = await tool.handler(prompt="x")
     assert "连接池未就绪" in text
+
+
+@pytest.mark.asyncio
+async def test_generate_image_clamps_requested_count(monkeypatch, tmp_path):
+    """图片数量必须限制在内置上限内，避免模型异常参数放大上游费用。"""
+    captured = {}
+    app = FastAPI()
+    app.state.http_client = FakePool()
+    monkeypatch.setattr(
+        tools_module,
+        "load_config",
+        lambda: {"image_supported_models": "dall-e-3", "agent_upload_dir": str(tmp_path / "uploads")},
+    )
+
+    async def fake_forward(body, *_args, **_kwargs):
+        captured.update(body)
+        return {"status_code": 200, "body": json.dumps({"data": []}), "error": ""}
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+
+    await _image_tool(app).handler(prompt="x", n=999)
+
+    assert captured["n"] == 4
 
 
 # ── akm_edit_image ──
@@ -405,6 +441,44 @@ async def test_edit_image_missing_file(edit_app, monkeypatch):
     text = await tool.handler(image_path="/nonexistent/nope.png", prompt="x")
     assert "不存在" in json.loads(text)["error"]
     assert called["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_edit_image_rejects_path_outside_workspace_and_upload_dir(monkeypatch, tmp_path):
+    """通过 Agent 请求执行时，图片文件不得来自工作区与上传目录之外。"""
+    from akm.agent_runtime.tools import reset_request_workspace_root, set_request_workspace_root
+
+    app = FastAPI()
+    app.state.http_client = FakePool()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    upload_dir = tmp_path / "uploads"
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNGoutside")
+    called = {"count": 0}
+    monkeypatch.setattr(
+        tools_module,
+        "load_config",
+        lambda: {
+            "image_supported_models": "dall-e-3",
+            "agent_workspace_root": str(workspace),
+            "agent_upload_dir": str(upload_dir),
+        },
+    )
+
+    async def fake_forward(*_args, **_kwargs):
+        called["count"] += 1
+        return {"status_code": 200, "body": "{}", "error": ""}
+
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+    token = set_request_workspace_root("")
+    try:
+        text = await _edit_tool(app).handler(image_path=str(outside), prompt="x")
+    finally:
+        reset_request_workspace_root(token)
+
+    assert "图片路径必须位于工作区或 agent_upload_dir 内" in json.loads(text)["error"]
+    assert called["count"] == 0
 
 
 @pytest.mark.asyncio

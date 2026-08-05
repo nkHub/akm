@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# 附件在解码、Base64 编码和消息注入时会同时占用多份内存；总量上限既保护
+# 服务进程，也避免大文本或大图片直接撑爆后续模型上下文。
+_AGENT_UPLOAD_MAX_FILES = 8
+_AGENT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
 
 def _render_default_instructions(text: str, workspace_root: str = "") -> str:
     """替换默认系统指令中的占位符（{...}）为运行时实际路径。
@@ -57,14 +62,27 @@ def _render_default_instructions(text: str, workspace_root: str = "") -> str:
 
 
 async def _check_agent_auth(request: Request) -> JSONResponse | None:
-    """校验 /v1/agent 请求的可选鉴权 token（agent_api_token）。
+    """校验 /v1/agent 的鉴权 token 与危险工具启用条件。
 
-    config.json 未配置 agent_api_token 时不做任何校验（返回 None）；
-    配置后要求请求携带 ``Authorization: Bearer <token>`` 或
-    ``X-Agent-Token: <token>`` 头，不匹配返回 401。用于在开放了写文件 /
-    shell 工具时限制调用方身份，避免任意本地进程滥用 Agent 权限。
+    只读工具场景允许不配置 token；一旦启用写文件、shell 或 git 工具，
+    必须配置 token。配置后要求请求携带 ``Authorization: Bearer <token>``
+    或 ``X-Agent-Token`` 头，不匹配返回 401，避免危险工具无鉴权暴露。
     """
-    token = str(load_config().get("agent_api_token") or "").strip()
+    config = load_config()
+    token = str(config.get("agent_api_token") or "").strip()
+    dangerous_tools_enabled = any(
+        config.get(flag) is True
+        for flag in (
+            "agent_write_tools_enabled",
+            "agent_run_shell_enabled",
+            "agent_git_enabled",
+        )
+    )
+    if dangerous_tools_enabled and not token:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "启用 Agent 写入、shell 或 git 工具前必须配置 agent_api_token"},
+        )
     if not token:
         return None
     auth = request.headers.get("authorization", "")
@@ -109,10 +127,18 @@ async def _append_file_messages(messages: list[dict], files: list) -> tuple[list
         (新 messages, "") 或 (None, 错误信息)
     """
     new_messages: list[dict] = list(messages)
+    if len(files) > _AGENT_UPLOAD_MAX_FILES:
+        return None, f"一次最多上传 {_AGENT_UPLOAD_MAX_FILES} 个文件"
+    total_size = 0
     for f in files:
         filename = f.filename or "上传文件"
         content_type = f.content_type or ""
-        data = await f.read()
+        # 单次只多读一个字节来判定超限，不能先完整读取攻击者声明的大文件。
+        remaining = _AGENT_UPLOAD_MAX_BYTES - total_size
+        data = await f.read(remaining + 1)
+        if len(data) > remaining:
+            return None, f"上传文件总大小不能超过 {_AGENT_UPLOAD_MAX_BYTES // (1024 * 1024)}MB"
+        total_size += len(data)
         if content_type.startswith("image/"):
             b64 = base64.b64encode(data).decode("ascii")
             saved_path = ""
