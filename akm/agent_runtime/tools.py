@@ -819,6 +819,22 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             for key in list_keys()
         ]
 
+    def get_keys_summary() -> dict[str, Any]:
+        """返回当前 Key 总数与每个 Key 的模型清单，不返回任何密钥信息。"""
+        keys = [
+            {
+                "alias": key.get("alias", ""),
+                "provider": key.get("provider", ""),
+                "models": key_model_list(key),
+                "status": key.get("status", ""),
+            }
+            for key in list_keys()
+        ]
+        return {
+            "total": len(keys),
+            "keys": keys,
+        }
+
     def get_time() -> dict[str, Any]:
         """返回服务器当前时间，含本地 ISO 时间、UTC 时间、UNIX 时间戳与时区。"""
         now = datetime.datetime.now().astimezone()
@@ -953,6 +969,70 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "再查询可返回 total_cost 与模型单价表"
             )
         return result
+
+    def get_config() -> dict[str, Any]:
+        """返回 AKM 运行配置。密钥类字段（agent_api_token、tavily_api_key）
+        不做明文透出：已配置时标记为"已配置"，避免敏感信息进入模型上下文。"""
+        cfg = load_config()
+        redacted: dict[str, Any] = {
+            "agent_api_token": ("已配置" if cfg.get("agent_api_token") else ""),
+            "tavily_api_key": ("已配置" if cfg.get("tavily_api_key") else ""),
+        }
+        safe = {key: value for key, value in cfg.items() if key not in redacted}
+        safe.update(redacted)
+        return safe
+
+    def list_plugins() -> list[dict[str, Any]]:
+        """返回已加载插件的非敏感摘要（名称、版本、分类、描述、启用状态与来源）。"""
+        pm = getattr(app.state, "plugin_manager", None)
+        if pm is None:
+            return []
+        try:
+            items = pm.get_plugin_list()
+        except Exception:
+            logger.warning("[AgentTool] akm_list_plugins 读取插件列表失败", exc_info=True)
+            return []
+        return [
+            {
+                "name": item.get("name", ""),
+                "version": item.get("version", ""),
+                "category": item.get("category", ""),
+                "description": item.get("description", ""),
+                "builtin": item.get("builtin", False),
+                "enabled": item.get("enabled", False),
+                "source": item.get("source", ""),
+            }
+            for item in items
+        ]
+
+    def list_sessions() -> list[dict[str, Any]]:
+        """列出历史 Agent 会话的元信息（不含消息正文），按更新时间倒序。"""
+        from akm.agent_cli.sessions import SessionStore
+        return SessionStore().list()
+
+    def load_session(name: str, limit: int = 20) -> dict[str, Any]:
+        """读取历史 Agent 会话的最近消息，用于回顾上下文。"""
+        import os as _os
+        if not name or name != _os.path.basename(name) or name in (".", ".."):
+            return {"error": f"非法的会话名: {name!r}"}
+        from akm.agent_cli.sessions import SessionStore
+        session = SessionStore().load(name)
+        if session is None:
+            return {"error": f"会话不存在: {name}"}
+        try:
+            limit_n = int(limit)
+        except (TypeError, ValueError):
+            limit_n = 20
+        limit_n = max(1, min(limit_n, 100))
+        messages = session.get("messages") or []
+        return {
+            "name": session.get("name", ""),
+            "model": session.get("model", ""),
+            "created_at": session.get("created_at", ""),
+            "updated_at": session.get("updated_at", ""),
+            "message_count": len(messages),
+            "messages": messages[-limit_n:],
+        }
 
     async def tavily_search_tool(
         query: str,
@@ -1211,7 +1291,39 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
     return [
         ToolDef("akm_get_status", "读取 AKM 服务健康、审计队列和插件运行状态", empty_object, get_status),
         ToolDef("akm_list_keys", "列出 AKM 中已配置 Key 的非敏感状态与模型信息，不返回密钥", empty_object, get_keys),
+        ToolDef("akm_get_keys_summary", "返回 AKM 当前已配置 Key 的总数，以及每个 Key 的供应商与模型清单，不返回密钥", empty_object, get_keys_summary),
         ToolDef("akm_get_time", "获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区", empty_object, get_time),
+        ToolDef(
+            "akm_get_config",
+            "读取 AKM 运行配置。密钥类字段（agent_api_token、tavily_api_key）不做明文透出，仅标记是否已配置；其余配置项原样返回",
+            empty_object,
+            get_config,
+        ),
+        ToolDef(
+            "akm_list_plugins",
+            "列出 AKM 已加载插件的非敏感摘要：名称、版本、分类、描述、是否内置、是否启用与来源",
+            empty_object,
+            list_plugins,
+        ),
+        ToolDef(
+            "akm_list_sessions",
+            "列出历史 Agent 会话的元信息（会话名、创建/更新时间、消息数、模型），不含消息正文，按更新时间倒序",
+            empty_object,
+            list_sessions,
+        ),
+        ToolDef(
+            "akm_load_session",
+            "读取历史 Agent 会话的最近若干条消息，用于回顾之前会话的上下文",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "会话名（来自 akm_list_sessions 的 name 字段）"},
+                    "limit": {"type": "integer", "description": "返回最近的消息条数，1 到 100，默认 20"},
+                },
+                "required": ["name"],
+            },
+            load_session,
+        ),
         ToolDef(
             "akm_list_logs",
             "查询近期 AKM 审计日志摘要，不返回请求体、响应体或请求头",
