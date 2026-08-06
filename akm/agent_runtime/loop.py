@@ -1471,6 +1471,23 @@ class AgentLoop:
                 if reasoning_content:
                     final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
+                # 自动保存会话到磁盘：/v1/agent 请求结束后自动落盘，供
+                # akm_load_session 或 CLI --resume 恢复对话。保存失败不
+                # 阻塞主流程（目录权限等问题不会导致请求异常）。
+                try:
+                    from akm.agent_cli.sessions import SessionStore
+
+                    _store = SessionStore()
+                    _store.save({
+                        "name": _store.next_name(),
+                        "model": model,
+                        "messages": working_messages,
+                        "workspace_root": workspace_root,
+                        "api_path": api_path,
+                        "instructions": instructions,
+                    })
+                except Exception:
+                    pass
                 yield _sse_event("final", {
                     "final_message": final_message,
                     "messages": working_messages,
