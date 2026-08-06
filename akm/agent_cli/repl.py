@@ -351,7 +351,21 @@ class Repl:
                 # 结束时把最终正文交给面板（Live 退出后用于统一渲染）
                 content = str((final_message or {}).get("content") or "")
                 panel.finish(content)
-        except (httpx.HTTPError, asyncio.CancelledError) as exc:
+        except asyncio.CancelledError:
+            # Ctrl+C / 任务取消绝不能当普通失败吞掉：否则流式输出会「突然停住」
+            # 但 REPL 仍卡在 akm> 提示符，用户感知为 TUI 假死。
+            # 仅在尚未收到 final 时回滚本轮刚追加的 user 消息，再向上传播取消。
+            if final_message is None:
+                messages = self._messages()
+                if messages and messages[-1].get("role") == "user":
+                    messages.pop()
+            try:
+                self._save()
+            except Exception:
+                pass
+            raise
+        except httpx.HTTPError as exc:
+            # 仅网络/HTTP 层失败：提示后回滚本轮，REPL 继续下一轮输入
             self._error(f"请求失败: {exc}")
             failed = True
 

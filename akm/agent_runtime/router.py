@@ -62,27 +62,15 @@ def _render_default_instructions(text: str, workspace_root: str = "") -> str:
 
 
 async def _check_agent_auth(request: Request) -> JSONResponse | None:
-    """校验 /v1/agent 的鉴权 token 与危险工具启用条件。
+    """校验 /v1/agent 的可选鉴权 token。
 
-    只读工具场景允许不配置 token；一旦启用写文件、shell 或 git 工具，
-    必须配置 token。配置后要求请求携带 ``Authorization: Bearer <token>``
-    或 ``X-Agent-Token`` 头，不匹配返回 401，避免危险工具无鉴权暴露。
+    ``agent_api_token`` 留空时不校验（本地/内网可直接调用，含写工具）。
+    配置了 token 后，请求须携带 ``Authorization: Bearer <token>`` 或
+    ``X-Agent-Token`` 头，不匹配返回 401。
     """
     config = load_config()
     token = str(config.get("agent_api_token") or "").strip()
-    dangerous_tools_enabled = any(
-        config.get(flag) is True
-        for flag in (
-            "agent_write_tools_enabled",
-            "agent_run_shell_enabled",
-            "agent_git_enabled",
-        )
-    )
-    if dangerous_tools_enabled and not token:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "启用 Agent 写入、shell 或 git 工具前必须配置 agent_api_token"},
-        )
+    # 未配置 token：不强制鉴权（写/shell/git 开关本身已控制危险工具是否注册）
     if not token:
         return None
     auth = request.headers.get("authorization", "")

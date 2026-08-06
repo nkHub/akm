@@ -300,6 +300,73 @@ def test_repl_run_stream_error_rolls_back_user_message(tmp_path):
     assert repl.session["messages"] == []
 
 
+def test_repl_run_stream_cancelled_error_propagates(tmp_path):
+    """流式过程中 CancelledError（Ctrl+C）必须向上传播，不能当普通失败吞掉。
+
+    旧行为会打印「请求失败」后回到 akm>，用户感知为 TUI 突然停住但仍卡在提示符。
+    """
+    store = SessionStore(tmp_path)
+    session = build_session(store, name="t")
+
+    class _CancelClient:
+        async def stream(self, messages, **kwargs):
+            yield "model_delta", {"content": "开始"}
+            raise asyncio.CancelledError()
+
+        async def aclose(self):
+            return None
+
+    repl = Repl(store, _CancelClient(), session, input_fn=lambda _: "hi", color=False)
+    outputs: list[str] = []
+    repl.print_fn = outputs.append
+
+    async def _run():
+        await repl._run_stream_round("hi")
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_run())
+    # 取消时回滚本轮 user 消息，会话不被污染
+    assert repl.session["messages"] == []
+    # 不得把取消伪装成「请求失败」
+    assert not any("请求失败" in line for line in outputs)
+
+
+def test_repl_run_async_cancelled_during_stream_exits(tmp_path):
+    """整段 REPL 在流式过程中被 cancel 时，run_async 应中止而不是继续读下一行。"""
+    store = SessionStore(tmp_path)
+    session = build_session(store, name="t")
+
+    class _SlowClient:
+        async def stream(self, messages, **kwargs):
+            yield "model_delta", {"content": "正在输出"}
+            await asyncio.sleep(5)
+            yield "final", {"final_message": {"content": "完"}, "messages": []}
+
+        async def aclose(self):
+            return None
+
+    inputs = iter(["hello", "should-not-reach"])
+    repl = Repl(
+        store,
+        _SlowClient(),
+        session,
+        input_fn=lambda _: next(inputs),
+        color=False,
+        enable_live=False,
+    )
+
+    async def _scenario():
+        task = asyncio.create_task(repl.run_async(stream=True))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_scenario())
+    # 第二轮输入不应被消费（取消后 REPL 已退出）
+    assert next(inputs) == "should-not-reach"
+
+
 def test_repl_run_stream_skips_empty_delta(tmp_path):
     """内容为空的 reasoning_delta / model_delta 不应触发打印（防刷屏）。"""
     store = SessionStore(tmp_path)
@@ -656,12 +723,12 @@ def test_live_panel_rendered_final_keeps_reasoning_and_tools():
     assert "最终C" in final
 
 
-def test_live_panel_clips_overflow_to_terminal_height():
-    """Live 模式 _render 把超长内容裁剪到终端可视高度，保留最新行。"""
+def test_live_panel_streams_full_content_without_clip():
+    """Live 模式不再裁剪到当屏：长内容完整保留，由终端自然滚动。"""
     from akm.agent_cli.render import LiveStreamPanel
 
     panel = LiveStreamPanel(enable=True, color=False)
-    # 用假 Live 对象触发裁剪逻辑（不真正启动终端重绘）
+
     class _FakeLive:
         def update(self, *_): pass
         def start(self): pass
@@ -670,7 +737,7 @@ def test_live_panel_clips_overflow_to_terminal_height():
     panel._live = _FakeLive()
     panel._term_lines = 30
     panel._term_columns = 100
-    # 直接填充一个超长正文段，模拟长回复（不经 finish 覆盖正文）
+    # 超长正文应完整出现在渲染结果中（不因终端高度被截掉）
     panel._flush_buffers()
     panel._segments.append(
         {
@@ -680,12 +747,106 @@ def test_live_panel_clips_overflow_to_terminal_height():
     )
     out = panel._render()
     s = out.plain if hasattr(out, "plain") else str(out)
-    lines = s.splitlines()
-    # 裁剪后行数不超过可视高度（终端行数 - 3）
-    assert len(lines) <= 27
-    # 旧内容被丢弃，最新内容保留
-    assert "第0行" not in s
+    # 首尾内容都在：不裁剪
+    assert "第0行" in s
     assert "第199行" in s
+    # 行数应明显超过当屏高度
+    assert len(s.splitlines()) > 30
+
+
+def test_live_panel_color_render_parses_ansi_not_literal():
+    """color=True 时 _render 必须用 Text.from_ansi，不能把 ESC 当字面量（否则花屏）。"""
+    from akm.agent_cli.render import LiveStreamPanel
+
+    class _FakeLive:
+        def update(self, *_): pass
+        def start(self): pass
+        def stop(self): pass
+
+    panel = LiveStreamPanel(enable=True, color=True)
+    panel._live = _FakeLive()
+    panel._term_lines = 24
+    panel._term_columns = 80
+    # 含代码 fence 的正文会触发 rich 语法高亮 ANSI
+    panel.add_body("```jsx\nexport const App = () => <div>hi</div>\n```\n")
+    out = panel._render()
+    plain = out.plain if hasattr(out, "plain") else str(out)
+    # plain 不应残留 ESC 转义序列（from_ansi 已解析）
+    assert "\x1b" not in plain
+    # 可见内容应包含代码关键字，而非裸 ANSI 数字碎片
+    assert "export" in plain
+    assert "App" in plain
+
+
+def test_live_panel_long_unclosed_fence_streams_full():
+    """长未闭合代码 fence 流式时，完整内容向下滚动显示，不裁成碎片。"""
+    from akm.agent_cli.render import LiveStreamPanel
+
+    class _FakeLive:
+        def update(self, *_): pass
+        def start(self): pass
+        def stop(self): pass
+
+    panel = LiveStreamPanel(enable=True, color=False)
+    panel._live = _FakeLive()
+    panel._term_lines = 20
+    panel._term_columns = 80
+    # 模拟 agent 写大量 React 代码、fence 尚未闭合
+    body = "```jsx\n"
+    for i in range(80):
+        body += f"export const Item{i} = () => {{\n  return <div>{i}</div>\n}}\n"
+    panel.add_body(body)
+    out = panel._render()
+    plain = out.plain if hasattr(out, "plain") else str(out)
+    # 首尾组件都在：完整流式，不裁剪
+    assert "Item0" in plain
+    assert "Item79" in plain
+    # 应能看到完整 export 语句
+    code_lines = [ln for ln in plain.splitlines() if "export const" in ln]
+    assert code_lines, "应能看到完整 export 语句"
+    assert any("Item" in ln for ln in code_lines)
+
+
+def test_live_panel_exit_cancels_deferred_redraw():
+    """Live 退出时必须 cancel 节流 deferred task，且退出后不再重绘。"""
+    from akm.agent_cli.render import LiveStreamPanel
+
+    class _CountingLive:
+        def __init__(self):
+            self.updates = 0
+            self.stopped = False
+
+        def update(self, *_):
+            self.updates += 1
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.stopped = True
+
+    async def _run():
+        panel = LiveStreamPanel(enable=True, color=False, refresh_per_second=12)
+        # 缩短节流窗口，便于测试
+        panel._throttle_secs = 0.05
+        fake = _CountingLive()
+        with panel:
+            panel._live = fake
+            # 第一次立即重绘
+            panel.add_body("a")
+            # 节流窗口内再追加 → 创建 deferred task
+            panel.add_body("b")
+            assert len(panel._deferred_tasks) >= 1
+            # 立刻退出：应 cancel deferred，不再追加 update
+            updates_before_exit = fake.updates
+        assert fake.stopped is True
+        assert panel._live is None
+        assert len(panel._deferred_tasks) == 0
+        # 给 deferred 一点时间（若未 cancel 会 sleep 后 update）
+        await asyncio.sleep(0.08)
+        assert fake.updates == updates_before_exit
+
+    asyncio.run(_run())
 
 
 def test_repl_run_stream_with_enable_live_passes_events(tmp_path, monkeypatch):

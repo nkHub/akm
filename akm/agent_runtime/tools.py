@@ -862,6 +862,98 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             for log in logs
         ]
 
+    def get_usage_stats(days: int = 0) -> dict[str, Any]:
+        """查询 Token 用量统计（默认同时返回最近 1/7/30 天）。
+
+        费用字段与模型单价表仅在 config.json 开启 ``cost_stats_enabled`` 时返回；
+        估算值不能替代供应商账单。
+
+        Args:
+            days: 查询窗口天数。传 1 / 7 / 30 时只返回该窗口；
+                传 0（默认）或其它值时返回 1、7、30 三个窗口。
+        """
+        # 延迟导入：tools 在 server 启动阶段注册，避免模块级循环依赖。
+        from akm.cost_estimate import DEFAULT_PRICING_TABLE, pricing_snapshot
+        from akm.server import _get_stats
+
+        cfg = load_config()
+        cost_enabled = bool(cfg.get("cost_stats_enabled", False))
+        pricing_table = str(cfg.get("cost_pricing_table") or DEFAULT_PRICING_TABLE)
+        # 只允许固定窗口，避免模型随意拉超长区间撑爆上下文。
+        allowed_windows = (1, 7, 30)
+        try:
+            days_n = int(days or 0)
+        except (TypeError, ValueError):
+            days_n = 0
+        if days_n in allowed_windows:
+            window_days = (days_n,)
+        else:
+            window_days = allowed_windows
+
+        def _summarize_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+            """压缩 by_* 分桶：保留 token / 请求数，费用开启时再带 cost。"""
+            out: dict[str, Any] = {
+                "prompt": int(bucket.get("prompt", 0) or 0),
+                "completion": int(bucket.get("completion", 0) or 0),
+                "total": int(bucket.get("total", 0) or 0),
+                "cached": int(bucket.get("cached", 0) or 0),
+                "requests": int(bucket.get("requests", 0) or 0),
+            }
+            if cost_enabled and "cost" in bucket:
+                out["cost"] = float(bucket.get("cost", 0) or 0)
+                out["currency"] = str(bucket.get("currency") or "$")
+            return out
+
+        def _window_payload(raw: dict[str, Any], window: int) -> dict[str, Any]:
+            """把 _get_stats 原始结果压成 Agent 友好摘要。"""
+            payload: dict[str, Any] = {
+                "days": window,
+                "total_requests": int(raw.get("total_requests", 0) or 0),
+                "total_prompt_tokens": int(raw.get("total_prompt_tokens", 0) or 0),
+                "total_completion_tokens": int(raw.get("total_completion_tokens", 0) or 0),
+                "total_tokens": int(raw.get("total_tokens", 0) or 0),
+                "total_cached_tokens": int(raw.get("total_cached_tokens", 0) or 0),
+                "by_model": {
+                    str(name): _summarize_bucket(item)
+                    for name, item in (raw.get("by_model") or {}).items()
+                },
+                "by_provider": {
+                    str(name): _summarize_bucket(item)
+                    for name, item in (raw.get("by_provider") or {}).items()
+                },
+                "by_key": {
+                    str(name): _summarize_bucket(item)
+                    for name, item in (raw.get("by_key") or {}).items()
+                },
+                "cached_at": raw.get("cached_at") or "",
+            }
+            if cost_enabled:
+                payload["total_cost"] = float(raw.get("total_cost", 0) or 0)
+                payload["cost_currency"] = str(raw.get("cost_currency") or "$")
+                if raw.get("costs_by_currency") is not None:
+                    payload["costs_by_currency"] = raw.get("costs_by_currency")
+            return payload
+
+        windows: dict[str, Any] = {}
+        for window in window_days:
+            windows[str(window)] = _window_payload(_get_stats(window), window)
+
+        result: dict[str, Any] = {
+            "windows": windows,
+            "cost_stats_enabled": cost_enabled,
+        }
+        # 费用与单价表都只在 cost_stats_enabled 开启时返回，避免未开启时干扰上下文。
+        if cost_enabled:
+            result["pricing"] = pricing_snapshot(pricing_table)
+            result["pricing_unit"] = "USD per 1M tokens (input / input_cache / output)"
+            result["cost_note"] = "费用为本地单价表估算，不能替代供应商账单"
+        else:
+            result["cost_note"] = (
+                "费用估算未开启：在 config.json 设置 cost_stats_enabled=true 后"
+                "再查询可返回 total_cost 与模型单价表"
+            )
+        return result
+
     async def tavily_search_tool(
         query: str,
         max_results: int = 5,
@@ -1133,6 +1225,24 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 },
             },
             get_logs,
+        ),
+        ToolDef(
+            "akm_get_usage_stats",
+            "查询 AKM 近期 Token 用量统计。默认同时返回最近 1/7/30 天窗口的请求数、"
+            "prompt/completion/total/cached tokens，以及按 model/provider/key 的汇总。"
+            "开启 cost_stats_enabled 时额外返回费用估算（total_cost）与模型单价表"
+            "（input/input_cache/output，单位 USD per 1M tokens）；费用为本地估算，不能替代供应商账单",
+            {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "查询窗口：1 / 7 / 30 只返回该窗口；0 或省略时返回 1、7、30 三个窗口",
+                        "enum": [0, 1, 7, 30],
+                    },
+                },
+            },
+            get_usage_stats,
         ),
         ToolDef(
             "tavily_search",

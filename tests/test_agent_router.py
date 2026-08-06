@@ -290,20 +290,21 @@ async def test_auth_skipped_when_token_unconfigured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auth_requires_token_when_dangerous_tools_enabled(monkeypatch):
-    """写入、shell 或 git 工具启用后，不能以无鉴权状态暴露 Agent 端点。"""
+async def test_auth_allows_dangerous_tools_without_token(monkeypatch):
+    """写/shell/git 已开启但未配置 agent_api_token 时仍放行（token 可选）。"""
     from akm.agent_runtime.router import _check_agent_auth
 
     monkeypatch.setattr(
         "akm.agent_runtime.router.load_config",
-        lambda: {"agent_run_shell_enabled": True, "agent_api_token": ""},
+        lambda: {
+            "agent_write_tools_enabled": True,
+            "agent_run_shell_enabled": True,
+            "agent_git_enabled": True,
+            "agent_api_token": "",
+        },
     )
 
-    resp = await _check_agent_auth(_FakeRequest(headers={}))
-
-    assert resp is not None
-    assert resp.status_code == 503
-    assert "必须配置 agent_api_token" in resp.body.decode("utf-8")
+    assert await _check_agent_auth(_FakeRequest(headers={})) is None
 
 
 @pytest.mark.asyncio
