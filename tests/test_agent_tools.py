@@ -28,6 +28,31 @@ def test_builtin_tools_only_expose_non_sensitive_key_metadata(monkeypatch):
     assert "base_url" not in result[0]
 
 
+def test_keys_summary_reports_total_and_models(monkeypatch):
+    """Key 汇总工具必须返回总数与每个 Key 的模型清单，且不含密钥。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.list_keys",
+        lambda: [
+            {"alias": "primary", "provider": "openai", "api_key": "sk-secret", "base_url": "https://api.example.com", "models": "gpt-4o,gpt-4o-mini", "priority": 1, "status": "active"},
+            {"alias": "backup", "provider": "deepseek", "api_key": "sk-secret2", "base_url": "https://api.deepseek.com", "models": "deepseek-chat", "priority": 2, "status": "active"},
+        ],
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    result = _handlers(app)["akm_get_keys_summary"]()
+
+    assert result == {
+        "total": 2,
+        "keys": [
+            {"alias": "primary", "provider": "openai", "models": ["gpt-4o", "gpt-4o-mini"], "status": "active"},
+            {"alias": "backup", "provider": "deepseek", "models": ["deepseek-chat"], "status": "active"},
+        ],
+    }
+    for key in result["keys"]:
+        assert "api_key" not in key
+        assert "base_url" not in key
+
+
 @pytest.mark.asyncio
 async def test_builtin_log_tool_limits_query_and_omits_bodies(monkeypatch):
     """日志工具必须限制查询范围，并剔除可能包含敏感内容的字段。"""
@@ -335,3 +360,126 @@ async def test_builtin_kb_search_registers_tool():
     assert "akm_search_kb" in tools
     assert tools["akm_search_kb"].parameters["required"] == ["question"]
     assert tools["akm_search_kb"].parameters["properties"]["top_k"]["description"]
+
+
+def test_builtin_get_config_redacts_secret_fields(monkeypatch):
+    """配置读取工具必须把密钥类字段改为已配置标记，不得明文透出。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {
+            "server_port": 8800,
+            "agent_api_token": "sk-token-secret",
+            "tavily_api_key": "tv-secret",
+            "agent_write_tools_enabled": True,
+        },
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    result = _handlers(app)["akm_get_config"]()
+
+    assert result["server_port"] == 8800
+    assert result["agent_api_token"] == "已配置"
+    assert result["tavily_api_key"] == "已配置"
+    assert "sk-token-secret" not in str(result)
+    assert "tv-secret" not in str(result)
+
+
+def test_builtin_list_plugins_returns_non_sensitive_summary():
+    """插件列表工具只返回非敏感摘要字段，不暴露 settings 等内部结构。"""
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            plugin_manager=SimpleNamespace(
+                get_plugin_list=lambda: [
+                    {
+                        "name": "guard",
+                        "version": "1.0.0",
+                        "category": "security",
+                        "description": "Guard",
+                        "builtin": True,
+                        "enabled": True,
+                        "source": "builtin",
+                        "settings": [{"key": "secret", "default": "x"}],
+                        "hooks": ["on_load"],
+                    },
+                ]
+            )
+        )
+    )
+
+    result = _handlers(app)["akm_list_plugins"]()
+
+    assert result == [
+        {
+            "name": "guard",
+            "version": "1.0.0",
+            "category": "security",
+            "description": "Guard",
+            "builtin": True,
+            "enabled": True,
+            "source": "builtin",
+        }
+    ]
+
+
+def test_builtin_list_plugins_graceful_without_manager():
+    """插件管理器未就绪时返回空列表，不抛异常。"""
+    app = SimpleNamespace(state=SimpleNamespace(plugin_manager=None))
+
+    assert _handlers(app)["akm_list_plugins"]() == []
+
+
+def test_builtin_sessions_list_and_load(monkeypatch):
+    """会话列表返回元信息；加载按会话名读取最近消息，非法名被拒绝。"""
+    fake_sessions = [
+        {"name": "20260805-142301", "created_at": "2026-08-05T14:23:01", "updated_at": "2026-08-05T14:30:12", "message_count": 3, "model": "gpt-4o"},
+    ]
+
+    class FakeStore:
+        def __init__(self, base_dir=None):
+            pass
+
+        def list(self):
+            return fake_sessions
+
+        def load(self, name):
+            if name == "20260805-142301":
+                return {
+                    "name": name,
+                    "model": "gpt-4o",
+                    "created_at": "2026-08-05T14:23:01",
+                    "updated_at": "2026-08-05T14:30:12",
+                    "messages": [
+                        {"role": "user", "content": "旧消息"},
+                        {"role": "assistant", "content": "回复1"},
+                        {"role": "user", "content": "最近问题"},
+                    ],
+                }
+            return None
+
+    monkeypatch.setattr("akm.agent_cli.sessions.SessionStore", FakeStore)
+    app = SimpleNamespace(state=SimpleNamespace())
+    handlers = _handlers(app)
+
+    listed = handlers["akm_list_sessions"]()
+    assert listed == fake_sessions
+    assert "content" not in listed[0]
+
+    loaded = handlers["akm_load_session"](name="20260805-142301", limit=2)
+    assert loaded["message_count"] == 3
+    assert [m["content"] for m in loaded["messages"]] == ["回复1", "最近问题"]
+
+    missing = handlers["akm_load_session"](name="nope")
+    assert missing["error"]
+
+    bad = handlers["akm_load_session"](name="../evil")
+    assert bad["error"]
+
+
+def test_builtin_readonly_tools_register():
+    """配置、插件、会话读取工具均应注册，名称符合内置工具前缀。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+
+    for name in ("akm_get_config", "akm_list_plugins", "akm_list_sessions", "akm_load_session"):
+        assert name in tools
+    assert tools["akm_load_session"].parameters["required"] == ["name"]
