@@ -427,6 +427,22 @@ def test_render_default_instructions_empty_returns_empty():
     assert _render_default_instructions("", "/tmp") == ""
 
 
+def test_render_default_instructions_os_getcwd_failure_falls_back_home(monkeypatch):
+    """工作目录被删除（os.getcwd 抛 OSError）时回退到用户主目录，不抛异常。"""
+    from pathlib import Path
+
+    import os as _os
+
+    from akm.agent_runtime.router import _render_default_instructions
+
+    def _boom():
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(_os, "getcwd", _boom)
+    out = _render_default_instructions("{CURRENT_WORKING_DIRECTORY}", "")
+    assert out == str(Path.home())
+
+
 @pytest.mark.asyncio
 async def test_default_instructions_placeholder_replaced_in_request(monkeypatch):
     """未传 instructions 时回填默认指令，且占位符在注入前被替换。"""

@@ -852,3 +852,55 @@ async def test_run_stream_self_healing_emits_tool_retry(monkeypatch):
     assert "上一步工具调用失败" in calls[1]["messages"][-1]["content"]
     assert events[-1]["event"] == "final"
     ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_stream_reuses_proxy_prefetched_aiter(monkeypatch):
+    """proxy 首字节预读后，run_stream 必须复用其 aiter 生成器，不得二次 aiter_bytes。
+
+    二次 aiter_bytes 会触发 httpx StreamConsumed（响应已被预读消费）。
+    """
+
+    async def _aiter(*chunks):
+        for chunk in chunks:
+            yield chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+
+    first_chunk = 'data: {"choices":[{"delta":{"content":"你"}}]}\n\n'.encode("utf-8")
+    rest = [
+        'data: {"choices":[{"delta":{"content":"好"}}]}\n\n'.encode("utf-8"),
+        b"data: [DONE]\n\n",
+    ]
+
+    class PrefetchedResponse:
+        """模拟已被 proxy 预读消费的上游响应：二次 aiter_bytes 必须报错。"""
+
+        status_code = 200
+        closed = False
+
+        async def aiter_bytes(self):
+            raise RuntimeError("httpx.StreamConsumed: content already streamed")
+
+        async def aread(self):
+            return b""
+
+        async def aclose(self):
+            self.closed = True
+
+    async def forward(*_args, **_kwargs):
+        return {
+            "stream": True,
+            "response": PrefetchedResponse(),
+            "status_code": 200,
+            "provider": "test",
+            "key_alias": "key",
+            "first_chunk": first_chunk,
+            "aiter": _aiter(*rest),
+        }
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
+
+    assert [event["event"] for event in events] == ["model_delta", "model_delta", "final"]
+    assert [event["data"]["content"] for event in events[:2]] == ["你", "好"]
+    assert events[-1]["data"]["final_message"]["content"] == "你好"

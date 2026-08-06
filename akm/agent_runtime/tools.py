@@ -6,11 +6,16 @@ import datetime
 import json
 import logging
 import mimetypes
+import os
 import re
 import shutil
+import smtplib
 import subprocess
+import tempfile
 import uuid
 from contextvars import ContextVar
+from email.message import EmailMessage
+from email.utils import formataddr, make_msgid, parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +42,18 @@ _AGENT_IMAGE_MAX_COUNT = 4
 _AGENT_IMAGE_MAX_INPUT_BYTES = 20 * 1024 * 1024
 # run_shell 工具默认超时（秒）
 _WORKSPACE_SHELL_TIMEOUT_SEC = 60
+# 读文件工具允许读取的最大文件大小（st_size 预检），超过时拒绝读取，
+# 防止把超大文件整个读入内存拖慢进程。文本源码/配置文件通常远小于此值。
+_WORKSPACE_READ_MAX_FILE_BYTES = 50 * 1024 * 1024
+# grep 单文件扫描上限：超过该字节数的文件直接跳过（不逐行正则匹配）
+_WORKSPACE_GREP_MAX_FILE_BYTES = 10 * 1024 * 1024
+# grep 单行最大长度：超过则跳过该行，避免把整文件内容聚合成单行后
+# 正则回退爆炸（ReDoS）或匹配超大行
+_WORKSPACE_GREP_MAX_LINE_BYTES = 1024 * 1024
+# grep 单次扫描的全局字节预算：达到后停止继续遍历，防止全盘递归拖垮进程
+_WORKSPACE_GREP_MAX_SCAN_BYTES = 128 * 1024 * 1024
+# 写文件工具允许写入的内容大小上限，防止模型一次写入 GB 级内容撑爆磁盘/内存
+_WORKSPACE_WRITE_MAX_BYTES = 10 * 1024 * 1024
 
 # 请求级工作区覆盖：由 AgentLoop 在单次请求执行工具期间设置，优先于
 # config.json 的全局 agent_workspace_root；空字符串表示不使用覆盖。
@@ -316,6 +333,33 @@ async def _save_generated_image(item: dict[str, Any], client) -> None:
         item["save_error"] = str(exc)
 
 
+def _read_file_lines_sync(target: Path, start_line: int, max_lines: int) -> tuple[list[str], int, bool]:
+    """同步迭代读取文件，仅保留目标行区间，返回 (选中的行, 总行数, 是否截断)。
+
+    与旧实现的区别：不再用 readlines() 把整个文件读进内存，而是逐行迭代，
+    只缓存目标区间的行；累计字节超过返回上限即停止（truncated=True）。
+    运行在 asyncio.to_thread 中，避免阻塞事件循环。
+    """
+    selected: list[str] = []
+    truncated = False
+    total_lines = 0
+    read_bytes = 0
+    with open(target, "r", encoding="utf-8", errors="replace") as fh:
+        for idx, line in enumerate(fh):
+            total_lines = idx + 1
+            if idx < start_line:
+                continue
+            if max_lines >= 0 and len(selected) >= max_lines:
+                # 行数已达上限：继续计数总行数，但不再缓存内容
+                continue
+            read_bytes += len(line)
+            if read_bytes > _WORKSPACE_READ_MAX_BYTES:
+                truncated = True
+                break
+            selected.append(line)
+    return selected, total_lines, truncated
+
+
 async def _read_file_tool(
     path: str,
     offset: int = 0,
@@ -335,29 +379,29 @@ async def _read_file_tool(
     if not target.is_file():
         return json.dumps({"error": f"{path} 不是文件"}, ensure_ascii=False)
     try:
-        with open(target, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
+        if target.stat().st_size > _WORKSPACE_READ_MAX_FILE_BYTES:
+            return json.dumps({
+                "error": f"文件过大（{target.stat().st_size} 字节），超过单次读取上限 "
+                         f"{_WORKSPACE_READ_MAX_FILE_BYTES}。可改用 akm_grep 定位关键内容，"
+                         "或用 offset/limit 分页读取较小的文件。",
+            }, ensure_ascii=False)
+    except OSError as exc:
+        return json.dumps({"error": f"读取文件信息失败: {exc}"}, ensure_ascii=False)
+
+    offset = max(0, int(offset or 0))
+    limit = int(limit if limit is not None else -1)
+    try:
+        # 同步 IO 放到线程池执行，避免阻塞事件循环
+        lines, total_lines, truncated = await asyncio.to_thread(
+            _read_file_lines_sync, target, offset, limit
+        )
     except OSError as exc:
         return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
 
-    total_lines = len(lines)
-    offset = max(0, int(offset or 0))
-    limit = int(limit if limit is not None else -1)
-    start = min(offset, len(lines))
-    if limit >= 0:
-        lines = lines[start:start + limit]
-    else:
-        lines = lines[start:]
-
     text = "".join(lines)
-    truncated = False
-    encoded = text.encode("utf-8", errors="ignore")
-    if len(encoded) > _WORKSPACE_READ_MAX_BYTES:
-        text = encoded[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore")
-        truncated = True
     return json.dumps({
         "path": str(target),
-        "start_line": start,
+        "start_line": offset,
         "total_lines": total_lines,
         "truncated": truncated,
         "content": text,
@@ -418,10 +462,18 @@ async def _glob_tool(pattern: str = "") -> str:
     total = 0
     try:
         for p in root.glob(pattern):
-            if p.is_file() or p.is_dir():
-                total += 1
-                if len(matches) < _WORKSPACE_GREP_MAX_RESULTS:
-                    matches.append(str(p.relative_to(root)))
+            if not (p.is_file() or p.is_dir()):
+                continue
+            # 与 grep 一致：逐项 resolve 后校验仍位于工作区内，
+            # 防止工作区内的软链接把匹配结果指向外部路径。
+            try:
+                if not _path_is_under(p.resolve(), root):
+                    continue
+            except OSError:
+                continue
+            total += 1
+            if len(matches) < _WORKSPACE_GREP_MAX_RESULTS:
+                matches.append(str(p.relative_to(root)))
     except (OSError, ValueError) as exc:
         return json.dumps({"error": f"匹配失败: {exc}"}, ensure_ascii=False)
     matches.sort()
@@ -457,6 +509,7 @@ async def _grep_tool(
         return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
 
     results = []
+    scanned_bytes = 0
     try:
         for p in root.rglob("*"):
             if not p.is_file():
@@ -473,9 +526,23 @@ async def _grep_tool(
             parts = rel.parts
             if any(part.startswith(".") or part in ("node_modules", ".git", "__pycache__", "venv", ".venv", "build", "dist") for part in parts):
                 continue
+            # 资源预算：超大文件跳过、全局扫描字节预算封顶，防止全盘递归
+            # 逐行正则匹配拖垮进程（该循环在事件循环内同步执行）。
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > _WORKSPACE_GREP_MAX_FILE_BYTES:
+                continue
+            scanned_bytes += size
+            if scanned_bytes > _WORKSPACE_GREP_MAX_SCAN_BYTES:
+                break
             try:
                 with open(p, "r", encoding="utf-8", errors="ignore") as fh:
                     for lineno, line in enumerate(fh, start=1):
+                        # 跳过超长单行，避免灾难性正则（ReDoS）在超大输入上回退爆炸
+                        if len(line) > _WORKSPACE_GREP_MAX_LINE_BYTES:
+                            continue
                         if rx.search(line):
                             results.append({
                                 "file": str(rel),
@@ -511,6 +578,32 @@ async def _file_info_tool(path: str) -> str:
         return json.dumps({"error": f"读取文件信息失败: {exc}"}, ensure_ascii=False)
 
 
+def _atomic_write_text(target: Path, text: str) -> None:
+    """以「临时文件 + os.replace」原子写入文本，避免进程中断/磁盘满时留下半个文件。
+
+    临时文件创建在与目标同一目录，保证 os.replace 在同一文件系统内是原子操作。
+    完成后按目标原权限（或默认 0644）修正临时文件权限，避免 mkstemp 的 0600
+    覆盖掉原本可被同机其他用户读写的文件。
+    """
+    data = text.encode("utf-8")
+    fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".akm-write-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        try:
+            mode = target.stat().st_mode & 0o777
+        except OSError:
+            mode = 0o644
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 async def _write_file_tool(
     path: str,
     content: str,
@@ -521,6 +614,12 @@ async def _write_file_tool(
     mode = str(mode or "overwrite").strip()
     if mode not in ("overwrite", "append"):
         return json.dumps({"error": "mode 只能是 overwrite 或 append"}, ensure_ascii=False)
+    payload = str(content or "")
+    payload_bytes = len(payload.encode("utf-8"))
+    if payload_bytes > _WORKSPACE_WRITE_MAX_BYTES:
+        return json.dumps({
+            "error": f"内容过大（{payload_bytes} 字节），超过单次写入上限 {_WORKSPACE_WRITE_MAX_BYTES}",
+        }, ensure_ascii=False)
     try:
         target = _safe_resolve_workspace_path(path, must_exist=(mode == "append"))
     except ValueError as exc:
@@ -529,11 +628,16 @@ async def _write_file_tool(
         return json.dumps({"error": f"{path} 是目录，不能写入"}, ensure_ascii=False)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "a" if mode == "append" else "w", encoding="utf-8") as fh:
-            fh.write(str(content or ""))
+        if mode == "append":
+            # 追加无原子语义，直接以 O_APPEND 打开续写
+            with open(target, "a", encoding="utf-8") as fh:
+                fh.write(payload)
+        else:
+            # 覆盖走原子替换，避免中断留下半个文件
+            _atomic_write_text(target, payload)
     except OSError as exc:
         return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "path": str(target), "mode": mode, "bytes_written": len(str(content or "").encode("utf-8"))}, ensure_ascii=False)
+    return json.dumps({"ok": True, "path": str(target), "mode": mode, "bytes_written": payload_bytes}, ensure_ascii=False)
 
 
 async def _edit_file_tool(
@@ -599,8 +703,12 @@ async def _edit_file_tool(
         # 保留原文件尾部换行风格，避免无谓的全文件 diff
         if content.endswith("\n") and not new_text.endswith("\n"):
             new_text += "\n"
+        if len(new_text.encode("utf-8")) > _WORKSPACE_WRITE_MAX_BYTES:
+            return json.dumps({
+                "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
+            }, ensure_ascii=False)
         try:
-            target.write_text(new_text, encoding="utf-8")
+            _atomic_write_text(target, new_text)
         except OSError as exc:
             return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
         return json.dumps({
@@ -620,8 +728,12 @@ async def _edit_file_tool(
     if not replace_all:
         count = 1
     new_text = content.replace(old_string, str(new_string or ""), count)
+    if len(new_text.encode("utf-8")) > _WORKSPACE_WRITE_MAX_BYTES:
+        return json.dumps({
+            "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
+        }, ensure_ascii=False)
     try:
-        target.write_text(new_text, encoding="utf-8")
+        _atomic_write_text(target, new_text)
     except OSError as exc:
         return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
     return json.dumps({"ok": True, "path": str(target), "replaced": count}, ensure_ascii=False)
@@ -977,6 +1089,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         redacted: dict[str, Any] = {
             "agent_api_token": ("已配置" if cfg.get("agent_api_token") else ""),
             "tavily_api_key": ("已配置" if cfg.get("tavily_api_key") else ""),
+            "agent_email_smtp_password": ("已配置" if cfg.get("agent_email_smtp_password") else ""),
         }
         safe = {key: value for key, value in cfg.items() if key not in redacted}
         safe.update(redacted)
@@ -1287,8 +1400,73 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             images.append(entry)
         return json.dumps({"images": images}, ensure_ascii=False)
 
+    async def send_email_tool(to: str, subject: str, body: str, from_: str = "") -> dict[str, Any]:
+        """发送邮件（SMTP）。返回发信结果与 Message-ID。"""
+        await _check_tool_enabled("agent_email_enabled", "akm_send_email")
+        # 校验收件人邮箱格式（parseaddr 只做基本解析，此处显式要求含 @）
+        _to_name, _to_addr = parseaddr(to)
+        if not _to_addr or "@" not in _to_addr:
+            return {"ok": False, "error": "收件人邮箱格式不合法"}
+        if len(body.encode("utf-8")) > _WORKSPACE_WRITE_MAX_BYTES:
+            return {
+                "ok": False,
+                "error": f"邮件正文过大，单次上限 {_WORKSPACE_WRITE_MAX_BYTES} 字节",
+            }
+        cfg = load_config()
+        host = str(cfg.get("agent_email_smtp_host") or "").strip()
+        user = str(cfg.get("agent_email_smtp_user") or "").strip()
+        if not host or not user:
+            return {
+                "ok": False,
+                "error": "SMTP 未配置：请在 config.json 中设置 agent_email_smtp_host 与 agent_email_smtp_user 后重启服务",
+            }
+        try:
+            port = int(cfg.get("agent_email_smtp_port") or 465)
+        except (TypeError, ValueError):
+            port = 465
+        password = str(cfg.get("agent_email_smtp_password") or "")
+        use_ssl = bool(cfg.get("agent_email_smtp_ssl", True))
+        # 发件人：优先工具传入 from_，其次 SMTP 账号；同样做格式校验
+        _from_name, _from_addr = parseaddr(str(from_ or "").strip())
+        sender = _from_addr if (_from_addr and "@" in _from_addr) else user
+        if not sender or "@" not in sender:
+            return {"ok": False, "error": "发件人邮箱格式不合法"}
+
+        def _send_sync() -> str:
+            """在独立线程中执行同步 SMTP 发送，避免阻塞事件循环。"""
+            msg = EmailMessage()
+            msg["From"] = formataddr((_from_name, sender))
+            msg["To"] = formataddr((_to_name, _to_addr))
+            msg["Subject"] = subject
+            msg["Message-ID"] = make_msgid()
+            msg.set_content(body)
+            try:
+                if use_ssl:
+                    server = smtplib.SMTP_SSL(host, port, timeout=30)
+                else:
+                    server = smtplib.SMTP(host, port, timeout=30)
+                    server.starttls()
+            except Exception as exc:
+                raise RuntimeError(f"连接 SMTP 服务器失败: {exc}") from exc
+            try:
+                server.login(user, password)
+                server.send_message(msg)
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+            return str(msg["Message-ID"])
+
+        try:
+            message_id = await asyncio.to_thread(_send_sync)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_send_email 发送失败: %s", exc)
+            return {"ok": False, "error": f"邮件发送失败: {exc}"}
+        return {"ok": True, "message_id": message_id, "from": sender, "to": _to_addr, "subject": subject}
+
     empty_object = {"type": "object", "properties": {}}
-    return [
+    tools: list[ToolDef] = [
         ToolDef("akm_get_status", "读取 AKM 服务健康、审计队列和插件运行状态", empty_object, get_status),
         ToolDef("akm_list_keys", "列出 AKM 中已配置 Key 的非敏感状态与模型信息，不返回密钥", empty_object, get_keys),
         ToolDef("akm_get_keys_summary", "返回 AKM 当前已配置 Key 的总数，以及每个 Key 的供应商与模型清单，不返回密钥", empty_object, get_keys_summary),
@@ -1423,6 +1601,25 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             edit_image_tool,
         ),
     ]
+    if load_config().get("agent_email_enabled"):
+        tools.append(
+            ToolDef(
+                "akm_send_email",
+                "发送邮件（SMTP）。需要管理员在 config.json 中配置 agent_email_smtp_host/user/password 且 agent_email_enabled=true。用于向指定邮箱发送纯文本通知",
+                {
+                    "type": "object",
+                    "properties": {
+                        "to": {"type": "string", "description": "收件人邮箱地址"},
+                        "subject": {"type": "string", "description": "邮件主题"},
+                        "body": {"type": "string", "description": "邮件正文（纯文本）"},
+                        "from_": {"type": "string", "description": "可选发件人地址，留空使用 SMTP 账号"},
+                    },
+                    "required": ["to", "subject", "body"],
+                },
+                send_email_tool,
+            )
+        )
+    return tools
 
 
 def build_workspace_tools() -> list[ToolDef]:

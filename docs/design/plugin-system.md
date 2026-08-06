@@ -592,6 +592,8 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
   - 当并发数 `>= max_inflight_per_key`（默认 `3`）时触发旁路；
   - 或最老 in-flight 请求时长 `>= slow_inflight_threshold_sec`（默认 `8` 秒）时触发旁路。
 - 触发后尝试改选其他可用 key；若无可替代 key，则继续使用当前 key（不硬失败）。
+- 旁路选候选时会排除 proxy 转发主循环中已尝试失败的 key（`proxy.tried_aliases`），
+  避免反复选中已失败的 key 导致主循环空转、请求长时间挂起。
 - in-flight 计数在 `on_key_selected` 增加，在 `on_response` 按 `response.key_alias` 回收，形成闭环。
 
 该策略的设计目标是“只在明显拥塞时轻量旁路”，避免对现有流量分配造成激进扰动。

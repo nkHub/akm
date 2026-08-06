@@ -24,17 +24,18 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；本地路径仅允许工作区或上传目录，亦可传入 base64 数据 |
-| `akm_read_file` | 读取工作区内的文本文件（可指定 `offset` / `limit`），返回内容与起始行号 |
+| `akm_read_file` | 读取工作区内的文本文件（可指定 `offset` / `limit`），返回内容与起始行号；单文件超 50MB 拒绝，单次返回超 60KB 截断并标记 |
 | `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构 |
 | `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表 |
-| `akm_grep` | 在工作区内按正则搜索文件内容，返回命中文件、行号与行内容（限制最多 100 条） |
+| `akm_grep` | 在工作区内按正则搜索文件内容，返回命中文件、行号与行内容（限制最多 100 条；单文件超 10MB 跳过） |
 | `akm_file_info` | 查询工作区内文件/目录的类型、大小与修改时间 |
-| `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`） |
+| `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`；单次内容超 10MB 拒绝） |
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内文件或目录（`recursive` 可选，禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
 | `akm_run_shell` | 执行管理员预定义的工作区任务并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
+| `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
@@ -112,7 +113,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ## 工作区文件工具与安全边界
 
-工作区文件工具受 `agent_workspace_root` 沙箱与配置开关约束。shell 是单独开启的主机级执行能力，`cwd` 不能提供文件系统隔离。相关配置项如下：
+工作区文件工具受 `agent_workspace_root` 沙箱与配置开关约束。shell 是单独开启的主机级执行能力，`cwd` 不能提供文件系统隔离。相关配置项如下（以下 `agent_*` 配置项在 `config.json` 中归组于嵌套 `agent_config` 对象下，读取与前端仍以扁平键名呈现）：
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|

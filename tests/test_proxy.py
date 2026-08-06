@@ -3,6 +3,7 @@ from akm import __version__
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 import httpx
+import asyncio
 from akm.proxy import forward_request, test_key_connectivity as check_key_connectivity, _diagnose_no_key, redact_headers
 from akm.agent import AGENT_REGISTRY
 from akm.db import get_connection, init_db
@@ -1496,3 +1497,80 @@ def test_redact_headers_case_insensitive_and_empty():
     assert redact_headers({"AUTHORIZATION": "abc"}) == {"AUTHORIZATION": "***"}
     assert redact_headers(None) == {}
     assert redact_headers({}) == {}
+
+
+class FakeSlowStreamResponse:
+    """模拟“接受了请求但迟迟不产首字节”的上游响应。"""
+
+    def __init__(self, status_code, delay, chunks):
+        self.status_code = status_code
+        self._delay = delay
+        self._chunks = chunks
+        self.closed = False
+
+    async def aiter_bytes(self):
+        await asyncio.sleep(self._delay)
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_forward_stream_prefetches_first_chunk(monkeypatch):
+    """流式请求成功时，应预读首块并通过 first_chunk 回传（避免丢块）。"""
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "ok", "provider": "openai", "api_key": "sk-xxx",
+        "base_url": "https://api.openai.com",
+    }))
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [
+        FakeChunkedStreamResponse(200, ["data: {\"x\":1}\n\n", "data: {\"x\":2}\n\n"])
+    ])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        client=mock_client,
+        api_path="chat/completions",
+    )
+
+    assert result["stream"] is True
+    assert result["status_code"] == 200
+    assert result["key_alias"] == "ok"
+    # 首块已被 proxy 预读并缓存回传，server 端据此先输出再续读
+    assert result["first_chunk"] == b"data: {\"x\":1}\n\n"
+    # 必须回传同一流式生成器：httpx aiter_raw 只能消费一次，server 侧需复用
+    # 该生成器继续迭代，否则二次调用 resp.aiter_bytes() 会抛 StreamConsumed
+    assert result["aiter"] is not None
+    # 复用生成器继续读取应拿到剩余块（而非从头重复首块或抛异常）
+    rest = [c async for c in result["aiter"]]
+    assert rest == [b"data: {\"x\":2}\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_forward_stream_first_byte_timeout_switches_key(monkeypatch):
+    """首字节超时（上游 2xx 后迟迟不产 body）时应关闭该上游并切换到下一个 Key。"""
+    monkeypatch.setattr("akm.proxy._proxy_first_byte_timeout", lambda: 0.1)
+    key1 = {"alias": "slow", "provider": "openai", "api_key": "sk-xxx",
+            "base_url": "https://api.openai.com"}
+    key2 = {"alias": "fast", "provider": "openai", "api_key": "sk-yyy",
+            "base_url": "https://api.openai.com"}
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(side_effect=[key1, key2]))
+    mock_client = AsyncMock()
+    slow_resp = FakeSlowStreamResponse(200, delay=5.0, chunks=[b"data: {\"x\":1}\n\n"])
+    fast_resp = FakeChunkedStreamResponse(200, ["data: {\"x\":2}\n\n", "data: [DONE]\n\n"])
+    _make_send_mock(mock_client, [slow_resp, fast_resp])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        client=mock_client,
+        api_path="chat/completions",
+    )
+
+    # 第一个 Key 首字节超时被跳过，切到第二个 Key 成功
+    assert result["stream"] is True
+    assert result["status_code"] == 200
+    assert result["key_alias"] == "fast"
+    assert result["first_chunk"] == b"data: {\"x\":2}\n\n"
+    assert slow_resp.closed is True
