@@ -1201,8 +1201,8 @@ async def test_chained_adapter_streams_incrementally_without_buffering_full_mids
 
 
 @pytest.mark.asyncio
-async def test_test_key_connectivity_openai_uses_responses_only(monkeypatch):
-    """默认情况下 openai 类 key 测试时只请求 responses，不自动回退。"""
+async def test_test_key_connectivity_openai_uses_chat_only(monkeypatch):
+    """默认情况下 openai 类 key 测试时只请求 chat/completions，不自动回退。"""
 
     called_urls = []
 
@@ -1228,17 +1228,17 @@ async def test_test_key_connectivity_openai_uses_responses_only(monkeypatch):
     })
 
     assert result["ok"] is False
-    assert result["api_path"] == "responses"
-    assert result["attempted_paths"] == ["responses"]
-    assert called_urls == ["https://example.com/v1/responses"]
+    assert result["api_path"] == "chat/completions"
+    assert result["attempted_paths"] == ["chat/completions"]
+    assert called_urls == ["https://example.com/v1/chat/completions"]
 
 
 @pytest.mark.asyncio
 async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch):
-    """显式开启 fallback 后，openai 类 key 可从 responses 回退到 chat/completions。"""
+    """显式开启 fallback 后，openai 类 key 可从 chat/completions 回退到 responses。"""
 
     responses = [
-        FakeTestResponse(403, '{"error":{"message":"restricted","code":"codex_access_restricted"}}'),
+        FakeTestResponse(404, '{"error":{"message":"not found"}}'),
         FakeTestResponse(200, '{"id":"ok"}'),
     ]
 
@@ -1263,14 +1263,14 @@ async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch)
     }, allow_fallback=True)
 
     assert result["ok"] is True
-    assert result["api_path"] == "chat/completions"
-    assert result["attempted_paths"] == ["responses", "chat/completions"]
+    assert result["api_path"] == "responses"
+    assert result["attempted_paths"] == ["chat/completions", "responses"]
     assert result["fallback_used"] is True
 
 
 @pytest.mark.asyncio
-async def test_test_key_connectivity_deepseek_prefers_responses(monkeypatch):
-    """deepseek 已支持 responses，测试时应首选 responses。"""
+async def test_test_key_connectivity_deepseek_prefers_chat(monkeypatch):
+    """deepseek 同时支持 chat 与 responses，测试时应首选 chat/completions。"""
 
     called_urls = []
 
@@ -1296,9 +1296,9 @@ async def test_test_key_connectivity_deepseek_prefers_responses(monkeypatch):
     })
 
     assert result["ok"] is True
-    assert result["api_path"] == "responses"
-    assert result["attempted_paths"] == ["responses"]
-    assert called_urls == ["https://api.deepseek.com/v1/responses"]
+    assert result["api_path"] == "chat/completions"
+    assert result["attempted_paths"] == ["chat/completions"]
+    assert called_urls == ["https://api.deepseek.com/v1/chat/completions"]
 
 
 @pytest.mark.asyncio

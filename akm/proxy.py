@@ -953,15 +953,17 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
             candidate_paths = ["messages"]
         else:
             candidate_paths = ["chat/completions"]
-    elif agent.supports_responses:
-        candidate_paths = ["responses"]
+    # 内置供应商：连通性测试按「Chat > Responses > Messages」顺序优先，
+    # chat/completions 最通用、兼容性最好，作为连通性验证首选。
+    if agent.supports_chat:
+        candidate_paths = ["chat/completions"]
         if allow_fallback:
-            if agent.supports_chat:
-                candidate_paths.append("chat/completions")
+            if agent.supports_responses:
+                candidate_paths.append("responses")
             if agent.supports_messages:
                 candidate_paths.append("messages")
-    elif agent.supports_chat:
-        candidate_paths = ["chat/completions"]
+    elif agent.supports_responses:
+        candidate_paths = ["responses"]
         if allow_fallback and agent.supports_messages:
             candidate_paths.append("messages")
     elif agent.supports_messages:
