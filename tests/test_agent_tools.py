@@ -4,6 +4,7 @@ import pytest
 
 from akm.agent_runtime.tools import (
     build_builtin_tools,
+    build_workspace_tools,
     reset_request_workspace_root,
     set_request_workspace_root,
 )
@@ -370,6 +371,7 @@ def test_builtin_get_config_redacts_secret_fields(monkeypatch):
             "server_port": 8800,
             "agent_api_token": "sk-token-secret",
             "tavily_api_key": "tv-secret",
+            "agent_email_smtp_password": "smtp-secret",
             "agent_write_tools_enabled": True,
         },
     )
@@ -380,8 +382,10 @@ def test_builtin_get_config_redacts_secret_fields(monkeypatch):
     assert result["server_port"] == 8800
     assert result["agent_api_token"] == "已配置"
     assert result["tavily_api_key"] == "已配置"
+    assert result["agent_email_smtp_password"] == "已配置"
     assert "sk-token-secret" not in str(result)
     assert "tv-secret" not in str(result)
+    assert "smtp-secret" not in str(result)
 
 
 def test_builtin_list_plugins_returns_non_sensitive_summary():
@@ -483,3 +487,242 @@ def test_builtin_readonly_tools_register():
     for name in ("akm_get_config", "akm_list_plugins", "akm_list_sessions", "akm_load_session"):
         assert name in tools
     assert tools["akm_load_session"].parameters["required"] == ["name"]
+
+
+def _workspace_handlers(monkeypatch, tmp_path, *, write_tools=True):
+    """构造工作区文件工具 handlers，并注入 tmp_path 作为请求级工作区。"""
+    import json as _json
+
+    from pathlib import Path
+
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    cfg = {"agent_workspace_root": str(ws)}
+    if write_tools:
+        cfg["agent_write_tools_enabled"] = True
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: cfg)
+    token = set_request_workspace_root(str(ws))
+    handlers = {tool.name: tool.handler for tool in build_workspace_tools()}
+    return ws, token, handlers
+
+
+@pytest.mark.asyncio
+async def test_builtin_read_file_rejects_oversized_file(tmp_path, monkeypatch):
+    """读文件工具必须对超过 st_size 预检阈值的文件直接拒绝，避免全量读入内存。"""
+    import json as _json
+
+    ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
+    try:
+        (ws / "big.txt").write_text("x" * 100)
+        monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_READ_MAX_FILE_BYTES", 50)
+        result = _json.loads(await handlers["akm_read_file"](path="big.txt"))
+    finally:
+        reset_request_workspace_root(token)
+    assert "文件过大" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_builtin_read_file_paginates_and_truncates(tmp_path, monkeypatch):
+    """分页应按行返回；超出字节上限时标记 truncated 且行保持完整。"""
+    import json as _json
+
+    ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
+    try:
+        (ws / "lines.txt").write_text("\n".join(f"line-{i}" for i in range(20)) + "\n")
+        handler = handlers["akm_read_file"]
+        r = _json.loads(await handler(path="lines.txt", offset=10, limit=3))
+        assert r["start_line"] == 10
+        assert r["content"] == "line-10\nline-11\nline-12\n"
+        assert r["truncated"] is False
+        assert r["total_lines"] == 20
+
+        monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_READ_MAX_BYTES", 10)
+        r2 = _json.loads(await handler(path="lines.txt", offset=0, limit=-1))
+        assert r2["truncated"] is True
+        assert r2["content"].endswith("\n")  # 截断按整行进行，不切半个字符
+    finally:
+        reset_request_workspace_root(token)
+
+
+@pytest.mark.asyncio
+async def test_builtin_glob_skips_symlink_escaping_workspace(tmp_path, monkeypatch):
+    """glob 命中工作区内指向外部文件的软链接时必须跳过，不得泄露外部文件名。"""
+    import json as _json
+    import os
+
+    ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
+    try:
+        outside = tmp_path / "outside-secret.txt"
+        outside.write_text("secret")
+        (ws / "leak.txt").symlink_to(outside)
+        (ws / "real.txt").write_text("real")
+        result = _json.loads(await handlers["akm_glob"](pattern="*.txt"))
+    finally:
+        reset_request_workspace_root(token)
+    assert "leak.txt" not in result["matches"]
+    assert "real.txt" in result["matches"]
+
+
+@pytest.mark.asyncio
+async def test_builtin_grep_skips_oversized_file(tmp_path, monkeypatch):
+    """grep 对超过单文件扫描上限的文件应跳过，避免逐行正则匹配超大文件。"""
+    import json as _json
+
+    ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
+    try:
+        (ws / "big.log").write_text("needle " + "x" * 500)
+        (ws / "small.txt").write_text("no match here")
+        monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_GREP_MAX_FILE_BYTES", 100)
+        result = _json.loads(await handlers["akm_grep"](pattern="needle"))
+    finally:
+        reset_request_workspace_root(token)
+    assert result["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_builtin_write_file_rejects_oversized_and_writes_atomically(tmp_path, monkeypatch):
+    """写文件工具应拒绝超限内容；正常覆盖写入内容正确且不留临时文件。"""
+    import json as _json
+
+    ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
+    try:
+        handler = handlers["akm_write_file"]
+        monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_WRITE_MAX_BYTES", 10)
+        r = _json.loads(await handler(path="a.txt", content="x" * 20))
+        assert "过大" in r["error"]
+
+        monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_WRITE_MAX_BYTES", 1024)
+        r2 = _json.loads(await handler(path="a.txt", content="hello"))
+        assert r2["ok"] is True
+        assert r2["bytes_written"] == 5
+        assert (ws / "a.txt").read_text(encoding="utf-8") == "hello"
+        assert not list(ws.glob(".akm-write-*"))
+    finally:
+        reset_request_workspace_root(token)
+
+
+@pytest.mark.asyncio
+async def test_builtin_edit_file_rejects_oversized_result(tmp_path, monkeypatch):
+    """编辑后文件超过写入上限时应拒绝，且原文件保持不变。"""
+    import json as _json
+
+    ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
+    try:
+        (ws / "f.txt").write_text("hello world")
+        monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_WRITE_MAX_BYTES", 8)
+        r = _json.loads(await handlers["akm_edit_file"](
+            path="f.txt", old_string="hello", new_string="hello world extra content"
+        ))
+        assert "过大" in r["error"]
+        assert (ws / "f.txt").read_text(encoding="utf-8") == "hello world"
+    finally:
+        reset_request_workspace_root(token)
+
+
+# ── akm_send_email 发送邮件工具 ──
+
+_EMAIL_CONFIG = {
+    "agent_email_enabled": True,
+    "agent_email_smtp_host": "smtp.example.com",
+    "agent_email_smtp_port": 465,
+    "agent_email_smtp_user": "sender@example.com",
+    "agent_email_smtp_password": "smtp-pass",
+    "agent_email_from": "",
+    "agent_email_smtp_ssl": True,
+}
+
+
+@pytest.mark.asyncio
+async def test_send_email_requires_feature_flag(monkeypatch):
+    """未启用 agent_email_enabled 时调用发送邮件工具必须抛 PermissionError。"""
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: _EMAIL_CONFIG)
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_send_email"]
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_email_enabled": False},
+    )
+    with pytest.raises(PermissionError):
+        await handler(to="a@b.com", subject="s", body="b")
+
+
+@pytest.mark.asyncio
+async def test_send_email_rejects_missing_smtp_config(monkeypatch):
+    """SMTP host/user 未配置时应返回明确错误而非抛异常。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_email_enabled": True},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_send_email"]
+
+    r = await handler(to="a@b.com", subject="s", body="b")
+
+    assert r["ok"] is False
+    assert "SMTP 未配置" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_send_email_sends_via_smtp_ssl(monkeypatch):
+    """完整 SMTP 配置下应通过 smtplib 真实构造邮件并返回 Message-ID。"""
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, *a, **kw):
+            self.msg = None
+
+        def login(self, *a, **kw):
+            pass
+
+        def send_message(self, msg, *a, **kw):
+            self.msg = msg
+
+        def quit(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: _EMAIL_CONFIG)
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.smtplib.SMTP_SSL",
+        lambda *a, **kw: sent.setdefault("server", FakeSMTP()),
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_send_email"]
+
+    r = await handler(to="receiver@example.com", subject="测试主题", body="正文内容")
+
+    assert r["ok"] is True
+    assert r["message_id"]
+    assert r["from"] == "sender@example.com"
+    assert r["to"] == "receiver@example.com"
+    assert r["subject"] == "测试主题"
+    msg = sent["server"].msg
+    assert msg["To"] == "receiver@example.com"
+    assert msg["Subject"] == "测试主题"
+    assert msg.get_content().rstrip("\n") == "正文内容"
+
+
+@pytest.mark.asyncio
+async def test_send_email_rejects_invalid_recipient(monkeypatch):
+    """非法收件人邮箱格式应被拒绝。"""
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: _EMAIL_CONFIG)
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_send_email"]
+
+    r = await handler(to="not-an-email", subject="s", body="b")
+
+    assert r["ok"] is False
+    assert "格式不合法" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_send_email_rejects_oversize_body(monkeypatch):
+    """邮件正文超过单次上限时应被拒绝。"""
+    monkeypatch.setattr("akm.agent_runtime.tools.load_config", lambda: _EMAIL_CONFIG)
+    monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_WRITE_MAX_BYTES", 100)
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_send_email"]
+
+    r = await handler(to="a@b.com", subject="s", body="x" * 200)
+
+    assert r["ok"] is False
+    assert "过大" in r["error"]

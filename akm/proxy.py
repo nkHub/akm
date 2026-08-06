@@ -133,6 +133,13 @@ def _proxy_retry_backoff_base() -> float:
 def _proxy_default_timeout() -> float:
     return max(30.0, float(load_config().get("proxy_default_timeout_sec", 120.0) or 120.0))
 
+# 流式首字节超时（秒）：上游返回 2xx 后迟迟不产出第一个响应体字节时视为
+# “假成功”（常见于 gs-codex 等上游对流式攒批），终止本 Key 并切换下一个。
+# 0 表示关闭该保护（不预读，恢复旧行为）。
+def _proxy_first_byte_timeout() -> float:
+    val = load_config().get("proxy_first_byte_timeout_sec", 12.0)
+    return max(0.0, float(val if val not in (None, "") else 12.0))
+
 # 敏感请求头名（小写比较）：值一律掩码，避免 API Key / Cookie 等凭据落入审计日志
 SENSITIVE_HEADER_NAMES = {
     "authorization",
@@ -423,6 +430,10 @@ async def forward_request(
         if plugin_manager:
             ctx.key = key
             ctx.model = model
+            # 把本轮已失败（在 tried_aliases 中）的 key 透传给插件，避免旁路插件
+            # 反复选中已失败的 key 导致 proxy 主循环空转（tries 不增长、请求卡死）。
+            # 插件在 on_key_selected 中可通过 ctx.bag_get("proxy.tried_aliases") 读取。
+            ctx.bag_set("proxy.tried_aliases", list(tried_aliases))
             await plugin_manager.run_hook("on_key_selected", ctx=ctx, model=model, key=key)
             if ctx.is_skip_key:
                 skipped = ctx.action or {}
@@ -677,6 +688,82 @@ async def forward_request(
                     continue
                 break
 
+            # ── 流式首字节预读 + 超时保护 ──
+            # 上游 2xx 只表示“已接受请求”，不保证响应体会尽快产出。gs-codex 等上游
+            # 对流式请求常“攒批”，首个字节可能延迟数十秒，客户端全程无输出体验为卡住。
+            # 这里预读第一个响应体字节：成功则缓存进 first_chunk 回传（server 先输出
+            # 再续读，不丢数据）；超时则关闭本上游并切换下一个 Key，避免无限挂起。
+            first_chunk: bytes | None = None
+            stream_aiter = None
+            if client_wants_stream:
+                first_byte_timeout = _proxy_first_byte_timeout()
+                if first_byte_timeout > 0:
+                    # 必须复用同一个 aiter_bytes 生成器：httpx 的 aiter_raw 只能消费
+                    # 一次（is_stream_consumed=True），且每次调用 aiter_bytes() 都会
+                    # 重建解码器（gzip/deflate 有跨块状态）。若 server 侧重新调用
+                    # resp.aiter_bytes()，会抛 StreamConsumed 或解压错乱。这里创建
+                    # 一次生成器并回传，server 侧从同一生成器继续迭代。
+                    stream_aiter = resp.aiter_bytes()
+                    try:
+                        first_chunk = await asyncio.wait_for(
+                            stream_aiter.__anext__(),
+                            timeout=first_byte_timeout,
+                        )
+                        first_chunk = first_chunk or b""
+                    except asyncio.TimeoutError:
+                        await resp.aclose()
+                        last_error = (
+                            f"上游首字节超时（{first_byte_timeout}s 未产出响应体）: {key['alias']}"
+                        )
+                        write_error_log(
+                            source="proxy.forward_request",
+                            error=f"上游首字节超时（{first_byte_timeout}s 未产出响应体）: {key['alias']}",
+                            extra={"provider": key.get("provider", ""), "key_alias": key["alias"], "model": model},
+                        )
+                        await _emit_on_response_meta({
+                            "ok": False,
+                            "phase": "stream_first_byte",
+                            "status_code": 0,
+                            "key_alias": key["alias"],
+                            "provider": key["provider"],
+                            "model": model,
+                            "latency_ms": int((time.time() - t0) * 1000),
+                            "error": last_error,
+                            "error_type": "first_byte_timeout",
+                            "attempt": attempt,
+                            "api_path": api_path,
+                            "upstream_api_path": upstream_api_path,
+                        })
+                        break
+                    except StopAsyncIteration:
+                        # 上游立即返回空流（0 字节响应体），视为已获得首字节（EOF）
+                        first_chunk = b""
+                    except Exception as e:
+                        # 首字节等待期间上游连接断开/流异常：关闭并按失败处理，
+                        # 切到下一个 Key 重试，避免冒泡成 500。
+                        await resp.aclose()
+                        last_error = f"上游首字节读取失败: {e}"
+                        write_error_log(
+                            source="proxy.forward_request",
+                            error=last_error,
+                            extra={"provider": key.get("provider", ""), "key_alias": key["alias"], "model": model},
+                        )
+                        await _emit_on_response_meta({
+                            "ok": False,
+                            "phase": "stream_first_byte",
+                            "status_code": 0,
+                            "key_alias": key["alias"],
+                            "provider": key["provider"],
+                            "model": model,
+                            "latency_ms": int((time.time() - t0) * 1000),
+                            "error": last_error,
+                            "error_type": "first_byte_error",
+                            "attempt": attempt,
+                            "api_path": api_path,
+                            "upstream_api_path": upstream_api_path,
+                        })
+                        break
+
             # ── 成功：客户端流式 → 透传或标记转换 ──
             if client_wants_stream:
                 # 流式请求在这里只表示“上游已经接受并开始返回数据”，并不代表
@@ -692,6 +779,8 @@ async def forward_request(
                     "status_code": resp.status_code,
                     "response": resp,
                     "adapter": adapter,  # 非 None 时 server.py 会用转换器包装
+                    "first_chunk": first_chunk,  # proxy 预读的首字节，server 生成器先输出再续读
+                    "aiter": stream_aiter,  # 复用的流式生成器，server 侧从此继续迭代（避免 httpx StreamConsumed）
                     "request_body_for_log": forwarded_request_body,
                     "upstream_headers_for_log": upstream_headers_for_log,
                     "request_context": ctx,

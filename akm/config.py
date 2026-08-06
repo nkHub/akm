@@ -40,6 +40,7 @@ DEFAULTS = {
     "proxy_max_retries_per_key": 2,     # 单个 Key 在 5xx/连接失败时的最大重试次数
     "proxy_retry_backoff_base_sec": 0.5,  # 重试退避基础等待秒数
     "proxy_default_timeout_sec": 120.0,  # 默认转发超时（秒），图片接口另有独立超时
+    "proxy_first_byte_timeout_sec": 12.0,  # 流式首字节超时（秒）：上游 2xx 后迟迟不产出第一个响应体字节时判定“假成功”并切换 Key；0 表示关闭
     # Agent Loop
     "agent_max_turns": 100,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
     "agent_max_context_tokens": 272000, # Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史（0 表示不压缩）
@@ -51,6 +52,13 @@ DEFAULTS = {
     "agent_run_shell_enabled": False,   # 是否启用 Agent 预定义任务执行工具（独立于写工具，默认关闭）
     "agent_shell_tasks": {},            # Agent 允许执行的预定义任务：任务名 -> argv 字符串数组
     "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅执行固定 operation）
+    "agent_email_enabled": False,       # 是否启用 Agent 发邮件工具（akm_send_email）
+    "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
+    "agent_email_smtp_port": 465,       # SMTP 端口：465 走 SSL，587 走 STARTTLS（由 agent_email_smtp_ssl 决定是否启用 SSL）
+    "agent_email_smtp_user": "",        # SMTP 登录账号
+    "agent_email_smtp_password": "",    # SMTP 密码 / 授权码（敏感，akm_get_config 会脱敏）
+    "agent_email_from": "",             # 默认发件人地址；留空则使用 SMTP 账号作为发件人
+    "agent_email_smtp_ssl": True,       # 是否使用 SSL 加密连接（True=SMTP_SSL/465；False=STARTTLS/587）
     "agent_max_tool_calls": 30,         # 单次 Agent 请求最多执行的工具调用数，限制循环与资源消耗
     "agent_tool_retry_max_retries": 1,  # Agent 工具失败后的最大自愈修正轮次（0 关闭：失败结果照常回传，模型自主决定）
     "agent_api_token": "",              # /v1/agent 请求鉴权 token（Bearer）；留空表示不校验
@@ -68,6 +76,34 @@ DEFAULTS = {
     # 统计
     "stats_cache_ttl_sec": 60,          # 首页统计缓存有效期（秒）
 }
+
+# Agent 相关配置键（含仅 Agent tavily 搜索使用的 tavily_api_key）。
+# config.json 中这些键归组在嵌套的 "agent_config" 对象下；内存层（load_config）
+# 仍保持扁平展开，业务代码无感。归组仅影响磁盘文件布局。
+AGENT_GROUP_KEYS: list[str] = [
+    "agent_max_turns",
+    "agent_max_context_tokens",
+    "agent_keep_recent_messages",
+    "agent_context_warning_ratio",
+    "agent_upload_dir",
+    "agent_workspace_root",
+    "agent_write_tools_enabled",
+    "agent_run_shell_enabled",
+    "agent_shell_tasks",
+    "agent_git_enabled",
+    "agent_email_enabled",
+    "agent_email_smtp_host",
+    "agent_email_smtp_port",
+    "agent_email_smtp_user",
+    "agent_email_smtp_password",
+    "agent_email_from",
+    "agent_email_smtp_ssl",
+    "agent_max_tool_calls",
+    "agent_tool_retry_max_retries",
+    "agent_api_token",
+    "agent_default_instructions",
+    "tavily_api_key",
+]
 
 
 def normalize_http_proxy_url(raw: object) -> str:
@@ -175,6 +211,14 @@ def load_config() -> dict:
     # 合并默认值
     merged = dict(DEFAULTS)
     merged.update(data)
+    # 兼容 config.json 的 agent_config 嵌套归组：展开到顶层（嵌套值优先于顶层旧键）
+    _agent_group = data.get("agent_config") if isinstance(data, dict) else None
+    if isinstance(_agent_group, dict):
+        for _key in AGENT_GROUP_KEYS:
+            if _key in _agent_group:
+                merged[_key] = _agent_group[_key]
+    # 内存层保持扁平，不把嵌套 agent_config 留在顶层
+    merged.pop("agent_config", None)
     merged["cost_pricing_table"] = _normalize_cost_pricing_table(merged["cost_pricing_table"])
     merged["http_proxy_enabled"] = merged.get("http_proxy_enabled") is True
     merged["http_proxy_url"] = normalize_http_proxy_url(merged.get("http_proxy_url", ""))
@@ -189,6 +233,7 @@ def load_config() -> dict:
     merged["proxy_max_retries_per_key"] = max(0, int(merged.get("proxy_max_retries_per_key", 2) or 2))
     merged["proxy_retry_backoff_base_sec"] = max(0.1, float(merged.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
     merged["proxy_default_timeout_sec"] = max(30.0, float(merged.get("proxy_default_timeout_sec", 120.0) or 120.0))
+    merged["proxy_first_byte_timeout_sec"] = max(0.0, _safe_float(merged.get("proxy_first_byte_timeout_sec"), 12.0))
     # Agent Loop
     merged["agent_max_turns"] = max(1, _safe_int(merged.get("agent_max_turns"), 100))
     merged["agent_max_context_tokens"] = max(0, _safe_int(merged.get("agent_max_context_tokens"), 272000))
@@ -198,6 +243,9 @@ def load_config() -> dict:
     merged["agent_write_tools_enabled"] = merged.get("agent_write_tools_enabled") is True
     merged["agent_run_shell_enabled"] = merged.get("agent_run_shell_enabled") is True
     merged["agent_git_enabled"] = merged.get("agent_git_enabled") is True
+    merged["agent_email_enabled"] = merged.get("agent_email_enabled") is True
+    merged["agent_email_smtp_ssl"] = merged.get("agent_email_smtp_ssl") is not False
+    merged["agent_email_smtp_port"] = max(1, _safe_int(merged.get("agent_email_smtp_port"), 465))
     merged["agent_shell_tasks"] = normalize_agent_shell_tasks(merged.get("agent_shell_tasks"))
     merged["agent_max_tool_calls"] = max(1, _safe_int(merged.get("agent_max_tool_calls"), 30))
     merged["agent_tool_retry_max_retries"] = max(0, _safe_int(merged.get("agent_tool_retry_max_retries"), 1))
@@ -215,6 +263,15 @@ def load_config() -> dict:
 def save_config(data: dict) -> None:
     """保存配置（合并写入）"""
     _ensure_dir()
+    # 先把调用方可能传入的 agent_config 嵌套对象展开进顶层，再走统一归一化，
+    # 避免嵌套的 agent 配置在后续 update/打包中丢失。
+    data = dict(data)
+    _agent_group = data.pop("agent_config", None)
+    if isinstance(_agent_group, dict):
+        for _key in AGENT_GROUP_KEYS:
+            # 嵌套值仅作为底层默认：调用方在 data 顶层显式给出的扁平键优先，避免覆盖
+            if _key in _agent_group and _key not in data:
+                data[_key] = _agent_group[_key]
     current = load_config()
     current.update(data)
     current["http_proxy_enabled"] = current.get("http_proxy_enabled") is True
@@ -230,6 +287,7 @@ def save_config(data: dict) -> None:
     current["proxy_max_retries_per_key"] = max(0, int(current.get("proxy_max_retries_per_key", 2) or 2))
     current["proxy_retry_backoff_base_sec"] = max(0.1, float(current.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
     current["proxy_default_timeout_sec"] = max(30.0, float(current.get("proxy_default_timeout_sec", 120.0) or 120.0))
+    current["proxy_first_byte_timeout_sec"] = max(0.0, _safe_float(current.get("proxy_first_byte_timeout_sec"), 12.0))
     # Agent Loop
     current["agent_max_turns"] = max(1, _safe_int(current.get("agent_max_turns"), 100))
     current["agent_max_context_tokens"] = max(0, _safe_int(current.get("agent_max_context_tokens"), 272000))
@@ -238,6 +296,9 @@ def save_config(data: dict) -> None:
     current["agent_write_tools_enabled"] = current.get("agent_write_tools_enabled") is True
     current["agent_run_shell_enabled"] = current.get("agent_run_shell_enabled") is True
     current["agent_git_enabled"] = current.get("agent_git_enabled") is True
+    current["agent_email_enabled"] = current.get("agent_email_enabled") is True
+    current["agent_email_smtp_ssl"] = current.get("agent_email_smtp_ssl") is not False
+    current["agent_email_smtp_port"] = max(1, _safe_int(current.get("agent_email_smtp_port"), 465))
     current["agent_shell_tasks"] = normalize_agent_shell_tasks(current.get("agent_shell_tasks"))
     current["agent_max_tool_calls"] = max(1, _safe_int(current.get("agent_max_tool_calls"), 30))
     current["agent_tool_retry_max_retries"] = max(0, _safe_int(current.get("agent_tool_retry_max_retries"), 1))
@@ -249,6 +310,8 @@ def save_config(data: dict) -> None:
     current["usage_query_check_interval_sec"] = max(10, int(current.get("usage_query_check_interval_sec", 60) or 60))
     # 统计
     current["stats_cache_ttl_sec"] = max(1, int(current.get("stats_cache_ttl_sec", 60) or 60))
+    # Agent 配置归组：写入嵌套 agent_config 对象，磁盘顶层不再保留 agent_* 键
+    current["agent_config"] = {_key: current.pop(_key) for _key in AGENT_GROUP_KEYS if _key in current}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(current, f, indent=2, ensure_ascii=False)
 

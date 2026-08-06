@@ -42,8 +42,13 @@ def _render_default_instructions(text: str, workspace_root: str = "") -> str:
     # akm 包源码根目录：akm/__init__.py 的上一级（即项目根）
     source_dir = str(Path(akm.__file__).resolve().parent.parent)
 
-    # 当前工作目录：优先请求级 workspace_root，否则进程当前目录
-    cwd = str(workspace_root or "").strip() or os.getcwd()
+    # 当前工作目录：优先请求级 workspace_root，否则进程当前目录。
+    # 打包 App 由 LaunchServices 启动时工作目录可能已被删除，os.getcwd() 会抛
+    # FileNotFoundError，回退到用户主目录避免 500。
+    try:
+        cwd = str(workspace_root or "").strip() or os.getcwd()
+    except OSError:
+        cwd = str(Path.home())
 
     # 用户环境路径探测：仅替换存在的路径，避免注入误导性路径
     home = Path.home()

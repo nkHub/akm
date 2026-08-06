@@ -110,13 +110,15 @@ class Plugin(PluginBase):
 
         return inflight_penalty + slow_penalty + latency_penalty + error_penalty + cooldown_penalty
 
-    async def _pick_better_alternate_key(self, model: str, current_alias: str) -> dict | None:
+    async def _pick_better_alternate_key(self, model: str, current_alias: str, tried_aliases: set[str] | None = None) -> dict | None:
         """在候选 key 集合中选择比当前 key 更优的替代项。
 
         说明：
         - 只在插件内部完成决策，尽量不改 proxy 主逻辑。
         - 候选通过多次调用 pick_key_async 获取（逐步扩大 exclude）。
         - 若替代 key 改善幅度不足，则保持当前 key，避免无意义抖动。
+        - ``tried_aliases`` 为 proxy 主循环中已尝试失败过的 key 集合，
+          候选选择时一并排除，避免反复选中已失败的 key 造成主循环空转。
         """
         cfg = self._get_cfg()
         candidate_pool = max(1, int(cfg.get("smart_bypass_candidate_pool", 4) or 4))
@@ -125,6 +127,9 @@ class Plugin(PluginBase):
         now_ts = time.time()
         current_score = self._calc_key_score(current_alias, now_ts)
         exclude = [current_alias]
+        # 合并 proxy 层已失败的 key，旁路候选绝不回头选它们。
+        if tried_aliases:
+            exclude += [a for a in tried_aliases if a != current_alias]
         best_key = None
         best_score = None
 
@@ -299,12 +304,17 @@ class Plugin(PluginBase):
         )
 
         if should_bypass:
+            # 读取 proxy 主循环透传的“已尝试失败 key”集合，旁路候选需一并排除，
+            # 防止反复选中已失败的 key 导致 proxy 主循环空转（tries 不增长）。
+            tried_aliases = set(
+                str(a) for a in (ctx.bag_get("proxy.tried_aliases") or []) if a
+            )
             # 智能旁路（默认关闭）：在多个候选中做健康打分，择优切换。
             # 关闭时维持原有行为，仅尝试下一个可用 key。
             if enable_smart_bypass:
-                alt = await self._pick_better_alternate_key(model, current_alias)
+                alt = await self._pick_better_alternate_key(model, current_alias, tried_aliases)
             else:
-                alt = await pick_key_async(model, [current_alias])
+                alt = await pick_key_async(model, [current_alias, *sorted(tried_aliases)])
             if isinstance(alt, dict) and alt.get("alias") and alt.get("alias") != current_alias:
                 if enable_smart_bypass:
                     now_ts = time.time()

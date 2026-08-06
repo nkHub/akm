@@ -2435,6 +2435,9 @@ async def _handle_ai_request(request: Request, api_path: str):
         client_request_body_for_log = _safe_request_body_for_log(body) if save_request_body else ""
         stream_capture_max_bytes = int(cfg.get("stream_capture_max_bytes", 262144) or 262144)
         request_timeout = _image_request_timeout_seconds(cfg) if api_path in {"images/generations", "images/edits"} else None
+        # 流式审计「首字延迟」计时起点：从请求到达本端点（含 key 选择与上游首字节等待）
+        # 记为 TTFB。真正产生第一个输出字节的时刻在 stream_generator 里记录。
+        stream_ttfb_start = time.time()
         result = await forward_request(
             body,
             request.app.state.http_client,
@@ -2512,7 +2515,8 @@ async def _handle_ai_request(request: Request, api_path: str):
                 # 上游原始响应捕获（插件/协议转换前），供审计记录原始响应体
                 raw_capture = _BoundedStreamCapture(stream_capture_max_bytes)
                 usage_tracker = _IncrementalSSEUsageTracker()
-                t0 = __import__("time").time()
+                # 首个输出字节时刻（TTFB）；None 表示尚未产出任何字节
+                _first_byte_at: float | None = None
                 stream_error = ""
                 security_action = ""
                 security_reason = ""
@@ -2574,6 +2578,28 @@ async def _handle_ai_request(request: Request, api_path: str):
                     security_changed = True
                     return [_dfg._build_safe_stream_payload(api_path).encode("utf-8")], True
 
+                async def _iter_upstream():
+                    """统一的上游字节迭代：先输出 proxy 预读的首字节（first_chunk），再继续读剩余流。
+
+                    首字节超时保护在 proxy 侧预读了第一个响应体字节并缓存到
+                    result["first_chunk"]，若不在这里先输出，该块会因底层流已被
+                    部分消费而丢失。空串（空流 EOF）不输出，直接进入剩余流迭代。
+                    """
+                    prefetched = result.get("first_chunk") if isinstance(result, dict) else None
+                    if prefetched:
+                        yield prefetched
+                    # 优先复用 proxy 预读时创建的同一生成器：httpx 的 aiter_raw 只能
+                    # 消费一次，重新调用 resp.aiter_bytes() 会抛 StreamConsumed，且
+                    # gzip/deflate 解码器有跨块状态不能重建。无预读（如超时保护关闭
+                    # 或兼容旧调用方）时才由这里首次创建。
+                    upstream_aiter = result.get("aiter") if isinstance(result, dict) else None
+                    if upstream_aiter is not None:
+                        async for chunk in upstream_aiter:
+                            yield chunk
+                    else:
+                        async for chunk in resp.aiter_bytes():
+                            yield chunk
+
                 async def _emit_stream_response_meta(status: int, latency: int, body_str: str):
                     """在流式请求真正结束时统一触发 on_response 生命周期。"""
                     current_pm = getattr(request.app.state, "plugin_manager", None)
@@ -2612,7 +2638,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                 try:
                     if adapter:
                         async def _raw_tee():
-                            async for raw_chunk in resp.aiter_bytes():
+                            async for raw_chunk in _iter_upstream():
                                 raw_capture.append(raw_chunk)
                                 yield raw_chunk
 
@@ -2626,13 +2652,15 @@ async def _handle_ai_request(request: Request, api_path: str):
                                 chunk = processed.encode("utf-8")
                             guarded_chunks, stop_stream = _guard_stream_chunk(chunk)
                             for guarded_chunk in guarded_chunks:
+                                if _first_byte_at is None:
+                                    _first_byte_at = time.time()
                                 capture.append(guarded_chunk)
                                 usage_tracker.append(guarded_chunk)
                                 yield guarded_chunk
                             if stop_stream:
                                 break
                     else:
-                        async for chunk in resp.aiter_bytes():
+                        async for chunk in _iter_upstream():
                             raw_capture.append(chunk)
                             if _rev_state is not None and _dfg is not None:
                                 text = chunk.decode("utf-8", errors="replace")
@@ -2642,6 +2670,8 @@ async def _handle_ai_request(request: Request, api_path: str):
                                 chunk = processed.encode("utf-8")
                             guarded_chunks, stop_stream = _guard_stream_chunk(chunk)
                             for guarded_chunk in guarded_chunks:
+                                if _first_byte_at is None:
+                                    _first_byte_at = time.time()
                                 capture.append(guarded_chunk)
                                 usage_tracker.append(guarded_chunk)
                                 yield guarded_chunk
@@ -2654,6 +2684,8 @@ async def _handle_ai_request(request: Request, api_path: str):
                             chunk = pending.encode("utf-8")
                             guarded_chunks, _ = _guard_stream_chunk(chunk)
                             for guarded_chunk in guarded_chunks:
+                                if _first_byte_at is None:
+                                    _first_byte_at = time.time()
                                 capture.append(guarded_chunk)
                                 usage_tracker.append(guarded_chunk)
                                 yield guarded_chunk
@@ -2664,7 +2696,9 @@ async def _handle_ai_request(request: Request, api_path: str):
                     await resp.aclose()
                     if monitor is not None:
                         monitor.stream_finished()
-                    latency = int((__import__("time").time() - t0) * 1000)
+                    # 「首字延迟」：从请求到达端点到首个输出字节的耗时；
+                    # 若从未产出字节（空流/失败）则取请求总耗时作为回退口径。
+                    latency = int(((_first_byte_at or time.time()) - stream_ttfb_start) * 1000)
                     body_str = capture.build_text()
                     raw_body_str = raw_capture.build_text()
                     status = 200 if not stream_error else 502

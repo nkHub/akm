@@ -1384,7 +1384,21 @@ class AgentLoop:
                         yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage, "compacted": compacted_count})
                         return
 
-                    async for chunk in resp.aiter_bytes():
+                    # proxy 首字节预读后，上游响应流已被消费过首块。直接对 resp
+                    # 二次 aiter_bytes() 会因 httpx「已消费」抛 StreamConsumed，必须
+                    # 复用 proxy 预读时创建的 aiter 生成器继续读流，并先补发预读缓存。
+                    prefetched = result.get("first_chunk") if isinstance(result, dict) else None
+                    upstream_aiter = result.get("aiter")
+                    if prefetched:
+                        text = prefetched.decode("utf-8", errors="replace")
+                        contents = acc.feed(text)
+                        for reasoning in acc.drain_reasoning_deltas():
+                            yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
+                        for content in contents:
+                            yield _sse_event("model_delta", {"turn": turn, "content": content})
+
+                    stream_source = upstream_aiter if upstream_aiter is not None else resp.aiter_bytes()
+                    async for chunk in stream_source:
                         text = chunk.decode("utf-8", errors="replace")
                         contents = acc.feed(text)
                         # 思考（推理）增量先于正文下发，保证「先思考后正文」
