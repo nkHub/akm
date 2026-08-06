@@ -268,6 +268,8 @@ class LiveStreamPanel:
         self._throttle_secs = 0.04
         self._last_live_at = 0.0
         self._pending_live = False
+        # 节流窗口内创建的延迟重绘 task；退出时统一 cancel，避免 stop 后仍 update
+        self._deferred_tasks: set[asyncio.Task] = set()
         # 终端高度缓存（列数 / 行数），用于 Live 裁剪到可视范围
         self._term_lines = _terminal_lines()
         self._term_columns = _terminal_columns()
@@ -379,11 +381,21 @@ class LiveStreamPanel:
 
     # ── Live 生命周期 ──
 
+    def _safe_live_update(self, live: Live) -> None:
+        """对 Live 做一次重绘；Live 已停 / 终端异常时静默，避免拖垮流式主循环。"""
+        try:
+            live.update(self._render())
+        except Exception:
+            # 渲染失败（终端尺寸变化、Live 已 stop 等）不向上抛，保证 SSE 消费继续
+            pass
+
     def _live_update(self) -> None:
         """增量数据后触发 Live 重绘（未启用 Live 时静默）。
 
         高频增量（逐 token 到达）会用节流合并：40ms 内的多次 update 只重绘一次，
         避免整段 Markdown 被反复全量重渲染造成卡顿；节流结束后补一次收尾重绘。
+        延迟任务在 ``__exit__`` 时会被 cancel，且执行前再次检查 ``_live``，
+        防止面板退出后仍访问已 stop 的 Live。
         """
         if self._live is None:
             return
@@ -393,23 +405,33 @@ class LiveStreamPanel:
         if now - self._last_live_at >= self._throttle_secs:
             self._last_live_at = now
             self._pending_live = False
-            live.update(self._render())
+            self._safe_live_update(live)
         else:
             # 节流窗口内：延迟到窗口结束再统一重绘
             async def _deferred() -> None:
                 remaining = self._throttle_secs - (time.monotonic() - self._last_live_at)
-                await asyncio.sleep(max(0.0, remaining))
-                if self._pending_live:
-                    self._pending_live = False
-                    self._last_live_at = time.monotonic()
-                    live.update(self._render())
+                try:
+                    await asyncio.sleep(max(0.0, remaining))
+                except asyncio.CancelledError:
+                    # 面板退出时 cancel 本任务，直接结束，不再重绘
+                    return
+                # 退出后 _live 已清空，或 pending 已被 __exit__ 清掉，则不再重绘
+                if not self._pending_live or self._live is None:
+                    return
+                current = self._live
+                self._pending_live = False
+                self._last_live_at = time.monotonic()
+                self._safe_live_update(current)
 
             try:
-                asyncio.get_running_loop().create_task(_deferred())
+                task = asyncio.get_running_loop().create_task(_deferred())
+                self._deferred_tasks.add(task)
+                # 完成后从集合移除，避免集合无限增长
+                task.add_done_callback(self._deferred_tasks.discard)
             except RuntimeError:
                 # 无事件循环（同步测试环境）：立即重绘
                 self._pending_live = False
-                live.update(self._render())
+                self._safe_live_update(live)
 
     def __enter__(self) -> "LiveStreamPanel":
         if not self.enable:
@@ -418,33 +440,87 @@ class LiveStreamPanel:
             console=Console(width=self._term_columns),
             refresh_per_second=self._refresh_per_second,
             screen=False,
-            # 保留最后渲染帧：流式结束后内容留在屏幕上，随后由 rendered_final 落定
             transient=False,
+            vertical_overflow="visible",  # 关键：允许向下滚动，不裁剪
         )
         self._live.start()
-        self._live.update(self._render())
+        self._safe_live_update(self._live)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        # 先清 pending 并 cancel 延迟重绘，再 stop Live，杜绝 stop 后仍 update 的竞态
+        self._pending_live = False
+        for task in list(self._deferred_tasks):
+            if not task.done():
+                task.cancel()
+        self._deferred_tasks.clear()
         if self._live is not None:
-            # 清掉节流 pending，避免延迟重绘任务访问已停止的 Live
-            self._pending_live = False
-            self._live.stop()
+            try:
+                self._live.stop()
+            except Exception:
+                # stop 失败（终端已关等）不影响外层异常传播
+                pass
             self._live = None
 
-    def _build_blocks(self) -> list[Any]:
+    def _tail_text_for_live(self, content: str, max_lines: int) -> str:
+        """为 Live 裁剪正文源文本：只保留末尾若干行，避免全量 Markdown 重绘与花屏。
+
+        流式过程中 fence 常未闭合，rich 会把大块代码按语法高亮展开；若再对整段
+        渲染结果做行裁剪，Panel 上边框被切掉后只剩 ``export`` / ``{`` / ``<`` 碎片，
+        且 color 模式下 ANSI 被 ``Text()`` 当普通字符会进一步错位。这里在**源文本**
+        层先截尾，再交给 Markdown，保证每帧都是完整可读的尾部内容。
+        """
+        if max_lines <= 0 or not content:
+            return content
+        # 按行截尾；保留一点余量，给 Panel 边框 / 标题留行
+        lines = content.splitlines(keepends=True)
+        # 源文本行数约为可视行的 2 倍即可（Markdown 代码块行与源行基本 1:1）
+        keep = max(max_lines * 2, max_lines + 8)
+        if len(lines) <= keep:
+            return content
+        # 从截断点起若处于未闭合 fence 内，补一个开 fence，避免语法高亮错乱
+        tail = lines[-keep:]
+        before = lines[:-keep]
+        open_fences = 0
+        for line in before:
+            stripped = line.lstrip()
+            if stripped.startswith("```"):
+                open_fences += 1
+        if open_fences % 2 == 1:
+            # 找到最后一个开 fence 的语言标记
+            lang = ""
+            for line in reversed(before):
+                stripped = line.lstrip()
+                if stripped.startswith("```"):
+                    lang = stripped[3:].strip().split()[0] if stripped[3:].strip() else ""
+                    break
+            prefix = f"```{lang}\n" if lang else "```\n"
+            return prefix + "".join(tail)
+        return "".join(tail)
+
+    def _build_blocks(self, *, live_clip: bool = False) -> list[Any]:
         """组装顺序渲染的块列表（thinking / text / tool 按段序列顺序排列）。
 
         每段按类型独立渲染，段与段之间以空行分隔，保持事件发生顺序；
         工具行直接用轻量 ANSI 短行（青色 / 暗色），与 chat 的 tool 段一致。
+
+        ``live_clip=True`` 时：只渲染末尾若干段，且超长 text 段先截源文本尾部，
+        专供 Live 可视区，避免长代码流式时 Panel 被行裁剪切碎。
         """
         # 渲染前先 flush 缓冲，保证 live 显示与最终文本一致
         self._flush_buffers()
+        max_lines = max(5, self._term_lines - 3) if live_clip else 0
+        # Live 只展示尾部段：工具行很短，正文/思考可能很长
+        segs = self._segments
+        if live_clip and len(segs) > 24:
+            segs = segs[-24:]
         blocks: list[Any] = []
-        for seg in self._segments:
+        for seg in segs:
             seg_type = seg.get("type")
             if seg_type == self._SEG_THINKING:
                 content = str(seg.get("content") or "")
+                if live_clip:
+                    content = self._tail_text_for_live(content, max_lines)
                 # 思考区：正常色整段（不再置灰，便于阅读）
                 blocks.append(
                     Panel(
@@ -455,6 +531,8 @@ class LiveStreamPanel:
                 )
             elif seg_type == self._SEG_TEXT:
                 content = str(seg.get("content") or "")
+                if live_clip:
+                    content = self._tail_text_for_live(content, max_lines)
                 # 正文段：实时渲染 markdown（逐字追加效果）
                 blocks.append(Panel(Markdown(content), title="正文", title_align="left"))
             elif seg_type == self._SEG_TOOL:
@@ -464,24 +542,28 @@ class LiveStreamPanel:
         return blocks
 
     def _render(self):
-        """拼装当前顺序界面（裁剪到终端可视高度，自动跟随最新内容）。"""
-        blocks = self._build_blocks()
+        """拼装当前顺序界面（实时完整显示，不裁剪到当屏）。
+
+        Live 使用 ``vertical_overflow='visible'``，内容超出终端高度时由终端
+        自然向下滚动，而不是只保留尾部可视行。color 模式下 Console 打印结果
+        含 ANSI 转义，必须用 ``Text.from_ansi`` 解析，否则转义码当字面量花屏。
+        """
+        # 完整段序列，不做源级截尾 / 行裁剪
+        blocks = self._build_blocks(live_clip=False)
         if not blocks:
             return Text("…")
-        # 段与段之间用空行分隔，保持顺序可读
         content = Group(*blocks)
         if not self.enable or self._live is None:
             return content
-        # 裁剪到终端高度：rich Live 不会自动滚动，超出屏幕的旧内容丢弃，
-        # 只保留底部可视行，让新增内容始终出现在屏幕内（等同“自动滚动到底部”）。
+        # 渲染完整内容后交给 Live；vertical_overflow=visible 会向下滚
         buf = StringIO()
         Console(file=buf, width=self._term_columns, force_terminal=True,
                 color_system="truecolor" if self.color else None).print(content)
-        lines = [line.rstrip() for line in buf.getvalue().splitlines()]
-        max_lines = max(5, self._term_lines - 3)
-        if len(lines) > max_lines:
-            lines = lines[-max_lines:]
-        return Text("\n".join(lines), no_wrap=True)
+        joined = buf.getvalue().rstrip()
+        # color 时必须 from_ansi，否则转义码当字面量导致花屏与列错位
+        if self.color and "\x1b" in joined:
+            return Text.from_ansi(joined)
+        return Text(joined, no_wrap=True)
 
     def rendered_final(self) -> str:
         """流式结束后返回完整顺序渲染文本（思考 / 正文 / 工具按序），供落定打印。

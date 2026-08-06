@@ -13,6 +13,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_get_status` | 查询健康监护、审计队列和插件状态 |
 | `akm_list_keys` | 查询 Key 的别名、供应商、状态和模型列表，不返回 API Key 或连接地址 |
 | `akm_list_logs` | 查询近期审计摘要，可按状态、天数和 Key 别名筛选；不返回请求体、响应体或请求头 |
+| `akm_get_usage_stats` | 查询 Token 用量统计（默认同时返回最近 1/7/30 天）；开启 `cost_stats_enabled` 时额外返回费用估算与模型单价表 |
 | `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
@@ -116,7 +117,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 | `agent_shell_tasks` | `{}` | shell 预定义任务，格式为任务名到 argv 字符串数组的映射；模型只能传任务名，不能传命令字符串 |
 | `agent_git_enabled` | `false` | 是否注册 git 工具（`akm_run_git`，仅允许固定 operation） |
 | `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
-| `agent_api_token` | `""` | `/v1/agent` 鉴权 token；启用写工具、shell 或 git 工具时必须配置 |
+| `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 Bearer / X-Agent-Token |
 
 ### 读工具（默认可用）
 
@@ -163,12 +164,29 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 
 ### 鉴权
 
-`/v1/agent` 在只读工具场景支持无 token 调用。只要启用写文件、shell 或 git 工具，就必须配置 `agent_api_token`；缺失时接口返回 `503`，避免危险工具以无鉴权状态暴露。配置后，所有请求（含纯 JSON 与 multipart）必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 `401`。
+`agent_api_token` 为可选鉴权：留空时 `/v1/agent` 不校验 token（含写/shell/git 已开启的场景，危险工具仍由各自配置开关控制是否注册）。配置了 token 后，所有请求（含纯 JSON 与 multipart）必须携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头，否则返回 `401`。
 
 ### 管理接口：`GET /api/agent-tools`
 
- 只读返回当前服务已注册的 Agent 工具名称列表（`{"data": ["akm_read_file", ...]}`），供 `akm agent` 客户端展示。接口位于管理端点，不经过 `/v1/agent` 的鉴权与工具注入逻辑。
+  只读返回当前服务已注册的 Agent 工具名称列表（`{"data": ["akm_read_file", ...]}`），供 `akm agent` 客户端展示。接口位于管理端点，不经过 `/v1/agent` 的鉴权与工具注入逻辑。
 
+## 用量统计
+
+内置的 `akm_get_usage_stats` 工具复用服务端 `_get_stats`（与 `/api/stats` 同源），查询审计日志中的 Token 用量汇总。默认同时返回最近 1 / 7 / 30 三个自然日窗口；也可指定单个窗口。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `days` | int | 否 | `1` / `7` / `30` 只返回该窗口；`0` 或省略时返回三个窗口 |
+
+返回结构要点：
+
+- `windows`：按窗口天数键（`"1"` / `"7"` / `"30"`）的用量摘要，含请求数、prompt / completion / total / cached tokens，以及 `by_model` / `by_provider` / `by_key` 分桶
+- `cost_stats_enabled`：当前是否开启费用估算
+- 当 `cost_stats_enabled=true` 时额外返回：
+  - 各窗口的 `total_cost` / `cost_currency`，以及分桶上的 `cost`
+  - `pricing`：当前 `cost_pricing_table` 解析后的模型单价表（`input_per_1m` / `cache_per_1m` / `output_per_1m`，单位 USD per 1M tokens）
+  - `pricing_unit` 与 `cost_note`（费用为本地估算，不能替代供应商账单）
+- 费用未开启时不返回 `pricing` / `total_cost`，仅在 `cost_note` 中提示如何开启
 
 ## 联网搜索
 

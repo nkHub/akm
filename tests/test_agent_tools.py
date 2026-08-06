@@ -78,6 +78,116 @@ def test_builtin_time_tool_returns_current_time_fields():
     assert abs(result["unix"] - datetime.datetime.now().timestamp()) < 60
 
 
+def test_builtin_usage_stats_default_windows_without_cost(monkeypatch):
+    """默认返回 1/7/30 三窗口；费用未开启时不含 total_cost 与单价表。"""
+    calls = []
+
+    def fake_get_stats(days: int):
+        calls.append(days)
+        return {
+            "total_requests": days,
+            "total_prompt_tokens": days * 10,
+            "total_completion_tokens": days * 2,
+            "total_tokens": days * 12,
+            "total_cached_tokens": 1,
+            "by_model": {
+                "gpt-4": {
+                    "prompt": 10,
+                    "completion": 2,
+                    "total": 12,
+                    "cached": 1,
+                    "requests": 1,
+                }
+            },
+            "by_provider": {"openai": {"prompt": 10, "completion": 2, "total": 12, "cached": 1, "requests": 1}},
+            "by_key": {"primary": {"prompt": 10, "completion": 2, "total": 12, "cached": 1, "requests": 1}},
+            "cached_at": "2026-08-06 12:00:00",
+        }
+
+    monkeypatch.setattr("akm.server._get_stats", fake_get_stats)
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"cost_stats_enabled": False, "cost_pricing_table": "gpt-4=1/0.1/2"},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    result = _handlers(app)["akm_get_usage_stats"]()
+
+    assert calls == [1, 7, 30]
+    assert set(result["windows"]) == {"1", "7", "30"}
+    assert result["windows"]["1"]["total_requests"] == 1
+    assert result["windows"]["7"]["total_tokens"] == 84
+    assert "total_cost" not in result["windows"]["1"]
+    assert "pricing" not in result
+    assert result["cost_stats_enabled"] is False
+    assert "cost_stats_enabled=true" in result["cost_note"]
+
+
+def test_builtin_usage_stats_single_window_with_cost(monkeypatch):
+    """days=7 只查 7 天；开启费用时返回 total_cost 与 pricing 单价表。"""
+    calls = []
+
+    def fake_get_stats(days: int):
+        calls.append(days)
+        return {
+            "total_requests": 3,
+            "total_prompt_tokens": 100,
+            "total_completion_tokens": 20,
+            "total_tokens": 120,
+            "total_cached_tokens": 5,
+            "total_cost": 0.12,
+            "cost_currency": "$",
+            "costs_by_currency": {"$": 0.12},
+            "by_model": {
+                "gpt-4": {
+                    "prompt": 100,
+                    "completion": 20,
+                    "total": 120,
+                    "cached": 5,
+                    "requests": 3,
+                    "cost": 0.12,
+                    "currency": "$",
+                }
+            },
+            "by_provider": {},
+            "by_key": {},
+            "cached_at": "2026-08-06 12:00:00",
+        }
+
+    monkeypatch.setattr("akm.server._get_stats", fake_get_stats)
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {
+            "cost_stats_enabled": True,
+            "cost_pricing_table": "gpt-4=1/0.1/2\n*=0/0/0",
+        },
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    result = _handlers(app)["akm_get_usage_stats"](days=7)
+
+    assert calls == [7]
+    assert set(result["windows"]) == {"7"}
+    win = result["windows"]["7"]
+    assert win["total_cost"] == 0.12
+    assert win["cost_currency"] == "$"
+    assert win["by_model"]["gpt-4"]["cost"] == 0.12
+    assert result["cost_stats_enabled"] is True
+    assert result["pricing"]["rules"][0]["pattern"] == "gpt-4"
+    assert result["pricing"]["rules"][0]["input_per_1m"] == 1.0
+    assert result["pricing_unit"].startswith("USD per 1M")
+    assert "不能替代供应商账单" in result["cost_note"]
+
+
+def test_builtin_usage_stats_registers_tool():
+    """akm_get_usage_stats 应注册，days 限定 0/1/7/30。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+    assert "akm_get_usage_stats" in tools
+    days_schema = tools["akm_get_usage_stats"].parameters["properties"]["days"]
+    assert days_schema["enum"] == [0, 1, 7, 30]
+
+
 class _FakeKbResponse:
     """模拟 httpx 响应：raise_for_status + json。"""
 
