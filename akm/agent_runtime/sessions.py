@@ -1,8 +1,9 @@
 """会话持久化层：把多轮对话历史与运行参数保存到磁盘。
 
 服务端 `/v1/agent` 无状态，messages 需要每次请求全量回传。本模块把一次
-`akm agent` 会话（消息历史 + model + workspace_root 等）持久化到
-``~/.akm/agent_sessions/*.json``，从而支持中断后 ``--resume`` 继续对话。
+Agent 会话（消息历史 + model + workspace_root 等）持久化到
+``~/.akm/agent_sessions/*.json``，供 `akm_load_session` / `akm_list_sessions`
+工具以及客户端会话回顾使用。
 
 会话文件格式（JSON）::
 

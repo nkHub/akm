@@ -4,7 +4,7 @@ pygments 的 lexers 目录包含 260 个语言文件（约 15MB），但 akm 只
 rich 的 Markdown 代码高亮用到少量语言。此脚本在 py2app 打包完成后运行，
 删除除白名单外的 lexer 文件，app 体积可减少约 13MB。
 
-白名单依据：akm agent CLI 渲染 markdown 代码块时最常用到的语言，
+白名单依据：rich 的 Markdown 代码高亮渲染时最常用到的语言，
 以及这些 lexer 顶层 import 所依赖的兄弟模块（如 html.py 依赖
 javascript/jvm/css/ruby）。
 """

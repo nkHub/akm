@@ -33,7 +33,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内的**单个文件**。禁止删除目录（防批量删除，`recursive` 已废弃）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
-| `akm_run_shell` | 执行管理员预定义的工作区任务并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
+| `akm_run_shell` | 在工作区内用系统 shell 执行命令字符串并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
@@ -119,8 +119,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 |--------|--------|------|
 | `agent_workspace_root` | `""` | 工作区沙箱根目录，所有文件工具仅能在此目录内读写；留空时文件工具不注册 |
 | `agent_write_tools_enabled` | `false` | 是否注册写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`） |
-| `agent_run_shell_enabled` | `false` | 是否注册 shell 工具（`akm_run_shell`） |
-| `agent_shell_tasks` | `{}` | shell 预定义任务，格式为任务名到 argv 字符串数组的映射；模型只能传任务名，不能传命令字符串 |
+| `agent_run_shell_enabled` | `false` | 是否注册 shell 工具（`akm_run_shell`，命令由模型直接传入，用系统 shell 执行） |
 | `agent_git_enabled` | `false` | 是否注册 git 工具（`akm_run_git`，仅允许固定 operation） |
 | `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
 | `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 Bearer / X-Agent-Token |
@@ -133,18 +132,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 写工具、shell 与 git 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作、shell 执行与 git 操作会改动本机状态，应经人工确认后再开放。
 
-`akm_run_shell` 不接受 `command` 参数。管理员需在配置中定义可用任务，例如：
-
-```json
-{
-  "agent_shell_tasks": {
-    "test": ["yarn", "test"],
-    "lint": ["yarn", "lint"]
-  }
-}
-```
-
-模型调用时只传 `{"task": "test"}`，服务端以配置的 argv 和当前工作区作为 cwd 执行。该机制避免模型拼接任意 shell 命令，但任务本身仍由主机进程执行，不能视为文件系统沙箱。
+`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。
 
 `akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。
 
@@ -156,7 +144,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 - 相对路径中的 `..` 穿越工作区被拒绝；
 - 软链接指向工作区外时（resolve 后越界）被拒绝。
 
-越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 执行预定义任务并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信。`akm_run_git` 只构造固定 operation 对应的 argv。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信。`akm_run_git` 只构造固定 operation 对应的 argv。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
 
 ## 自愈重试
 
@@ -174,7 +162,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 
 ### 管理接口：`GET /api/agent-tools`
 
-  只读返回当前服务已注册的 Agent 工具名称列表（`{"data": ["akm_read_file", ...]}`），供 `akm agent` 客户端展示。接口位于管理端点，不经过 `/v1/agent` 的鉴权与工具注入逻辑。
+  只读返回当前服务已注册的 Agent 工具名称列表（`{"data": ["akm_read_file", ...]}`）。接口位于管理端点，不经过 `/v1/agent` 的鉴权与工具注入逻辑。
 
 ## 用量统计
 

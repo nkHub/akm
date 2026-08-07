@@ -437,29 +437,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 文件工具受工作区沙箱约束：所有路径（含 `..` 穿越、绝对路径、软链接）在解析后都会被校验必须在 `agent_workspace_root` 目录内；请求级 `workspace_root` 只能选用该根目录的子目录。`/v1/agent` 的 multipart 附件单次最多 8 个、总大小最多 20MB。图片编辑仅能读取工作区或 `agent_upload_dir` 内、且不超过 20MB 的文件或 Base64 数据。`akm_run_git` 只接受 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch` 等固定 operation，不接受自由命令。`akm_delete_file` 仅支持删除**单个文件**，禁止删除目录（防批量删除，`recursive` 已废弃）。`akm_run_shell` 只能执行 `agent_shell_tasks` 中管理员配置的 argv 任务，仍是显式开启的主机级进程执行能力，`cwd` 只决定初始目录，不能作为文件系统沙箱。`agent_api_token` 可选：留空不鉴权；配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头。
 
-Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化。
-
-### Agent 交互式 CLI（`akm agent`）
-
-内置基于本地 `/v1/agent` 的轻量终端客户端（`akm/agent_cli/`），提供交互式会话与历史管理：
-
-```bash
-akm agent                       # 进入交互式会话（多行输入 + 流式渲染）
-akm agent --resume 会话名        # 从历史会话继续
-akm agent session list          # 列出历史会话
-akm agent session show 会话名    # 查看会话摘要与最近消息
-akm agent session rm 会话名      # 删除会话
-```
-
-- 交互式 REPL 输入基于 `prompt_toolkit`（`akm/agent_cli/input.py`）：`Enter` 发送、`Alt+Enter` / `Ctrl+J` 换行书写多行问题；粘贴的多行文本整体进入缓冲区、按 `Enter` 一次性提交（不会逐行误触发）；输入 `/` 自动弹出命令菜单（方向键选择、`Enter` 确认，`/` 前可带任意文本、空格接 `/` 同样唤起），命令名支持 fzf 风格模糊匹配（如 `/mde` → `/model`），菜单右侧显示命令说明，`/resume` 可补全会话名、`/workspace` 可补全路径；输入历史持久化到 `~/.akm/agent_history.txt`。stdin 非 TTY（管道 / 重定向）或未安装 `prompt_toolkit` 时自动回退系统 `input()` 逐行输入。
-- 交互模式下支持内建斜杠命令：`/model`（切换模型）、`/workspace`（切换工作区）、`/instructions`（覆盖系统指令）、`/sessions` / `/resume`（历史会话）、`/clear`（清空消息）、`/quit`（退出）等，输入 `/help` 查看全部。
-- 会话多轮历史持久化到 `~/.akm/agent_sessions/*.json`，服务端 `/v1/agent` 保持无状态，客户端在每轮请求时全量回传 `messages`。
-- `--workspace-root` 缺省为当前目录，作为文件工具工作区；配置了全局 `agent_workspace_root` 时，该目录必须位于全局工作区内。
-- 交互模式需要本地代理服务运行（`akm serve`）。
-- 启动时打印横幅：圆角框内左侧字符画小猫、右侧会话初始信息（标题含版本号、会话名、模型、工作区、操作提示），由 `render.startup_banner` 渲染，`--no-color` 下自动去掉着色。
-- 输出基于 `rich` 渲染：交互终端下流式回复使用三区实时面板（思考区 / 工具区 / 正文区，rich Live），正文区每个增量到达即重渲染 markdown（粗体 / 列表 / 代码语法高亮），思考与正文逐字出现；长回复**不裁剪到当屏**，由终端自然向下滚动完整显示；color 模式下用 `Text.from_ansi` 解析高亮，避免 ANSI 当字面量导致花屏。工具调用与状态提示为轻量 ANSI 短行。非 TTY（管道 / 重定向）自动退化为逐行打印。颜色缺省按是否 TTY 自动开启，可用 `--no-color` 关闭。
-- 模型的思考过程（`reasoning_delta`）默认折叠，只显示「思考中…」提示，避免 token 流刷屏；需要查看详细思考时用 `--show-reasoning` 开启。
-- 流式输出过程中 `Ctrl+C` 会取消当前请求并退出会话（不再吞掉 `CancelledError` 后卡在 `akm>`）；Live 面板退出时会取消节流延迟重绘任务，避免终端状态残留。
+Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、`sessions.py` 负责会话持久化（`/v1/agent` 请求结束后自动落盘到 `~/.akm/agent_sessions/*.json`，供 `akm_load_session` / `akm_list_sessions` 工具及客户端回顾使用）。
 
 ## 故障切换策略
 
