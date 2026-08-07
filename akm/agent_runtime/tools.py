@@ -853,6 +853,93 @@ async def _run_shell_tool(command: str, timeout: int = 0) -> str:
     return await _run_workspace_shell(command, root, timeout, "shell 命令")
 
 
+async def _xlsx_tool(
+    action: str,
+    path: str,
+    data: Any = None,
+    sheet: str = "",
+    overwrite: bool = False,
+    updates: Any = None,
+) -> str:
+    """创建或修改工作区内的 .xlsx 电子表格文件（基于 openpyxl）。
+
+    仅 agent_write_tools_enabled=true 时注册。action 区分两种操作：
+    - ``create``：新建 xlsx。``data`` 为二维数组（每行一个子数组）或
+      {sheet_name: 二维数组} 的映射；纯数组时写入 ``sheet`` 指定的工作表
+      （默认 "Sheet1"）。目标已存在且 overwrite=false 时拒绝，防止误覆盖。
+    - ``edit``：修改已有 xlsx。``updates`` 为 [{sheet, cell, value}] 列表，
+      逐条写入指定单元格（cell 形如 "A1"，sheet 默认 "Sheet1"）。
+    所有文件路径限定在工作区内，返回值是 JSON 字符串。
+    """
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_xlsx")
+    try:
+        from openpyxl import Workbook, load_workbook
+    except ImportError:
+        return json.dumps({"error": "服务端未安装 openpyxl，无法使用 xlsx 工具"}, ensure_ascii=False)
+
+    action = str(action or "").strip()
+    if action not in ("create", "edit"):
+        return json.dumps({"error": "action 只能是 create 或 edit"}, ensure_ascii=False)
+    try:
+        target = _safe_resolve_workspace_path(path, must_exist=(action == "edit"))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    if action == "create":
+        if target.exists() and not overwrite:
+            return json.dumps({"error": f"{path} 已存在，如需覆盖请传 overwrite=true"}, ensure_ascii=False)
+        if data is None:
+            return json.dumps({"error": "create 需要 data 参数"}, ensure_ascii=False)
+        try:
+            wb = Workbook()
+            active = wb.active
+            if active is not None:
+                wb.remove(active)  # 移除默认空白工作表，按 data 重建
+            if isinstance(data, dict):
+                sheets = {str(k): v for k, v in data.items()}
+            else:
+                sheets = {str(sheet or "Sheet1"): data}
+            for name, rows in sheets.items():
+                if not isinstance(rows, list):
+                    return json.dumps({"error": f"工作表 {name} 的数据必须是二维数组"}, ensure_ascii=False)
+                ws = wb.create_sheet(title=str(name))
+                for row in rows:
+                    if not isinstance(row, list):
+                        return json.dumps({"error": f"工作表 {name} 的行必须是数组"}, ensure_ascii=False)
+                    ws.append(row)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(target)
+        except ValueError as exc:
+            return json.dumps({"error": f"创建工作表失败: {exc}"}, ensure_ascii=False)
+        except OSError as exc:
+            return json.dumps({"error": f"保存文件失败: {exc}"}, ensure_ascii=False)
+        return json.dumps({"ok": True, "action": "create", "path": str(target)}, ensure_ascii=False)
+
+    # action == "edit"
+    if not updates:
+        return json.dumps({"error": "edit 需要 updates 参数（[{sheet, cell, value}, ...]）"}, ensure_ascii=False)
+    if not isinstance(updates, list):
+        return json.dumps({"error": "updates 必须是数组"}, ensure_ascii=False)
+    try:
+        wb = load_workbook(target)
+        for item in updates:
+            if not isinstance(item, dict):
+                return json.dumps({"error": "updates 中的每一项必须是 {sheet, cell, value}"}, ensure_ascii=False)
+            cell_ref = str(item.get("cell") or "").strip().upper()
+            if not cell_ref:
+                return json.dumps({"error": "updates 每一项都必须包含 cell（如 A1）"}, ensure_ascii=False)
+            sheet_name = str(item.get("sheet") or "Sheet1")
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+            ws[cell_ref] = item.get("value")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(target)
+    except KeyError as exc:
+        return json.dumps({"error": f"修改文件失败: {exc}"}, ensure_ascii=False)
+    except OSError as exc:
+        return json.dumps({"error": f"保存文件失败: {exc}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "action": "edit", "path": str(target), "updated": len(updates)}, ensure_ascii=False)
+
+
 def _git_paths(paths: list[str] | None) -> list[str]:
     """规范化 git 路径参数，防止通过路径穿越让 git 操作工作区外文件。"""
     if paths is None:
@@ -1663,7 +1750,7 @@ def build_workspace_tools() -> list[ToolDef]:
     安全设计：
     - 读工具（read/list/glob/grep/info）始终注册，但目标必须位于
       agent_workspace_root 工作区内；未配置工作区时执行返回明确错误。
-    - 写工具（write/edit/make_dir/delete）默认禁用，仅当 config.json
+    - 写工具（write/edit/make_dir/delete/xlsx）默认禁用，仅当 config.json
       设置 ``agent_write_tools_enabled=true`` 时才注册，模型不可见即不可调。
     - shell 工具默认禁用，仅当 ``agent_run_shell_enabled=true`` 时才注册；
       命令由模型直接传入，系统 shell 解释执行（cwd 固定为工作区根目录）。
@@ -1792,6 +1879,23 @@ def build_workspace_tools() -> list[ToolDef]:
                     "required": ["path"],
                 },
                 _delete_tool,
+            ),
+            ToolDef(
+                "akm_xlsx",
+                "创建或修改工作区内的 .xlsx 电子表格文件。action=create 新建（data 为二维数组或 {sheet名: 二维数组}，目标已存在时需 overwrite=true）；action=edit 修改已有文件（updates 为 [{sheet, cell, value}] 单元格写入列表）。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "edit"], "description": "create 新建 / edit 修改"},
+                        "path": {"type": "string", "description": "工作区内的 .xlsx 文件路径"},
+                        "data": {"type": ["array", "object"], "description": "create 用：二维数组（[[...],[...]]）或 {sheet名: 二维数组} 映射"},
+                        "sheet": {"type": "string", "description": "create 时纯数组数据写入的工作表名，默认 Sheet1"},
+                        "overwrite": {"type": "boolean", "description": "create 时目标已存在是否覆盖，默认 false"},
+                        "updates": {"type": "array", "items": {"type": "object"}, "description": "edit 用：[{sheet, cell, value}] 单元格写入列表，cell 如 A1"},
+                    },
+                    "required": ["action", "path"],
+                },
+                _xlsx_tool,
             ),
         ])
     if load_config().get("agent_run_shell_enabled"):

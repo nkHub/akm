@@ -492,6 +492,7 @@ def test_workspace_tools_registration(monkeypatch):
     names = {t.name for t in build_workspace_tools()}
     assert {"akm_read_file", "akm_list_dir", "akm_glob", "akm_grep", "akm_file_info"} <= names
     assert "akm_write_file" not in names
+    assert "akm_xlsx" not in names
     assert "akm_run_shell" not in names
     assert "akm_run_git" not in names
 
@@ -509,6 +510,7 @@ def test_workspace_tools_registration(monkeypatch):
     assert "akm_edit_file" in names
     assert "akm_make_dir" in names
     assert "akm_delete_file" in names
+    assert "akm_xlsx" in names
     assert "akm_run_shell" in names
     assert "akm_run_git" in names
 
@@ -527,3 +529,124 @@ def test_shell_and_git_schema(monkeypatch):
     assert shell_properties["command"]["type"] == "string"
     assert "operation" in git_properties
     assert "command" not in git_properties
+
+
+# ── xlsx 电子表格工具 ──
+
+
+@pytest.mark.asyncio
+async def test_xlsx_create_and_verify_content(_workspace, monkeypatch):
+    """akm_xlsx create 生成可被 openpyxl 读回的 xlsx，数据逐行落位。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_xlsx"](
+        action="create",
+        path="book.xlsx",
+        data=[["name", "age"], ["alice", 30], ["bob", 25]],
+    ))
+
+    assert out.get("ok") is True
+    assert out["action"] == "create"
+    assert (Path(str(out["path"]))).is_file()
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    ws = wb["Sheet1"]
+    assert [c.value for c in ws[1]] == ["name", "age"]
+    assert ws["A2"].value == "alice"
+    assert ws["B2"].value == 30
+
+
+@pytest.mark.asyncio
+async def test_xlsx_create_multiple_sheets(_workspace, monkeypatch):
+    """create 的 data 传 {sheet名: 二维数组} 时生成多个工作表。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_xlsx"](
+        action="create",
+        path="multi.xlsx",
+        data={"Sheet1": [["a"]], "Sheet2": [["b", 2]]},
+    ))
+
+    assert out.get("ok") is True
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    assert wb.sheetnames == ["Sheet1", "Sheet2"]
+    assert wb["Sheet2"]["A1"].value == "b"
+
+
+@pytest.mark.asyncio
+async def test_xlsx_edit_writes_cells(_workspace, monkeypatch):
+    """edit 按 updates 写单元格；缺 sheet 默认 Sheet1。"""
+    handlers = _handlers(monkeypatch)
+
+    await handlers["akm_xlsx"](action="create", path="book.xlsx", data=[["x"]])
+    out = json.loads(await handlers["akm_xlsx"](
+        action="edit",
+        path="book.xlsx",
+        updates=[
+            {"sheet": "Sheet1", "cell": "B1", "value": "score"},
+            {"cell": "B2", "value": 99},
+        ],
+    ))
+
+    assert out.get("ok") is True
+    assert out["updated"] == 2
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    assert wb["Sheet1"]["B1"].value == "score"
+    assert wb["Sheet1"]["B2"].value == 99
+
+
+@pytest.mark.asyncio
+async def test_xlsx_create_rejects_existing_without_overwrite(_workspace, monkeypatch):
+    """目标已存在且未传 overwrite=true 时应拒绝覆盖。"""
+    handlers = _handlers(monkeypatch)
+    await handlers["akm_xlsx"](action="create", path="book.xlsx", data=[["x"]])
+
+    out = json.loads(await handlers["akm_xlsx"](action="create", path="book.xlsx", data=[["y"]]))
+
+    assert "error" in out
+    assert "已存在" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_xlsx_rejects_path_outside_workspace(_workspace, monkeypatch):
+    """xlsx 路径越界（绝对路径/..穿越）应被拒绝。"""
+    handlers = _handlers(monkeypatch)
+
+    for path in ("/etc/passwd", "../outside.xlsx"):
+        out = json.loads(await handlers["akm_xlsx"](action="create", path=path, data=[["x"]]))
+        assert "error" in out
+        assert "超出工作区" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_xlsx_rejects_bad_action_and_missing_args(_workspace, monkeypatch):
+    """非法 action、create 缺 data、edit 缺 updates 应返回错误。"""
+    handlers = _handlers(monkeypatch)
+
+    bad_action = json.loads(await handlers["akm_xlsx"](action="delete", path="a.xlsx"))
+    assert "error" in bad_action
+    assert "action" in bad_action["error"]
+
+    no_data = json.loads(await handlers["akm_xlsx"](action="create", path="a.xlsx"))
+    assert "error" in no_data
+
+    no_updates = json.loads(await handlers["akm_xlsx"](action="edit", path="a.xlsx"))
+    assert "error" in no_updates
+
+
+def test_xlsx_schema(monkeypatch):
+    """xlsx 工具注册在写工具开关下，暴露 action/path/data/updates 参数。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: _workspace_cfg(),
+    )
+    tools = {tool.name: tool for tool in build_workspace_tools()}
+
+    assert "akm_xlsx" in tools
+    props = tools["akm_xlsx"].parameters["properties"]
+    assert props["action"]["enum"] == ["create", "edit"]
+    assert "path" in props
+    assert "data" in props
+    assert "updates" in props

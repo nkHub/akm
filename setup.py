@@ -45,7 +45,7 @@ DATA_FILES = [
 
 OPTIONS = {
     "argv_emulation": False,
-    "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "anyio", "sqlite_vec", "objc"],
+    "packages": ["akm", "rumps", "uvicorn", "fastapi", "httpx", "click", "cryptography", "anyio", "sqlite_vec", "objc", "openpyxl", "et_xmlfile"],
     "includes": ["akm.server", "akm.db", "akm.key_pool", "akm.proxy", "akm.audit", "akm.models", "akm.config", "akm.agent", "akm.adapter", "akm.cli", "sqlite_vec", "_cffi_backend"],
     "excludes": ["tkinter", "PyQt5", "PySide2", "wx", "jieba3", "numpy", "numpy._core", "numpy.linalg", "numpy.fft", "numpy.random", "numpy.distutils", "numpy.lib", "numpy.ma", "numpy.matrixlib", "numpy.polynomial", "numpy.testing", "numpy.typing", "docutils", "PIL", "rich", "pygments", "websockets"],
     "iconfile": "logo.icns",
