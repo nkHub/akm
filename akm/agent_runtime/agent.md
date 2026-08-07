@@ -146,7 +146,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 写工具、shell 与 git 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作、shell 执行与 git 操作会改动本机状态，应经人工确认后再开放。
 
-`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zsh_history` / `.gitconfig` / `.npmrc` 等）/ `/etc` / `/private/etc` / `/var/log` / `/var/db` / `/tmp` 等敏感路径与家目录列举），将越界风险从「无限制」降到「限制敏感读写」级别。
+`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zsh_history` / `.gitconfig` / `.npmrc` 等）/ `/etc` / `/private/etc` / `/var/log` / `/var/db` / `/tmp` 等敏感路径与家目录列举），将越界风险从「无限制」降到「限制敏感读写」级别。此外，父进程若携带 `PYTHONHOME`/`PYTHONPATH`（py2app 打包的 app 内嵌 Python 运行时设置），执行前会被剥离，避免污染 shell 里外部 `python3` 使其启动即崩溃。
 
 `akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。
 

@@ -930,6 +930,10 @@ async def _run_workspace_shell(command: str, root: Path, timeout: int, label: st
     任意命令；cwd 固定为工作区根目录。执行受超时与输出字节上限约束。
     当配置 agent_run_shell_sandbox=true 且本机提供 sandbox_init_with_parameters
     时，用 seatbelt 沙箱隔离 shell 子进程（见 _seatbelt_profile）。
+    若父进程环境带 PYTHONHOME/PYTHONPATH（py2app 打包的 app 内嵌 Python
+    运行时会设置，指向 app 的 Resources/lib/python3.12），会污染子进程里
+    的系统/python3 使其启动即崩溃（找不到 encodings），这里传剥离后的
+    干净 env，保证 shell 里的外部 Python 可正常使用。
     """
     timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
     sandbox = bool(load_config().get("agent_run_shell_sandbox", False))
@@ -939,6 +943,9 @@ async def _run_workspace_shell(command: str, root: Path, timeout: int, label: st
             preexec_fn = _seatbelt_preexec(_seatbelt_profile(root))
         else:
             logger.warning("agent_run_shell_sandbox=true 但本机缺少 sandbox_init_with_parameters，退回无隔离执行")
+    env = None
+    if os.environ.get("PYTHONHOME") or os.environ.get("PYTHONPATH"):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -946,6 +953,7 @@ async def _run_workspace_shell(command: str, root: Path, timeout: int, label: st
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             preexec_fn=preexec_fn,
+            env=env,
         )
         try:
             output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
