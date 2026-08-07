@@ -33,6 +33,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内的**单个文件**。禁止删除目录（防批量删除，`recursive` 已废弃）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
+| `akm_xlsx` | 创建工作区内 `.xlsx` 文件（`action=create`，`data` 传二维数组或 `{工作表名: 二维数组}`，已存在需 `overwrite=true`）或修改已有文件的单元格（`action=edit`，`updates` 传 `[{"sheet","cell","value"}]`）；需开启 `agent_write_tools_enabled` |
 | `akm_run_shell` | 在工作区内用系统 shell 执行命令字符串并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
@@ -135,6 +136,13 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 `akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。
 
 `akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。
+
+`akm_xlsx` 通过 `action` 区分创建与修改，基于 `openpyxl`：
+
+- `create`：`data` 传纯二维数组（写入默认 `Sheet1`）或 `{"工作表名": [[...]]}` 映射（每个工作表写入对应数组）；目标文件已存在时需 `overwrite=true`，否则返回错误。
+- `edit`：`updates` 传 `[{"sheet": "Sheet1", "cell": "B2", "value": 42}]` 列表，按坐标写入已有文件的单元格；`sheet` 缺省为 `Sheet1`，目标工作表不存在时自动创建。
+
+两种模式都以工作区为沙箱，路径越界返回「超出工作区范围」错误。
 
 ### 路径沙箱
 
