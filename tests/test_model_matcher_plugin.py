@@ -171,8 +171,10 @@ async def test_model_matcher_bypass_falls_back_when_no_alternate(monkeypatch):
     )
     out = await plugin.on_key_selected(ctx)
     assert out["alias"] == "k1"
-    # 仍应正常登记 in-flight
-    assert plugin._inflight_counts["k1"] >= 1
+    # 无替代候选时不再递增 in-flight，避免慢请求把计数永久推高造成拥塞误判累积
+    assert plugin._inflight_counts["k1"] == 1
+    # 同时不登记 inflight_key，on_response 不会对此请求做回收配对
+    assert ctx.bag_get("model_matcher.inflight_key") is None
 
 
 @pytest.mark.asyncio
@@ -341,8 +343,10 @@ async def test_model_matcher_bypass_keeps_current_when_only_tried_candidates(mon
     ctx.bag_set("proxy.tried_aliases", ["k2"])
     out = await plugin.on_key_selected(ctx)
     assert out["alias"] == "k1"
-    # 仍应正常登记 in-flight
-    assert plugin._inflight_counts["k1"] >= 1
+    # 无替代候选时不再递增 in-flight，避免慢请求把计数永久推高造成拥塞误判累积
+    assert plugin._inflight_counts["k1"] == 1
+    # 同时不登记 inflight_key，on_response 不会对此请求做回收配对
+    assert ctx.bag_get("model_matcher.inflight_key") is None
 
 
 @pytest.mark.asyncio
