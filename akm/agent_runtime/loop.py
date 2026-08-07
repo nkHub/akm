@@ -15,20 +15,16 @@ from akm.config import load_config
 
 logger = logging.getLogger("akm.agent_runtime.loop")
 
-# 未传 tools 时默认不注入的内置工具（联网搜索、图片生成/编辑，以及写文件/shell
-# 等有副作用的工具，涉及外部服务调用、资源消耗或修改文件系统；客户端如需使用
-# 须在 tools 中显式声明）
+# 未传 tools 时默认不注入的内置工具（联网搜索、图片生成/编辑等涉及外部服务
+# 调用与资源消耗的工具；客户端如需使用须在 tools 中显式声明）。
+# 注意：写文件（write/edit/make_dir/delete）与 shell/git 工具**不在**排除之列——
+# 它们的可用性由 config 开关（agent_write_tools_enabled / agent_run_shell_enabled /
+# agent_git_enabled）控制注册，注册后默认即下发，避免「开关已开但模型仍看不到」。
 _DEFAULT_EXCLUDED_TOOLS: frozenset[str] = frozenset(
     {
         "tavily_search",
         "akm_generate_image",
         "akm_edit_image",
-        "akm_write_file",
-        "akm_edit_file",
-        "akm_make_dir",
-        "akm_delete_file",
-        "akm_run_shell",
-        "akm_run_git",
     }
 )
 
