@@ -51,13 +51,18 @@ def test_agent_chat_serves_index_and_assets(tmp_path):
     plugin = _load_plugin(app, plugin_dir)
     client = TestClient(app)
 
+    # 从真实产物 index.html 提取资源文件名，避免构建产物 hash 变化时改测试。
+    index_html = (plugin_dir / "dist" / "index.html").read_text(encoding="utf-8")
+    js_name = index_html.split('src="./assets/')[1].split('"')[0]
+    css_name = index_html.split('href="./assets/')[1].split('"')[0]
+
     index = client.get("/chat")
     assert index.status_code == 200
     assert "AI Chat Window" in index.text
-    assert "./assets/index-DtK7hnPg.js" in index.text
+    assert f"./assets/{js_name}" in index.text
 
-    assert client.get("/chat/assets/index-DtK7hnPg.js").status_code == 200
-    assert client.get("/chat/assets/index-Bycx4iDa.css").status_code == 200
+    assert client.get(f"/chat/assets/{js_name}").status_code == 200
+    assert client.get(f"/chat/assets/{css_name}").status_code == 200
     assert client.get("/chat/favicon.svg").status_code == 200
     assert plugin.site_path == "/chat"
 
@@ -94,4 +99,4 @@ def test_agent_chat_unready_returns_503(tmp_path):
     plugin.runtime_ready = False
 
     assert client.get("/chat").status_code == 503
-    assert client.get("/chat/assets/index-DtK7hnPg.js").status_code == 503
+    assert client.get("/chat/assets/missing.js").status_code == 503
