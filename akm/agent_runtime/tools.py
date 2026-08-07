@@ -857,6 +857,165 @@ async def _run_shell_tool(command: str, timeout: int = 0) -> str:
     return await _run_workspace_shell(command, root, timeout, "shell 命令")
 
 
+def _xlsx_range_bounds(range_ref: str) -> tuple | None:
+    """把 Excel 区间字符串（如 "B2:C6"）解析为 (min_col, min_row, max_col, max_row)。
+
+    非法格式返回 None，由调用方统一报错。
+    """
+    try:
+        from openpyxl.utils.cell import range_boundaries
+        bounds = range_boundaries(str(range_ref).replace("$", "").upper())
+        if bounds is None or bounds[0] is None or bounds[2] is None:
+            return None
+        return bounds
+    except (ImportError, ValueError):
+        return None
+
+
+def _xlsx_reference(ws, range_ref: str):
+    """按 Excel 区间字符串构造 openpyxl Reference（供图表使用）。"""
+    from openpyxl.chart import Reference
+    bounds = _xlsx_range_bounds(range_ref)
+    if bounds is None:
+        raise ValueError(f"非法单元格区间: {range_ref}")
+    min_col, min_row, max_col, max_row = bounds
+    return Reference(ws, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
+
+
+def _apply_xlsx_styles(wb, styles: Any) -> str | None:
+    """把 styles 列表应用到工作簿，返回错误信息（无错误返回 None）。
+
+    styles 每项: {sheet?, cell, bold?, italic?, size?, color?, fill?,
+    align?, number_format?}。color/fill 为不带 # 的十六进制色值。
+    """
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    if not isinstance(styles, list):
+        return "styles 必须是数组"
+    for item in styles:
+        if not isinstance(item, dict):
+            return "styles 中的每一项必须是对象"
+        cell_ref = str(item.get("cell") or "").strip().upper()
+        if not cell_ref:
+            return "styles 每一项都必须包含 cell（如 A1）"
+        sheet_name = str(item.get("sheet") or "Sheet1")
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+        cell = ws[cell_ref]
+
+        if any(k in item for k in ("bold", "italic", "size", "color")):
+            cell.font = Font(
+                bold=item.get("bold"),
+                italic=item.get("italic"),
+                size=item.get("size"),
+                color=str(item.get("color") or "").strip("#") or None,
+            )
+        fill = str(item.get("fill") or "").strip("#")
+        if fill:
+            cell.fill = PatternFill("solid", fgColor=fill)
+        align = str(item.get("align") or "").strip().lower()
+        if align:
+            cell.alignment = Alignment(horizontal=align) if align in ("left", "center", "right", "fill", "justify", "center_continuous", "distributed") else Alignment(vertical=align)
+        if item.get("number_format"):
+            cell.number_format = str(item["number_format"])
+    return None
+
+
+def _apply_xlsx_layout(wb, column_widths: Any, row_heights: Any, merge_cells: Any, freeze_panes: Any) -> str | None:
+    """应用列宽/行高/合并单元格/冻结窗格，返回错误信息（无错误返回 None）。
+
+    各参数均为 {sheet名: 配置} 映射；单 sheet 场景 sheet 键可省略，默认 Sheet1。
+    """
+    def resolve(entries: Any, default_sheet: str):
+        if entries is None:
+            return {}
+        if isinstance(entries, dict):
+            if "Sheet1" in entries or "sheet" in entries or any(str(k).startswith("Sheet") for k in entries):
+                return {str(k): v for k, v in entries.items()}
+            return {default_sheet: entries}
+        return {default_sheet: entries}
+
+    for sheet_name, config in resolve(column_widths, "Sheet1").items():
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+        if not isinstance(config, dict):
+            return "column_widths 配置必须是 {列名: 宽度} 映射"
+        for col, width in config.items():
+            ws.column_dimensions[str(col).upper()].width = float(width)
+
+    for sheet_name, config in resolve(row_heights, "Sheet1").items():
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+        if not isinstance(config, dict):
+            return "row_heights 配置必须是 {行号: 高度} 映射"
+        for row, height in config.items():
+            ws.row_dimensions[int(row)].height = float(height)
+
+    for sheet_name, config in resolve(merge_cells, "Sheet1").items():
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+        if isinstance(config, str):
+            config = [config]
+        if not isinstance(config, list):
+            return "merge_cells 配置必须是区间字符串数组"
+        for rng in config:
+            ws.merge_cells(str(rng).upper())
+
+    for sheet_name, config in resolve(freeze_panes, "Sheet1").items():
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+        if not isinstance(config, str):
+            return "freeze_panes 配置必须是单元格引用字符串（如 A2）"
+        ws.freeze_panes = str(config).upper()
+    return None
+
+
+def _apply_xlsx_charts(wb, charts: Any) -> str | None:
+    """把图表定义列表应用到工作簿，返回错误信息（无错误返回 None）。
+
+    charts 每项: {sheet?, type, title?, data_range, categories_range?,
+    x_title?, y_title?, anchor?, legend?}。type 支持 bar/line/pie/
+    scatter/area/doughnut。
+    """
+    from openpyxl.chart import AreaChart, BarChart, DoughnutChart, LineChart, PieChart, ScatterChart
+
+    chart_types = {
+        "bar": BarChart,
+        "line": LineChart,
+        "pie": PieChart,
+        "scatter": ScatterChart,
+        "area": AreaChart,
+        "doughnut": DoughnutChart,
+    }
+    if not isinstance(charts, list):
+        return "charts 必须是数组"
+    for item in charts:
+        if not isinstance(item, dict):
+            return "charts 中的每一项必须是对象"
+        ctype = str(item.get("type") or "").strip().lower()
+        cls = chart_types.get(ctype)
+        if cls is None:
+            return f"不支持的图表类型: {ctype}（可用: {', '.join(chart_types)}）"
+        data_range = str(item.get("data_range") or "").strip().upper()
+        if not data_range:
+            return "charts 每一项都必须包含 data_range（如 B2:B6）"
+        sheet_name = str(item.get("sheet") or "Sheet1")
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+
+        chart = cls()
+        if item.get("title"):
+            chart.title = str(item["title"])
+        chart.add_data(_xlsx_reference(ws, data_range), titles_from_data=bool(item.get("titles_from_data")))
+        categories = str(item.get("categories_range") or "").strip().upper()
+        if categories:
+            chart.set_categories(_xlsx_reference(ws, categories))
+        if item.get("x_title"):
+            if getattr(chart, "x_axis", None) is not None:
+                chart.x_axis.title = str(item["x_title"])
+        if item.get("y_title"):
+            if getattr(chart, "y_axis", None) is not None:
+                chart.y_axis.title = str(item["y_title"])
+        if item.get("legend") is False:
+            chart.legend = None
+        ws.add_chart(chart, str(item.get("anchor") or "F2").upper())
+    return None
+
+
 async def _xlsx_tool(
     action: str,
     path: str,
@@ -864,6 +1023,12 @@ async def _xlsx_tool(
     sheet: str = "",
     overwrite: bool = False,
     updates: Any = None,
+    styles: Any = None,
+    column_widths: Any = None,
+    row_heights: Any = None,
+    merge_cells: Any = None,
+    freeze_panes: Any = None,
+    charts: Any = None,
 ) -> str:
     """创建或修改工作区内的 .xlsx 电子表格文件（基于 openpyxl）。
 
@@ -873,7 +1038,19 @@ async def _xlsx_tool(
       （默认 "Sheet1"）。目标已存在且 overwrite=false 时拒绝，防止误覆盖。
     - ``edit``：修改已有 xlsx。``updates`` 为 [{sheet, cell, value}] 列表，
       逐条写入指定单元格（cell 形如 "A1"，sheet 默认 "Sheet1"）。
-    所有文件路径限定在工作区内，返回值是 JSON 字符串。
+
+    两种 action 共用以下可选自定义参数：
+    - ``styles``：[{sheet?, cell, bold?, italic?, size?, color?, fill?,
+      align?, number_format?}] 设置单元格字体/背景/对齐/数字格式。
+    - ``column_widths`` / ``row_heights``：{sheet?: {列名/行号: 尺寸}} 映射，
+      sheet 键可省略（默认 Sheet1）。
+    - ``merge_cells``：{sheet?: [区间, ...]} 合并单元格。
+    - ``freeze_panes``：{sheet?: "A2"} 冻结窗格。
+    - ``charts``：[{sheet?, type, title?, data_range, categories_range?,
+      x_title?, y_title?, anchor?, legend?}] 添加图表，type 支持 bar/line/
+      pie/scatter/area/doughnut。
+    公式支持：value 或 data 中以 "=" 开头的字符串会按公式写入（如
+    "=SUM(B2:B6)"）。所有文件路径限定在工作区内，返回值是 JSON 字符串。
     """
     await _check_tool_enabled("agent_write_tools_enabled", "akm_xlsx")
     try:
@@ -889,12 +1066,12 @@ async def _xlsx_tool(
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
-    if action == "create":
-        if target.exists() and not overwrite:
-            return json.dumps({"error": f"{path} 已存在，如需覆盖请传 overwrite=true"}, ensure_ascii=False)
-        if data is None:
-            return json.dumps({"error": "create 需要 data 参数"}, ensure_ascii=False)
-        try:
+    try:
+        if action == "create":
+            if target.exists() and not overwrite:
+                return json.dumps({"error": f"{path} 已存在，如需覆盖请传 overwrite=true"}, ensure_ascii=False)
+            if data is None:
+                return json.dumps({"error": "create 需要 data 参数"}, ensure_ascii=False)
             wb = Workbook()
             active = wb.active
             if active is not None:
@@ -911,37 +1088,48 @@ async def _xlsx_tool(
                     if not isinstance(row, list):
                         return json.dumps({"error": f"工作表 {name} 的行必须是数组"}, ensure_ascii=False)
                     ws.append(row)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            wb.save(target)
-        except ValueError as exc:
-            return json.dumps({"error": f"创建工作表失败: {exc}"}, ensure_ascii=False)
-        except OSError as exc:
-            return json.dumps({"error": f"保存文件失败: {exc}"}, ensure_ascii=False)
-        return json.dumps({"ok": True, "action": "create", "path": str(target)}, ensure_ascii=False)
+        else:  # action == "edit"
+            if not updates:
+                return json.dumps({"error": "edit 需要 updates 参数（[{sheet, cell, value}, ...]）"}, ensure_ascii=False)
+            if not isinstance(updates, list):
+                return json.dumps({"error": "updates 必须是数组"}, ensure_ascii=False)
+            wb = load_workbook(target)
+            for item in updates:
+                if not isinstance(item, dict):
+                    return json.dumps({"error": "updates 中的每一项必须是 {sheet, cell, value}"}, ensure_ascii=False)
+                cell_ref = str(item.get("cell") or "").strip().upper()
+                if not cell_ref:
+                    return json.dumps({"error": "updates 每一项都必须包含 cell（如 A1）"}, ensure_ascii=False)
+                sheet_name = str(item.get("sheet") or "Sheet1")
+                ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
+                ws[cell_ref] = item.get("value")
 
-    # action == "edit"
-    if not updates:
-        return json.dumps({"error": "edit 需要 updates 参数（[{sheet, cell, value}, ...]）"}, ensure_ascii=False)
-    if not isinstance(updates, list):
-        return json.dumps({"error": "updates 必须是数组"}, ensure_ascii=False)
-    try:
-        wb = load_workbook(target)
-        for item in updates:
-            if not isinstance(item, dict):
-                return json.dumps({"error": "updates 中的每一项必须是 {sheet, cell, value}"}, ensure_ascii=False)
-            cell_ref = str(item.get("cell") or "").strip().upper()
-            if not cell_ref:
-                return json.dumps({"error": "updates 每一项都必须包含 cell（如 A1）"}, ensure_ascii=False)
-            sheet_name = str(item.get("sheet") or "Sheet1")
-            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(title=sheet_name)
-            ws[cell_ref] = item.get("value")
+        # 自定义参数：样式 / 布局 / 图表（create 与 edit 共用）
+        if styles is not None:
+            err = _apply_xlsx_styles(wb, styles)
+            if err:
+                return json.dumps({"error": err}, ensure_ascii=False)
+        if any(v is not None for v in (column_widths, row_heights, merge_cells, freeze_panes)):
+            err = _apply_xlsx_layout(wb, column_widths, row_heights, merge_cells, freeze_panes)
+            if err:
+                return json.dumps({"error": err}, ensure_ascii=False)
+        if charts is not None:
+            err = _apply_xlsx_charts(wb, charts)
+            if err:
+                return json.dumps({"error": err}, ensure_ascii=False)
+
         target.parent.mkdir(parents=True, exist_ok=True)
         wb.save(target)
     except KeyError as exc:
         return json.dumps({"error": f"修改文件失败: {exc}"}, ensure_ascii=False)
+    except (ValueError, TypeError) as exc:
+        return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
     except OSError as exc:
         return json.dumps({"error": f"保存文件失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "action": "edit", "path": str(target), "updated": len(updates)}, ensure_ascii=False)
+    return json.dumps(
+        {"ok": True, "action": action, "path": str(target), **({"updated": len(updates)} if action == "edit" else {})},
+        ensure_ascii=False,
+    )
 
 
 def _git_paths(paths: list[str] | None) -> list[str]:
@@ -1887,7 +2075,7 @@ def build_workspace_tools() -> list[ToolDef]:
             ),
             ToolDef(
                 "akm_xlsx",
-                "创建或修改工作区内的 .xlsx 电子表格文件。action=create 新建（data 为二维数组或 {sheet名: 二维数组}，目标已存在时需 overwrite=true）；action=edit 修改已有文件（updates 为 [{sheet, cell, value}] 单元格写入列表）。仅 agent_write_tools_enabled=true 时可用",
+                "创建或修改工作区内的 .xlsx 电子表格文件。action=create 新建（data 为二维数组或 {sheet名: 二维数组}，目标已存在时需 overwrite=true）；action=edit 修改已有文件（updates 为 [{sheet, cell, value}] 单元格写入列表）。两种 action 共用可选自定义参数：styles 设置单元格字体/背景/对齐/数字格式，column_widths / row_heights 设列宽行高，merge_cells 合并单元格，freeze_panes 冻结窗格，charts 添加柱状/折线/饼图等图表；value 以 = 开头按公式写入。仅 agent_write_tools_enabled=true 时可用",
                 {
                     "type": "object",
                     "properties": {
@@ -1896,7 +2084,33 @@ def build_workspace_tools() -> list[ToolDef]:
                         "data": {"type": ["array", "object"], "description": "create 用：二维数组（[[...],[...]]）或 {sheet名: 二维数组} 映射"},
                         "sheet": {"type": "string", "description": "create 时纯数组数据写入的工作表名，默认 Sheet1"},
                         "overwrite": {"type": "boolean", "description": "create 时目标已存在是否覆盖，默认 false"},
-                        "updates": {"type": "array", "items": {"type": "object"}, "description": "edit 用：[{sheet, cell, value}] 单元格写入列表，cell 如 A1"},
+                        "updates": {"type": "array", "items": {"type": "object"}, "description": "edit 用：[{sheet, cell, value}] 单元格写入列表，cell 如 A1；value 以 = 开头写公式"},
+                        "styles": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "单元格样式：[{sheet?, cell, bold?, italic?, size?, color?, fill?, align?, number_format?}]，color/fill 为十六进制色值（如 FF0000）",
+                        },
+                        "column_widths": {
+                            "type": "object",
+                            "description": "列宽：{sheet?: {列名: 宽度}}，如 {\"Sheet1\": {\"A\": 20}}，sheet 键可省略默认 Sheet1",
+                        },
+                        "row_heights": {
+                            "type": "object",
+                            "description": "行高：{sheet?: {行号: 高度}}",
+                        },
+                        "merge_cells": {
+                            "type": "object",
+                            "description": "合并单元格：{sheet?: [区间...]}，如 {\"Sheet1\": [\"A1:C1\"]}",
+                        },
+                        "freeze_panes": {
+                            "type": "object",
+                            "description": "冻结窗格：{sheet?: \"A2\"}",
+                        },
+                        "charts": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "图表列表：[{sheet?, type, title?, data_range, categories_range?, x_title?, y_title?, anchor?, legend?}]，type 为 bar/line/pie/scatter/area/doughnut，data_range 如 B2:B6",
+                        },
                     },
                     "required": ["action", "path"],
                 },

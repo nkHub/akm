@@ -667,3 +667,140 @@ def test_xlsx_schema(monkeypatch):
     assert "path" in props
     assert "data" in props
     assert "updates" in props
+    # 自定义参数开放
+    for key in ("styles", "column_widths", "row_heights", "merge_cells", "freeze_panes", "charts"):
+        assert key in props
+
+
+@pytest.mark.asyncio
+async def test_xlsx_styles_apply(_workspace, monkeypatch):
+    """styles 应写入单元格字体/背景/对齐/数字格式。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_xlsx"](
+        action="create",
+        path="styled.xlsx",
+        data=[["h"], ["12.345"]],
+        styles=[
+            {"cell": "A1", "bold": True, "color": "FF0000", "fill": "FFFF00", "align": "center"},
+            {"cell": "A2", "number_format": "0.00"},
+        ],
+    ))
+
+    assert out.get("ok") is True
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    ws = wb["Sheet1"]
+    assert ws["A1"].font.bold is True
+    assert ws["A1"].font.color.rgb == "00FF0000"
+    assert ws["A1"].fill.start_color.rgb == "00FFFF00"
+    assert ws["A1"].alignment.horizontal == "center"
+    assert ws["A2"].number_format == "0.00"
+
+
+@pytest.mark.asyncio
+async def test_xlsx_layout_apply(_workspace, monkeypatch):
+    """column_widths / merge_cells / freeze_panes 应生效。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_xlsx"](
+        action="create",
+        path="layout.xlsx",
+        data=[["a", "b", "c"], [1, 2, 3]],
+        column_widths={"A": 25},
+        row_heights={1: 30},
+        merge_cells=["A1:C1"],
+        freeze_panes="A2",
+    ))
+
+    assert out.get("ok") is True
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    ws = wb["Sheet1"]
+    assert ws.column_dimensions["A"].width == 25
+    assert ws.row_dimensions[1].height == 30
+    assert "A1:C1" in {str(r) for r in ws.merged_cells.ranges}
+    assert ws.freeze_panes == "A2"
+
+
+@pytest.mark.asyncio
+async def test_xlsx_charts_added(_workspace, monkeypatch):
+    """charts 应添加柱状图并生成图表 XML。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_xlsx"](
+        action="create",
+        path="chart.xlsx",
+        data=[["mon", "n"], ["jan", 10], ["feb", 20]],
+        charts=[{"type": "bar", "title": "月度", "data_range": "B2:B3", "categories_range": "A2:A3"}],
+    ))
+
+    assert out.get("ok") is True
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    ws = wb["Sheet1"]
+    charts = getattr(ws, "_charts")
+    assert len(charts) == 1
+    assert charts[0].title.tx.rich.p[0].r[0].t == "月度"
+    assert charts[0].anchor._from.col == 5  # 默认 anchor F2
+
+
+@pytest.mark.asyncio
+async def test_xlsx_formula_written_as_formula(_workspace, monkeypatch):
+    """value 以 = 开头应按公式写入而非字面量。"""
+    handlers = _handlers(monkeypatch)
+
+    await handlers["akm_xlsx"](action="create", path="f.xlsx", data=[["x"], [1], [2]])
+    out = json.loads(await handlers["akm_xlsx"](
+        action="edit",
+        path="f.xlsx",
+        updates=[{"cell": "A4", "value": "=SUM(A2:A3)"}],
+    ))
+
+    assert out.get("ok") is True
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    assert wb["Sheet1"]["A4"].value == "=SUM(A2:A3)"
+
+
+@pytest.mark.asyncio
+async def test_xlsx_charts_bad_type_and_range(_workspace, monkeypatch):
+    """非法图表类型或非法区间应返回错误。"""
+    handlers = _handlers(monkeypatch)
+
+    bad_type = json.loads(await handlers["akm_xlsx"](
+        action="create", path="c.xlsx", data=[["a"]],
+        charts=[{"type": "radar", "data_range": "A1:A1"}],
+    ))
+    assert "error" in bad_type
+    assert "图表类型" in bad_type["error"]
+
+    bad_range = json.loads(await handlers["akm_xlsx"](
+        action="create", path="c2.xlsx", data=[["a"]],
+        charts=[{"type": "bar", "data_range": "ZZZZ"}],
+    ))
+    assert "error" in bad_range
+    assert "区间" in bad_range["error"]
+
+
+@pytest.mark.asyncio
+async def test_xlsx_edit_with_style_and_chart(_workspace, monkeypatch):
+    """edit 模式同样支持 styles 与 charts 自定义参数。"""
+    handlers = _handlers(monkeypatch)
+
+    await handlers["akm_xlsx"](action="create", path="e.xlsx", data=[["h"], [5], [6]])
+    out = json.loads(await handlers["akm_xlsx"](
+        action="edit",
+        path="e.xlsx",
+        updates=[{"cell": "B1", "value": "total"}],
+        styles=[{"cell": "A1", "bold": True}],
+        charts=[{"type": "line", "data_range": "A2:A3"}],
+    ))
+
+    assert out.get("ok") is True
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out["path"]))
+    ws = wb["Sheet1"]
+    assert ws["A1"].font.bold is True
+    assert ws["B1"].value == "total"
+    assert len(getattr(ws, "_charts")) == 1
