@@ -218,30 +218,6 @@ akm-menubar
   "proxy_max_retries_per_key": 2,
   "proxy_retry_backoff_base_sec": 0.5,
   "proxy_default_timeout_sec": 120.0,
-  "agent_config": {
-    "agent_max_turns": 100,
-    "agent_max_context_tokens": 272000,
-    "agent_keep_recent_messages": 10,
-    "agent_context_warning_ratio": 0.8,
-    "agent_upload_dir": "~/.akm/cache",
-    "agent_workspace_root": "",
-    "agent_write_tools_enabled": false,
-    "agent_run_shell_enabled": false,
-    "agent_shell_tasks": {},
-    "agent_git_enabled": false,
-    "agent_email_enabled": false,
-    "agent_email_smtp_host": "",
-    "agent_email_smtp_port": 465,
-    "agent_email_smtp_user": "",
-    "agent_email_smtp_password": "",
-    "agent_email_from": "",
-    "agent_email_smtp_ssl": true,
-    "agent_max_tool_calls": 30,
-    "agent_tool_retry_max_retries": 1,
-    "agent_api_token": "",
-    "agent_default_instructions": "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。",
-    "tavily_api_key": ""
-  },
   "rate_limit_cooldown_sec": 60,
   "audit_queue_maxsize": 512,
   "usage_query_check_interval_sec": 60,
@@ -278,31 +254,7 @@ akm-menubar
 
 ### Agent
 
-> 以下 `agent_*` 配置项在 `~/.akm/config.json` 中归组于嵌套的 `agent_config` 对象下（内存加载与前端展示仍以扁平键名呈现，键名不变，可直接按本表检索）。
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `agent_max_turns` | `100` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
-| `agent_max_context_tokens` | `272000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
-| `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
-| `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
-| `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
-| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
-| `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_xlsx`），默认关闭需显式开启 |
-| `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行 |
-| `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
-| `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
-| `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
-| `agent_email_smtp_port` | `465` | SMTP 端口：465 走 SSL，587 走 STARTTLS（由 `agent_email_smtp_ssl` 决定是否用 SSL） |
-| `agent_email_smtp_user` | `""` | SMTP 登录账号；`agent_email_from` 留空时默认作为发件人 |
-| `agent_email_smtp_password` | `""` | SMTP 密码 / 授权码（敏感字段，`akm_get_config` 会脱敏，不返回明文） |
-| `agent_email_from` | `""` | 默认发件人地址；留空则使用 SMTP 账号 |
-| `agent_email_smtp_ssl` | `true` | 是否使用 SSL 加密连接（`true`=SMTP_SSL/465；`false`=STARTTLS/587） |
-| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
-| `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
-| `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 `Authorization: Bearer <token>` 或 `X-Agent-Token` |
-| `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
-| `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
+`/v1/agent` 多轮智能体（Agent Loop）的 `agent_*` 配置项（在 `~/.akm/config.json` 中归组于嵌套的 `agent_config` 对象下，内存加载与前端展示仍以扁平键名呈现）及完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)。
 
 ### 出站代理
 
@@ -430,13 +382,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
-完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
-
-服务启动后会注册内置 AKM 工具（`akm_get_status` / `akm_list_keys` / `akm_get_keys_summary` / `akm_list_logs` / `akm_get_usage_stats` / `akm_get_time` / `akm_get_config` / `akm_list_plugins` / `akm_list_sessions` / `akm_load_session` / `tavily_search` / `akm_search_kb` / `akm_generate_image` / `akm_edit_image` / `akm_send_email`）以及工作区文件工具（`akm_read_file` / `akm_list_dir` / `akm_glob` / `akm_grep` / `akm_file_info`，配置 `agent_workspace_root` 后可用；写工具 `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_xlsx`、shell 工具 `akm_run_shell` 与 git 工具 `akm_run_git` 需分别开启 `agent_write_tools_enabled` / `agent_run_shell_enabled` / `agent_git_enabled` 才会注册），它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。内置工具采用白名单注入与执行校验：客户端请求显式传入 `tools` 时，只会向模型暴露并执行声明中的工具；同名的服务端注册工具始终使用服务端 schema，客户端不能篡改其参数契约；显式传空数组 `[]` 时不注入也不执行任何工具；未传 `tools` 时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_send_email` 外的全部已注册内置工具（写文件 / shell / git 工具的可用性由 `agent_write_tools_enabled` / `agent_run_shell_enabled` / `agent_git_enabled` 开关控制注册，注册后默认即下发，不再额外排除）。`akm_edit_file` 支持结构化编辑（行号模式：`start_line` / `end_line` 行区间替换为 `new_content`，可配 `old_string` 锚点校验；内容模式：`old_string` → `new_string`）。`akm_xlsx` 基于 `openpyxl`：`action=create` 用二维数组或 `{工作表名: 二维数组}` 生成 `.xlsx`（目标已存在需 `overwrite=true`），`action=edit` 用 `updates=[{"sheet","cell","value"}]` 写入已有文件单元格；可选 `styles`（单元格样式：粗体/斜体/字号/颜色/填充/对齐/数字格式）、`column_widths` / `row_heights`（列宽/行高）、`merge_cells`（合并区间）、`freeze_panes`（冻结窗格）、`charts`（柱状/折线/饼图/散点/面积/环形图，含标题、数据区间、坐标轴标签与锚点），值以 `=` 开头时按公式写入。工具调用失败时，Agent Loop 会按 `agent_tool_retry_max_retries`（默认 1）注入 `system` 修正提示强制模型重试，流式模式下先下发 `tool_retry` 事件。
-
-文件工具受工作区沙箱约束：所有路径（含 `..` 穿越、绝对路径、软链接）在解析后都会被校验必须在 `agent_workspace_root` 目录内；请求级 `workspace_root` 只能选用该根目录的子目录。`/v1/agent` 的 multipart 附件单次最多 8 个、总大小最多 20MB。图片编辑仅能读取工作区或 `agent_upload_dir` 内、且不超过 20MB 的文件或 Base64 数据。`akm_run_git` 只接受 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch` 等固定 operation，不接受自由命令。`akm_delete_file` 默认只删除**单个文件**，`recursive=true` 时可删除目录并递归清除其中所有内容（批量删除），始终禁止删除工作区根目录。`akm_run_shell` 接受命令字符串，由系统 shell 解释执行（支持管道、通配符、重定向），仍是显式开启的主机级进程执行能力，`cwd` 只决定初始目录，不能作为文件系统沙箱。`agent_api_token` 可选：留空不鉴权；配置后请求需携带 `Authorization: Bearer <token>` 或 `X-Agent-Token` 头。
-
-Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、`sessions.py` 负责会话持久化（`/v1/agent` 请求结束后自动落盘到 `~/.akm/agent_sessions/*.json`，供 `akm_load_session` / `akm_list_sessions` 工具及客户端回顾使用）。
+完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、配置、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
 
 ## 故障切换策略
 

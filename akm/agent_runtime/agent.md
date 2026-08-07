@@ -4,7 +4,7 @@
 
 每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
-Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具，`service.py` 负责服务启动时的初始化。
+Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、`sessions.py` 负责会话持久化（`/v1/agent` 请求结束后自动落盘到 `~/.akm/agent_sessions/*.json`，供 `akm_load_session` / `akm_list_sessions` 工具及客户端回顾使用）。
 
 服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具与工作区文件工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。工作区文件工具（`akm_read_file` 等）需在 config.json 配置 `agent_workspace_root` 才会注册，写工具与 shell 工具默认不注册（见「工作区文件工具」章节）。客户端显式声明同名已注册工具时，服务端会保留客户端的授权意图，但始终使用服务端工具定义，避免参数契约不一致：
 
@@ -39,6 +39,34 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
+
+## 配置
+
+以下 `agent_*` 配置项在 `~/.akm/config.json` 中归组于嵌套的 `agent_config` 对象下（内存加载与前端展示仍以扁平键名呈现，键名不变，可直接按本表检索）。`tavily_api_key` 位于配置顶层。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `agent_max_turns` | `100` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
+| `agent_max_context_tokens` | `272000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
+| `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
+| `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
+| `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
+| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
+| `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_xlsx`），默认关闭需显式开启 |
+| `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行 |
+| `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
+| `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
+| `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
+| `agent_email_smtp_port` | `465` | SMTP 端口：465 走 SSL，587 走 STARTTLS（由 `agent_email_smtp_ssl` 决定是否用 SSL） |
+| `agent_email_smtp_user` | `""` | SMTP 登录账号；`agent_email_from` 留空时默认作为发件人 |
+| `agent_email_smtp_password` | `""` | SMTP 密码 / 授权码（敏感字段，`akm_get_config` 会脱敏，不返回明文） |
+| `agent_email_from` | `""` | 默认发件人地址；留空则使用 SMTP 账号 |
+| `agent_email_smtp_ssl` | `true` | 是否使用 SSL 加密连接（`true`=SMTP_SSL/465；`false`=STARTTLS/587） |
+| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
+| `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
+| `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 `Authorization: Bearer <token>` 或 `X-Agent-Token` |
+| `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
+| `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
 ## 请求格式
 
@@ -83,14 +111,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 
 ## 上下文压缩
 
-长对话可能导致上下文超出模型窗口。Agent Loop 提供两层保障，均由 config.json 控制：
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `agent_max_context_tokens` | `272000` | 上下文 token 估算上限，超过后自动压缩早期历史；`0` 关闭自动压缩 |
-| `agent_keep_recent_messages` | `10` | 压缩时保留的最近消息条数，工具调用与其配对的 `tool_calls` 消息整组完整保留 |
-| `agent_context_warning_ratio` | `0.8` | 上下文占用超过上限该比例时，SSE 流式下发 `context_warning` 事件；`0` 关闭警告 |
-| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
+长对话可能导致上下文超出模型窗口。Agent Loop 提供两层保障，均由 config.json 中的 `agent_config` 配置项控制（`agent_max_context_tokens` / `agent_keep_recent_messages` / `agent_context_warning_ratio` / `agent_max_tool_calls`，见「配置」章节）：
 
 1. **自动压缩兜底**：每轮开始前估算上下文 token（CJK 字符按 1 token/字符，其余按 4 字符≈1 token，图片块固定估算），超过 `agent_max_context_tokens` 时把早期历史交给 LLM 总结为摘要并替换（保留最近 `agent_keep_recent_messages` 条消息与工具调用配对组），保证上下文不爆掉；摘要生成失败时降级为直接丢弃早期历史。
 2. **AI 主动压缩**：模型可调用 `akm_context_status` 查询当前 token 占用、`akm_compact_context` 主动压缩早期历史。`akm_compact_context` 优先采用摘要替换，不丢失关键信息。`agent_context_warning_ratio` 触发的 `context_warning` SSE 事件即用于提示客户端 / 模型接近上限。
@@ -114,16 +135,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ## 工作区文件工具与安全边界
 
-工作区文件工具受 `agent_workspace_root` 沙箱与配置开关约束。shell 是单独开启的主机级执行能力，`cwd` 不能提供文件系统隔离。相关配置项如下（以下 `agent_*` 配置项在 `config.json` 中归组于嵌套 `agent_config` 对象下，读取与前端仍以扁平键名呈现）：
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `agent_workspace_root` | `""` | 工作区沙箱根目录，所有文件工具仅能在此目录内读写；留空时文件工具不注册 |
-| `agent_write_tools_enabled` | `false` | 是否注册写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`） |
-| `agent_run_shell_enabled` | `false` | 是否注册 shell 工具（`akm_run_shell`，命令由模型直接传入，用系统 shell 执行） |
-| `agent_git_enabled` | `false` | 是否注册 git 工具（`akm_run_git`，仅允许固定 operation） |
-| `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
-| `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 Bearer / X-Agent-Token |
+工作区文件工具受 `agent_workspace_root` 沙箱与配置开关约束（`agent_workspace_root` / `agent_write_tools_enabled` / `agent_run_shell_enabled` / `agent_git_enabled` / `agent_max_tool_calls` / `agent_api_token` 见「配置」章节）。shell 是单独开启的主机级执行能力，`cwd` 不能提供文件系统隔离。
 
 ### 读工具（默认可用）
 
