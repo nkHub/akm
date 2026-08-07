@@ -352,19 +352,36 @@ async def test_delete_rejects_workspace_root(_workspace, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_rejects_directory(_workspace, monkeypatch):
-    """删除目录应被拒绝（防批量删除）。"""
+async def test_delete_rejects_directory_without_recursive(_workspace, monkeypatch):
+    """删除目录但未设置 recursive=true 应被拒绝（目录完好）。"""
     handlers = _handlers(monkeypatch)
 
     d = _workspace / "adir"
     d.mkdir()
     (d / "f1.txt").write_text("x", encoding="utf-8")
 
-    out = json.loads(await handlers["akm_delete_file"](path="adir", recursive=True))
+    out = json.loads(await handlers["akm_delete_file"](path="adir"))
 
     assert "error" in out
-    assert "禁止删除目录" in out["error"]
+    assert "recursive=true" in out["error"]
     assert d.is_dir()  # 目录及其内容完好
+
+
+@pytest.mark.asyncio
+async def test_delete_directory_recursive(_workspace, monkeypatch):
+    """recursive=true 时递归删除目录及其所有内容。"""
+    handlers = _handlers(monkeypatch)
+
+    d = _workspace / "adir"
+    d.mkdir()
+    (d / "sub").mkdir()
+    (d / "f1.txt").write_text("x", encoding="utf-8")
+    (d / "sub" / "f2.txt").write_text("y", encoding="utf-8")
+
+    out = json.loads(await handlers["akm_delete_file"](path="adir", recursive=True))
+
+    assert out["ok"] is True
+    assert not d.exists()  # 目录连同子目录与文件全部删除
 
 
 @pytest.mark.asyncio

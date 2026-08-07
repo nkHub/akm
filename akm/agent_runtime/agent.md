@@ -32,7 +32,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`；单次内容超 10MB 拒绝） |
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
-| `akm_delete_file` | 删除工作区内的**单个文件**。禁止删除目录（防批量删除，`recursive` 已废弃）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
+| `akm_delete_file` | 删除工作区内的文件或目录。默认只删除**单个文件**；`recursive=true` 可删除目录并递归清除其中所有内容（批量删除）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
 | `akm_xlsx` | 创建工作区内 `.xlsx` 文件（`action=create`，`data` 传二维数组或 `{工作表名: 二维数组}`，已存在需 `overwrite=true`）或修改已有文件的单元格（`action=edit`，`updates` 传 `[{"sheet","cell","value"}]`）；需开启 `agent_write_tools_enabled` |
 | `akm_run_shell` | 在工作区内用系统 shell 执行命令字符串并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
