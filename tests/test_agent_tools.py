@@ -460,7 +460,7 @@ def test_builtin_sessions_list_and_load(monkeypatch):
                 }
             return None
 
-    monkeypatch.setattr("akm.agent_cli.sessions.SessionStore", FakeStore)
+    monkeypatch.setattr("akm.agent_runtime.sessions.SessionStore", FakeStore)
     app = SimpleNamespace(state=SimpleNamespace())
     handlers = _handlers(app)
 

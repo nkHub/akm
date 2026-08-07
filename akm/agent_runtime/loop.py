@@ -1468,10 +1468,10 @@ class AgentLoop:
                     final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
                 # 自动保存会话到磁盘：/v1/agent 请求结束后自动落盘，供
-                # akm_load_session 或 CLI --resume 恢复对话。保存失败不
+                # akm_load_session 工具或客户端回顾恢复对话。保存失败不
                 # 阻塞主流程（目录权限等问题不会导致请求异常）。
                 try:
-                    from akm.agent_cli.sessions import SessionStore
+                    from akm.agent_runtime.sessions import SessionStore
 
                     _store = SessionStore()
                     _store.save({
