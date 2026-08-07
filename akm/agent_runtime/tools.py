@@ -813,14 +813,17 @@ async def _run_workspace_argv(argv: list[str], root: Path, timeout: int, label: 
 def _seatbelt_profile(root: Path) -> str:
     """构造 macOS seatbelt 黑名单式 sandbox profile（SBPL）。
 
-    策略：allow default + 只放行工作区写 + 全局禁写 + 只放行工作区读 +
-    精确拒绝常见敏感路径（家目录密钥/配置目录与 /etc 密码文件）。
-    注意 seatbelt 的 deny 优先级高于 allow，因此 allow 必须写在 deny 之前。
+    策略：全局禁写 + 拒绝敏感路径 + 拒绝家目录元数据列举，然后**后置**
+    allow 放行工作区与临时目录。seatbelt 规则按声明顺序求值、后面的规则
+    覆盖前面的（last-match-wins），因此 allow 必须写在所有 deny 之后，
+    否则 deny 敏感目录（如 ~/Desktop）会把位于其下的工作区一并锁死。
     这是「限制敏感读写」级别的隔离，不是真正的 chroot，命令仍可读系统
-    目录、访问网络；但能挡住最常见的读密钥配置与往系统写文件的越界。
+    目录、访问网络；但能挡住读密钥/配置文件、列家目录结构与往系统写
+    文件的越界。
     """
     ws = str(root)
     home = str(Path.home())
+    tmp = os.environ.get("TMPDIR") or "/tmp"
     sensitive = [
         f'"{home}/.ssh"',
         f'"{home}/.aws"',
@@ -828,19 +831,32 @@ def _seatbelt_profile(root: Path) -> str:
         f'"{home}/Downloads"',
         f'"{home}/Documents"',
         f'"{home}/Desktop"',
+        f'"{home}/Library"',
         # macOS 的 /etc 是 /private/etc 的符号链接，cat /etc/passwd 实际打开
         # /private/etc/passwd；deny 必须同时覆盖两个形态才有效
         '"/etc"',
         '"/private/etc"',
     ]
     deny_read = " ".join(f'(subpath {p})' for p in sensitive)
+    allow_write = (
+        f'(subpath "{ws}") (subpath "{tmp}")'
+        ' (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/zero")'
+    )
+    allow_read = (
+        f'(subpath "{ws}") (subpath "{tmp}")'
+        ' (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/zero")'
+    )
     return (
         "(version 1)\n"
         "(allow default)\n"
-        f'(allow file-write* (subpath "{ws}"))\n'
         "(deny file-write*)\n"
-        f'(allow file-read* (subpath "{ws}"))\n'
         f"(deny file-read* {deny_read})\n"
+        # 家目录的整体元数据列举（如 ls ~）也会泄露目录名，单独拒绝；
+        # 后面的 allow 会为工作区/临时目录重新放行对应 metadata 访问。
+        f'(deny file-read-metadata (subpath "{home}"))\n'
+        f"(allow file-write* {allow_write})\n"
+        f"(allow file-read* {allow_read})\n"
+        f'(allow file-read-metadata (subpath "{ws}") (subpath "{tmp}"))\n'
     )
 
 

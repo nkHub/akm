@@ -442,13 +442,22 @@ def test_seatbelt_profile_denies_sensitive_paths(_workspace):
     """生成的 SBPL profile 应放行工作区读写并拒绝敏感路径。"""
     profile = _seatbelt_profile(_workspace)
 
-    assert f'(allow file-write* (subpath "{_workspace}"))' in profile
-    assert f'(allow file-read* (subpath "{_workspace}"))' in profile
+    assert f'(allow file-write* (subpath "{_workspace}")' in profile
+    assert f'(allow file-read* (subpath "{_workspace}")' in profile
     assert "(deny file-write*)" in profile
     assert "/.ssh" in profile
     assert "/.akm" in profile
+    assert "/Library" in profile
     assert '"/etc"' in profile
     assert '"/private/etc"' in profile
+    assert f'(deny file-read-metadata (subpath "{Path.home()}"))' in profile
+    assert f'(allow file-read-metadata (subpath "{_workspace}")' in profile
+    assert profile.index("(deny file-write*)") < profile.index(
+        f'(allow file-write* (subpath "{_workspace}")'
+    )
+    assert profile.index('(deny file-read*') < profile.index(
+        f'(allow file-read* (subpath "{_workspace}")'
+    )
 
 
 @pytest.mark.skipif(

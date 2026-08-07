@@ -54,7 +54,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
 | `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_xlsx`），默认关闭需显式开启 |
 | `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行。**注意：这不是文件系统沙箱**，命令可访问工作区之外（如 `/etc`、家目录），仅以工作区为 cwd，启用前应确认调用方可信 |
-| `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区，全局禁写（仅放行工作区），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `/etc` / `/private/etc` 等敏感路径；系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
+| `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区与临时目录，全局禁写（仅放行工作区/TMP/`/dev`），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `~/Library` / `/etc` / `/private/etc` 等敏感路径，同时拒绝 `~` 的目录列举（`file-read-metadata`）；系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
 | `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
@@ -146,7 +146,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 写工具、shell 与 git 工具默认**不注册**，即使配置了 `agent_workspace_root`，模型也看不到这些工具。需要显式开启对应配置开关并在请求 `tools` 中显式声明才会启用。这是默认只读的安全设计：文件写操作、shell 执行与 git 操作会改动本机状态，应经人工确认后再开放。
 
-`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。开启 `agent_run_shell_sandbox` 后，shell 子进程会用 macOS seatbelt 沙箱隔离（只读工作区 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` 等敏感路径），将越界风险从「无限制」降到「限制敏感读写」级别。
+`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` 等敏感路径与家目录列举），将越界风险从「无限制」降到「限制敏感读写」级别。
 
 `akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。
 
@@ -175,7 +175,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 - 相对路径中的 `..` 穿越工作区被拒绝；
 - 软链接指向工作区外时（resolve 后越界）被拒绝。
 
-越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；开启 `agent_run_shell_sandbox` 可用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
 
 ## 自愈重试
 
