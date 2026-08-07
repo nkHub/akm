@@ -9,6 +9,8 @@ import pytest
 from akm.agent_runtime.tools import (
     build_workspace_tools,
     _safe_resolve_workspace_path,
+    _seatbelt_available,
+    _seatbelt_profile,
     _workspace_root,
     reset_request_workspace_root,
     set_request_workspace_root,
@@ -431,6 +433,59 @@ async def test_run_shell_timeout(_workspace, monkeypatch):
     out = json.loads(await handlers["akm_run_shell"](command="sleep 5", timeout=1))
 
     assert "超时" in out["error"]
+
+
+# ── shell 沙箱（seatbelt）──
+
+
+def test_seatbelt_profile_denies_sensitive_paths(_workspace):
+    """生成的 SBPL profile 应放行工作区读写并拒绝敏感路径。"""
+    profile = _seatbelt_profile(_workspace)
+
+    assert f'(allow file-write* (subpath "{_workspace}"))' in profile
+    assert f'(allow file-read* (subpath "{_workspace}"))' in profile
+    assert "(deny file-write*)" in profile
+    assert "/.ssh" in profile
+    assert "/.akm" in profile
+    assert '"/etc"' in profile
+    assert '"/private/etc"' in profile
+
+
+@pytest.mark.skipif(
+    not _seatbelt_available(), reason="当前环境不提供 sandbox_init_with_parameters"
+)
+@pytest.mark.asyncio
+async def test_run_shell_sandbox_rejects_sensitive_read(_workspace, monkeypatch):
+    """开启 agent_run_shell_sandbox 后，shell 读取 /etc/passwd 应被沙箱拒绝。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools._seatbelt_api_ok", True, raising=False
+    )
+    handlers = _handlers(monkeypatch, agent_run_shell_sandbox=True)
+
+    out = json.loads(await handlers["akm_run_shell"](command="cat /etc/passwd"))
+
+    assert out["exit_code"] != 0
+    assert "Operation not permitted" in out["output"]
+
+
+@pytest.mark.skipif(
+    not _seatbelt_available(), reason="当前环境不提供 sandbox_init_with_parameters"
+)
+@pytest.mark.asyncio
+async def test_run_shell_sandbox_allows_workspace_write(_workspace, monkeypatch):
+    """开启沙箱后，工作区内的写入仍应正常。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools._seatbelt_api_ok", True, raising=False
+    )
+    handlers = _handlers(monkeypatch, agent_run_shell_sandbox=True)
+
+    out = json.loads(
+        await handlers["akm_run_shell"](command="echo sandbox-ok >> sb.txt && cat sb.txt")
+    )
+
+    assert out["exit_code"] == 0
+    assert "sandbox-ok" in out["output"]
+    assert (_workspace / "sb.txt").exists()
 
 
 # ── git 工具 ──

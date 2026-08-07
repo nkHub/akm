@@ -50,6 +50,7 @@ DEFAULTS = {
     "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
     "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
     "agent_run_shell_enabled": False,   # 是否启用 Agent shell 执行工具（akm_run_shell，独立于写工具，默认关闭）
+    "agent_run_shell_sandbox": False,   # 启用后 akm_run_shell 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与敏感路径放行受限；探测不到 API 时自动退回普通执行）
     "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅执行固定 operation）
     "agent_email_enabled": False,       # 是否启用 Agent 发邮件工具（akm_send_email）
     "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
@@ -88,6 +89,7 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_workspace_root",
     "agent_write_tools_enabled",
     "agent_run_shell_enabled",
+    "agent_run_shell_sandbox",
     "agent_git_enabled",
     "agent_email_enabled",
     "agent_email_smtp_host",

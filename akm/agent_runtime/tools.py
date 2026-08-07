@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import ctypes
 import datetime
 import json
 import logging
@@ -809,19 +810,108 @@ async def _run_workspace_argv(argv: list[str], root: Path, timeout: int, label: 
         return json.dumps({"error": f"执行{label}失败: {exc}"}, ensure_ascii=False)
 
 
+def _seatbelt_profile(root: Path) -> str:
+    """构造 macOS seatbelt 黑名单式 sandbox profile（SBPL）。
+
+    策略：allow default + 只放行工作区写 + 全局禁写 + 只放行工作区读 +
+    精确拒绝常见敏感路径（家目录密钥/配置目录与 /etc 密码文件）。
+    注意 seatbelt 的 deny 优先级高于 allow，因此 allow 必须写在 deny 之前。
+    这是「限制敏感读写」级别的隔离，不是真正的 chroot，命令仍可读系统
+    目录、访问网络；但能挡住最常见的读密钥配置与往系统写文件的越界。
+    """
+    ws = str(root)
+    home = str(Path.home())
+    sensitive = [
+        f'"{home}/.ssh"',
+        f'"{home}/.aws"',
+        f'"{home}/.akm"',
+        f'"{home}/Downloads"',
+        f'"{home}/Documents"',
+        f'"{home}/Desktop"',
+        # macOS 的 /etc 是 /private/etc 的符号链接，cat /etc/passwd 实际打开
+        # /private/etc/passwd；deny 必须同时覆盖两个形态才有效
+        '"/etc"',
+        '"/private/etc"',
+    ]
+    deny_read = " ".join(f'(subpath {p})' for p in sensitive)
+    return (
+        "(version 1)\n"
+        "(allow default)\n"
+        f'(allow file-write* (subpath "{ws}"))\n'
+        "(deny file-write*)\n"
+        f'(allow file-read* (subpath "{ws}"))\n'
+        f"(deny file-read* {deny_read})\n"
+    )
+
+
+_seatbelt_lib = None
+_seatbelt_api_ok = None
+
+
+def _seatbelt_available() -> bool:
+    """探测当前运行环境是否提供 libSystem 的 sandbox_init_with_parameters。
+
+    结果缓存在模块级变量，避免每次执行 shell 都重复探测。py2app 打包后
+    libSystem.dylib 始终存在；若 API 缺失（如非 macOS 或未来系统移除），
+    返回 False，调用方应退回无隔离执行并记录警告。
+    """
+    global _seatbelt_lib, _seatbelt_api_ok
+    if _seatbelt_api_ok is not None:
+        return _seatbelt_api_ok
+    try:
+        _seatbelt_lib = ctypes.CDLL("libSystem.dylib")
+        getattr(_seatbelt_lib, "sandbox_init_with_parameters")
+        _seatbelt_api_ok = True
+    except (AttributeError, OSError):
+        _seatbelt_lib = None
+        _seatbelt_api_ok = False
+    return _seatbelt_api_ok
+
+
+def _seatbelt_preexec(profile: str):
+    """构造 preexec_fn：在 fork 出的子进程、exec 之前应用 seatbelt 沙箱。
+
+    只对即将 exec 的 shell 子进程生效，AKM 主进程不受影响。用
+    sandbox_init_with_parameters 应用黑名单式 profile；失败时直接 os._exit
+    避免子进程带沙箱进入 exec，父进程的 wait_for 会捕获非零返回码。
+    """
+    def _apply():
+        err = ctypes.c_char_p()
+        lib: ctypes.CDLL = _seatbelt_lib  # type: ignore[assignment]
+        rc = lib.sandbox_init_with_parameters(
+            profile.encode("utf-8"), 0, None, ctypes.byref(err)
+        )
+        if rc != 0:
+            err_text = (err.value or b"").decode("utf-8", "replace")
+            msg = f"SANDBOX_INIT_FAILED rc={rc} {err_text}\n"
+            os.write(2, msg.encode("utf-8", "replace"))
+            os._exit(125)
+    return _apply
+
+
 async def _run_workspace_shell(command: str, root: Path, timeout: int, label: str) -> str:
     """在工作区用系统 shell 执行命令字符串，并统一限制时间与输出大小。
 
     shell 语义（管道 / 通配符 / 重定向等）由系统 shell 解释，模型可编写
     任意命令；cwd 固定为工作区根目录。执行受超时与输出字节上限约束。
+    当配置 agent_run_shell_sandbox=true 且本机提供 sandbox_init_with_parameters
+    时，用 seatbelt 沙箱隔离 shell 子进程（见 _seatbelt_profile）。
     """
     timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
+    sandbox = bool(load_config().get("agent_run_shell_sandbox", False))
+    preexec_fn = None
+    if sandbox:
+        if _seatbelt_available():
+            preexec_fn = _seatbelt_preexec(_seatbelt_profile(root))
+        else:
+            logger.warning("agent_run_shell_sandbox=true 但本机缺少 sandbox_init_with_parameters，退回无隔离执行")
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(root),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            preexec_fn=preexec_fn,
         )
         try:
             output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
