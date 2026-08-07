@@ -1,0 +1,27 @@
+{
+  "name": "agent_chat",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "app",
+  "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 200,
+  "hooks": {},
+  "settings": [
+    {
+      "key": "route_prefix",
+      "label": "访问路径",
+      "type": "string",
+      "default": "/chat",
+      "description": "聊天界面挂载路径，例如 /chat 或 /console。不能使用 /、/api、/v1、/admin、/health、/debug。修改路径后需要重启服务。"
+    },
+    {
+      "key": "spa_fallback",
+      "label": "启用 SPA 路由回退",
+      "type": "boolean",
+      "default": true,
+      "description": "将不存在的无扩展名路径返回 index.html。聊天界面为单页应用，建议保持开启。"
+    }
+  ]
+}

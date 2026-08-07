@@ -21,6 +21,7 @@
 | `response_schema_guard` | post | 关 | 校验调用方声明的 JSON Schema |
 | `webhook_notifier` | post | 关 | 失败/安全/慢请求异步 Webhook + 原生 App 通知 |
 | `frontend_static_server` | app | 关 | 托管前端构建产物与 SPA History 回退 |
+| `agent_chat` | app | 关 | 内置 `/v1/agent` Web 聊天界面（AetherAI），访问 `/chat` 即聊 |
 | `provider_health_probe` | app | 关 | Key 连通性探测与状态快照 API |
 | `mcp_tool_gateway` | app | 关 | 本地 HTTP 工具注册、可选注入 tools、受控调用 API |
 | `markdown_kb` | app | 关 | 本地 Markdown 知识库（上传/状态） |
@@ -99,6 +100,7 @@
 | `cache_proxy` | 重复相同 prompt、省延迟和费用 | 流式、工具调用、强随机/强时效内容 |
 | `budget_gate` | 本地日预算/滚动预算硬闸门 | 需要跨进程对账或与供应商账单严格一致 |
 | `mcp_tool_gateway` | 给 Agent 暴露受控本地 HTTP 工具 | 需要真正 MCP stdio 传输或多进程沙箱 |
+| `agent_chat` | 直接给 `/v1/agent` 一个开箱即用的 Web 聊天界面 | 需要深度定制对话流程（改前端源码） |
 
 > 费用估算已并入核心：设置页「费用统计」开关 + 模型单价表；首页 `/api/stats` 在开启后展示总费用与每日费用。
 
@@ -137,6 +139,7 @@ Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `
 | `data_filter_guard` | [plugins/data_filter_guard/README.md](data_filter_guard/README.md) | 14 |
 | `fallback_router` | [plugins/fallback_router/README.md](fallback_router/README.md) | 5 |
 | `frontend_static_server` | [plugins/frontend_static_server/README.md](frontend_static_server/README.md) | 4 |
+| `agent_chat` | [plugins/agent_chat/README.md](agent_chat/README.md) | 2 |
 | `key_source_guard` | [plugins/key_source_guard/README.md](key_source_guard/README.md) | 3 |
 | `markdown_kb` | [plugins/markdown_kb/README.md](markdown_kb/README.md) | 19 |
 | `mcp_tool_gateway` | [plugins/mcp_tool_gateway/README.md](mcp_tool_gateway/README.md) | 8 |
