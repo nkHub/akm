@@ -289,8 +289,7 @@ akm-menubar
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
 | `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
 | `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`），默认关闭需显式开启 |
-| `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启 |
-| `agent_shell_tasks` | `{}` | `akm_run_shell` 可执行的管理员预定义任务，格式为任务名到 argv 字符串数组的映射；模型只能传任务名 |
+| `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行 |
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
 | `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |

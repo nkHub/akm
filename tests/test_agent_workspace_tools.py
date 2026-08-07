@@ -13,7 +13,6 @@ from akm.agent_runtime.tools import (
     reset_request_workspace_root,
     set_request_workspace_root,
 )
-from akm.config import normalize_agent_shell_tasks
 
 # 供测试复用的工作区配置
 WORKSPACE = "/tmp/akm-test-workspace"
@@ -25,10 +24,6 @@ def _workspace_cfg(**overrides):
         "agent_workspace_root": WORKSPACE,
         "agent_write_tools_enabled": True,
         "agent_run_shell_enabled": True,
-        "agent_shell_tasks": {
-            "diagnose": ["sh", "-c", "pwd && echo ok"],
-            "slow": ["sleep", "5"],
-        },
     }
     cfg.update(overrides)
     return cfg
@@ -40,16 +35,6 @@ def _handlers(monkeypatch, **cfg):
         "akm.agent_runtime.tools.load_config", lambda: _workspace_cfg(**cfg)
     )
     return {t.name: t.handler for t in build_workspace_tools()}
-
-
-def test_normalize_agent_shell_tasks_only_keeps_safe_argv_mapping():
-    """任务配置只接受安全任务名与非空字符串 argv，避免坏配置扩大执行入口。"""
-    assert normalize_agent_shell_tasks({
-        "lint": ["yarn", "lint"],
-        "bad task": ["yarn", "test"],
-        "empty": [],
-        "mixed": ["yarn", 1],
-    }) == {"lint": ["yarn", "lint"]}
 
 
 @pytest.fixture(autouse=True)
@@ -411,10 +396,10 @@ async def test_run_shell_requires_enabled_flag(_workspace, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_shell_executes_with_workspace_cwd(_workspace, monkeypatch):
-    """shell 工具只能执行配置的任务，且以工作区为 cwd。"""
+    """shell 工具直接执行命令字符串，且以工作区为 cwd。"""
     handlers = _handlers(monkeypatch)
 
-    out = json.loads(await handlers["akm_run_shell"](task="diagnose"))
+    out = json.loads(await handlers["akm_run_shell"](command="pwd && echo ok"))
 
     assert out["exit_code"] == 0
     assert str(_workspace) in out["output"]
@@ -423,10 +408,10 @@ async def test_run_shell_executes_with_workspace_cwd(_workspace, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_shell_timeout(_workspace, monkeypatch):
-    """预定义任务超时应被终止并返回错误。"""
+    """shell 命令超时应被终止并返回错误。"""
     handlers = _handlers(monkeypatch)
 
-    out = json.loads(await handlers["akm_run_shell"](task="slow", timeout=1))
+    out = json.loads(await handlers["akm_run_shell"](command="sleep 5", timeout=1))
 
     assert "超时" in out["error"]
 
@@ -528,8 +513,8 @@ def test_workspace_tools_registration(monkeypatch):
     assert "akm_run_git" in names
 
 
-def test_shell_and_git_schema_exclude_free_command(monkeypatch):
-    """危险工具的公开 schema 不得重新暴露自由命令字符串入口。"""
+def test_shell_and_git_schema(monkeypatch):
+    """shell 工具暴露 command 字符串；git 工具保持固定 operation，不暴露自由命令。"""
     monkeypatch.setattr(
         "akm.agent_runtime.tools.load_config",
         lambda: _workspace_cfg(agent_git_enabled=True),
@@ -538,7 +523,7 @@ def test_shell_and_git_schema_exclude_free_command(monkeypatch):
 
     shell_properties = tools["akm_run_shell"].parameters["properties"]
     git_properties = tools["akm_run_git"].parameters["properties"]
-    assert "task" in shell_properties
-    assert "command" not in shell_properties
+    assert "command" in shell_properties
+    assert shell_properties["command"]["type"] == "string"
     assert "operation" in git_properties
     assert "command" not in git_properties

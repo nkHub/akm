@@ -49,8 +49,7 @@ DEFAULTS = {
     "agent_upload_dir": "~/.akm/cache", # Agent 上传文件（图片）的保存目录，路径支持 ~ 展开
     "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
     "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
-    "agent_run_shell_enabled": False,   # 是否启用 Agent 预定义任务执行工具（独立于写工具，默认关闭）
-    "agent_shell_tasks": {},            # Agent 允许执行的预定义任务：任务名 -> argv 字符串数组
+    "agent_run_shell_enabled": False,   # 是否启用 Agent shell 执行工具（akm_run_shell，独立于写工具，默认关闭）
     "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅执行固定 operation）
     "agent_email_enabled": False,       # 是否启用 Agent 发邮件工具（akm_send_email）
     "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
@@ -89,7 +88,6 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_workspace_root",
     "agent_write_tools_enabled",
     "agent_run_shell_enabled",
-    "agent_shell_tasks",
     "agent_git_enabled",
     "agent_email_enabled",
     "agent_email_smtp_host",
@@ -122,28 +120,6 @@ def normalize_http_proxy_url(raw: object) -> str:
     if "://" not in text and text[0].isalnum():
         return f"http://{text}"
     return text
-
-
-def normalize_agent_shell_tasks(raw: object) -> dict[str, list[str]]:
-    """规范化 Agent 预定义 shell 任务，拒绝无法安全传给 exec 的配置形态。
-
-    任务命令由管理员写入配置，模型仅能选择任务名，不能在请求中拼接命令。
-    每项必须是非空字符串 argv 数组；任务名仅接受字母、数字、下划线与连字符，
-    防止配置歧义与文档展示时注入不可见字符。
-    """
-    if not isinstance(raw, dict):
-        return {}
-    normalized: dict[str, list[str]] = {}
-    for name, argv in raw.items():
-        task_name = str(name or "").strip()
-        if not task_name or not task_name.replace("_", "").replace("-", "").isalnum():
-            continue
-        if not isinstance(argv, list):
-            continue
-        args = [str(item) for item in argv if isinstance(item, str) and item]
-        if args and len(args) == len(argv):
-            normalized[task_name] = args
-    return normalized
 
 
 def _safe_int(raw: object, default: int) -> int:
@@ -246,7 +222,6 @@ def load_config() -> dict:
     merged["agent_email_enabled"] = merged.get("agent_email_enabled") is True
     merged["agent_email_smtp_ssl"] = merged.get("agent_email_smtp_ssl") is not False
     merged["agent_email_smtp_port"] = max(1, _safe_int(merged.get("agent_email_smtp_port"), 465))
-    merged["agent_shell_tasks"] = normalize_agent_shell_tasks(merged.get("agent_shell_tasks"))
     merged["agent_max_tool_calls"] = max(1, _safe_int(merged.get("agent_max_tool_calls"), 30))
     merged["agent_tool_retry_max_retries"] = max(0, _safe_int(merged.get("agent_tool_retry_max_retries"), 1))
     # Key 管理
@@ -299,7 +274,6 @@ def save_config(data: dict) -> None:
     current["agent_email_enabled"] = current.get("agent_email_enabled") is True
     current["agent_email_smtp_ssl"] = current.get("agent_email_smtp_ssl") is not False
     current["agent_email_smtp_port"] = max(1, _safe_int(current.get("agent_email_smtp_port"), 465))
-    current["agent_shell_tasks"] = normalize_agent_shell_tasks(current.get("agent_shell_tasks"))
     current["agent_max_tool_calls"] = max(1, _safe_int(current.get("agent_max_tool_calls"), 30))
     current["agent_tool_retry_max_retries"] = max(0, _safe_int(current.get("agent_tool_retry_max_retries"), 1))
     # Key 管理
