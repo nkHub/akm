@@ -805,18 +805,52 @@ async def _run_workspace_argv(argv: list[str], root: Path, timeout: int, label: 
         return json.dumps({"error": f"执行{label}失败: {exc}"}, ensure_ascii=False)
 
 
-async def _run_shell_tool(task: str, timeout: int = 0) -> str:
-    """执行配置中预定义的工作区任务，模型不能传入或拼接任意 shell 命令。"""
+async def _run_workspace_shell(command: str, root: Path, timeout: int, label: str) -> str:
+    """在工作区用系统 shell 执行命令字符串，并统一限制时间与输出大小。
+
+    shell 语义（管道 / 通配符 / 重定向等）由系统 shell 解释，模型可编写
+    任意命令；cwd 固定为工作区根目录。执行受超时与输出字节上限约束。
+    """
+    timeout = max(1, min(int(timeout or _WORKSPACE_SHELL_TIMEOUT_SEC), 300))
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            output, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return json.dumps({"error": f"{label}执行超时（{timeout} 秒），已终止"}, ensure_ascii=False)
+        text = output.decode("utf-8", errors="replace")
+        encoded = text.encode("utf-8")
+        truncated = len(encoded) > _WORKSPACE_READ_MAX_BYTES
+        if truncated:
+            text = encoded[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore")
+        return json.dumps({"exit_code": proc.returncode, "truncated": truncated, "output": text}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": f"执行{label}失败: {exc}"}, ensure_ascii=False)
+
+
+async def _run_shell_tool(command: str, timeout: int = 0) -> str:
+    """在工作区用 shell 执行命令字符串并返回 stdout+stderr。
+
+    命令由模型/客户端直接传入，系统 shell 解释执行（支持管道、通配符、
+    重定向等），cwd 固定为工作区根目录；超时与输出大小统一受限。
+    这是显式开启的主机级进程执行能力，仅 agent_run_shell_enabled=true
+    时注册，管理员应通过 tool_policy_guard 等插件策略约束调用。
+    """
     await _check_tool_enabled("agent_run_shell_enabled", "akm_run_shell")
-    task = str(task or "").strip()
-    tasks = load_config().get("agent_shell_tasks") or {}
-    argv = tasks.get(task) if isinstance(tasks, dict) else None
-    if not isinstance(argv, list) or not argv:
-        return json.dumps({"error": f"未找到允许执行的任务: {task}"}, ensure_ascii=False)
+    command = str(command or "").strip()
+    if not command:
+        return json.dumps({"error": "command 不能为空"}, ensure_ascii=False)
     root = _workspace_root()
     if root is None:
         return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
-    return await _run_workspace_argv([str(item) for item in argv], root, timeout, f"任务 {task}")
+    return await _run_workspace_shell(command, root, timeout, "shell 命令")
 
 
 def _git_paths(paths: list[str] | None) -> list[str]:
@@ -1121,7 +1155,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
 
     def list_sessions() -> list[dict[str, Any]]:
         """列出历史 Agent 会话的元信息（不含消息正文），按更新时间倒序。"""
-        from akm.agent_cli.sessions import SessionStore
+        from akm.agent_runtime.sessions import SessionStore
         return SessionStore().list()
 
     def load_session(name: str, limit: int = 20) -> dict[str, Any]:
@@ -1129,7 +1163,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         import os as _os
         if not name or name != _os.path.basename(name) or name in (".", ".."):
             return {"error": f"非法的会话名: {name!r}"}
-        from akm.agent_cli.sessions import SessionStore
+        from akm.agent_runtime.sessions import SessionStore
         session = SessionStore().load(name)
         if session is None:
             return {"error": f"会话不存在: {name}"}
@@ -1632,7 +1666,7 @@ def build_workspace_tools() -> list[ToolDef]:
     - 写工具（write/edit/make_dir/delete）默认禁用，仅当 config.json
       设置 ``agent_write_tools_enabled=true`` 时才注册，模型不可见即不可调。
     - shell 工具默认禁用，仅当 ``agent_run_shell_enabled=true`` 时才注册；
-      模型只能选择 ``agent_shell_tasks`` 中由管理员配置的任务名，不能传自由命令。
+      命令由模型直接传入，系统 shell 解释执行（cwd 固定为工作区根目录）。
     """
     tools: list[ToolDef] = [
         ToolDef(
@@ -1761,17 +1795,16 @@ def build_workspace_tools() -> list[ToolDef]:
             ),
         ])
     if load_config().get("agent_run_shell_enabled"):
-        task_names = sorted((load_config().get("agent_shell_tasks") or {}).keys())
         tools.append(ToolDef(
             "akm_run_shell",
-            "执行管理员预定义的工作区任务并返回 stdout+stderr。仅 agent_run_shell_enabled=true 时可用；模型只能从已配置任务中选择，不能传入任意 shell 命令。可用任务：" + ("、".join(task_names) or "无"),
+            "在工作区用 shell 执行命令字符串并返回 stdout+stderr（支持管道、通配符、重定向；cwd 固定为工作区根目录）。仅 agent_run_shell_enabled=true 时可用；属主机级进程执行能力，需配合插件策略使用",
             {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "enum": task_names, "description": "管理员配置的任务名"},
+                    "command": {"type": "string", "description": "要执行的 shell 命令字符串"},
                     "timeout": {"type": "integer", "description": "超时秒数，1-300，默认 60"},
                 },
-                "required": ["task"],
+                "required": ["command"],
             },
             _run_shell_tool,
         ))
