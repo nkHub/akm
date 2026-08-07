@@ -8,7 +8,6 @@ import logging
 import mimetypes
 import os
 import re
-import shutil
 import smtplib
 import subprocess
 import tempfile
@@ -754,9 +753,11 @@ async def _make_dir_tool(path: str) -> str:
 
 
 async def _delete_tool(path: str, recursive: bool = False) -> str:
-    """删除工作区内的文件或（recursive=true 时）目录。仅 agent_write_tools_enabled=true 时可用。
+    """删除工作区内的单个文件。仅 agent_write_tools_enabled=true 时可用。
 
-    出于安全考虑，始终拒绝删除工作区根目录本身。
+    出于安全考虑，始终拒绝删除目录（目录删除会递归清除其中所有文件，
+    属于批量删除，一律禁止；``recursive`` 参数已废弃、仅保留兼容签名）；
+    也始终拒绝删除工作区根目录本身。
     """
     await _check_tool_enabled("agent_write_tools_enabled", "akm_delete_file")
     try:
@@ -766,13 +767,13 @@ async def _delete_tool(path: str, recursive: bool = False) -> str:
     root = _workspace_root()
     if target == root:
         return json.dumps({"error": "禁止删除工作区根目录"}, ensure_ascii=False)
+    if target.is_dir():
+        return json.dumps(
+            {"error": "禁止删除目录（会批量删除其中的所有文件），请改为删除单个文件"},
+            ensure_ascii=False,
+        )
     try:
-        if target.is_dir():
-            if not recursive:
-                return json.dumps({"error": "删除目录需要 recursive=true"}, ensure_ascii=False)
-            shutil.rmtree(target)
-        else:
-            target.unlink()
+        target.unlink()
     except OSError as exc:
         return json.dumps({"error": f"删除失败: {exc}"}, ensure_ascii=False)
     return json.dumps({"ok": True, "path": str(target)}, ensure_ascii=False)
@@ -1748,12 +1749,11 @@ def build_workspace_tools() -> list[ToolDef]:
             ),
             ToolDef(
                 "akm_delete_file",
-                "删除工作区内的文件，或（recursive=true 时）目录。仅 agent_write_tools_enabled=true 时可用",
+                "删除工作区内的单个文件。禁止删除目录（防批量删除）。仅 agent_write_tools_enabled=true 时可用",
                 {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "工作区内的文件或目录路径"},
-                        "recursive": {"type": "boolean", "description": "删除目录时需设为 true"},
+                        "path": {"type": "string", "description": "工作区内要删除的单个文件路径"},
                     },
                     "required": ["path"],
                 },

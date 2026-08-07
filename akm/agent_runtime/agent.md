@@ -32,7 +32,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`；单次内容超 10MB 拒绝） |
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
-| `akm_delete_file` | 删除工作区内文件或目录（`recursive` 可选，禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
+| `akm_delete_file` | 删除工作区内的**单个文件**。禁止删除目录（防批量删除，`recursive` 已废弃）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
 | `akm_run_shell` | 执行管理员预定义的工作区任务并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |

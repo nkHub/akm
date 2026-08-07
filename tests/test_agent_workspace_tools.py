@@ -367,6 +367,22 @@ async def test_delete_rejects_workspace_root(_workspace, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_delete_rejects_directory(_workspace, monkeypatch):
+    """删除目录应被拒绝（防批量删除）。"""
+    handlers = _handlers(monkeypatch)
+
+    d = _workspace / "adir"
+    d.mkdir()
+    (d / "f1.txt").write_text("x", encoding="utf-8")
+
+    out = json.loads(await handlers["akm_delete_file"](path="adir", recursive=True))
+
+    assert "error" in out
+    assert "禁止删除目录" in out["error"]
+    assert d.is_dir()  # 目录及其内容完好
+
+
+@pytest.mark.asyncio
 async def test_make_dir_and_delete(_workspace, monkeypatch):
     """创建目录并删除文件。"""
     handlers = _handlers(monkeypatch)

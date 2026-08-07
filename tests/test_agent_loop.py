@@ -457,6 +457,43 @@ async def test_run_default_injects_tools_except_excluded(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_default_injects_write_and_shell_tools(monkeypatch):
+    """未传 tools 时，已注册的写文件/shell/git 工具默认下发（不属排除列表）。
+
+    写工具可用性由 config 开关控制注册（agent_write_tools_enabled 等），
+    注册后默认即下发，避免「开关已开但模型仍看不到写工具」。
+    """
+    registry = ToolRegistry()
+    for name in (
+        "akm_write_file",
+        "akm_edit_file",
+        "akm_make_dir",
+        "akm_delete_file",
+        "akm_run_shell",
+        "akm_read_file",
+    ):
+        registry.register(
+            ToolDef(name, f"{name} 描述", {"type": "object", "properties": {}}, lambda: {})
+        )
+    requests = []
+
+    async def forward(body, *_args, **_kwargs):
+        requests.append(body)
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"ok"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    result = await AgentLoop(http_client=None, tool_registry=registry).run(
+        [{"role": "user", "content": "你好"}]
+    )
+
+    assert result.ok is True
+    names = [t["function"]["name"] for t in requests[0]["tools"]]
+    for w in ("akm_write_file", "akm_edit_file", "akm_make_dir", "akm_delete_file", "akm_run_shell"):
+        assert w in names
+    assert "akm_read_file" in names
+
+
+@pytest.mark.asyncio
 async def test_run_explicit_tools_can_override_excluded(monkeypatch):
     """客户端显式声明被默认排除的工具时，仍按白名单正常注入（可主动启用联网搜索/图片）。"""
     registry = ToolRegistry()
