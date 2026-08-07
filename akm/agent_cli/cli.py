@@ -23,7 +23,6 @@ import sys
 import click
 import httpx
 
-from akm import __version__
 import akm.config as config_module
 
 
@@ -129,7 +128,7 @@ def _run_agent(
     color=None,
     show_reasoning=False,
 ):
-    """启动交互式 Agent 会话（rich 逐行 REPL）。"""
+    """启动交互式 Agent 会话（多行智能输入 + rich 流式渲染）。"""
     _check_service()
 
     # --color 缺省时按是否终端自动决定；非 TTY（管道/重定向）自动关闭颜色
@@ -161,8 +160,9 @@ def _run_agent(
 
     client = AgentClient(_base_url(), token=_token())
 
-    # rich 逐行 REPL（支持中文输入，走系统级 input()）
-    click.echo(f"AKM Agent（v{__version__}）— 交互式会话。输入 /help 查看命令，Ctrl+C 退出。")
+    # TTY 下输入走 prompt_toolkit 多行智能输入（Enter 发送 / Alt+Enter 换行 /
+    # 输入 / 弹命令菜单，命令名模糊匹配），非 TTY（管道 / 重定向）自动回退系统
+    # input() 逐行输入；启动横幅（小猫 + 会话信息）由 REPL 主循环打印
     try:
         asyncio.run(
             run_agent_repl(

@@ -22,6 +22,7 @@ import time
 from io import StringIO
 from typing import Any
 
+from rich import box
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -89,6 +90,61 @@ def render_markdown(content: str, color: bool = True) -> str:
     text = buf.getvalue()
     # rich 会按终端宽度自动换行并在行尾填充空格，这里裁剪干净
     lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join(lines).strip("\n")
+
+
+# 启动横幅里的字符画小猫（每行等宽，方便与右侧信息逐行对齐排版）
+_CAT_ART = [
+    r"  /\_/\  ",
+    r" ( o.o ) ",
+    r"  > ^ <  ",
+]
+
+
+def startup_banner(
+    *,
+    version: str,
+    name: str | None = None,
+    model: str | None = None,
+    workspace: str | None = None,
+    color: bool = True,
+) -> str:
+    """启动横幅：左边字符画小猫，右边会话初始信息，整体用圆角框包起来。
+
+    - 标题（版本号）、会话名、模型、工作区、操作提示逐行排列；
+    - 模型 / 工作区值用青色高亮，标题加粗，提示行弱化；
+    - 返回含 ANSI 的字符串（color=False 时无 ANSI，便于测试断言子串），
+      交给任意 print 通道打印，与模块其他渲染函数一致。
+    """
+    cat_w = max(len(line) for line in _CAT_ART)
+    info_lines: list[tuple[str, str | None]] = [
+        (f"AKM Agent（v{version}）— 交互式会话", "bold"),
+        (f"会话: 「{name}」" if name else "会话: （新会话）", None),
+        (f"模型: {model or '(未设置)'}", "cyan"),
+        (f"工作区: {workspace or os.getcwd()}", "cyan"),
+        ("输入 /help 查看命令 · Ctrl+C 退出", "dim"),
+    ]
+    # 左右逐行拼接：左侧小猫（不足行补空），右侧信息（不足行留空）
+    rows = max(len(_CAT_ART), len(info_lines))
+    body = Text()
+    for i in range(rows):
+        if i:
+            body.append("\n")
+        cat = _CAT_ART[i] if i < len(_CAT_ART) else " " * cat_w
+        body.append(cat.ljust(cat_w + 2))
+        if i < len(info_lines):
+            text, style = info_lines[i]
+            body.append(text, style=style)
+    buf = StringIO()
+    console = Console(
+        file=buf,
+        force_terminal=True,
+        color_system=("truecolor" if color else None),
+        width=_terminal_columns(),
+    )
+    console.print(Panel(body, box=box.ROUNDED, padding=(0, 1)))
+    # 去掉 rich 行尾填充的空格，保持框线紧贴内容
+    lines = [line.rstrip() for line in buf.getvalue().splitlines()]
     return "\n".join(lines).strip("\n")
 
 

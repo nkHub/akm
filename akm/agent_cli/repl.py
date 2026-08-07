@@ -17,8 +17,9 @@ import os
 import sys
 from typing import Any, AsyncGenerator, Callable
 
-# 显式导入 readline，为系统 input() 启用行编辑（左右键移动光标 / 删除 / 历史）。
-# 非交互式进程（console script、python -m）默认不会自动导入 readline，
+# 显式导入 readline，为回退模式的系统 input() 启用行编辑（左右键移动光标 / 删除 / 历史）。
+# TTY 下默认输入走 prompt_toolkit（自带行编辑与历史），readline 仅在
+# 非交互式进程（console script、python -m）或非 TTY 回退到系统 input() 时生效；
 # 若缺失则 input() 退化为无编辑读取，左右键无法移动光标。
 try:  # 非 Unix 平台（如 Windows）没有 readline 模块，静默跳过
     import readline  # noqa: F401
@@ -27,6 +28,8 @@ except ImportError:  # pragma: no cover
 
 import httpx
 
+from akm import __version__
+from akm.agent_cli.input import create_agent_input
 from akm.agent_cli.render import (
     LiveStreamPanel,
     dim,
@@ -37,6 +40,7 @@ from akm.agent_cli.render import (
     ok,
     reason_delta_text,
     render_markdown,
+    startup_banner,
     warn,
 )
 from akm.agent_cli.sessions import SessionStore
@@ -172,7 +176,7 @@ class Repl:
         client: 服务端客户端。
         session: 初始会话 dict（含 name / messages / model / workspace_root 等）。
         print_fn: 输出函数（默认 print，便于测试注入）。
-        input_fn: 输入函数（默认 input，便于测试注入）。
+        input_fn: 输入函数（默认按终端自动选择：TTY 下多行智能输入，否则系统 input）。
         color: 是否启用 ANSI 颜色。
     """
 
@@ -183,7 +187,7 @@ class Repl:
         session: dict[str, Any],
         *,
         print_fn: Callable[[str], None] = print,
-        input_fn: Callable[[str], str] = input,
+        input_fn: Callable[[str], str] | None = None,
         color: bool = True,
         show_reasoning: bool = False,
         enable_live: bool = False,
@@ -192,7 +196,11 @@ class Repl:
         self.client = client
         self.session = session
         self.print_fn = print_fn
-        self.input_fn = input_fn
+        # 输入函数：显式注入（测试）时直接用；否则按终端情况自动选择
+        # （TTY 且 prompt_toolkit 可用 → 多行智能输入；管道/重定向 → 系统 input）
+        self.input_fn: Callable[[str], str] = (
+            input_fn if input_fn is not None else create_agent_input(store)
+        )
         self.color = color
         # 是否展示模型的思考过程（reasoning_delta）。
         # 默认折叠：只显示「思考中…」占位，避免 token 流刷屏；
@@ -419,8 +427,16 @@ class Repl:
 
     async def run_async(self, stream: bool = True) -> None:
         """主循环：读取输入 → 命令或发送。"""
-        self._header(f"AKM Agent 会话「{self.session.get('name')}」")
-        self._dim(f"工作区: {self._workspace() or os.getcwd()}")
+        # 启动横幅：左边字符画小猫，右边会话 / 模型 / 工作区等初始信息
+        self._p(
+            startup_banner(
+                version=__version__,
+                name=self.session.get("name"),
+                model=self.session.get("model"),
+                workspace=self._workspace() or os.getcwd(),
+                color=self.color,
+            )
+        )
         if self._messages():
             self._dim(f"已载入 {len(self._messages())} 条历史消息，输入 /help 查看命令")
 
@@ -432,12 +448,14 @@ class Repl:
                 return
             if not line:
                 continue
-            if line.startswith("/"):
+            # 多行输入（粘贴 / Alt+Enter 换行）作为一条完整消息发送，
+            # 不再逐行判断：仅单行内容才可能是斜杠命令或退出词
+            if "\n" not in line and line.startswith("/"):
                 action = self._handle_command(line)
                 if action is False:
                     return
                 continue
-            if line.lower() in ("exit", "quit"):
+            if "\n" not in line and line.lower() in ("exit", "quit"):
                 self._dim("再见！")
                 return
 
@@ -566,7 +584,7 @@ async def run_agent_repl(
     *,
     stream: bool = True,
     print_fn: Callable[[str], None] = print,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] | None = None,
     color: bool = True,
     show_reasoning: bool = False,
     enable_live: bool = False,
