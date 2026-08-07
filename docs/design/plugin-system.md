@@ -595,6 +595,8 @@ ctx → [plugin A (priority=10)] → [plugin B (priority=50)] → [plugin C (pri
 - 旁路选候选时会排除 proxy 转发主循环中已尝试失败的 key（`proxy.tried_aliases`），
   避免反复选中已失败的 key 导致主循环空转、请求长时间挂起。
 - in-flight 计数在 `on_key_selected` 增加，在 `on_response` 按 `response.key_alias` 回收，形成闭环。
+- 旁路触发但无替代候选时，直接使用当前 key 且**不再递增**该 key 的 in-flight 计数（也不登记回收配对），
+  避免慢请求把计数永久推高，导致该 key 被持续误判为拥塞、又无替代可切（表现为“没有可用的 API key”）。
 
 该策略的设计目标是“只在明显拥塞时轻量旁路”，避免对现有流量分配造成激进扰动。
 
@@ -886,7 +888,7 @@ class Plugin(PluginBase):
 - `smart_bypass_min_improve`：最小改善阈值（默认 `0.15`）
 - `smart_bypass_error_cooldown_sec`：错误冷却惩罚窗口（默认 `15` 秒）
 
-开启后，仅在当前 key 明显拥塞时尝试旁路到其他可用 key；若无替代 key 则自动回退当前 key，不会额外硬失败。
+开启后，仅在当前 key 明显拥塞时尝试旁路到其他可用 key；若无替代 key 则自动回退当前 key，不会额外硬失败。回退时**不再递增**该 key 的 in-flight 计数，避免慢请求把计数永久推高、造成拥塞误判累积（表现为“没有可用的 API key”）。
 
 ### 12.4 usage_quota_guard / key_source_guard / fallback_router / data_filter_guard
 

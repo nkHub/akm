@@ -302,6 +302,8 @@ class Plugin(PluginBase):
                 or (slow_threshold_sec > 0 and oldest_age >= slow_threshold_sec)
             )
         )
+        # 标记旁路是否成功切换到替代 key；未切换时按“无替代候选”处理，跳过 inflight 登记。
+        switched = False
 
         if should_bypass:
             # 读取 proxy 主循环透传的“已尝试失败 key”集合，旁路候选需一并排除，
@@ -336,6 +338,14 @@ class Plugin(PluginBase):
                 )
                 key = alt
                 current_alias = str(key.get("alias", ""))
+                switched = True
+
+        # 旁路触发但未找到替代候选（仍用当前 key）时，不再递增 inflight 计数：
+        # 慢请求会不断把计数推高，导致该 key 被永久误判为拥塞，而旁路又无替代可切，
+        # 最终形成累积性误判（表现为“没有可用的 API key”）。
+        # 因此直接返回，既不 +1 也无需在 on_response 中回收（bag 未登记即天然不配对）。
+        if should_bypass and not switched:
+            return key
 
         # 将最终选择的 key 记为 in-flight；由 on_response 生命周期回收。
         # 同时在 ctx.bag 中登记本请求使用的 key，防止重试时 on_response 被多次
