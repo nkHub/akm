@@ -50,7 +50,7 @@ DEFAULTS = {
     "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
     "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
     "agent_run_shell_enabled": False,   # 是否启用 Agent shell 执行工具（akm_run_shell，独立于写工具，默认关闭）
-    "agent_run_shell_sandbox": False,   # 启用后 akm_run_shell 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与敏感路径放行受限；探测不到 API 时自动退回普通执行）
+    "agent_run_shell_sandbox": True,    # 启用后 akm_run_shell 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与敏感路径放行受限；探测不到 API 时自动退回普通执行）
     "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅执行固定 operation）
     "agent_email_enabled": False,       # 是否启用 Agent 发邮件工具（akm_send_email）
     "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
@@ -220,6 +220,7 @@ def load_config() -> dict:
     # Agent 文件工具开关：布尔归一化，防止配置为字符串/数字时误判
     merged["agent_write_tools_enabled"] = merged.get("agent_write_tools_enabled") is True
     merged["agent_run_shell_enabled"] = merged.get("agent_run_shell_enabled") is True
+    merged["agent_run_shell_sandbox"] = merged.get("agent_run_shell_sandbox") is True
     merged["agent_git_enabled"] = merged.get("agent_git_enabled") is True
     merged["agent_email_enabled"] = merged.get("agent_email_enabled") is True
     merged["agent_email_smtp_ssl"] = merged.get("agent_email_smtp_ssl") is not False
@@ -272,6 +273,7 @@ def save_config(data: dict) -> None:
     current["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(current.get("agent_context_warning_ratio"), 0.8)))
     current["agent_write_tools_enabled"] = current.get("agent_write_tools_enabled") is True
     current["agent_run_shell_enabled"] = current.get("agent_run_shell_enabled") is True
+    current["agent_run_shell_sandbox"] = current.get("agent_run_shell_sandbox") is True
     current["agent_git_enabled"] = current.get("agent_git_enabled") is True
     current["agent_email_enabled"] = current.get("agent_email_enabled") is True
     current["agent_email_smtp_ssl"] = current.get("agent_email_smtp_ssl") is not False
