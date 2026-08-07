@@ -818,8 +818,8 @@ def _seatbelt_profile(root: Path) -> str:
     覆盖前面的（last-match-wins），因此 allow 必须写在所有 deny 之后，
     否则 deny 敏感目录（如 ~/Desktop）会把位于其下的工作区一并锁死。
     这是「限制敏感读写」级别的隔离，不是真正的 chroot，命令仍可读系统
-    目录、访问网络；但能挡住读密钥/配置文件、列家目录结构与往系统写
-    文件的越界。
+    目录、访问网络；但能挡住读密钥/配置文件/命令历史/家目录 dotfile、
+    列家目录与 /var、/tmp 结构、往系统写文件的越界。
     """
     ws = str(root)
     home = str(Path.home())
@@ -832,10 +832,28 @@ def _seatbelt_profile(root: Path) -> str:
         f'"{home}/Documents"',
         f'"{home}/Desktop"',
         f'"{home}/Library"',
-        # macOS 的 /etc 是 /private/etc 的符号链接，cat /etc/passwd 实际打开
-        # /private/etc/passwd；deny 必须同时覆盖两个形态才有效
+        # home 根目录点文件：shell 配置与命令历史、git/npm 凭据等
+        f'"{home}/.zshrc"',
+        f'"{home}/.zprofile"',
+        f'"{home}/.bash_profile"',
+        f'"{home}/.bashrc"',
+        f'"{home}/.zsh_history"',
+        f'"{home}/.bash_history"',
+        f'"{home}/.gitconfig"',
+        f'"{home}/.git-credentials"',
+        f'"{home}/.npmrc"',
+        f'"{home}/.netrc"',
+        # 系统目录：/etc 是 /private/etc 的符号链接，cat /etc/passwd 实际打开
+        # /private/etc/passwd；/var 与 /tmp 同理。deny 必须同时覆盖符号链接
+        # 的两个形态才有效
         '"/etc"',
         '"/private/etc"',
+        '"/var/log"',
+        '"/private/var/log"',
+        '"/var/db"',
+        '"/private/var/db"',
+        '"/tmp"',
+        '"/private/tmp"',
     ]
     deny_read = " ".join(f'(subpath {p})' for p in sensitive)
     allow_write = (
