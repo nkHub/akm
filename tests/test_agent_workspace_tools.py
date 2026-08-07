@@ -505,6 +505,28 @@ async def test_run_shell_sandbox_allows_workspace_write(_workspace, monkeypatch)
     assert (_workspace / "sb.txt").exists()
 
 
+@pytest.mark.asyncio
+async def test_run_shell_strips_pythonhome_pollution(_workspace, monkeypatch):
+    """PYTHONHOME/PYTHONPATH 被 AKM 进程污染时，shell 子进程应剥离后执行。
+
+    py2app 打包的 app 内嵌 Python 运行时会设置 PYTHONHOME 指向 app 的
+    Resources/lib/python3.12，若不剥离，shell 里外部 python3 会因找不到
+    encodings 启动即崩。此处模拟污染后验证子进程里的 python3 仍可用。
+    """
+    monkeypatch.setenv("PYTHONHOME", "/nonexistent/pythonhome")
+    monkeypatch.setenv("PYTHONPATH", "/fake/pythonpath")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(
+        await handlers["akm_run_shell"](
+            command='python3 -c "import sys; print(\'py-ok\')"'
+        )
+    )
+
+    assert out["exit_code"] == 0
+    assert "py-ok" in out["output"]
+
+
 # ── git 工具 ──
 
 
