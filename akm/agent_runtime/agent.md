@@ -33,7 +33,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内的文件或目录。默认只删除**单个文件**；`recursive=true` 可删除目录并递归清除其中所有内容（批量删除）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
-| `akm_xlsx` | 创建工作区内 `.xlsx` 文件（`action=create`，`data` 传二维数组或 `{工作表名: 二维数组}`，已存在需 `overwrite=true`）或修改已有文件的单元格（`action=edit`，`updates` 传 `[{"sheet","cell","value"}]`）；需开启 `agent_write_tools_enabled` |
+| `akm_xlsx` | 创建工作区内 `.xlsx` 文件（`action=create`，`data` 传二维数组或 `{工作表名: 二维数组}`，已存在需 `overwrite=true`）或修改已有文件的单元格（`action=edit`，`updates` 传 `[{"sheet","cell","value"}]`）；可选 `styles` / `column_widths` / `row_heights` / `merge_cells` / `freeze_panes` / `charts` 自定义样式、布局与图表；需开启 `agent_write_tools_enabled` |
 | `akm_run_shell` | 在工作区内用系统 shell 执行命令字符串并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
@@ -141,6 +141,16 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 - `create`：`data` 传纯二维数组（写入默认 `Sheet1`）或 `{"工作表名": [[...]]}` 映射（每个工作表写入对应数组）；目标文件已存在时需 `overwrite=true`，否则返回错误。
 - `edit`：`updates` 传 `[{"sheet": "Sheet1", "cell": "B2", "value": 42}]` 列表，按坐标写入已有文件的单元格；`sheet` 缺省为 `Sheet1`，目标工作表不存在时自动创建。
+
+两种模式共用以下可选自定义参数（均为单工作表时可直接传，多工作表时以 `{"工作表名": 配置}` 映射）：
+
+- `styles`：单元格样式数组 `[{"sheet"?, "cell", "bold"?, "italic"?, "size"?, "color"?, "fill"?, "align"?, "number_format"?}]`。`color`/`fill` 为十六进制色值（如 `FF0000`），`align` 可传 `left`/`center`/`right`/`fill`/`justify`/`center_continuous`/`distributed` 之一。
+- `column_widths` / `row_heights`：列宽/行高映射，如 `{"A": 25}` / `{1: 30}`，键分别为列名（`A`）与行号（`1`）。
+- `merge_cells`：合并单元格区间列表，如 `["A1:C1"]`。
+- `freeze_panes`：冻结窗格坐标，如 `"A2"`（冻结首行）。
+- `charts`：图表数组 `[{"sheet"?, "type", "title"?, "data_range", "categories_range"?, "x_title"?, "y_title"?, "anchor"?, "legend"?}]`。`type` 支持 `bar`/`line`/`pie`/`scatter`/`area`/`doughnut`，`data_range`/`categories_range` 为单元格区间（如 `"B2:B3"`），`anchor` 缺省 `F2`。
+
+`data`/`updates` 中值以 `=` 开头的字符串会按公式写入（如 `"=SUM(A2:A3)"`）。
 
 两种模式都以工作区为沙箱，路径越界返回「超出工作区范围」错误。
 
