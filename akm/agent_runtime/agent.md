@@ -54,7 +54,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
 | `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_xlsx`），默认关闭需显式开启 |
 | `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行。**注意：这不是文件系统沙箱**，命令可访问工作区之外（如 `/etc`、家目录），仅以工作区为 cwd，启用前应确认调用方可信 |
-| `agent_run_shell_sandbox` | `false` | 启用后 `akm_run_shell` 用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区，全局禁写（仅放行工作区），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `/etc` / `/private/etc` 等敏感路径；系统不支持该 API 时自动退回普通执行并记录警告。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
+| `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区，全局禁写（仅放行工作区），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `/etc` / `/private/etc` 等敏感路径；系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
 | `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
