@@ -916,6 +916,203 @@ def test_repl_run_stream_with_enable_live_passes_events(tmp_path, monkeypatch):
     assert loaded["messages"] == final_msgs
 
 
+# ── 输入层（多行输入 / tab 补全 / 非 TTY 回退） ──
+
+
+class _Doc:
+    """模拟 prompt_toolkit Document：只暴露 text_before_cursor。"""
+
+    def __init__(self, text: str):
+        self.text_before_cursor = text
+
+
+def test_completer_slash_commands():
+    """tab 补全斜杠命令名（/mo → /model）。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    c = AgentCompleter()
+    comps = list(c.get_completions(_Doc("/mo"), None))
+    assert ("/model", -3) in comps
+    # 不匹配的不出现
+    assert all(t.startswith("/mo") for t, _ in comps)
+
+
+def test_completer_fuzzy_matches_commands():
+    """斜杠命令支持 fzf 风格模糊匹配（/mde → /model，/x 无命中）。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    c = AgentCompleter()
+    comps = list(c.get_completions(_Doc("/mde"), None))
+    assert ("/model", -4) in comps
+    # 模糊不命中的命令不出现
+    assert all(_is_subsequence("/mde", t) for t, _ in comps)
+    # 完全无关的输入无候选
+    assert list(c.get_completions(_Doc("/zzz"), None)) == []
+
+
+def test_completer_typing_slash_lists_all():
+    """仅输入 / 时列出全部命令（selector 弹窗）。"""
+    from akm.agent_cli.input import AgentCompleter, SLASH_COMMANDS
+
+    c = AgentCompleter()
+    comps = list(c.get_completions(_Doc("/"), None))
+    assert {t for t, _ in comps} == set(SLASH_COMMANDS)
+
+
+def test_completer_space_then_slash_lists_all():
+    """空格接 /（输入 / 前有空格）同样弹出全部命令。"""
+    from akm.agent_cli.input import AgentCompleter, SLASH_COMMANDS
+
+    c = AgentCompleter()
+    comps = list(c.get_completions(_Doc(" /"), None))
+    assert {t for t, _ in comps} == set(SLASH_COMMANDS)
+
+
+def test_completer_mid_text_slash():
+    """文本中间输入空格+/ 也能唤起命令菜单（/mde → /model）。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    c = AgentCompleter()
+    comps = list(c.get_completions(_Doc("帮我翻译这句话 /mde"), None))
+    assert ("/model", -4) in comps
+
+
+def test_completer_mid_text_not_slash_no_candidates():
+    """普通句子不弹菜单（无斜杠候选）。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    c = AgentCompleter()
+    assert list(c.get_completions(_Doc("帮我翻译这句话"), None)) == []
+
+
+def test_adapter_adds_display_meta():
+    """命令补全项附带说明（display_meta），selector 菜单右侧展示。"""
+    from akm.agent_cli.input import _build_prompt_session, SLASH_COMMAND_META
+    from akm.agent_cli.sessions import SessionStore
+
+    session = _build_prompt_session(SessionStore(), [])
+    assert session.completer is not None
+    docs = list(session.completer.get_completions(_Doc("/clear"), None))
+    assert docs and all(
+        d.display_meta_text == SLASH_COMMAND_META.get(d.text) for d in docs
+    )
+
+
+def _is_subsequence(pattern: str, word: str) -> bool:
+    """测试辅助：子序列匹配（与 input._fuzzy_match 同语义）。"""
+    it = iter(word)
+    return all(ch in it for ch in pattern)
+
+
+def test_completer_resume_session_names(tmp_path):
+    """/resume 补全会话名。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    store = SessionStore(tmp_path)
+    store.save({"name": "s1", "messages": []})
+    store.save({"name": "s2", "messages": []})
+    c = AgentCompleter(store=store)
+    comps = list(c.get_completions(_Doc("/resume s1"), None))
+    assert any(t == "s1" for t, _ in comps)
+
+
+def test_completer_workspace_paths(tmp_path):
+    """/workspace 补全已有目录。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    sub = tmp_path / "mywork"
+    sub.mkdir()
+    prefix = str(tmp_path / "my")
+    c = AgentCompleter()
+    comps = list(c.get_completions(_Doc(f"/workspace {prefix}"), None))
+    assert any(t.startswith(str(sub)) for t, _ in comps)
+
+
+def test_completer_ignores_multiline():
+    """多行输入不触发补全（避免对长代码内容误补全）。"""
+    from akm.agent_cli.input import AgentCompleter
+
+    c = AgentCompleter()
+    assert list(c.get_completions(_Doc("/mo\n第二行"), None)) == []
+
+
+def test_create_agent_input_force_plain_is_builtin_input():
+    """force_plain=True 时强制回退到系统 input()。"""
+    from akm.agent_cli.input import create_agent_input
+
+    fn = create_agent_input(force_plain=True)
+    assert fn is input
+
+
+def test_create_agent_input_non_tty_falls_back(monkeypatch):
+    """stdin 非 TTY 时回退到系统 input()，不启动 prompt_toolkit 会话。"""
+    from akm.agent_cli.input import create_agent_input
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    fn = create_agent_input()
+    assert fn is input
+
+
+def test_repl_multiline_starts_with_slash_not_command(tmp_path):
+    """多行输入首行以 / 开头也作为单条 user 消息发送，不误判为斜杠命令。"""
+    store = SessionStore(tmp_path)
+    session = build_session(store, name="t")
+
+    class _C:
+        def __init__(self):
+            self.stream_args = None
+
+        async def stream(self, messages, **kwargs):
+            self.stream_args = messages
+            yield "final", {"final_message": {"content": "ok"}, "messages": messages}
+
+        async def aclose(self):
+            return None
+
+    client = _C()
+    inputs = iter(["/usr/bin/foo\n第二行", "/quit"])
+    repl = Repl(store, client, session, input_fn=lambda _: next(inputs), color=False)
+
+    async def _run():
+        await repl.run_async()
+
+    asyncio.run(_run())
+    # 多行内容整体作为一条 user 消息发送，未走命令分支
+    assert client.stream_args is not None
+    assert client.stream_args[-1] == {"role": "user", "content": "/usr/bin/foo\n第二行"}
+
+
+def test_startup_banner_contains_cat_and_session_info():
+    """启动横幅：圆角框内左边字符画小猫、右边会话初始信息。"""
+    from akm.agent_cli.render import startup_banner
+
+    s = startup_banner(
+        version="0.1.23",
+        name="t1",
+        model="m1",
+        workspace="/w",
+        color=False,
+    )
+    assert "( o.o )" in s  # 小猫字符画
+    assert "AKM Agent（v0.1.23）" in s
+    assert "会话: 「t1」" in s
+    assert "模型: m1" in s
+    assert "工作区: /w" in s
+    # 圆角框
+    assert "╭" in s and "╰" in s
+    # 无颜色时不带 ANSI 码
+    assert "\x1b" not in s
+
+
+def test_startup_banner_defaults():
+    """无 name / model / workspace 时显示占位，不抛错。"""
+    from akm.agent_cli.render import startup_banner
+
+    s = startup_banner(version="0.1.23")
+    assert "会话: （新会话）" in s
+    assert "模型: (未设置)" in s or "模型: （未设置）" in s
+
+
 # ── 菜单栏版本比较 ──
 
 

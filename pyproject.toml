@@ -20,6 +20,7 @@ dependencies = [
     "sqlite-vec>=0.1.6",
     "rich>=13.0.0",
     "pygments>=2.15.0",
+    "prompt_toolkit>=3.0.40",
 ]
 
 [project.scripts]
