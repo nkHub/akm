@@ -490,6 +490,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `response_schema_guard` | post | | 可选结构化响应校验：校验调用方声明的 JSON 格式与常用 Schema 字段 |
 | `provider_health_probe` | app | | 可选供应商健康探测：提供 Key 连通性批量探测与脱敏状态快照 API |
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
+| `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊 |
 
 插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；`model_matcher` 标记为必需（`required: true`），不可禁用。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
 
