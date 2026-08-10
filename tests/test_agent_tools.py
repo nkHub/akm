@@ -1054,3 +1054,182 @@ def test_send_notification_not_registered_when_disabled(monkeypatch):
     app = SimpleNamespace(state=SimpleNamespace())
     tools = {tool.name for tool in build_builtin_tools(app)}
     assert "akm_send_notification" not in tools
+
+
+# ── flow 工作流工具（akm_flow_*）────────────────────────────────
+
+
+def test_builtin_flow_tools_register():
+    """flow 工作流工具（列表/读取/保存/删除/运行/运行列表）应注册为内置工具。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+
+    for name in (
+        "akm_flow_list",
+        "akm_flow_get",
+        "akm_flow_save",
+        "akm_flow_delete",
+        "akm_flow_run",
+        "akm_flow_runs",
+    ):
+        assert name in tools
+    assert tools["akm_flow_save"].parameters["required"] == ["name"]
+    assert tools["akm_flow_delete"].parameters["required"] == ["workflow_id"]
+    assert tools["akm_flow_run"].parameters["required"] == ["workflow_id", "prompt"]
+
+
+def test_builtin_flow_save_get_list_delete(monkeypatch, tmp_path):
+    """flow 工具应在隔离库上完成工作流的保存、读取、列表与删除闭环。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+    from akm.flow.db import init_flow_db
+    init_flow_db()
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    handlers = _handlers(app)
+
+    created = handlers["akm_flow_save"](
+        name="需求提炼",
+        description="把用户需求拆解为方案",
+        nodes=[
+            {"id": "n1", "type": "intake", "data": {"label": "需求输入", "modelId": "mock-coder"}},
+            {"id": "n2", "type": "output", "data": {"label": "交付", "modelId": "mock-coder"}},
+        ],
+        edges=[{"id": "e1", "source": "n1", "target": "n2"}],
+        variables={"language": "Python"},
+    )
+    assert "error" not in created
+    wf = created["workflow"]
+    assert wf["name"] == "需求提炼"
+    assert len(wf["nodes"]) == 2
+    assert len(wf["edges"]) == 1
+
+    listed = handlers["akm_flow_list"]()
+    assert len(listed) == 1
+    assert listed[0]["name"] == "需求提炼"
+    assert listed[0]["node_count"] == 2
+
+    fetched = handlers["akm_flow_get"](workflow_id=wf["id"])
+    assert fetched["workflow"]["variables"]["language"] == "Python"
+
+    updated = handlers["akm_flow_save"](
+        name="需求提炼（改）",
+        workflow_id=wf["id"],
+        nodes=wf["nodes"],
+        edges=wf["edges"],
+        variables=wf["variables"],
+    )
+    assert updated["workflow"]["name"] == "需求提炼（改）"
+    assert len(handlers["akm_flow_list"]()) == 1
+
+    deleted = handlers["akm_flow_delete"](workflow_id=wf["id"])
+    assert deleted["deleted"] is True
+    assert handlers["akm_flow_list"]() == []
+
+
+@pytest.mark.asyncio
+async def test_builtin_flow_tools_validate(monkeypatch, tmp_path):
+    """缺参、不存在的 id 与缺 flow 引擎时应返回错误而非抛异常。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+    from akm.flow.db import init_flow_db
+    init_flow_db()
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    handlers = _handlers(app)
+
+    assert "error" in handlers["akm_flow_save"](name="")
+    assert "error" in handlers["akm_flow_delete"](workflow_id="")
+    assert "error" in handlers["akm_flow_get"](workflow_id="nope")
+    assert "error" in handlers["akm_flow_delete"](workflow_id="nope")
+    assert "error" in await handlers["akm_flow_run"](workflow_id="nope", prompt="hi")
+
+
+@pytest.mark.asyncio
+async def test_builtin_flow_run_starts_engine(monkeypatch, tmp_path):
+    """akm_flow_run 应调用 app.state.flow_engine.start 并返回运行摘要。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+    from akm.flow.db import init_flow_db
+    init_flow_db()
+
+    from akm.flow.db import insert_workflow, create_workflow_id, now_iso
+
+    wf_id = create_workflow_id()
+    insert_workflow(
+        {
+            "id": wf_id,
+            "name": "t",
+            "nodes": [{"id": "n1", "type": "output", "data": {"label": "o", "modelId": "mock-coder"}}],
+            "edges": [],
+            "variables": {},
+            "createdAt": now_iso(),
+            "updatedAt": now_iso(),
+        }
+    )
+
+    started = {}
+
+    class _FakeEngine:
+        async def start(self, wf, prompt, project_id="", requirement_id=""):
+            started["wf"] = wf
+            return {
+                "id": "run_abc",
+                "workflowId": wf["id"],
+                "status": "running",
+                "input": {"prompt": prompt},
+            }
+
+    app = SimpleNamespace(state=SimpleNamespace(flow_engine=_FakeEngine()))
+    handlers = _handlers(app)
+
+    r = await handlers["akm_flow_run"](workflow_id=wf_id, prompt="帮我写个脚本")
+    assert r["ok"] is True
+    assert r["run"]["id"] == "run_abc"
+    assert r["run"]["status"] == "running"
+    assert started["wf"]["id"] == wf_id
+
+    missing = await handlers["akm_flow_run"](workflow_id=wf_id, prompt="")
+    assert "error" in missing
+
+
+def test_builtin_flow_runs_lists_records(monkeypatch, tmp_path):
+    """akm_flow_runs 应返回运行记录列表与总数。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+    from akm.flow.db import init_flow_db
+    init_flow_db()
+
+    from akm.flow.db import insert_run
+
+    insert_run(
+        {
+            "id": "run_1",
+            "workflowId": "wf_1",
+            "status": "succeeded",
+            "input": {"prompt": "hi"},
+            "data_json": {},
+            "startedAt": "2026-01-01T00:00:00.000Z",
+            "finishedAt": "2026-01-01T00:00:01.000Z",
+        }
+    )
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    handlers = _handlers(app)
+
+    listed = handlers["akm_flow_runs"]()
+    assert listed["total"] == 1
+    assert listed["runs"][0]["id"] == "run_1"
+    assert listed["runs"][0]["status"] == "succeeded"
+
+    filtered = handlers["akm_flow_runs"](workflow_id="wf_x")
+    assert filtered["total"] == 0
+

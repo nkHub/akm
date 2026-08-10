@@ -1734,6 +1734,160 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             return {"error": "task_id 不能为空"}
         return {"deleted": delete_task(task_id)}
 
+    def list_flow_workflows_tool() -> list[dict[str, Any]]:
+        """列出已配置的工作流（akm flow 工作流引擎），返回工作流的 id、名称、
+        描述、节点数、边数与更新时间，不含完整定义。"""
+        from akm.flow.db import list_workflows
+
+        return [
+            {
+                "id": wf.get("id", ""),
+                "name": wf.get("name", ""),
+                "description": wf.get("description", ""),
+                "version": wf.get("version", 1),
+                "node_count": len(wf.get("nodes") or []),
+                "edge_count": len(wf.get("edges") or []),
+                "updated_at": wf.get("updatedAt", ""),
+            }
+            for wf in list_workflows()
+        ]
+
+    def get_flow_workflow_tool(workflow_id: str) -> dict[str, Any]:
+        """按 id 读取一条工作流完整定义（nodes / edges / variables）。"""
+        from akm.flow.db import get_workflow
+
+        wf_id = str(workflow_id or "").strip()
+        if not wf_id:
+            return {"error": "workflow_id 不能为空"}
+        wf = get_workflow(wf_id)
+        if wf is None:
+            return {"error": f"工作流不存在: {wf_id}"}
+        return {"workflow": wf}
+
+    def save_flow_workflow_tool(
+        name: str,
+        nodes: list[dict[str, Any]] | None = None,
+        edges: list[dict[str, Any]] | None = None,
+        variables: dict[str, Any] | None = None,
+        description: str = "",
+        workflow_id: str = "",
+    ) -> dict[str, Any]:
+        """创建或更新一条工作流定义。
+
+        workflow_id 留空则创建新工作流；传 id 则更新已有工作流（不存在返回错误）。
+        nodes 为节点数组（含 type / data 等），edges 为连线数组（含 source / target
+        / condition / loop），variables 为运行变量（如 projectPath / maxNodeVisits）。
+        """
+        from akm.flow import db as flow_db
+
+        name = str(name or "").strip()
+        if not name:
+            return {"error": "name 不能为空"}
+        wf_id = str(workflow_id or "").strip()
+        if wf_id:
+            existing = flow_db.get_workflow(wf_id)
+            if existing is None:
+                return {"error": f"工作流不存在: {wf_id}"}
+            updated = flow_db.update_workflow(
+                wf_id,
+                {
+                    "name": name,
+                    "description": str(description or ""),
+                    "nodes": nodes or [],
+                    "edges": edges or [],
+                    "variables": variables or {},
+                },
+            )
+            return {"ok": True, "workflow": updated}
+        t = flow_db.now_iso()
+        wf: dict[str, Any] = {
+            "id": flow_db.create_workflow_id(),
+            "name": name,
+            "description": str(description or ""),
+            "version": 1,
+            "nodes": nodes or [],
+            "edges": edges or [],
+            "variables": variables or {},
+            "createdAt": t,
+            "updatedAt": t,
+        }
+        flow_db.insert_workflow(wf)
+        return {"ok": True, "workflow": flow_db.get_workflow(wf["id"])}
+
+    def delete_flow_workflow_tool(workflow_id: str) -> dict[str, Any]:
+        """删除一条工作流及其全部运行记录，返回是否删除成功。"""
+        from akm.flow.db import delete_workflow
+
+        wf_id = str(workflow_id or "").strip()
+        if not wf_id:
+            return {"error": "workflow_id 不能为空"}
+        if not delete_workflow(wf_id):
+            return {"error": f"工作流不存在: {wf_id}"}
+        return {"deleted": True}
+
+    async def run_flow_workflow_tool(workflow_id: str, prompt: str) -> dict[str, Any]:
+        """启动一次工作流运行并返回运行对象（含 run id 与初始状态）。
+
+        运行在后台执行，可通过 akm_flow_runs 查询进度与结果。
+        """
+        from akm.flow.db import get_workflow
+
+        wf_id = str(workflow_id or "").strip()
+        prompt = str(prompt or "").strip()
+        if not wf_id:
+            return {"error": "workflow_id 不能为空"}
+        if not prompt:
+            return {"error": "prompt 不能为空"}
+        wf = get_workflow(wf_id)
+        if wf is None:
+            return {"error": f"工作流不存在: {wf_id}"}
+        engine = getattr(app.state, "flow_engine", None)
+        if engine is None:
+            return {"error": "flow 引擎未初始化"}
+        try:
+            run = await engine.start(wf, prompt)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return {
+            "ok": True,
+            "run": {
+                "id": run.get("id", ""),
+                "workflowId": run.get("workflowId", ""),
+                "status": run.get("status", ""),
+                "input": run.get("input", {}),
+            },
+        }
+
+    def list_flow_runs_tool(
+        workflow_id: str = "",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """列出工作流运行记录（按创建时间倒序），返回运行 id、状态、起止时间与
+        token 用量摘要；可按 workflow_id 过滤，limit 最大 100。"""
+        from akm.flow.db import list_runs
+
+        runs, total = list_runs(
+            str(workflow_id or "").strip() or None,
+            limit=max(1, min(int(limit or 20), 100)),
+            offset=max(int(offset or 0), 0),
+        )
+        return {
+            "total": total,
+            "runs": [
+                {
+                    "id": r.get("id", ""),
+                    "workflowId": r.get("workflowId", ""),
+                    "status": r.get("status", ""),
+                    "input": r.get("input", {}),
+                    "totals": r.get("totals", {}),
+                    "startedAt": r.get("startedAt", ""),
+                    "finishedAt": r.get("finishedAt", ""),
+                }
+                for r in runs
+            ],
+        }
+
     async def tavily_search_tool(
         query: str,
         max_results: int = 5,
@@ -2354,6 +2508,96 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "required": ["task_id"],
             },
             delete_task_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_list",
+            "列出已配置的工作流（akm flow 工作流引擎）：返回工作流的 id、名称、描述、节点数与更新时间，不含完整定义",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            list_flow_workflows_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_get",
+            "按 id 读取一条工作流的完整定义（nodes / edges / variables），供检查流程结构或复制修改",
+            {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+                },
+                "required": ["workflow_id"],
+            },
+            get_flow_workflow_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_save",
+            "创建或更新一条工作流定义：workflow_id 留空则新建，传 id 则更新已有工作流。nodes 为节点数组（含 type / label / data）、edges 为连线数组（含 source / target / condition / loop）、variables 为运行变量（如 projectPath / maxNodeVisits）",
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "工作流名称"},
+                    "nodes": {"type": "array", "description": "节点数组，每项含 type（intake/plan/code/review/test/fix/human/router/merge/output）与 data（label/modelId/systemPrompt/userPromptTemplate 等）"},
+                    "edges": {"type": "array", "description": "连线数组，每项含 source / target（节点 id），可选 condition（pass/fail/子串）与 loop"},
+                    "variables": {"type": "object", "description": "运行变量，如 projectPath / maxNodeVisits / useWorktree"},
+                    "description": {"type": "string", "description": "工作流描述，可选"},
+                    "workflow_id": {"type": "string", "description": "留空创建新工作流；传已有 id 则更新该工作流"},
+                },
+                "required": ["name"],
+            },
+            save_flow_workflow_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_delete",
+            "删除一条工作流及其全部运行记录，返回是否删除成功",
+            {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+                },
+                "required": ["workflow_id"],
+            },
+            delete_flow_workflow_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_run",
+            "启动一次工作流运行：传入工作流 id 与用户提示词 prompt，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态；可用 akm_flow_runs 查询进度",
+            {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+                    "prompt": {"type": "string", "description": "用户提示词，作为工作流输入注入 {{input.prompt}}"},
+                },
+                "required": ["workflow_id", "prompt"],
+            },
+            run_flow_workflow_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_runs",
+            "列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 workflow_id 过滤",
+            {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {"type": "string", "description": "按工作流 id 过滤，留空返回全部"},
+                    "limit": {"type": "integer", "description": "返回条数，默认 20，最大 100"},
+                    "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+                },
+                "required": [],
+            },
+            list_flow_runs_tool,
         )
     )
     if load_config().get("agent_email_enabled"):

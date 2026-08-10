@@ -247,6 +247,27 @@ async def cancel_run(run_id: str, request: Request):
     return {"run": run}
 
 
+@router.post("/runs/{run_id}/resume")
+async def resume_run(run_id: str, request: Request):
+    """人工审批续跑：body 传 {action: approve|reject, note?, nodeId?}，使等待审批的 human 节点继续。"""
+    blocked = _check(request)
+    if blocked:
+        return blocked
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"detail": "请求体必须是 JSON 对象"}, status_code=400)
+    try:
+        run = await _engine(request).resume(run_id, body)
+    except ValueError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+    if run is None:
+        return JSONResponse({"detail": "运行不存在"}, status_code=404)
+    return {"run": run}
+
+
 @router.get("/runs/{run_id}/events")
 async def run_events(run_id: str, request: Request):
     """SSE 事件流：先推 snapshot，再转发引擎事件；终态补发 run_end。"""
