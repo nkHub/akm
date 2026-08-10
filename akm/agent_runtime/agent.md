@@ -41,6 +41,11 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
 | `akm_send_notification` | 发送 macOS 原生系统通知，在当前 Mac 桌面弹出提醒（需通过菜单栏启动 AKM 才能正常展示，受 `agent_notify_enabled` 控制，默认开启）；适合推送任务完成、定时提醒等短消息，不产生网络流量 |
+| `akm_clipboard_get` | 读取当前 macOS 剪贴板文本内容，返回内容与长度（超过 10 万字符截断并标记 `truncated`） |
+| `akm_clipboard_set` | 将文本写入当前 macOS 剪贴板（超 10 万字符截断），返回写入长度 |
+| `akm_system_info` | 返回本机系统信息：macOS 版本、架构、主机名、硬件型号、CPU 型号与核数、内存字节数、Python 版本与服务器本地时间 |
+| `akm_open` | 打开指定目标：`kind=url` 仅允许 `http/https` 链接、`kind=path` 打开工作区内文件或目录（沙箱校验）、`kind=app` 按应用名启动（不接受路径分隔符） |
+| `akm_frontmost_app` | 返回当前前台应用的信息（名称、Bundle ID、进程 ID）；无活跃 GUI 会话时返回空 |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
 
@@ -62,6 +67,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
 | `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
 | `agent_notify_enabled` | `true` | 是否启用 Agent 原生通知工具（`akm_send_notification`），默认开启；通过菜单栏启动 AKM 时可弹出 macOS 系统通知 |
+| `agent_native_tools_enabled` | `true` | 是否启用 Agent 原生系统工具（`akm_clipboard_get` / `akm_clipboard_set` / `akm_system_info` / `akm_open` / `akm_frontmost_app`），默认开启；直接调用本机剪贴板、系统信息与前台应用（pyobjc，不受 akm_run_shell 沙箱约束） |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
 | `agent_email_smtp_port` | `465` | SMTP 端口：465 走 SSL，587 走 STARTTLS（由 `agent_email_smtp_ssl` 决定是否用 SSL） |
 | `agent_email_smtp_user` | `""` | SMTP 登录账号；`agent_email_from` 留空时默认作为发件人 |

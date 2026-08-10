@@ -860,6 +860,191 @@ async def test_send_notification_requires_title_and_message(monkeypatch):
     assert "不能为空" in r["error"]
 
 
+def test_builtin_native_tools_register(monkeypatch):
+    """原生系统工具应全部注册，akm_clipboard_set 需要 content、akm_open 需要 target。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+    for name in ("akm_clipboard_get", "akm_clipboard_set", "akm_system_info", "akm_open", "akm_frontmost_app"):
+        assert name in tools
+    assert tools["akm_clipboard_set"].parameters["required"] == ["content"]
+    assert tools["akm_open"].parameters["required"] == ["target"]
+    assert tools["akm_open"].parameters["properties"]["kind"]["enum"] == ["url", "path", "app"]
+
+
+def test_builtin_native_tools_not_registered_when_disabled(monkeypatch):
+    """agent_native_tools_enabled=false 时原生工具不应注册。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": False},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name for tool in build_builtin_tools(app)}
+    for name in ("akm_clipboard_get", "akm_clipboard_set", "akm_system_info", "akm_open", "akm_frontmost_app"):
+        assert name not in tools
+
+
+@pytest.mark.asyncio
+async def test_clipboard_get_returns_content(monkeypatch):
+    """akm_clipboard_get 应返回剪贴板内容与长度。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    monkeypatch.setattr("akm.agent_runtime.tools._clipboard_read_text", lambda: "你好 world")
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_clipboard_get"]
+
+    r = await handler()
+
+    assert r["ok"] is True
+    assert r["content"] == "你好 world"
+    assert r["length"] == 8
+    assert r["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_clipboard_set_writes_content(monkeypatch):
+    """akm_clipboard_set 应调用底层写入并返回 ok。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    written = []
+    monkeypatch.setattr("akm.agent_runtime.tools._clipboard_write_text", lambda c: written.append(c))
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_clipboard_set"]
+
+    r = await handler(content="待复制文本")
+
+    assert r["ok"] is True
+    assert written == ["待复制文本"]
+
+
+@pytest.mark.asyncio
+async def test_clipboard_set_rejects_empty_content(monkeypatch):
+    """content 为空时应被拒绝。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_clipboard_set"]
+
+    r = await handler(content="   ")
+
+    assert r["ok"] is False
+    assert "不能为空" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_system_info_returns_collected(monkeypatch):
+    """akm_system_info 应返回底层采集的系统信息。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools._collect_system_info",
+        lambda: {"arch": "arm64", "hostname": "mbp", "macos": {"ProductVersion": "15.5"}},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_system_info"]
+
+    r = await handler()
+
+    assert r["ok"] is True
+    assert r["arch"] == "arm64"
+    assert r["hostname"] == "mbp"
+    assert r["macos"]["ProductVersion"] == "15.5"
+
+
+@pytest.mark.asyncio
+async def test_open_rejects_unsafe_targets(monkeypatch):
+    """非法 kind / 非 http(s) URL / 带路径分隔符的应用名应被拒绝。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    monkeypatch.setattr("akm.agent_runtime.tools._workspace_root", lambda: "/tmp/ws")
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_open"]
+
+    r = await handler(kind="ftp", target="ftp://x")
+    assert r["ok"] is False
+    assert "kind" in r["error"]
+
+    r = await handler(kind="url", target="file:///etc/passwd")
+    assert r["ok"] is False
+    assert "http" in r["error"]
+
+    r = await handler(kind="app", target="/Applications/Safari.app")
+    assert r["ok"] is False
+    assert "路径分隔符" in r["error"]
+
+
+@pytest.mark.asyncio
+async def test_open_url_and_app(monkeypatch):
+    """合法的 http(s) URL 与应用名应调用底层打开逻辑。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    opened = []
+    monkeypatch.setattr("akm.agent_runtime.tools._open_target", lambda k, t: opened.append((k, t)) or True)
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_open"]
+
+    r = await handler(kind="url", target="https://example.com")
+    assert r["ok"] is True
+    assert opened == [("url", "https://example.com")]
+
+    r = await handler(kind="app", target="Safari")
+    assert r["ok"] is True
+    assert opened == [("url", "https://example.com"), ("app", "Safari")]
+
+
+@pytest.mark.asyncio
+async def test_frontmost_app_returns_info(monkeypatch):
+    """akm_frontmost_app 应返回前台应用信息。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools._frontmost_app_info",
+        lambda: {"name": "Safari", "bundle_id": "com.apple.Safari", "pid": 123},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_frontmost_app"]
+
+    r = await handler()
+
+    assert r["ok"] is True
+    assert r["app"]["name"] == "Safari"
+
+
+@pytest.mark.asyncio
+async def test_frontmost_app_none_when_no_gui(monkeypatch):
+    """无前台应用时应返回 app 为 null 的提示。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_native_tools_enabled": True},
+    )
+    monkeypatch.setattr("akm.agent_runtime.tools._frontmost_app_info", lambda: None)
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_frontmost_app"]
+
+    r = await handler()
+
+    assert r["ok"] is True
+    assert r["app"] is None
+    assert "无前台应用" in r["message"]
+
+
 def test_send_notification_not_registered_when_disabled(monkeypatch):
     """agent_notify_enabled=false 时 akm_send_notification 不应注册为工具。"""
     monkeypatch.setattr(
