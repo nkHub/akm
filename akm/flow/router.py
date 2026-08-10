@@ -26,16 +26,16 @@ def _engine(request: Request) -> WorkflowEngine:
     return engine
 
 
-def _check(request: Request):
+async def _check(request: Request):
     """鉴权；返回 None 表示放行，否则返回 JSONResponse（已含错误）。"""
-    return _check_agent_auth(request)
+    return await _check_agent_auth(request)
 
 
 # ── 健康检查 / 模型目录 ───────────────────────────────────────
 
 @router.get("/health")
 async def health(request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     return {"ok": True, "engine": "flow"}
@@ -43,7 +43,7 @@ async def health(request: Request):
 
 @router.get("/models")
 async def list_models(request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     from akm.flow import models as flow_models
@@ -55,7 +55,7 @@ async def list_models(request: Request):
 
 @router.get("/workflows")
 async def list_workflows(request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     return {"workflows": flow_db.list_workflows()}
@@ -63,7 +63,7 @@ async def list_workflows(request: Request):
 
 @router.post("/workflows")
 async def create_workflow(request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     body = await request.json()
@@ -87,7 +87,7 @@ async def create_workflow(request: Request):
 
 @router.get("/workflows/{wf_id}")
 async def get_workflow(wf_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     wf = flow_db.get_workflow(wf_id)
@@ -98,7 +98,7 @@ async def get_workflow(wf_id: str, request: Request):
 
 @router.put("/workflows/{wf_id}")
 async def update_workflow(wf_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     body = await request.json()
@@ -110,7 +110,7 @@ async def update_workflow(wf_id: str, request: Request):
 
 @router.delete("/workflows/{wf_id}")
 async def delete_workflow(wf_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     if not flow_db.delete_workflow(wf_id):
@@ -122,7 +122,7 @@ async def delete_workflow(wf_id: str, request: Request):
 
 @router.get("/templates")
 async def list_templates(request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     # 返回不含 id 的模板定义（实例化时重新生成 id）
@@ -138,7 +138,7 @@ async def list_templates(request: Request):
 
 @router.post("/templates/{template_id}/instantiate")
 async def instantiate_template(template_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     # 按模板名或序号匹配
@@ -196,7 +196,7 @@ def _instantiate(template: dict) -> dict:
 
 @router.post("/workflows/{wf_id}/runs")
 async def start_run(wf_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     wf = flow_db.get_workflow(wf_id)
@@ -218,7 +218,7 @@ async def start_run(wf_id: str, request: Request):
 
 @router.get("/runs")
 async def list_runs(request: Request, workflow_id: str | None = None, limit: int = 100, offset: int = 0):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     runs, total = flow_db.list_runs(workflow_id, limit=min(max(limit, 1), 500), offset=max(offset, 0))
@@ -227,7 +227,7 @@ async def list_runs(request: Request, workflow_id: str | None = None, limit: int
 
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     run = _engine(request).get_run(run_id)
@@ -238,7 +238,7 @@ async def get_run(run_id: str, request: Request):
 
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, request: Request):
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     run = await _engine(request).cancel(run_id)
@@ -250,7 +250,7 @@ async def cancel_run(run_id: str, request: Request):
 @router.post("/runs/{run_id}/resume")
 async def resume_run(run_id: str, request: Request):
     """人工审批续跑：body 传 {action: approve|reject, note?, nodeId?}，使等待审批的 human 节点继续。"""
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     try:
@@ -271,7 +271,7 @@ async def resume_run(run_id: str, request: Request):
 @router.get("/runs/{run_id}/events")
 async def run_events(run_id: str, request: Request):
     """SSE 事件流：先推 snapshot，再转发引擎事件；终态补发 run_end。"""
-    blocked = _check(request)
+    blocked = await _check(request)
     if blocked:
         return blocked
     engine = _engine(request)
