@@ -28,11 +28,53 @@ _DEFAULT_EXCLUDED_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-# 上下文管理框架工具：LLM 可主动查询上下文占用或触发压缩。
-# 与业务工具不同，这两个工具不注册到 ToolRegistry（其 handler 需要访问
-# 当前运行的 AgentLoop 上下文），而是由 AgentLoop 在 run/run_stream 内部
-# 内联拦截处理。默认模式下随内置工具注入；白名单模式下需客户端显式声明。
+# 框架工具：除上下文管理外，还包括「向用户澄清提问」的交互工具。
+# 与业务工具不同，这些工具不注册到 ToolRegistry（其 handler 需要访问当前
+# 运行的 AgentLoop 上下文），而是由 AgentLoop 在 run/run_stream 内部内联
+# 拦截处理。默认模式下随内置工具注入；白名单模式下需客户端显式声明。
+# 交互澄清工具 akm_ask_user 在默认注入（未传 tools）与白名单注入（传了
+# tools）时都可用，只有显式传空数组 [] 时才会被排除。
+_AGENT_ASK_USER_TOOL: str = "akm_ask_user"
 _AGENT_CONTEXT_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": _AGENT_ASK_USER_TOOL,
+            "description": (
+                "当你需要向用户确认信息才能继续时调用本工具：用户上一条消息"
+                "信息不完整、存在歧义、缺少关键参数，或你需要用户做选择时，"
+                "把想确认的内容作为 question 传给本工具，等待用户回答后继续。"
+                "问题要具体、一次只问一件事，避免让用户费解。"
+                "如果不传 options，用户以自由文本回答；传了 options 则用户从"
+                "选项中挑选（multiple=true 可多选，否则单选）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "需要向用户确认的问题，需具体明确",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "可选的候选答案列表。不传时用户自由文本回答；"
+                            "传入后用户从这些选项中挑选回答"
+                        ),
+                    },
+                    "multiple": {
+                        "type": "boolean",
+                        "description": (
+                            "传了 options 时是否允许用户多选（默认 false 单选）。"
+                            "不传 options 时本字段无意义"
+                        ),
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -355,6 +397,7 @@ class AgentResult:
         error: str = "",
         usage: dict | None = None,
         compacted: int = 0,
+        ask_user: dict | None = None,
     ):
         self.ok = ok
         self.final_message = final_message or {}
@@ -363,6 +406,7 @@ class AgentResult:
         self.error = error
         self.usage = usage or {}
         self.compacted = compacted  # 本次运行中上下文被压缩的次数
+        self.ask_user = ask_user  # 非空表示 AI 需要向用户澄清提问（见 akm_ask_user）
 
     def to_dict(self) -> dict:
         """转为可序列化的 dict"""
@@ -374,6 +418,7 @@ class AgentResult:
             "error": self.error,
             "usage": self.usage,
             "compacted": self.compacted,
+            "ask_user": self.ask_user,
         }
 
 
@@ -1120,6 +1165,9 @@ class AgentLoop:
             tool_results: list[dict] = []
             # 本轮工具失败信息（首个错误文本），用于自愈重试判断
             tool_error_text = ""
+            # akm_ask_user 触发时记录需要向用户澄清的内容（question/options/multiple），
+            # 非 None 表示中断编排
+            ask_user_data: dict | None = None
             for tc in tool_calls:
                 tc_id = tc["id"]
                 tc_name = tc["name"]
@@ -1152,6 +1200,22 @@ class AgentLoop:
                         {"error": f"工具未获本次请求授权: {tc_name}"},
                         ensure_ascii=False,
                     )
+                elif tc_name == _AGENT_ASK_USER_TOOL:
+                    # akm_ask_user：AI 需要向用户澄清提问。中断本轮编排，把问题
+                    # 及候选选项原样记入工具结果，返回给客户端等待用户回答后继续。
+                    tool_call_count += 1
+                    ask_question = str((tc_args or {}).get("question", "") or "").strip()
+                    ask_options = (tc_args or {}).get("options") or []
+                    ask_multiple = bool((tc_args or {}).get("multiple", False))
+                    ask_user_data = {
+                        "question": ask_question,
+                        "options": [str(o) for o in ask_options] if ask_options else [],
+                        "multiple": ask_multiple,
+                    }
+                    tool_result = json.dumps({
+                        "status": "awaiting_user",
+                        **ask_user_data,
+                    }, ensure_ascii=False)
                 else:
                     tool_call_count += 1
                     # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
@@ -1185,9 +1249,29 @@ class AgentLoop:
                     len(tool_result),
                 )
 
+                # 已触发 akm_ask_user：不再执行本轮的其余工具调用
+                if ask_user_data is not None:
+                    break
+
             # assistant 消息中包含所有 tool_calls，tool 结果紧跟其后
             working_messages.append(assistant_msg)
             working_messages.extend(tool_results)
+
+            # AI 需要向用户澄清：中断编排并返回，等待客户端把用户回答追加入
+            # messages 后重新请求以继续。final_message 即模型想问的问题。
+            if ask_user_data is not None:
+                logger.info(
+                    "[AgentLoop] AI 向用户提问澄清（turn=%d）: %s", turn, ask_user_data["question"]
+                )
+                return AgentResult(
+                    ok=True,
+                    final_message={"role": "assistant", "content": ask_user_data["question"]},
+                    messages=working_messages,
+                    turns=turn,
+                    usage=total_usage,
+                    compacted=compacted_count,
+                    ask_user=ask_user_data,
+                )
 
             # 自愈重试：本轮存在工具失败且未超过修正上限时，注入一条 system 修正提示，
             # 强制模型基于错误信息修正工具参数后继续（比让模型自行决定更可靠）
@@ -1243,6 +1327,9 @@ class AgentLoop:
                                 一条 system 修正提示并强制模型修正参数后重新调用
         - ``context_warning`` — 上下文占用接近上限（超过 agent_context_warning_ratio 比例），
                                 data 含 estimated_tokens / max_tokens / remaining_tokens / ratio / compacted
+        - ``ask_user``        — AI 需要向用户澄清提问（调用 akm_ask_user），data 含 question /
+                                messages / turns / usage；随后本轮结束，等待客户端把用户回答
+                                追加入 messages 后重新请求以继续
         - ``cancelled``       — 手动中断（客户端通过 AbortController 取消流式请求，或
                                 cancel_check 回调返回 True），data 含 turns / usage；随后生成器退出
         - ``final``           — Agent 完成，含 final_message / usage / turns
@@ -1532,6 +1619,9 @@ class AgentLoop:
             tool_result_msgs: list[dict] = []
             # 本轮工具失败信息（首个错误文本），用于自愈重试判断
             tool_error_text = ""
+            # akm_ask_user 触发时记录需要向用户澄清的内容（question/options/multiple），
+            # 非 None 表示中断编排
+            ask_user_data: dict | None = None
             for tc in tool_calls:
                 tc_id = tc["id"]
                 tc_name = tc["name"]
@@ -1566,6 +1656,22 @@ class AgentLoop:
                         {"error": f"工具未获本次请求授权: {tc_name}"},
                         ensure_ascii=False,
                     )
+                elif tc_name == _AGENT_ASK_USER_TOOL:
+                    # akm_ask_user：AI 需要向用户澄清提问。中断本轮编排，把问题及
+                    # 候选选项记入工具结果，下发 ask_user 事件并等待用户回答后继续。
+                    tool_call_count += 1
+                    ask_question = str((tc_args or {}).get("question", "") or "").strip()
+                    ask_options = (tc_args or {}).get("options") or []
+                    ask_multiple = bool((tc_args or {}).get("multiple", False))
+                    ask_user_data = {
+                        "question": ask_question,
+                        "options": [str(o) for o in ask_options] if ask_options else [],
+                        "multiple": ask_multiple,
+                    }
+                    tool_result = json.dumps({
+                        "status": "awaiting_user",
+                        **ask_user_data,
+                    }, ensure_ascii=False)
                 else:
                     tool_call_count += 1
                     # ── 工具执行前检查取消：客户端已停止时不再执行工具 ──
@@ -1601,8 +1707,27 @@ class AgentLoop:
                     "content": tool_result,
                 })
 
+                # 已触发 akm_ask_user：不再执行本轮的其余工具调用
+                if ask_user_data is not None:
+                    break
+
             working_messages.append(assistant_msg)
             working_messages.extend(tool_result_msgs)
+
+            # AI 需要向用户澄清：下发 ask_user 事件并结束本轮，等待客户端把用户
+            # 回答追加入 messages 后重新请求以继续（携带 working_messages 供续跑）。
+            if ask_user_data is not None:
+                logger.info(
+                    "[AgentLoop] AI 向用户提问澄清（turn=%d）: %s", turn, ask_user_data["question"]
+                )
+                yield _sse_event("ask_user", {
+                    **ask_user_data,
+                    "messages": working_messages,
+                    "turns": turn,
+                    "usage": total_usage,
+                    "compacted": compacted_count,
+                })
+                return
 
             # 自愈重试：本轮存在工具失败且未超过修正上限时，下发 tool_retry 事件
             # 并注入一条 system 修正提示，强制模型修正工具参数后继续
