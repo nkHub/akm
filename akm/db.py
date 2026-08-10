@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from croniter import croniter, CroniterBadCronError
+
 # 数据目录：~/.akm/
 DB_DIR = os.path.expanduser("~/.akm")
 
@@ -165,6 +167,36 @@ def _now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def validate_cron_expr(cron: str) -> bool:
+    """校验 cron 表达式是否合法（非空时）。
+
+    内部以 croniter 解析验证：表达式为空返回 True（表示未使用 cron），
+    否则返回解析是否成功。
+    """
+    expr = (cron or "").strip()
+    if not expr:
+        return True
+    try:
+        croniter(expr, datetime.now())
+        return True
+    except (CroniterBadCronError, ValueError, KeyError):
+        return False
+
+
+def cron_next_run(cron: str, base: datetime | None = None) -> str:
+    """计算 cron 表达式对应的下一次执行时间（本地时间字符串）。
+
+    调用方需保证表达式合法（见 validate_cron_expr）；空表达式抛 ValueError，
+    非法表达式抛 CroniterBadCronError。
+    """
+    expr = (cron or "").strip()
+    if not expr:
+        raise ValueError("cron 表达式不能为空")
+    base_time = base or datetime.now()
+    it = croniter(expr, base_time)
+    return it.get_next(datetime).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _task_row_to_dict(row: sqlite3.Row) -> dict:
     """把 scheduled_tasks 行转成可 JSON 序列化的字典。"""
     item = dict(row)
@@ -189,14 +221,19 @@ def create_task(
     """创建一条定时任务并返回其完整记录。
 
     首次创建时把 next_run_at 设为当前时间，保证启用后下一轮调度即可执行；
-    之后由调度器按 interval_sec / cron 滚动计算。
+    提供了合法 cron 时改为按 cron 计算的下一次执行时间；之后由调度器按
+    interval_sec / cron 滚动计算。cron 表达式非法时抛 ValueError。
     """
     if task_type not in TASK_TYPES:
         raise ValueError(f"不支持的任务类型: {task_type}")
+    if not validate_cron_expr(cron):
+        raise ValueError(f"cron 表达式非法: {cron}")
     conn = get_connection()
     try:
         now = _now_str()
         row_id = task_id or uuid.uuid4().hex
+        # 首次调度时间：提供 cron 时按表达式算下一次；否则取当前时间立即待执行
+        next_run = cron_next_run(cron) if (cron or "").strip() else now
         conn.execute(
             """INSERT INTO scheduled_tasks
                (id, name, task_type, interval_sec, cron, payload, enabled,
@@ -210,7 +247,7 @@ def create_task(
                 cron or "",
                 json.dumps(payload or {}, ensure_ascii=False),
                 1 if enabled else 0,
-                now,  # next_run_at 首次即当前时间，启用后可立即执行
+                next_run,  # 首次调度时间：cron 任务按表达式，否则当前时间立即待执行
                 now,
                 now,
             ),
@@ -271,6 +308,8 @@ def update_task(task_id: str, **fields) -> dict | None:
             continue
         if key == "task_type" and value not in TASK_TYPES:
             raise ValueError(f"不支持的任务类型: {value}")
+        if key == "cron" and not validate_cron_expr(value):
+            raise ValueError(f"cron 表达式非法: {value}")
         if key == "payload":
             value = json.dumps(value or {}, ensure_ascii=False)
         if key == "enabled":

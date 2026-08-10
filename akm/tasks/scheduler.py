@@ -9,7 +9,8 @@
 - ``usage_query``：对指定 alias 的 key 执行用量查询脚本并落库。
 
 循环任务按 ``interval_sec`` 滚动计算下一次执行时间；``interval_sec=0``
-视为单次任务，执行后自动禁用。``cron`` 字段预留，暂不解析。
+视为单次任务，执行后自动禁用。提供 ``cron`` 表达式时优先按 cron 计算
+下一次执行时间（cron 优先于 interval_sec）。
 """
 
 import asyncio
@@ -175,13 +176,24 @@ class TaskScheduler:
         """推进任务执行状态：更新 last_run_at 与下一次执行时间。"""
         task_id = task["id"]
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        interval_sec = int(task.get("interval_sec", 0) or 0)
         fields: dict[str, Any] = {"last_run_at": now_str}
-        if interval_sec > 0:
+        cron = (task.get("cron") or "").strip()
+        if cron:
+            # cron 任务：按表达式计算下一次执行时间（cron 优先于 interval_sec）
+            from akm.db import cron_next_run
+
+            try:
+                fields["next_run_at"] = cron_next_run(cron)
+            except Exception:
+                # 表达式异常（理论上已被创建/更新时拦截）：回退到禁用该任务，避免卡死
+                logger.exception("[TaskScheduler] cron 表达式异常，禁用任务 %s: %s", task_id, cron)
+                fields["next_run_at"] = ""
+                fields["enabled"] = False
+        elif int(task.get("interval_sec", 0) or 0) > 0:
             # 循环任务：按间隔滚动排下一次
             from datetime import timedelta
 
-            next_run = (datetime.now() + timedelta(seconds=interval_sec)).strftime(
+            next_run = (datetime.now() + timedelta(seconds=int(task.get("interval_sec", 0)))).strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
             fields["next_run_at"] = next_run
