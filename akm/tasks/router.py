@@ -21,6 +21,7 @@ from akm.db import (
     list_tasks,
     update_task,
     delete_task,
+    validate_cron_expr,
 )
 
 logger = logging.getLogger("akm.tasks.router")
@@ -76,6 +77,8 @@ async def create_task_route(request: Request):
     interval_sec = int(body.get("interval_sec", 0) or 0)
     cron = str(body.get("cron") or "")
     enabled = bool(body.get("enabled", True))
+    if cron.strip() and not validate_cron_expr(cron):
+        return JSONResponse(status_code=400, content={"detail": f"cron 表达式非法: {cron}"})
     try:
         task = create_task(
             name=name,

@@ -276,3 +276,82 @@ async def test_scheduler_advances_interval_task():
     assert task["enabled"] is True
     assert task["next_run_at"]  # 下一轮已排期
     assert task["next_run_at"] > task["last_run_at"]
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_cron_computes_first_next_run():
+    """提供合法 cron 的任务创建时应按表达式计算首次 next_run_at。"""
+    from akm.db import cron_next_run
+
+    async with _make_client() as client:
+        resp = await client.post(
+            "/v1/tasks",
+            json={
+                "name": "每日十一点",
+                "task_type": "agent_call",
+                "payload": {"messages": [{"role": "user", "content": "执行"}]},
+                "cron": "0 11 * * *",
+            },
+        )
+    assert resp.status_code == 201
+    task = resp.json()["task"]
+    assert task["cron"] == "0 11 * * *"
+    # 首次 next_run_at 应是 cron 计算的下一时刻（晚于创建时刻），而非立即执行
+    assert task["next_run_at"] > task["created_at"]
+    assert task["next_run_at"] == cron_next_run("0 11 * * *")
+
+
+@pytest.mark.asyncio
+async def test_create_task_rejects_invalid_cron():
+    """非法 cron 表达式应返回 400。"""
+    async with _make_client() as client:
+        resp = await client.post(
+            "/v1/tasks",
+            json={
+                "name": "坏 cron",
+                "task_type": "agent_call",
+                "cron": "not-a-cron",
+            },
+        )
+    assert resp.status_code == 400
+    assert "cron" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_update_task_rejects_invalid_cron():
+    """更新任务时传入非法 cron 应返回 400。"""
+    async with _make_client() as client:
+        created = await client.post(
+            "/v1/tasks", json={"name": "改 cron", "task_type": "agent_call"}
+        )
+        task_id = created.json()["task"]["id"]
+        resp = await client.put(
+            f"/v1/tasks/{task_id}", json={"cron": "61 25 * * *"}
+        )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_scheduler_advances_cron_task():
+    """cron 任务执行后应按下一次 cron 时刻滚动 next_run_at，保持启用。"""
+    from akm.db import cron_next_run
+
+    task_id = db.create_task(
+        name="cron 循环",
+        task_type="agent_call",
+        payload={"messages": [{"role": "user", "content": "hi"}]},
+        cron="0 */2 * * *",  # 每两小时
+        interval_sec=3600,   # cron 应优先于 interval_sec
+        enabled=True,
+    )["id"]
+    # 模拟已到执行时刻：把 next_run_at 拨到过去，触发到期执行
+    db.update_task(task_id, next_run_at="2020-01-01 00:00:00")
+
+    scheduler = app.state.task_scheduler
+    await scheduler._check_due_tasks()
+
+    task = db.get_task(task_id)
+    assert task["enabled"] is True
+    # 下一时刻由 cron 计算，而非按 interval_sec 滚动
+    assert task["next_run_at"] == cron_next_run("0 */2 * * *")
+    assert task["last_run_at"]
