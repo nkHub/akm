@@ -156,7 +156,7 @@ async def test_run_includes_registered_tools_in_upstream_request(monkeypatch):
 
     assert result.ok is True
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["akm_get_status", "akm_context_status", "akm_compact_context"]
+    assert names == ["akm_get_status", "akm_ask_user", "akm_context_status", "akm_compact_context"]
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_run_whitelist_injects_only_client_declared_tools(monkeypatch):
 
     assert result.ok is True
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["my_search", "akm_context_status", "akm_compact_context"]
+    assert names == ["my_search", "akm_ask_user", "akm_context_status", "akm_compact_context"]
     assert "akm_get_status" not in names
 
 
@@ -202,7 +202,7 @@ async def test_run_stream_whitelist_injects_only_client_declared_tools(monkeypat
         break
 
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["my_tool", "akm_context_status", "akm_compact_context"]
+    assert names == ["my_tool", "akm_ask_user", "akm_context_status", "akm_compact_context"]
     assert "akm_get_time" not in names
 
 
@@ -512,7 +512,7 @@ async def test_run_explicit_tools_can_override_excluded(monkeypatch):
 
     assert result.ok is True
     names = [t["function"]["name"] for t in requests[0]["tools"]]
-    assert names == ["tavily_search", "akm_context_status", "akm_compact_context"]
+    assert names == ["tavily_search", "akm_ask_user", "akm_context_status", "akm_compact_context"]
 
 
 @pytest.mark.asyncio
@@ -1049,3 +1049,119 @@ async def test_run_stream_cancel_before_tool_execution_skips_tool(monkeypatch):
     assert executed == []
     assert events[-1]["data"]["turns"] == 1
     ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_ask_user_breaks_loop_with_question(monkeypatch):
+    """AI 调用 akm_ask_user 时应中断编排，返回需要澄清的问题，等待用户回答后续跑。"""
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"akm_ask_user","arguments":"{\\"question\\":\\"你指的是北京还是上海？\\"}"}}]}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run([{"role": "user", "content": "帮我查天气"}])
+
+    assert result.ok is True
+    assert result.ask_user == {
+        "question": "你指的是北京还是上海？",
+        "options": [],
+        "multiple": False,
+    }
+    # final_message 即澄清问题，供客户端直接展示
+    assert result.final_message["content"] == "你指的是北京还是上海？"
+    # 工具结果记录了等待用户回答的状态，供后续续跑时模型感知上下文
+    tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert json.loads(tool_msgs[0]["content"])["status"] == "awaiting_user"
+    # 只跑了一轮就中断，不继续执行后续轮次
+    assert result.turns == 1
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_ask_user_with_options_radio(monkeypatch):
+    """akm_ask_user 传 options 时应原样透传候选答案（单选，multiple 缺省为 false）。"""
+    async def forward(*_args, **_kwargs):
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"akm_ask_user","arguments":"{\\"question\\":\\"选择目的地\\",\\"options\\":[\\"北京\\",\\"上海\\"]}"}}]}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run([{"role": "user", "content": "帮我订票"}])
+
+    assert result.ok is True
+    assert result.ask_user == {
+        "question": "选择目的地",
+        "options": ["北京", "上海"],
+        "multiple": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_ask_user_with_options_multiple(monkeypatch):
+    """akm_ask_user 传 options + multiple=true 时透传多选标记。"""
+    async def forward(*_args, **_kwargs):
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"akm_ask_user","arguments":"{\\"question\\":\\"选你喜欢的\\",\\"options\\":[\\"苹果\\",\\"香蕉\\"],\\"multiple\\":true}"}}]}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run([{"role": "user", "content": "推荐水果"}])
+
+    assert result.ok is True
+    assert result.ask_user == {
+        "question": "选你喜欢的",
+        "options": ["苹果", "香蕉"],
+        "multiple": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_stream_ask_user_emits_event(monkeypatch):
+    """流式路径下 AI 调用 akm_ask_user 时应下发 ask_user 事件后结束，不再继续编排。"""
+    response = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "akm_ask_user", "arguments": "{\"question\":\"需要确认仓库名\"}"}}]}}]}),
+        "data: [DONE]\n\n",
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
+
+    # turn_start → tool_call → tool_result → ask_user，随后结束（无 final）
+    assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "ask_user"]
+    ask = events[-1]["data"]
+    assert ask["question"] == "需要确认仓库名"
+    assert ask["options"] == []
+    assert ask["multiple"] is False
+    assert ask["turns"] == 1
+    # ask_user 事件携带完整 messages，供客户端在用户回答后续跑
+    assert any(m.get("role") == "tool" for m in ask["messages"])
+    assert response.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_stream_ask_user_with_options(monkeypatch):
+    """流式路径下 ask_user 事件应透传 options 与 multiple 字段。"""
+    response = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "akm_ask_user", "arguments": "{\"question\":\"选哪种套餐？\",\"options\":[\"基础\",\"专业\"],\"multiple\":true}"}}]}}]}),
+        "data: [DONE]\n\n",
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
+
+    assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "ask_user"]
+    ask = events[-1]["data"]
+    assert ask["question"] == "选哪种套餐？"
+    assert ask["options"] == ["基础", "专业"]
+    assert ask["multiple"] is True
+    assert ask["turns"] == 1
