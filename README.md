@@ -344,6 +344,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)） |
 | GET/POST | `/v1/tasks` | 定时任务接口：列表 / 创建（`agent_call`、`usage_query` 类型）；配套 `GET/PUT/DELETE /v1/tasks/{id}` 与 `POST /v1/tasks/{id}/run` 立即执行 |
+| GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见表后「工作流引擎」段） |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
@@ -384,6 +385,16 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 `POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、配置、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
+
+## 工作流引擎（/v1/flow）
+
+工作流引擎把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成 DAG 有向无环图：每个节点是一个步骤（LLM 节点执行提示词、`merge`/`router` 做流程控制），边上的 `condition` 决定分支走向、`loop` 边支持按预算重入（如审查不通过回到修复）。多路并行节点（如双模型竞赛）会同时执行，全部前驱完成后才汇聚。节点输出以 `artifacts` 累积，供下游 `{{artifacts.xxx}}` 模板引用；LLM 调用复用 AKM 代理网关（自动选 Key / 协议转换 / 重试）。
+
+- 内置模板：`standard_dev`（标准开发，含 review→fix 循环）、`hotfix`（快速热修）、`dual_model`（双模型并行竞赛），可一键实例化为工作流。
+- 数据表：`flow_workflows`（工作流定义，节点/边以 JSON 存储）与 `flow_runs`（每次运行快照 `data_json`），位于 `~/.akm/akm.db`。
+- 运行管理：`POST /v1/flow/workflows/{id}/runs` 传入 `prompt` 启动；`GET /v1/flow/runs/{id}/events` 提供 SSE 事件流（`run_start` / `node_start` / `log` / `token` / `node_end` / `run_end`），断线重连先收到完整 `snapshot`。
+- 实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）。
+- 一期范围：LLM 节点 + 流程控制（拓扑 / 并行 / 条件 / loop 重入 / merge / router）。编码节点（`pi-agent`）与人工审批（`human`）为二期规划，当前遇到时按 LLM 节点降级执行并在日志提示。
 
 ## 故障切换策略
 
