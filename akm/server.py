@@ -51,6 +51,8 @@ from akm.usage_flags import (
     FLAG_LOOP_GUARD_TRIGGERED,
 )
 from akm.usage_query import execute_query_script
+from akm.tasks.router import router as tasks_router
+from akm.tasks.scheduler import TaskScheduler
 
 
 # ── 用量查询自动调度器 ─────────────────────────────────────
@@ -159,12 +161,18 @@ async def lifespan(app: FastAPI):
     usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
     app.state.usage_query_scheduler = usage_query_scheduler
     app.state.usage_scheduler_task = usage_scheduler_task
+    # 通用定时任务调度器（scheduled_tasks 表）
+    task_scheduler = TaskScheduler(app)
+    await task_scheduler.start()
+    app.state.task_scheduler = task_scheduler
     try:
         yield
     finally:
         # 只清理当前这轮 lifespan 自己创建出来的对象，避免菜单栏重启时
         # 旧实例 shutdown 晚到，把新实例刚挂到 app.state 上的资源误停掉。
         await plugin_manager.unload_all()
+
+        await task_scheduler.stop()
 
         usage_scheduler_task.cancel()
         try:
@@ -185,6 +193,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
 app.include_router(agent_router)
+app.include_router(tasks_router)
 app.include_router(markdown_kb_mcp_router, prefix="/api/markdown-kb/mcp")
 
 
