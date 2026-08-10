@@ -15,6 +15,7 @@ class _FakeAgentLoop:
 
     def __init__(self):
         self.calls = []
+        self.stream_options = []
 
     async def run(self, messages, **options):
         self.calls.append({"messages": messages, "options": options})
@@ -23,6 +24,12 @@ class _FakeAgentLoop:
             final_message={"role": "assistant", "content": "done"},
             messages=messages,
         )
+
+    async def run_stream(self, messages, **options):
+        self.stream_options.append(options)
+        # 模拟生成器：生成 10 个 model_delta 事件，逐条等待取消回调
+        for i in range(10):
+            yield f"data: {json.dumps({'event': 'model_delta', 'data': {'content': str(i)}})}\n\n"
 
 
 @pytest.fixture(autouse=True)
@@ -470,3 +477,32 @@ async def test_default_instructions_placeholder_replaced_in_request(monkeypatch)
     assert "/tmp/ws" in options["instructions"]
     assert "{AKM_SOURCE_DIR}" not in options["instructions"]
     assert "{CURRENT_WORKING_DIRECTORY}" not in options["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_stream_passes_cancel_check_to_run_stream():
+    """流式请求应将断连检测回调作为 cancel_check 传给 run_stream。"""
+    loop = app.state.agent_loop
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/v1/agent",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            # 读完整个流，验证 cancel_check 已注入且可调用（正常结束时为 False）
+            chunks = [chunk async for chunk in resp.aiter_bytes()]
+
+    assert len(loop.stream_options) == 1
+    cancel_check = loop.stream_options[0].get("cancel_check")
+    assert cancel_check is not None
+    assert callable(cancel_check)
+    # 连接未断开时回调返回 False
+    assert cancel_check() is False
+    # 收到了流式内容
+    assert chunks
