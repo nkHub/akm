@@ -20,6 +20,9 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_list_plugins` | 列出已加载插件的非敏感摘要：名称、版本、分类、描述、是否内置、是否启用与来源 |
 | `akm_list_sessions` | 列出历史 Agent 会话的元信息（会话名、创建/更新时间、消息数、模型），不含消息正文，按更新时间倒序 |
 | `akm_load_session` | 读取历史 Agent 会话的最近若干条消息（`limit` 1-100，默认 20），用于回顾之前会话的上下文 |
+| `akm_list_tasks` | 列出已配置的定时任务（akm 后台任务系统，见「定时任务」章节）：任务 id、名称、类型、间隔、启用状态与执行时间；可用 `task_type` / `enabled=1` 过滤 |
+| `akm_create_task` | 创建一条定时任务（见「定时任务」章节）：`agent_call` 类型需 `payload.messages`（周期调用 Agent Loop 跑一轮对话），`usage_query` 类型需 `payload.alias`；`interval_sec` 为循环间隔秒数，0（默认）表示单次执行后自动禁用 |
+| `akm_delete_task` | 按 `akm_list_tasks` 返回的 `task_id` 删除一条定时任务，返回是否删除成功 |
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
