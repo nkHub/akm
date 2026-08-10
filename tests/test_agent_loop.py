@@ -941,3 +941,111 @@ async def test_run_stream_reuses_proxy_prefetched_aiter(monkeypatch):
     assert [event["event"] for event in events] == ["model_delta", "model_delta", "final"]
     assert [event["data"]["content"] for event in events[:2]] == ["你", "好"]
     assert events[-1]["data"]["final_message"]["content"] == "你好"
+
+
+@pytest.mark.asyncio
+async def test_run_stream_cancel_emits_cancelled_at_turn_start(monkeypatch):
+    """cancel_check 在每轮开始时返回 True，应下发 cancelled 事件并提前退出，不再调用上游。"""
+    called = False
+
+    async def forward(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"stream": True, "response": FakeStreamResponse(200, []), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream(
+        [{"role": "user", "content": "hi"}], cancel_check=lambda: True,
+    )])
+
+    assert [event["event"] for event in events] == ["cancelled"]
+    assert events[0]["data"]["turns"] == 1
+    assert events[0]["data"]["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_run_stream_cancel_emits_cancelled_before_streaming_upstream(monkeypatch):
+    """读取上游流前 cancel_check 返回 True：已流式下发的正文保留，随后 cancelled 提前退出。"""
+    first_chunk = 'data: {"choices":[{"delta":{"content":"你"}}]}\n\n'.encode("utf-8")
+
+    async def _aiter(*chunks):
+        for chunk in chunks:
+            yield chunk if isinstance(chunk, bytes) else chunk.encode("utf-8")
+
+    class PrefetchedResponse:
+        status_code = 200
+        closed = False
+
+        async def aiter_bytes(self):
+            raise RuntimeError("httpx.StreamConsumed: content already streamed")
+
+        async def aread(self):
+            return b""
+
+        async def aclose(self):
+            self.closed = True
+
+    async def forward(*_args, **_kwargs):
+        return {
+            "stream": True,
+            "response": PrefetchedResponse(),
+            "status_code": 200,
+            "provider": "test",
+            "key_alias": "key",
+            "first_chunk": first_chunk,
+            "aiter": _aiter('data: {"choices":[{"delta":{"content":"好"}}]}\n\n', b"data: [DONE]\n\n"),
+        }
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    # 首字节预读在内部先被消费并补发；读流前检查取消，剩余 chunk 不应继续消费
+    events = _events([item async for item in loop.run_stream(
+        [{"role": "user", "content": "hi"}], cancel_check=lambda: True,
+    )])
+
+    assert [event["event"] for event in events] == ["cancelled"]
+    assert events[0]["data"]["turns"] == 1
+    assert events[0]["data"]["usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+
+@pytest.mark.asyncio
+async def test_run_stream_cancel_before_tool_execution_skips_tool(monkeypatch):
+    """工具执行前 cancel_check 返回 True：跳过工具执行，下发 cancelled 提前退出。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    executed = []
+
+    def weather(city):
+        executed.append(city)
+        return {"city": city, "temp": 25}
+
+    registry.register(ToolDef("get_weather", "weather", {"type": "object"}, weather))
+    response = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"beijing\"}"}}]}}]}),
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    # 检查点调用顺序：每轮开始 → 读上游流前 → 工具执行前；
+    # 前两次放行，第三次（工具执行前）才触发取消
+    calls = {"n": 0}
+
+    def cancel_check():
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    events = _events([item async for item in loop.run_stream(
+        [{"role": "user", "content": "北京天气"}], cancel_check=cancel_check,
+    )])
+
+    # 已流出的 tool_call 事件保留，但工具不执行、不再继续
+    assert [event["event"] for event in events] == ["turn_start", "tool_call", "cancelled"]
+    assert events[1]["data"]["name"] == "get_weather"
+    assert executed == []
+    assert events[-1]["data"]["turns"] == 1
+    ToolRegistry.reset()

@@ -1228,6 +1228,7 @@ class AgentLoop:
         max_turns: int = 0,
         api_path: str = "chat/completions",
         workspace_root: str = "",
+        cancel_check: Callable[[], bool] | None = None,
     ) -> AsyncGenerator[str, None]:
         """运行 Agent Loop 并流式返回 SSE 事件
 
@@ -1242,6 +1243,8 @@ class AgentLoop:
                                 一条 system 修正提示并强制模型修正参数后重新调用
         - ``context_warning`` — 上下文占用接近上限（超过 agent_context_warning_ratio 比例），
                                 data 含 estimated_tokens / max_tokens / remaining_tokens / ratio / compacted
+        - ``cancelled``       — 手动中断（客户端通过 AbortController 取消流式请求，或
+                                cancel_check 回调返回 True），data 含 turns / usage；随后生成器退出
         - ``final``           — Agent 完成，含 final_message / usage / turns
         - ``error``           — 错误结束，含 error / turns / usage
 
@@ -1252,8 +1255,14 @@ class AgentLoop:
         每轮 LLM 调用以 ``stream: True`` 发送。上游协议帧只在服务端解析，
         客户端始终收到统一的 Agent SSE 事件。
 
+        手动中断：当 ``cancel_check`` 提供且返回 True（如客户端断开、前端点击
+        停止按钮触发的 AbortController）时，在关键 await 点（读取上游流前、
+        工具执行前、每轮开始）检查并提前退出，下发 ``cancelled`` 事件。这样
+        服务端会停止继续消费上游 LLM 流，避免「客户端已停止但仍烧 token」。
+
         Args:
             与 ``run()`` 相同。
+            cancel_check: 可选回调，返回 True 表示本次请求应被中断。
 
         Yields:
             格式化为 ``data: {...}\\n\\n`` 的 Agent SSE 字符串
@@ -1312,6 +1321,15 @@ class AgentLoop:
         tool_call_count = 0
 
         for turn in range(1, _max_turns + 1):
+            # ── 每轮开始检查取消 ──
+            if cancel_check is not None and cancel_check():
+                yield _sse_event("cancelled", {
+                    "turns": turn,
+                    "usage": total_usage,
+                    "compacted": compacted_count,
+                })
+                return
+
             # 上下文自动压缩：估算 token 超限时把早期历史压缩为摘要，控制上下文增长
             compacted_messages, removed = await self._compact_context(
                 working_messages, model, api_path
@@ -1394,6 +1412,15 @@ class AgentLoop:
                             yield _sse_event("model_delta", {"turn": turn, "content": content})
 
                     stream_source = upstream_aiter if upstream_aiter is not None else resp.aiter_bytes()
+                    # ── 读取上游流前检查取消：客户端已停止时不再继续消费
+                    # LLM 流，避免「客户端已停止但仍烧 token」 ──
+                    if cancel_check is not None and cancel_check():
+                        yield _sse_event("cancelled", {
+                            "turns": turn,
+                            "usage": total_usage,
+                            "compacted": compacted_count,
+                        })
+                        return
                     async for chunk in stream_source:
                         text = chunk.decode("utf-8", errors="replace")
                         contents = acc.feed(text)
@@ -1541,6 +1568,14 @@ class AgentLoop:
                     )
                 else:
                     tool_call_count += 1
+                    # ── 工具执行前检查取消：客户端已停止时不再执行工具 ──
+                    if cancel_check is not None and cancel_check():
+                        yield _sse_event("cancelled", {
+                            "turns": turn,
+                            "usage": total_usage,
+                            "compacted": compacted_count,
+                        })
+                        return
                     # 执行工具：上下文管理框架工具由 AgentLoop 内联处理，
                     # 其余委托 ToolRegistry 执行（期间注入请求级工作区覆盖）
                     tool_result, working_messages, compacted_count = (

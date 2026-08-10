@@ -219,15 +219,15 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `task_type` | str | 是 | `agent_call`（调 Agent Loop 跑一轮对话）或 `usage_query`（对指定 alias 执行用量查询） |
 | `payload` | dict | 否 | 任务参数，见下 |
 | `interval_sec` | int | 否 | 循环间隔（秒）；`0` 表示单次任务，执行后自动禁用 |
-| `cron` | str | 否 | 预留字段，暂不解析 |
-| `enabled` | bool | 否 | 默认 `true`；创建后 `next_run_at` 即为当前时间，下一轮扫描即可执行 |
+| `cron` | str | 否 | cron 时间表达式（标准 5 段：分 时 日 月 周，支持 `*` `/` `,` `-`）；提供时优先于 `interval_sec`，按表达式计算下一次执行时间；非法表达式返回 `400` |
+| `enabled` | bool | 否 | 默认 `true`；创建时 `interval_sec=0` 且无 `cron` 的任务 `next_run_at` 即为当前时间，下一轮扫描即可执行 |
 
 按类型的 `payload`：
 
 - **`agent_call`**：`messages`（必填，对话历史，与 `/v1/agent` 一致）；可选 `model` / `tools` / `instructions` / `max_turns` / `api_path` / `workspace_root`。执行结果摘要会写回 `payload.last_result`（含 `ok` / `final_message`）供事后追溯。
 - **`usage_query`**：`alias`（必填，对应 Key 的 alias）；执行该 Key 配置的用量查询脚本并写入 `usage_data`。
 
-执行后调度器更新 `last_run_at`；循环任务按 `interval_sec` 滚动排下一次 `next_run_at`，单次任务清空 `next_run_at` 并自动禁用。
+执行后调度器更新 `last_run_at`；提供 `cron` 的任务按下一次 cron 时刻滚动 `next_run_at`，循环任务按 `interval_sec` 滚动排下一次 `next_run_at`，单次任务清空 `next_run_at` 并自动禁用。
 
 ## 用量统计
 
@@ -360,8 +360,11 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
 | `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
+| `cancelled` | 手动中断（客户端通过 AbortController 取消流式请求断开连接，服务端主动检测到断连），`data` 含 `turns` / `usage` / `compacted`；随后流结束，不再下发 `final` |
 | `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |
 | `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` / `data.compacted` |
+
+> **断连取消**：客户端通过 AbortController 取消流式请求时底层 TCP 连接断开，服务端后台轮询检测到断连后在关键 await 点（每轮开始、读取上游 LLM 流前、工具执行前）检查并提前退出，下发 `cancelled` 事件，停止继续消费上游 LLM 流，避免「客户端已停止但仍烧 token」。工具轮中已流出的 `tool_call` 事件会保留，但对应工具不再执行。
 
 ```json
 // SSE 示例（工具轮：思考与正文实时下发，工具事件随后，最终主体实时流式）

@@ -1,5 +1,6 @@
 """Agent API 路由。"""
 
+import asyncio
 import base64
 import json
 import logging
@@ -7,11 +8,10 @@ import mimetypes
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-
 import akm
 from akm.config import load_config
 
@@ -271,10 +271,56 @@ async def agent(request: Request):
     }
     if stream:
         return StreamingResponse(
-            agent_loop.run_stream(messages, **options),
+            _agent_stream(agent_loop, request, messages, options),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
     result = await agent_loop.run(messages, **options)
     return JSONResponse(content=result.to_dict())
+
+
+def _agent_stream(agent_loop, request: Request, messages: list[dict], options: dict) -> AsyncGenerator[str, None]:
+    """包装 Agent 流式生成器，检测客户端断连并主动取消。
+
+    客户端通过 AbortController 取消 /v1/agent 流式请求时，底层 TCP 连接会断开。
+    这里后台轮询 request.is_disconnected()，一旦检测到断连即置位事件，作为
+    cancel_check 传给 run_stream，让服务端停止继续消费上游 LLM 流，避免「客户端
+    已停止但仍烧 token」。请求正常结束时取消轮询任务。
+    """
+
+    async def _inner() -> AsyncGenerator[str, None]:
+        import anyio
+
+        disconnected = anyio.Event()
+        stream_ended = asyncio.Event()
+
+        async def _watch_disconnect() -> None:
+            try:
+                while True:
+                    if stream_ended.is_set():
+                        return
+                    if await request.is_disconnected():
+                        disconnected.set()
+                        return
+                    await asyncio.sleep(0.5)
+            except (asyncio.CancelledError, Exception):
+                return
+
+        watcher = asyncio.create_task(_watch_disconnect())
+        try:
+            async for event in agent_loop.run_stream(
+                messages,
+                **options,
+                cancel_check=disconnected.is_set,
+            ):
+                yield event
+        finally:
+            stream_ended.set()
+            watcher.cancel()
+            try:
+                await watcher
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    return _inner()
