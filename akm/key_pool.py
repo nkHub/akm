@@ -505,6 +505,12 @@ def pick_wildcard_key(model: str = "", exclude_aliases: list[str] | None = None)
         ).fetchall()
     conn.close()
     normalized_model = str(model or "").strip()
+    # 空模型不允许走通配兜底：通配 Key 依赖 provider_models 做“可用模型集合”
+    # 匹配，空模型会绕过包含检查，把“模型未指定”的请求误发给不支持空模型的
+    # 上游（如 opencode.ai 对 model='' 返回 401），进而触发故障切换把 Key 误判
+    # 为失效而自动禁用。这里直接拒绝空模型，从选 Key 源头杜绝误命中。
+    if not normalized_model:
+        return None
     for row in rows:
         d = dict(row)
         provider_models = _provider_models_list(d.get("provider_models"))
