@@ -53,6 +53,7 @@ from akm.usage_flags import (
 from akm.usage_query import execute_query_script
 from akm.tasks.router import router as tasks_router
 from akm.tasks.scheduler import TaskScheduler
+from akm.flow.router import router as flow_router
 
 
 # ── 用量查询自动调度器 ─────────────────────────────────────
@@ -165,6 +166,12 @@ async def lifespan(app: FastAPI):
     task_scheduler = TaskScheduler(app)
     await task_scheduler.start()
     app.state.task_scheduler = task_scheduler
+    # 工作流引擎（/v1/flow）：建表 + 单例注入
+    from akm.flow.db import init_flow_db
+    from akm.flow.engine import WorkflowEngine
+
+    init_flow_db()
+    app.state.flow_engine = WorkflowEngine(app)
     try:
         yield
     finally:
@@ -194,6 +201,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
 app.include_router(agent_router)
 app.include_router(tasks_router)
+app.include_router(flow_router)
 app.include_router(markdown_kb_mcp_router, prefix="/api/markdown-kb/mcp")
 
 
