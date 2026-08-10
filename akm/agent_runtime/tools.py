@@ -1967,6 +1967,45 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             return {"ok": False, "error": f"邮件发送失败: {exc}"}
         return {"ok": True, "message_id": message_id, "from": sender, "to": _to_addr, "subject": subject}
 
+    async def send_notification_tool(
+        title: str,
+        message: str,
+        subtitle: str = "",
+    ) -> dict[str, Any]:
+        """发送 macOS 原生系统通知。返回发送结果。
+
+        优先使用菜单栏注入的宿主通知回调（app.state.host_notify，走 AppKit）；
+        纯 uvicorn / 无菜单栏环境时回退调用 rumps.notification。通知仅在
+        当前 Mac 上弹出，不会产生网络流量。
+        """
+        await _check_tool_enabled("agent_notify_enabled", "akm_send_notification")
+        title = str(title or "").strip()
+        message = str(message or "").strip()
+        if not title or not message:
+            return {"ok": False, "error": "title 与 message 不能为空"}
+        # macOS 通知正文过长会被系统截断，且大量文本不适合弹窗，限制一下体积
+        title = title[:200]
+        subtitle = str(subtitle or "")[:200]
+        message = message[:2000]
+
+        def _notify_sync() -> None:
+            """在独立线程中发送通知，避免阻塞事件循环。"""
+            # 优先宿主注入的回调（rumps.notification 最终走 AppKit，可从服务线程调用）
+            host_notify = getattr(app.state, "host_notify", None)
+            if callable(host_notify):
+                host_notify(title, subtitle, message)
+                return
+            import rumps
+
+            rumps.notification(title, subtitle, message)
+
+        try:
+            await asyncio.to_thread(_notify_sync)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_send_notification 发送失败: %s", exc)
+            return {"ok": False, "error": f"通知发送失败: {exc}"}
+        return {"ok": True, "title": title, "message": message}
+
     empty_object = {"type": "object", "properties": {}}
     tools: list[ToolDef] = [
         ToolDef("akm_get_status", "读取 AKM 服务健康、审计队列和插件运行状态", empty_object, get_status),
@@ -2167,6 +2206,24 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     "required": ["to", "subject", "body"],
                 },
                 send_email_tool,
+            )
+        )
+    if load_config().get("agent_notify_enabled", True):
+        tools.append(
+            ToolDef(
+                "akm_send_notification",
+                "发送 macOS 原生系统通知，在用户当前 Mac 桌面弹出提醒（需通过菜单栏启动 AKM 才能正常展示）。"
+                "适合向用户主动推送任务完成、定时提醒、重要事件等短消息；不产生网络流量",
+                {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "通知标题，建议简短"},
+                        "message": {"type": "string", "description": "通知正文内容"},
+                        "subtitle": {"type": "string", "description": "可选副标题"},
+                    },
+                    "required": ["title", "message"],
+                },
+                send_notification_tool,
             )
         )
     return tools

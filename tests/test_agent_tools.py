@@ -789,3 +789,83 @@ async def test_send_email_rejects_oversize_body(monkeypatch):
 
     assert r["ok"] is False
     assert "过大" in r["error"]
+
+
+def test_builtin_notification_registers_tool(monkeypatch):
+    """akm_send_notification 应注册为工具，title/message 必填。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_notify_enabled": True},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+    assert "akm_send_notification" in tools
+    assert tools["akm_send_notification"].parameters["required"] == ["title", "message"]
+
+
+@pytest.mark.asyncio
+async def test_send_notification_uses_host_notify(monkeypatch):
+    """宿主注入 host_notify 时通知应走该回调，并返回 ok。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_notify_enabled": True},
+    )
+    received = {}
+    app = SimpleNamespace(
+        state=SimpleNamespace(host_notify=lambda t, s, m: received.update(t=t, s=s, m=m))
+    )
+    handler = _handlers(app)["akm_send_notification"]
+
+    r = await handler(title="任务完成", message="测试正文", subtitle="sub")
+
+    assert r["ok"] is True
+    assert received["t"] == "任务完成"
+    assert received["s"] == "sub"
+    assert received["m"] == "测试正文"
+
+
+@pytest.mark.asyncio
+async def test_send_notification_falls_back_to_rumps(monkeypatch):
+    """无宿主回调时通知应回退 rumps.notification。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_notify_enabled": True},
+    )
+    called = []
+    import rumps
+
+    monkeypatch.setattr(rumps, "notification", lambda t, s, m: called.append((t, s, m)))
+    app = SimpleNamespace(state=SimpleNamespace(host_notify=None))
+    handler = _handlers(app)["akm_send_notification"]
+
+    r = await handler(title="标题", message="内容")
+
+    assert r["ok"] is True
+    assert called == [("标题", "", "内容")]
+
+
+@pytest.mark.asyncio
+async def test_send_notification_requires_title_and_message(monkeypatch):
+    """title 与 message 不能为空。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_notify_enabled": True},
+    )
+    app = SimpleNamespace(state=SimpleNamespace(host_notify=None))
+    handler = _handlers(app)["akm_send_notification"]
+
+    r = await handler(title="", message="内容")
+
+    assert r["ok"] is False
+    assert "不能为空" in r["error"]
+
+
+def test_send_notification_not_registered_when_disabled(monkeypatch):
+    """agent_notify_enabled=false 时 akm_send_notification 不应注册为工具。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_notify_enabled": False},
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name for tool in build_builtin_tools(app)}
+    assert "akm_send_notification" not in tools

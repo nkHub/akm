@@ -53,6 +53,7 @@ DEFAULTS = {
     "agent_run_shell_sandbox": True,    # 启用后 akm_run_shell 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与敏感路径放行受限；探测不到 API 时自动退回普通执行）
     "agent_git_enabled": False,         # 是否启用 Agent git 工具（akm_run_git，仅执行固定 operation）
     "agent_email_enabled": False,       # 是否启用 Agent 发邮件工具（akm_send_email）
+    "agent_notify_enabled": True,       # 是否启用 Agent 原生通知工具（akm_send_notification，macOS 系统通知）
     "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
     "agent_email_smtp_port": 465,       # SMTP 端口：465 走 SSL，587 走 STARTTLS（由 agent_email_smtp_ssl 决定是否启用 SSL）
     "agent_email_smtp_user": "",        # SMTP 登录账号
@@ -92,6 +93,7 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_run_shell_sandbox",
     "agent_git_enabled",
     "agent_email_enabled",
+    "agent_notify_enabled",
     "agent_email_smtp_host",
     "agent_email_smtp_port",
     "agent_email_smtp_user",
@@ -223,6 +225,7 @@ def load_config() -> dict:
     merged["agent_run_shell_sandbox"] = merged.get("agent_run_shell_sandbox") is True
     merged["agent_git_enabled"] = merged.get("agent_git_enabled") is True
     merged["agent_email_enabled"] = merged.get("agent_email_enabled") is True
+    merged["agent_notify_enabled"] = merged.get("agent_notify_enabled") is not False
     merged["agent_email_smtp_ssl"] = merged.get("agent_email_smtp_ssl") is not False
     merged["agent_email_smtp_port"] = max(1, _safe_int(merged.get("agent_email_smtp_port"), 465))
     merged["agent_max_tool_calls"] = max(1, _safe_int(merged.get("agent_max_tool_calls"), 30))
@@ -276,6 +279,7 @@ def save_config(data: dict) -> None:
     current["agent_run_shell_sandbox"] = current.get("agent_run_shell_sandbox") is True
     current["agent_git_enabled"] = current.get("agent_git_enabled") is True
     current["agent_email_enabled"] = current.get("agent_email_enabled") is True
+    current["agent_notify_enabled"] = current.get("agent_notify_enabled") is not False
     current["agent_email_smtp_ssl"] = current.get("agent_email_smtp_ssl") is not False
     current["agent_email_smtp_port"] = max(1, _safe_int(current.get("agent_email_smtp_port"), 465))
     current["agent_max_tool_calls"] = max(1, _safe_int(current.get("agent_max_tool_calls"), 30))
