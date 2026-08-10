@@ -489,6 +489,69 @@ def test_builtin_readonly_tools_register():
     assert tools["akm_load_session"].parameters["required"] == ["name"]
 
 
+def test_builtin_task_tools_register():
+    """定时任务工具（列表/创建/删除）应注册为内置工具。"""
+    app = SimpleNamespace(state=SimpleNamespace())
+    tools = {tool.name: tool for tool in build_builtin_tools(app)}
+
+    for name in ("akm_list_tasks", "akm_create_task", "akm_delete_task"):
+        assert name in tools
+    assert tools["akm_create_task"].parameters["required"] == ["name", "task_type"]
+    assert tools["akm_delete_task"].parameters["required"] == ["task_id"]
+
+
+def test_builtin_task_create_list_delete(monkeypatch, tmp_path):
+    """任务工具应在隔离库上完成创建、列表与删除闭环。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    handlers = _handlers(app)
+
+    created = handlers["akm_create_task"](
+        name="每日统计",
+        task_type="agent_call",
+        payload={"messages": [{"role": "user", "content": "hi"}]},
+        interval_sec=3600,
+    )
+    assert "error" not in created
+    assert created["name"] == "每日统计"
+    assert created["task_type"] == "agent_call"
+    assert created["enabled"] is True
+    assert created["next_run_at"]
+
+    listed = handlers["akm_list_tasks"]()
+    assert len(listed) == 1
+    assert listed[0]["name"] == "每日统计"
+
+    filtered = handlers["akm_list_tasks"](task_type="usage_query")
+    assert filtered == []
+
+    deleted = handlers["akm_delete_task"](task_id=created["id"])
+    assert deleted["deleted"] is True
+    assert handlers["akm_list_tasks"]() == []
+
+
+def test_builtin_task_tools_validate(monkeypatch, tmp_path):
+    """非法类型与非法 id 应返回错误而非抛出异常。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    handlers = _handlers(app)
+
+    bad_type = handlers["akm_create_task"](name="x", task_type="not-a-type")
+    assert "error" in bad_type
+
+    missing = handlers["akm_delete_task"](task_id="")
+    assert "error" in missing
+
+
+
 def _workspace_handlers(monkeypatch, tmp_path, *, write_tools=True):
     """构造工作区文件工具 handlers，并注入 tmp_path 作为请求级工作区。"""
     import json as _json
