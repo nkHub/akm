@@ -382,7 +382,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 ## Agent Loop
 
-`POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
+`POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。内置 `akm_ask_user` 澄清工具支持**交互式提问**：AI 认为信息不足时可中断本轮、向用户反问确认（支持自由输入框 / 单选 / 多选三种模式，由 `options` / `multiple` 参数控制），用户回答后携带上下文续跑（非流式返回 `ask_user` 字段，流式下发 `ask_user` 事件）。
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、配置、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
 
@@ -394,7 +394,9 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 - 数据表：`flow_workflows`（工作流定义，节点/边以 JSON 存储）与 `flow_runs`（每次运行快照 `data_json`），位于 `~/.akm/akm.db`。
 - 运行管理：`POST /v1/flow/workflows/{id}/runs` 传入 `prompt` 启动；`GET /v1/flow/runs/{id}/events` 提供 SSE 事件流（`run_start` / `node_start` / `log` / `token` / `node_end` / `run_end`），断线重连先收到完整 `snapshot`。
 - 实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）。
-- 一期范围：LLM 节点 + 流程控制（拓扑 / 并行 / 条件 / loop 重入 / merge / router）。编码节点（`pi-agent`）与人工审批（`human`）为二期规划，当前遇到时按 LLM 节点降级执行并在日志提示。
+- 一期能力：LLM 节点 + 流程控制（拓扑 / 并行 / 条件 / loop 重入 / merge / router）。
+- 二期能力：编码节点（`pi-agent`，subprocess 调本机 `pi` CLI，失败回退 mock）、人工审批（`human`，`POST /v1/flow/runs/{id}/resume` 审批；`flow_human_auto_approve` 默认 `true` 自动放行，设 `false` 后节点挂起等待审批）、git worktree 沙箱（`variables.useWorktree`，`run` / `per-coding` 两种模式）、节点级 `retry`（`error` / `review_fail` 触发，指数退避）、路径锁（同一项目路径串行化）与工作区快照 diff（编码节点产出 `fileDiffs`）。
+- 内置工具：`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs`，可在对话里直接管理并驱动工作流。
 
 ## 故障切换策略
 

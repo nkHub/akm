@@ -69,6 +69,18 @@ def _monkey_forward(monkeypatch):
         "resolve_model_catalog",
         lambda: [{"id": "gpt-test", "name": "GPT Test", "provider": "custom", "model": "gpt-test", "strengths": ["code", "reason"], "costPer1k": None}],
     )
+    # 编码节点（pi-agent）不真实调用本机 pi CLI（测试环境 Node 版本可能不支持），
+    # 统一 mock 返回一段文本，仅验证引擎调度与产物链
+    async def _fake_pi_agent(opts):
+        (opts.get("on_log") or (lambda m, lvl="info": None))("pi-agent（mock）", "info")
+        return {
+            "text": "# Pi Agent（mock）\n\n已完成编码任务。\n\n## 结论\npass",
+            "tokensIn": 50,
+            "tokensOut": 30,
+            "fileDiffs": None,
+        }
+
+    monkeypatch.setattr(fe.pi_runner, "run_pi_agent", _fake_pi_agent)
     return fake
 
 
@@ -265,3 +277,195 @@ def test_templates_instantiate():
         for e in inst["edges"]:
             assert e["source"] in node_ids
             assert e["target"] in node_ids
+
+
+# ── 二期：human 审批 ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_engine_human_auto_approve_by_default(_monkey_forward):
+    """默认 flow_human_auto_approve=true 时 human 节点自动放行，工作流可跑通。"""
+    wf = hotfix_workflow()
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "修复 bug")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+    assert final["status"] == "succeeded"
+    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
+    assert final["nodeRuns"][human_node["id"]]["status"] == "succeeded"
+    assert "output" in final["artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_engine_human_waits_and_resume_approve(_monkey_forward, monkeypatch):
+    """flow_human_auto_approve=false 时 human 节点挂起，resume approve 后续跑成功。"""
+    import akm.flow.engine as fe
+
+    monkeypatch.setattr(
+        "akm.config.load_config",
+        lambda: {"flow_human_auto_approve": False},
+    )
+    wf = hotfix_workflow()
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "修复 bug")
+    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
+    # 等 human 节点进入 waiting_human
+    for _ in range(50):
+        cur = engine.get_run(run["id"])
+        if cur["status"] == "waiting_human":
+            break
+        await asyncio.sleep(0.05)
+    cur = engine.get_run(run["id"])
+    assert cur["status"] == "waiting_human"
+    assert cur.get("pendingHumanNodeId") == human_node["id"]
+    assert cur["nodeRuns"][human_node["id"]]["status"] == "waiting_human"
+    # approve 后应继续跑完
+    await engine.resume(run["id"], {"action": "approve", "note": "同意"})
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+    assert final["status"] == "succeeded"
+    assert final["nodeRuns"][human_node["id"]]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_engine_human_resume_reject_fails_run(_monkey_forward, monkeypatch):
+    """resume reject 时 run 置 failed。"""
+    import akm.flow.engine as fe
+
+    monkeypatch.setattr(
+        "akm.config.load_config",
+        lambda: {"flow_human_auto_approve": False},
+    )
+    wf = hotfix_workflow()
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "修复 bug")
+    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
+    for _ in range(50):
+        cur = engine.get_run(run["id"])
+        if cur["status"] == "waiting_human":
+            break
+        await asyncio.sleep(0.05)
+    await engine.resume(run["id"], {"action": "reject", "note": "不同意"})
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+    assert final["status"] == "failed"
+    assert final["nodeRuns"][human_node["id"]]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_engine_human_resume_wrong_state(_monkey_forward, monkeypatch):
+    """非 waiting_human 状态 resume 应抛错。"""
+    import akm.flow.engine as fe
+
+    monkeypatch.setattr(
+        "akm.config.load_config",
+        lambda: {"flow_human_auto_approve": False},
+    )
+    wf = hotfix_workflow()
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "修复 bug")
+    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
+    for _ in range(50):
+        cur = engine.get_run(run["id"])
+        if cur["status"] == "waiting_human":
+            break
+        await asyncio.sleep(0.05)
+    # 先 approve 一次让 run 离开 waiting_human
+    await engine.resume(run["id"], {"action": "approve"})
+    await engine._tasks[run["id"]]
+    # 此时再 resume 应报错（run 已终态）
+    with pytest.raises(ValueError):
+        await engine.resume(run["id"], {"action": "approve"})
+
+
+# ── 二期：retry ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_engine_retry_on_error(_monkey_forward, monkeypatch):
+    """retry.on=error 时首次失败后重试成功。"""
+    wf = hotfix_workflow()
+    # 给 intake 节点配 retry：首次失败、重试成功
+    intake = next(n for n in wf["nodes"] if n["type"] == "intake")
+    intake["data"]["retry"] = {"max": 1, "on": "error"}
+    calls = {"n": 0}
+
+    async def flaky(body, client, api_path="chat/completions", plugin_manager=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("上游超时")
+        import json
+
+        return {
+            "status_code": 200,
+            "body": json.dumps({"choices": [{"message": {"role": "assistant", "content": "已完成。\n\n## 结论\npass"}}]}),
+            "key_alias": "t",
+            "provider": "p",
+            "model": "m",
+        }
+
+    import akm.flow.engine as fe
+
+    monkeypatch.setattr(fe, "_forward_request", flaky)
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "重试测试")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+    assert final["status"] == "succeeded"
+    assert calls["n"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_engine_retry_on_review_fail(_monkey_forward, monkeypatch):
+    """retry.on=review_fail 时结论 fail 会重试同节点。"""
+    wf = hotfix_workflow()
+    intake = next(n for n in wf["nodes"] if n["type"] == "intake")
+    intake["data"]["retry"] = {"max": 1, "on": "review_fail"}
+    calls = {"n": 0}
+
+    async def flaky(body, client, api_path="chat/completions", plugin_manager=None):
+        calls["n"] += 1
+        import json
+
+        if calls["n"] <= 1:
+            text = "有严重问题。\n\n## 结论\nfail"
+        else:
+            text = "已修复。\n\n## 结论\npass"
+        return {
+            "status_code": 200,
+            "body": json.dumps({"choices": [{"message": {"role": "assistant", "content": text}}]}),
+            "key_alias": "t",
+            "provider": "p",
+            "model": "m",
+        }
+
+    import akm.flow.engine as fe
+
+    monkeypatch.setattr(fe, "_forward_request", flaky)
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "审查重试")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+    assert final["status"] == "succeeded"
+    assert calls["n"] >= 2
+
+
+# ── 二期：pi-agent 节点 ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_engine_pi_coding_node_runs_pi_agent(_monkey_forward):
+    """pi-agent 编码节点走 run_pi_agent 执行（fixture 已 mock），产物链完整。"""
+    wf = hotfix_workflow()
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(wf, "编码测试")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+    assert final["status"] == "succeeded"
+    code_node = next(n for n in wf["nodes"] if n["type"] == "code")
+    assert final["nodeRuns"][code_node["id"]]["status"] == "succeeded"
+    assert "output" in final["artifacts"]

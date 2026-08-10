@@ -48,6 +48,13 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_frontmost_app` | 返回当前前台应用的信息（名称、Bundle ID、进程 ID）；无活跃 GUI 会话时返回空 |
 | `akm_context_status` | 查询当前对话上下文的 token 占用（估算已用 token、上限与剩余空间），用于判断是否需要压缩早期历史 |
 | `akm_compact_context` | 主动压缩当前对话的早期历史为一段摘要，保留最近约 `agent_keep_recent_messages` 条消息（工具调用与配对消息自动完整保留） |
+| `akm_flow_list` | 列出已配置的工作流（akm flow 工作流引擎）：返回工作流的 id、名称、描述、节点数与更新时间，不含完整定义 |
+| `akm_flow_get` | 按 id 读取一条工作流的完整定义（nodes / edges / variables），供检查流程结构或复制修改 |
+| `akm_flow_save` | 创建或更新一条工作流定义：`workflow_id` 留空则新建，传已有 id 则更新；`nodes` 为节点数组（`type` 取值 intake/plan/code/review/test/fix/human/router/merge/output，`data` 含 label/modelId/systemPrompt 等）、`edges` 为连线数组（含 source / target / condition / loop）、`variables` 为运行变量（如 projectPath / maxNodeVisits） |
+| `akm_flow_delete` | 删除一条工作流及其全部运行记录，返回是否删除成功 |
+| `akm_flow_run` | 启动一次工作流运行：传入工作流 id 与用户提示词 `prompt`，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态 |
+| `akm_flow_runs` | 列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 `workflow_id` 过滤 |
+| `akm_ask_user` | 向用户提出澄清问题并等待回答：当用户请求信息不完整、存在歧义或缺少关键参数时调用，本轮立即中断并把问题返回给客户端，用户回答后携带上下文续跑。支持三种交互模式：不传 `options` 时用户自由文本回答；传 `options` 时用户从候选中单选（`multiple` 缺省 `false`）；传 `options` + `multiple: true` 时多选（详见「交互式澄清提问」） |
 
 ## 配置
 
@@ -129,6 +136,34 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 2. **AI 主动压缩**：模型可调用 `akm_context_status` 查询当前 token 占用、`akm_compact_context` 主动压缩早期历史。`akm_compact_context` 优先采用摘要替换，不丢失关键信息。`agent_context_warning_ratio` 触发的 `context_warning` SSE 事件即用于提示客户端 / 模型接近上限。
 
 压缩只作用于早期历史，最近消息与所有工具调用配对始终完整保留；`final` / `error` / `context_warning` 事件的 `compacted` 字段表示本次运行累计压缩次数。
+
+## 交互式澄清提问
+
+默认编排中，Agent Loop 会在一轮请求内持续调用工具直到给出最终答案。当模型认为用户请求信息不完整、存在歧义、或缺少继续执行所需的关键参数时，可调用内置的 **`akm_ask_user`** 工具向用户提出澄清问题，本轮编排会**立即中断**，不再执行后续工具调用。该工具支持三种交互模式：
+
+| 调用参数 | 交互模式 | 说明 |
+|----------|----------|------|
+| 仅 `question` | 输入框 | 用户以自由文本回答 |
+| `question` + `options` | 单选 | 用户从候选列表中单选，`multiple` 缺省为 `false` |
+| `question` + `options` + `multiple: true` | 多选 | 用户可从候选中多选 |
+
+- **非流式**：响应体额外返回 `ask_user` 字段（`{"question": "...", "options": [...], "multiple": false}`），`final_message.content` 即模型想确认的问题，`messages` 中已把本轮 `akm_ask_user` 调用与其 `awaiting_user` 结果写入历史。
+- **流式**（`stream: true`）：在 `turn_start` / `tool_call` / `tool_result` 事件之后下发 `ask_user` 事件（`data` 含 `question` / `options` / `multiple` / `messages` / `turns` / `usage`），随后本轮结束，不再下发 `final`。
+
+客户端收到 `ask_user` 后应按 `multiple` / `options` 渲染输入框或选择控件，把问题展示给用户，等待用户回答；用户回答后，把上轮返回的 `messages` 追加一条新的 `user` 回答消息后重新请求 `/v1/agent`，模型即可结合上下文继续完成原本的任务。
+
+```bash
+# 第一轮：AI 提问澄清（单选模式）
+curl -s http://127.0.0.1:8788/v1/agent \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"帮我查一下天气"}],"tools":[{"type":"function","function":{"name":"akm_ask_user","description":"向用户澄清","parameters":{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}},"multiple":{"type":"boolean"}},"required":["question"]}}}]}'
+# → {"ok":true,"ask_user":{"question":"你想查哪个城市的天气？","options":["北京","上海","广州"],"multiple":false},...}
+
+# 第二轮：携带上下文继续（messages 为上轮返回，末尾追加用户回答）
+curl -s http://127.0.0.1:8788/v1/agent \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[<上轮返回的 messages>...,{"role":"user","content":"北京"}]}'
+```
 
 ## 文件上传
 
@@ -236,6 +271,44 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 - **`usage_query`**：`alias`（必填，对应 Key 的 alias）；执行该 Key 配置的用量查询脚本并写入 `usage_data`。
 
 执行后调度器更新 `last_run_at`；提供 `cron` 的任务按下一次 cron 时刻滚动 `next_run_at`，循环任务按 `interval_sec` 滚动排下一次 `next_run_at`，单次任务清空 `next_run_at` 并自动禁用。
+
+### 工作流引擎：`/v1/flow`
+
+服务内置一个 DAG 工作流引擎（实现位于 `akm/flow/`），把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成有向无环图：节点为步骤（`intake` / `plan` / `code` / `review` / `test` / `fix` / `human` / `router` / `merge` / `output`），边上的 `condition` 决定分支（`pass` / `fail` / 子串匹配）、`loop` 边支持按预算重入（如审查不通过回到修复）。多路并行节点同时执行，全部前驱完成后才汇聚（fan-in）。节点输出以 `artifacts` 累积，下游模板用 `{{artifacts.xxx}}` 引用；LLM 调用复用 AKM 代理网关。鉴权与 `/v1/agent` 一致。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/flow/health` | 引擎健康检查 |
+| GET | `/v1/flow/models` | 可用模型目录（从 AKM Key 模型列表构建，附 mock 兜底） |
+| GET | `/v1/flow/workflows` | 工作流列表 |
+| POST | `/v1/flow/workflows` | 创建工作流（`name` 必填） |
+| GET/PUT/DELETE | `/v1/flow/workflows/{id}` | 查询 / 更新 / 删除工作流（删除连带运行记录） |
+| GET | `/v1/flow/templates` | 内置模板列表（standard_dev / hotfix / dual_model） |
+| POST | `/v1/flow/templates/{id}/instantiate` | 实例化模板为工作流（重新生成全部 id） |
+| POST | `/v1/flow/workflows/{id}/runs` | 启动运行（`prompt` 必填），返回 `201` 与运行对象 |
+| GET | `/v1/flow/runs` | 运行分页列表（`workflow_id` / `limit` ≤500 / `offset`） |
+| GET | `/v1/flow/runs/{id}` | 查询运行完整快照 |
+| POST | `/v1/flow/runs/{id}/cancel` | 取消运行（运行中/等待审批节点标 cancelled，待激活标 skipped） |
+| POST | `/v1/flow/runs/{id}/resume` | 人工审批：body `{action: approve\|reject, note?, nodeId?}`；运行须处于 `waiting_human`，否则 `409` |
+| GET | `/v1/flow/runs/{id}/events` | SSE 事件流（先发完整 `snapshot`，再转发 `run_start` / `node_start` / `log` / `token` / `human_wait` / `node_end` / `run_end`，每 1 秒 `ping`） |
+
+工作流运行变量（`variables`）：
+
+| 变量 | 说明 |
+|------|------|
+| `projectPath` | 编码节点的工作项目路径（相对当前进程 cwd 或绝对路径） |
+| `maxNodeVisits` | 单节点最大访问次数（loop 预算），默认 `3`，取值钳制到 `[1, 20]` |
+| `useWorktree` | `true` 时编码节点用 git worktree 沙箱隔离；`false`（默认）直接在工作项目目录执行 |
+| `worktreeMode` | `run`（整个运行共享一个沙箱）或 `per-coding`（每个编码节点独立沙箱，可真并行写） |
+| `keepWorktree` | `true` 时运行结束后保留 worktree，否则自动清理 |
+
+节点 `data` 的 `retry` 字段支持重试：`{max: N, on: "error"}`（LLM/代理调用失败重试，指数退避 `400ms×attempt`）或 `{on: "review_fail"}`（审查结论为 `fail` 时同节点重执行）。编码节点（`code` / `fix` / `test`）调用本机 `pi` CLI（失败回退 mock 摘要），执行前后对项目目录做工作区快照 diff，产出写入 `run.fileDiffs`；同一项目路径通过路径锁串行化，避免并发写冲突。`human` 节点默认自动放行（`flow_human_auto_approve` 为 `true`），设为 `false` 后运行在审批节点挂起（`waiting_human`），经 `resume` 批准/驳回后继续或终止。
+
+配置项：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `flow_human_auto_approve` | `true` | 工作流（/v1/flow）的 human 人工审批节点是否自动放行；默认 true 保持内置模板可直接跑通，设为 false 后节点挂起等待 `POST /runs/{id}/resume` 审批 |
 
 ## 用量统计
 
@@ -368,6 +441,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
 | `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
+| `ask_user` | AI 调用 `akm_ask_user` 向用户澄清提问，本轮中断；`data` 含 `question` / `options` / `multiple`（`options` 为空数组表示自由文本回答，非空则单选或多选）/ `messages`（含本轮调用与 `awaiting_user` 结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端展示问题与选择控件、用户回答后携带 messages 续跑 |
 | `cancelled` | 手动中断（客户端通过 AbortController 取消流式请求断开连接，服务端主动检测到断连），`data` 含 `turns` / `usage` / `compacted`；随后流结束，不再下发 `final` |
 | `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |
 | `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` / `data.compacted` |
