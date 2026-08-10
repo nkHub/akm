@@ -26,12 +26,30 @@ from akm.db import (
     delete_task,
 )
 from akm.config import load_config
+from akm.key_pool import list_keys, key_model_list
 
 logger = logging.getLogger("akm.tasks.scheduler")
 
 # 调度器扫描间隔（秒）：最小 5 秒，避免空转过快
 _DEFAULT_SCAN_INTERVAL_SEC = 5
 _MIN_SCAN_INTERVAL_SEC = 5
+
+
+def _default_agent_model() -> str:
+    """为 agent_call 任务挑选一个默认模型。
+
+    任务未显式指定 model 时使用：取第一个 active Key 的模型列表首项。
+    避免把空模型传给 Agent Loop / 转发层——空模型无法选 Key，历史上还会
+    误命中通配 Key 并发往不支持空模型的上游（如 opencode.ai 返回 401），
+    进而触发故障切换把 Key 自动禁用。
+    """
+    for key in list_keys():
+        if key.get("status") != "active":
+            continue
+        models = key_model_list(key)
+        if models:
+            return models[0]
+    return ""
 
 
 class TaskScheduler:
@@ -117,9 +135,14 @@ class TaskScheduler:
         if not messages:
             logger.warning("[TaskScheduler] agent_call 任务 %s 缺少 messages", task.get("id"))
             return
+        model = str(payload.get("model") or "").strip()
+        if not model:
+            # 任务未指定模型时回填默认模型，避免空模型误选通配 Key
+            # （空模型向上游发送会触发 401 → 自动禁用 Key 的连锁问题）。
+            model = _default_agent_model()
         result = await agent_loop.run(
             messages,
-            model=payload.get("model", ""),
+            model=model,
             tools=payload.get("tools"),
             instructions=payload.get("instructions", ""),
             max_turns=int(payload.get("max_turns", 0) or 0),

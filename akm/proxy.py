@@ -4,6 +4,7 @@ import time
 import json
 import asyncio
 from contextlib import suppress
+from datetime import datetime
 import httpx
 
 from akm.config import resolve_http_proxy_url, load_config
@@ -14,7 +15,7 @@ from akm.key_pool import (
     set_status,
     key_model_list,
 )
-from akm.db import get_connection
+from akm.db import get_connection, get_keys_log_path
 from akm.agent import BUILTIN_AGENTS, get_agent
 from akm.plugins.context import RequestContext
 from akm.error_log import write_error_log
@@ -48,6 +49,28 @@ _PLUGIN_HEADER_SKIP = {
     "transfer-encoding",
     "upgrade",
 }
+
+
+def _write_key_audit(event: str, alias: str, details: dict | None = None) -> None:
+    """将 Key 配置/状态审计事件追加写入 ~/.akm/keys.log。
+
+    与 server.py 的 _write_key_change_log 保持同一格式，供代理层自动降级
+    （禁用/限流）这类绕过管理端 API 的状态变更也留下审计痕迹，避免“无痕禁用”。
+    """
+    payload = {
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "category": "key_audit",
+        "scope": "configuration",
+        "event": str(event or "unknown"),
+        "alias": str(alias or ""),
+        "details": details or {},
+    }
+    try:
+        with open(get_keys_log_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        # 审计写入失败不能影响主链路
+        pass
 
 
 class _ChainedAdapter:
@@ -380,6 +403,33 @@ async def forward_request(
                 "request_context": ctx,
             }
 
+    # ── 模型未指定时不进入选 Key 流程 ──
+    # 空模型无法做精确匹配，通配兜底已拒绝空模型（见 key_pool.pick_wildcard_key）。
+    # 这里直接返回明确错误，避免请求落到“没有可用的 API key”诊断分支，
+    # 也避免历史上“model='' 误选中通配 Key 并发往上游 → 401 → 自动禁用”的隐患。
+    if not (model or "").strip():
+        err_msg = "请求未指定 model，无法选择 API Key"
+        await _emit_on_response_meta({
+            "ok": False,
+            "phase": "select_key",
+            "status_code": 400,
+            "key_alias": "",
+            "provider": "",
+            "model": model,
+            "latency_ms": 0,
+            "error": err_msg,
+            "api_path": api_path,
+        })
+        return {
+            "status_code": 400,
+            "body": json.dumps({"error": err_msg}, ensure_ascii=False),
+            "key_alias": "",
+            "provider": "",
+            "model": model,
+            "error": err_msg,
+            "latency_ms": 0,
+        }
+
     while tries < _proxy_max_key_tries():
         # ── 两阶段 key 选择：精确匹配 → 通配符兜底 ──
         if use_fallback:
@@ -665,8 +715,36 @@ async def forward_request(
                 if action == "block":
                     if resp.status_code == 429:
                         mark_rate_limited(key["alias"])
+                        new_status = "rate_limited"
                     else:
                         set_status(key["alias"], "disabled")
+                        new_status = "disabled"
+                    # 自动降级留痕：写 error.log + keys.log 审计，避免“无痕禁用”
+                    # 让用户误以为 Key 莫名失效。禁用依据是本次上游状态码，
+                    # 结合 model 与上游响应片段，便于事后追溯是否为误判。
+                    write_error_log(
+                        source="proxy.auto_disable",
+                        error=f"上游返回 {resp.status_code}，自动{ '限流' if new_status == 'rate_limited' else '禁用' } Key: {key['alias']}",
+                        extra={
+                            "provider": key.get("provider", ""),
+                            "key_alias": key["alias"],
+                            "model": model or "",
+                            "status_code": resp.status_code,
+                            "action": action,
+                            "api_path": api_path,
+                            "upstream_api_path": upstream_api_path,
+                        },
+                    )
+                    _write_key_audit(
+                        "key.status.changed",
+                        key["alias"],
+                        {
+                            "before_status": str(key.get("status") or ""),
+                            "after_status": new_status,
+                            "reason": f"上游返回 {resp.status_code}，触发自动降级",
+                            "model": model or "",
+                        },
+                    )
                 await resp.aclose()
                 await _emit_on_response_meta({
                     "ok": False,

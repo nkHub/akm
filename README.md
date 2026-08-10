@@ -316,7 +316,7 @@ akm-menubar
 
 ## 数据与日志存储
 
-Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。菜单栏应用的休眠恢复链路则会单独把关键节点追加写入 `~/.akm/wake-recovery.log`，采用逐行 JSON 的形式记录收到唤醒、等待、探针结果、重启动作和最终恢复结果，便于判断到底是等待时间过短、本地服务未 ready，还是上游链路尚未恢复。系统内部错误（全局异常、代理转发失败、用量查询异常、插件加载失败等）会以逐行 JSON 写入 `~/.akm/error.log`，不再将 traceback 或内部报错详情返回给客户端；客户端仅收到通用错误提示，排障时请查看该文件。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
+Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。代理转发过程中因上游 401/403/402/429 触发的自动降级（禁用/限流）同样会追加写入 `key.status.changed`（含 before/after 状态与触发原因）到 `~/.akm/keys.log`，并同步写入 `~/.akm/error.log`（source 为 `proxy.auto_disable`），避免“无痕禁用”导致难以追溯。菜单栏应用的休眠恢复链路则会单独把关键节点追加写入 `~/.akm/wake-recovery.log`，采用逐行 JSON 的形式记录收到唤醒、等待、探针结果、重启动作和最终恢复结果，便于判断到底是等待时间过短、本地服务未 ready，还是上游链路尚未恢复。系统内部错误（全局异常、代理转发失败、用量查询异常、插件加载失败等）会以逐行 JSON 写入 `~/.akm/error.log`，不再将 traceback 或内部报错详情返回给客户端；客户端仅收到通用错误提示，排障时请查看该文件。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
 
 ## 本地智能体接入指引
 
@@ -399,6 +399,8 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | 连接/超时 | 指数退避重试后切换 Key |
 
 Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级依次尝试，已失败 Key 自动排除），精确匹配全部不可用时回退到 `models='*'` 的 Key。`*` 不再表示“无条件匹配全部模型”，而是表示“仅在保存为 `*` 时自动同步 `{base_url}/models`，并在这些提供商模型列表中参与匹配”；如果该 key 没有可用的 provider 模型列表，则不会参与 wildcard 匹配。
+
+请求未携带 `model`（或为空字符串）时直接返回「请求未指定 model，无法选择 API Key」（400），不进入选 Key 流程：空模型无法匹配任何模型的 provider 模型列表，历史上曾因通配兜底跳过包含检查而误选中 `models='*'` 的 Key，把空模型请求发往不支持空模型的上游（如 opencode.ai 对 `model=''` 返回 401），进而被故障切换误判为 Key 失效而自动禁用。定时任务（`agent_call`）未显式指定 `model` 时，会回填第一个 active Key 模型列表的首项作为默认模型。
 
 > 应用重启后，数据库中残留的 `rate_limited` 状态会自动恢复为 `active`。
 > Key 的 models 字段存储时自动规范化（去除逗号前后空格），防止匹配失败。
