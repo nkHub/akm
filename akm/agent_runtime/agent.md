@@ -195,6 +195,37 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 
   只读返回当前服务已注册的 Agent 工具名称列表（`{"data": ["akm_read_file", ...]}`）。接口位于管理端点，不经过 `/v1/agent` 的鉴权与工具注入逻辑。
 
+### 定时任务：`/v1/tasks`
+
+服务内置一个通用的后台定时任务系统，任务持久化在 `scheduled_tasks` 表中，由独立于用量查询调度器的 `TaskScheduler` 周期扫描执行（扫描间隔取配置 `task_check_interval_sec`，默认 5 秒，最小 5 秒）。鉴权与 `/v1/agent` 一致（`agent_api_token` 留空时免鉴权，配置后需 `Authorization: Bearer` 或 `X-Agent-Token`）。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/tasks` | 任务列表，可选 `task_type` / `enabled=1` 过滤 |
+| POST | `/v1/tasks` | 创建任务，返回 `201` 与完整记录 |
+| GET | `/v1/tasks/{id}` | 查询单条任务 |
+| PUT | `/v1/tasks/{id}` | 更新任务字段 |
+| DELETE | `/v1/tasks/{id}` | 删除任务 |
+| POST | `/v1/tasks/{id}/run` | 绕过调度器立即执行一次（不改变 `last_run_at` / `next_run_at`） |
+
+创建请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | str | 是 | 任务名称 |
+| `task_type` | str | 是 | `agent_call`（调 Agent Loop 跑一轮对话）或 `usage_query`（对指定 alias 执行用量查询） |
+| `payload` | dict | 否 | 任务参数，见下 |
+| `interval_sec` | int | 否 | 循环间隔（秒）；`0` 表示单次任务，执行后自动禁用 |
+| `cron` | str | 否 | 预留字段，暂不解析 |
+| `enabled` | bool | 否 | 默认 `true`；创建后 `next_run_at` 即为当前时间，下一轮扫描即可执行 |
+
+按类型的 `payload`：
+
+- **`agent_call`**：`messages`（必填，对话历史，与 `/v1/agent` 一致）；可选 `model` / `tools` / `instructions` / `max_turns` / `api_path` / `workspace_root`。执行结果摘要会写回 `payload.last_result`（含 `ok` / `final_message`）供事后追溯。
+- **`usage_query`**：`alias`（必填，对应 Key 的 alias）；执行该 Key 配置的用量查询脚本并写入 `usage_data`。
+
+执行后调度器更新 `last_run_at`；循环任务按 `interval_sec` 滚动排下一次 `next_run_at`，单次任务清空 `next_run_at` 并自动禁用。
+
 ## 用量统计
 
 内置的 `akm_get_usage_stats` 工具复用服务端 `_get_stats`（与 `/api/stats` 同源），查询审计日志中的 Token 用量汇总。默认同时返回最近 1 / 7 / 30 三个自然日窗口；也可指定单个窗口。

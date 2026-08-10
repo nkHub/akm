@@ -343,6 +343,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/images/generations` | Images Generations 转发接口（仅透传，不做协议转换；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)） |
+| GET/POST | `/v1/tasks` | 定时任务接口：列表 / 创建（`agent_call`、`usage_query` 类型）；配套 `GET/PUT/DELETE /v1/tasks/{id}` 与 `POST /v1/tasks/{id}/run` 立即执行 |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
