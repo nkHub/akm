@@ -43,6 +43,8 @@ _AGENT_IMAGE_MAX_COUNT = 4
 _AGENT_IMAGE_MAX_INPUT_BYTES = 20 * 1024 * 1024
 # run_shell 工具默认超时（秒）
 _WORKSPACE_SHELL_TIMEOUT_SEC = 60
+# 剪贴板工具单次读写的最大字符数，防止超大剪贴板内容撑爆模型上下文
+_CLIPBOARD_MAX_CHARS = 100_000
 # 读文件工具允许读取的最大文件大小（st_size 预检），超过时拒绝读取，
 # 防止把超大文件整个读入内存拖慢进程。文本源码/配置文件通常远小于此值。
 _WORKSPACE_READ_MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -1332,6 +1334,89 @@ async def _run_git_tool(
     return await _run_workspace_argv(argv, root, timeout, f"git {operation}")
 
 
+# ---- 原生系统工具底层实现（剪贴板 / 系统信息 / 打开 / 前台应用）----
+# 模块级辅助函数，便于测试单独 mock；工具入口在 build_builtin_tools 内。
+
+
+def _clipboard_read_text() -> str:
+    """读取系统剪贴板纯文本；无文本时返回空字符串。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    pb = NSPasteboard.generalPasteboard()
+    text = pb.stringForType_(NSPasteboardTypeString)
+    return text or ""
+
+
+def _clipboard_write_text(content: str) -> None:
+    """把纯文本写入系统剪贴板（替换当前内容）。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.setString_forType_(content, NSPasteboardTypeString)
+
+
+def _collect_system_info() -> dict[str, Any]:
+    """采集只读系统信息（macOS 版本 / 架构 / CPU / 内存 / 主机名 / Python 版本）。"""
+
+    def _run(*args: str) -> str:
+        try:
+            return subprocess.run(list(args), capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            return ""
+
+    info: dict[str, Any] = {}
+    sw = _run("sw_vers")
+    for line in sw.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            info.setdefault("macos", {})[key.strip()] = val.strip()
+    info["arch"] = _run("uname", "-m")
+    info["hostname"] = _run("hostname")
+    info["model"] = _run("sysctl", "-n", "hw.model")
+    info["cpu"] = _run("sysctl", "-n", "machdep.cpu.brand_string")
+    try:
+        info["cpu_count"] = int(_run("sysctl", "-n", "hw.ncpu"))
+    except ValueError:
+        pass
+    try:
+        info["memory_bytes"] = int(_run("sysctl", "-n", "hw.memsize"))
+    except ValueError:
+        pass
+    import platform
+
+    info["python_version"] = platform.python_version()
+    info["server_time"] = datetime.datetime.now().isoformat(timespec="seconds")
+    return info
+
+
+def _open_target(kind: str, target: str) -> bool:
+    """按类型打开 URL / 工作区文件 / 应用，返回是否成功。"""
+    from AppKit import NSWorkspace
+    from Foundation import NSURL
+
+    ws = NSWorkspace.sharedWorkspace()
+    if kind == "url":
+        return bool(ws.openURL_(NSURL.URLWithString_(target)))
+    if kind == "path":
+        return bool(ws.openFile_(target))
+    return bool(ws.launchApplication_(target))
+
+
+def _frontmost_app_info() -> dict[str, Any] | None:
+    """返回当前前台应用信息；无前台应用（无活跃 GUI 会话）时返回 None。"""
+    from AppKit import NSWorkspace
+
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if app is None:
+        return None
+    return {
+        "name": str(app.localizedName() or ""),
+        "bundle_id": str(app.bundleIdentifier() or ""),
+        "pid": int(app.processIdentifier() or 0),
+    }
+
+
 def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
     """创建与当前服务实例绑定的只读调试工具。
 
@@ -2006,6 +2091,87 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             return {"ok": False, "error": f"通知发送失败: {exc}"}
         return {"ok": True, "title": title, "message": message}
 
+    # ---- 原生系统工具（剪贴板 / 系统信息 / 打开 / 前台应用）----
+    # 这些工具通过 pyobjc（AppKit/Foundation）直调 macOS 原生能力，仅在本机生效；
+    # seatbelt 沙箱只作用于 akm_run_shell 的 shell 子进程，原生工具不受其约束，
+    # 因此统一由 agent_native_tools_enabled 开关控制。底层实现见模块级
+    # _clipboard_read_text / _clipboard_write_text / _collect_system_info /
+    # _open_target / _frontmost_app_info。
+
+    async def clipboard_get_tool() -> dict[str, Any]:
+        """读取系统剪贴板纯文本内容，返回内容与长度。"""
+        await _check_tool_enabled("agent_native_tools_enabled", "akm_clipboard_get")
+        try:
+            text = await asyncio.to_thread(_clipboard_read_text)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_clipboard_get 读取失败: %s", exc)
+            return {"ok": False, "error": f"剪贴板读取失败: {exc}"}
+        truncated = len(text) > _CLIPBOARD_MAX_CHARS
+        content = text[:_CLIPBOARD_MAX_CHARS]
+        return {"ok": True, "content": content, "length": len(text), "truncated": truncated}
+
+    async def clipboard_set_tool(content: str) -> dict[str, Any]:
+        """把纯文本写入系统剪贴板，替换当前内容。"""
+        await _check_tool_enabled("agent_native_tools_enabled", "akm_clipboard_set")
+        content = str(content or "")
+        if not content.strip():
+            return {"ok": False, "error": "content 不能为空"}
+        try:
+            await asyncio.to_thread(_clipboard_write_text, content[:_CLIPBOARD_MAX_CHARS])
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_clipboard_set 写入失败: %s", exc)
+            return {"ok": False, "error": f"剪贴板写入失败: {exc}"}
+        return {"ok": True, "length": len(content)}
+
+    async def system_info_tool() -> dict[str, Any]:
+        """采集本机只读系统信息：macOS 版本、架构、CPU、内存、主机名、Python 版本、服务器时间。"""
+        await _check_tool_enabled("agent_native_tools_enabled", "akm_system_info")
+        try:
+            info = await asyncio.to_thread(_collect_system_info)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_system_info 采集失败: %s", exc)
+            return {"ok": False, "error": f"系统信息采集失败: {exc}"}
+        return {"ok": True, **info}
+
+    async def open_tool(kind: str, target: str) -> dict[str, Any]:
+        """打开 URL（仅 http/https）、工作区内文件或应用，返回是否成功。"""
+        await _check_tool_enabled("agent_native_tools_enabled", "akm_open")
+        kind = str(kind or "url").strip().lower()
+        target = str(target or "").strip()
+        if kind not in ("url", "path", "app"):
+            return {"ok": False, "error": "kind 仅支持 url / path / app"}
+        if not target:
+            return {"ok": False, "error": "target 不能为空"}
+        if kind == "url":
+            # 仅放行 http/https，拒绝 file:// 等可导致本地文件被系统打开的 scheme
+            if not re.match(r"^https?://", target):
+                return {"ok": False, "error": "仅允许打开 http/https 协议的 URL"}
+        if kind == "path":
+            # 文件路径必须位于工作区内，避免模型引导打开任意系统路径
+            target = str(_safe_resolve_workspace_path(target, must_exist=True))
+        if kind == "app":
+            # 只允许应用名（不含路径分隔符），避免通过路径启动任意程序
+            if "/" in target or target in (".", ".."):
+                return {"ok": False, "error": "应用名不能包含路径分隔符"}
+        try:
+            opened = await asyncio.to_thread(_open_target, kind, target)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_open 打开失败: %s", exc)
+            return {"ok": False, "error": f"打开失败: {exc}"}
+        return {"ok": opened, "kind": kind, "target": target}
+
+    async def frontmost_app_tool() -> dict[str, Any]:
+        """返回当前前台应用的名称、Bundle ID 与进程号；无前台应用时 app 为 null。"""
+        await _check_tool_enabled("agent_native_tools_enabled", "akm_frontmost_app")
+        try:
+            info = await asyncio.to_thread(_frontmost_app_info)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_frontmost_app 查询失败: %s", exc)
+            return {"ok": False, "error": f"前台应用查询失败: {exc}"}
+        if info is None:
+            return {"ok": True, "app": None, "message": "当前无前台应用（无活跃 GUI 会话）"}
+        return {"ok": True, "app": info}
+
     empty_object = {"type": "object", "properties": {}}
     tools: list[ToolDef] = [
         ToolDef("akm_get_status", "读取 AKM 服务健康、审计队列和插件运行状态", empty_object, get_status),
@@ -2224,6 +2390,60 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     "required": ["title", "message"],
                 },
                 send_notification_tool,
+            )
+        )
+    if load_config().get("agent_native_tools_enabled", True):
+        tools.append(
+            ToolDef(
+                "akm_clipboard_get",
+                "读取本机 macOS 系统剪贴板纯文本内容，返回内容与长度（超 100000 字符截断并标记 truncated）。只读本机剪贴板，不产生网络流量",
+                empty_object,
+                clipboard_get_tool,
+            )
+        )
+        tools.append(
+            ToolDef(
+                "akm_clipboard_set",
+                "把纯文本写入本机 macOS 系统剪贴板，替换当前内容（会覆盖用户当前剪贴板，请确认模型意图后再调用）",
+                {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "要写入剪贴板的纯文本内容"},
+                    },
+                    "required": ["content"],
+                },
+                clipboard_set_tool,
+            )
+        )
+        tools.append(
+            ToolDef(
+                "akm_system_info",
+                "采集本机只读系统信息：macOS 版本、架构、CPU 型号与核数、内存、主机名、Python 版本、服务器时间。只读无副作用",
+                empty_object,
+                system_info_tool,
+            )
+        )
+        tools.append(
+            ToolDef(
+                "akm_open",
+                "打开本机资源：URL（仅限 http/https）、工作区内文件或已安装应用。kind 为 url/path/app，默认 url；path 必须位于工作区内，app 只接受应用名",
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["url", "path", "app"], "description": "打开类型，默认 url"},
+                        "target": {"type": "string", "description": "目标：http/https URL、工作区内文件路径或应用名"},
+                    },
+                    "required": ["target"],
+                },
+                open_tool,
+            )
+        )
+        tools.append(
+            ToolDef(
+                "akm_frontmost_app",
+                "返回本机当前前台应用的名称、Bundle ID 与进程号（只读）；无前台应用（无活跃 GUI 会话）时 app 为 null",
+                empty_object,
+                frontmost_app_tool,
             )
         )
     return tools
