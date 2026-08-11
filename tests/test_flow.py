@@ -110,6 +110,28 @@ def _monkey_forward(monkeypatch, tmp_path):
 
 # ── 纯函数 ─────────────────────────────────────────────────────
 
+def test_resolve_pi_binary(monkeypatch):
+    """pi CLI 定位：which 优先，找不到再扫常见安装目录，全未命中返回 None。"""
+    import os
+    import shutil as sh
+
+    from akm.flow.pi_runner import _resolve_pi_binary
+
+    # 1) which 命中时直接返回（打包 app 也能拿到绝对路径，不依赖 PATH）
+    monkeypatch.setattr(sh, "which", lambda name: "/custom/pi")
+    assert _resolve_pi_binary() == "/custom/pi"
+
+    # 2) which 未命中时，兜底扫描常见安装目录（模拟 /usr/local/bin/pi 存在）
+    monkeypatch.setattr(sh, "which", lambda name: None)
+    monkeypatch.setattr(os.path, "isfile", lambda p: p == "/usr/local/bin/pi")
+    monkeypatch.setattr(os, "access", lambda p, mode: True)
+    assert _resolve_pi_binary() == "/usr/local/bin/pi"
+
+    # 3) 全部未命中返回 None（由 _is_start_failure 判定后回退 mock）
+    monkeypatch.setattr(os.path, "isfile", lambda p: False)
+    assert _resolve_pi_binary() is None
+
+
 def test_structural_edges_excludes_loop():
     wf = standard_dev_workflow()
     edges = structural_edges(wf)

@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 from typing import Any
@@ -31,6 +32,29 @@ def resolve_cwd(raw: str | None) -> str:
     if not raw or raw == ".":
         return os.getcwd()
     return os.path.abspath(os.path.expanduser(raw))
+
+
+def _resolve_pi_binary() -> str | None:
+    """定位 pi CLI 绝对路径。
+
+    优先 ``shutil.which`` 走 PATH；GUI/launchctl 启动的打包 app 常缺
+    /usr/local/bin 等目录，再查常见安装位置兜底。找不到返回 None，
+    交由 ``_is_start_failure`` 判定后回退 mock。
+    """
+    found = shutil.which("pi")
+    if found:
+        return found
+    candidates = (
+        "/usr/local/bin/pi",
+        "/opt/homebrew/bin/pi",
+        "/opt/local/bin/pi",
+        os.path.expanduser("~/.local/bin/pi"),
+        "/usr/bin/pi",
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _load_pi_models_file() -> dict | None:
@@ -103,7 +127,7 @@ def _is_start_failure(err: Exception) -> bool:
     """启动类错误（找不到命令/认证/模型配置）才允许回退 mock。"""
     msg = str(err)
     return bool(
-        re.search(r"ENOENT|not found|command not found|Cannot find module|EACCES|spawn ", msg, re.IGNORECASE)
+        re.search(r"ENOENT|not found|No such file|command not found|Cannot find module|EACCES|spawn ", msg, re.IGNORECASE)
         or re.search(r"API key|auth|unauthorized|login|models?\.json|unknown model|invalid model", msg, re.IGNORECASE)
     )
 
@@ -129,8 +153,13 @@ async def _run_pi_cli(opts: dict, timeout_ms: int, model_ref: str | None) -> dic
         "CI": os.environ.get("CI", "1"),
         "NO_COLOR": os.environ.get("NO_COLOR", "1"),
     }
+    pi_bin = _resolve_pi_binary()
+    if not pi_bin:
+        raise FileNotFoundError(
+            "pi 命令不存在（PATH 与常见安装目录均未找到）：请安装 pi-coding-agent 或把其所在目录加入 PATH"
+        )
     proc = await asyncio.create_subprocess_exec(
-        "pi",
+        pi_bin,
         *args,
         cwd=cwd,
         env=env,
