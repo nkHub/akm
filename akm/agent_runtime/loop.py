@@ -422,6 +422,31 @@ class AgentResult:
         }
 
 
+def _extract_cached_tokens(usage) -> tuple[int, int]:
+    """从 usage 提取缓存命中/写入 token 数（兼容 Chat / Messages / Responses）。
+
+    统一口径与 server._extract_tokens 一致：
+    - 优先 Chat 的 cached_tokens；
+    - 其次 Anthropic Messages 的 cache_read_input_tokens；
+    - 再退到 prompt_tokens_details / input_tokens_details 里的 cached_tokens。
+    返回 (cached_tokens, cache_creation_tokens)。
+    """
+    if not isinstance(usage, dict):
+        return 0, 0
+    cached = int(usage.get("cached_tokens", 0) or 0)
+    if not cached:
+        cached = int(usage.get("cache_read_input_tokens", 0) or 0)
+    if not cached:
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = usage.get(key)
+            if isinstance(details, dict):
+                cached = int(details.get("cached_tokens", 0) or 0)
+                if cached:
+                    break
+    creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    return cached, creation
+
+
 class _SSEStreamAccumulator:
     """SSE 流式累加器
 
@@ -626,6 +651,14 @@ class _SSEStreamAccumulator:
         return self.prompt_tokens + self.completion_tokens
 
     @property
+    def cached_tokens(self) -> int:
+        return _extract_cached_tokens(self._usage)[0]
+
+    @property
+    def cache_creation_tokens(self) -> int:
+        return _extract_cached_tokens(self._usage)[1]
+
+    @property
     def response_body(self) -> str:
         """重建非流式完整响应 JSON，供 _extract_tool_calls_from_response 等复用"""
         sorted_calls = [self._tool_calls[i] for i in sorted(self._tool_calls)]
@@ -709,11 +742,16 @@ class AgentLoop:
         total_tokens: int,
         error: str = "",
         source: str = "chat",
+        cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
     ) -> None:
         """如果注册了审计回调，则写入审计日志。
 
         来源标记通过 request_headers 的 x-akm-source 字段区分：
         chat（/v1/agent 直接调用）、task（定时任务触发）。
+
+        cached_tokens / cache_creation_tokens 记录上游上下文缓存命中与写入的
+        token 数（上游支持自动缓存时可能大于 0）。
         """
         if self._audit_submitter is None:
             return
@@ -745,6 +783,8 @@ class AgentLoop:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
+                "cached_tokens": cached_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
             })
         except Exception:
             logger.warning("[AgentLoop] 审计日志写入失败", exc_info=True)
@@ -1116,6 +1156,8 @@ class AgentLoop:
             # 累加 token 用量
             prompt_tokens = 0
             completion_tokens = 0
+            cached_tokens = 0
+            cache_creation_tokens = 0
             try:
                 resp_data = json.loads(response_body)
                 usage = resp_data.get("usage", {})
@@ -1125,6 +1167,7 @@ class AgentLoop:
                     total_usage["prompt_tokens"] += prompt_tokens
                     total_usage["completion_tokens"] += completion_tokens
                     total_usage["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+                    cached_tokens, cache_creation_tokens = _extract_cached_tokens(usage)
             except json.JSONDecodeError:
                 pass
 
@@ -1133,6 +1176,8 @@ class AgentLoop:
                 result, model, body, response_body, status_code,
                 prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
                 source=source,
+                cached_tokens=cached_tokens,
+                cache_creation_tokens=cache_creation_tokens,
             )
 
             # 提取 tool_calls
@@ -1537,6 +1582,8 @@ class AgentLoop:
                 prompt_tokens = acc.prompt_tokens
                 completion_tokens = acc.completion_tokens
                 total_tokens = acc.total_tokens
+                cached_tokens = acc.cached_tokens
+                cache_creation_tokens = acc.cache_creation_tokens
             else:
                 # ── 非流式兜底（上游不支持流式或其他原因返回了普通 JSON 响应）──
                 status_code = int(result.get("status_code", 0) or 0)
@@ -1554,6 +1601,8 @@ class AgentLoop:
                 prompt_tokens = 0
                 completion_tokens = 0
                 total_tokens = 0
+                cached_tokens = 0
+                cache_creation_tokens = 0
                 try:
                     resp_data = json.loads(response_body)
                     usage = resp_data.get("usage", {})
@@ -1561,6 +1610,7 @@ class AgentLoop:
                         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                         completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                         total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+                        cached_tokens, cache_creation_tokens = _extract_cached_tokens(usage)
                 except json.JSONDecodeError:
                     pass
 
@@ -1574,6 +1624,8 @@ class AgentLoop:
                 result, model, body, response_body, status_code,
                 prompt_tokens, completion_tokens, total_tokens,
                 source=source,
+                cached_tokens=cached_tokens,
+                cache_creation_tokens=cache_creation_tokens,
             )
 
             # ── 从累积/重建的响应中提取 tool_calls ──
