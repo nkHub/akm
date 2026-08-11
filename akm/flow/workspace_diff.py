@@ -33,10 +33,35 @@ TEXT_EXT = {
     ".txt", ".env", ".gitignore",
 }
 
+# 快照/差异边界默认值；可通过 config.json 的 agent_flow 自定义
 MAX_FILE_BYTES = 120_000
 MAX_FILES_SCAN = 800
 MAX_DIFFS = 40
 MAX_CONTENT_CHARS = 24_000
+
+
+def _flow_wsdiff_limits() -> dict:
+    """解析工作区快照/差异边界：优先 config.json 的 agent_flow.wsdiff_*，否则默认值。
+
+    返回 {max_file_bytes, max_files_scan, max_diffs, max_content_chars}。
+    """
+    try:
+        from akm.config import load_config
+
+        cfg = load_config().get("agent_flow") or {}
+        return {
+            "max_file_bytes": int(cfg.get("wsdiff_max_file_bytes") or MAX_FILE_BYTES),
+            "max_files_scan": int(cfg.get("wsdiff_max_files_scan") or MAX_FILES_SCAN),
+            "max_diffs": int(cfg.get("wsdiff_max_diffs") or MAX_DIFFS),
+            "max_content_chars": int(cfg.get("wsdiff_max_content_chars") or MAX_CONTENT_CHARS),
+        }
+    except Exception:  # noqa: BLE001
+        return {
+            "max_file_bytes": MAX_FILE_BYTES,
+            "max_files_scan": MAX_FILES_SCAN,
+            "max_diffs": MAX_DIFFS,
+            "max_content_chars": MAX_CONTENT_CHARS,
+        }
 
 
 def build_patch_preview(path: str, before: str | None, after: str | None, max_lines: int = 80) -> str:
@@ -70,19 +95,19 @@ def build_patch_preview(path: str, before: str | None, after: str | None, max_li
     return "\n".join(lines)
 
 
-def _walk_files(root: str) -> list[str]:
+def _walk_files(root: str, max_files_scan: int = MAX_FILES_SCAN) -> list[str]:
     """递归收集文本文件路径（有边界）。"""
     out: list[str] = []
 
     def _walk(dir_path: str) -> None:
-        if len(out) >= MAX_FILES_SCAN:
+        if len(out) >= max_files_scan:
             return
         try:
             entries = sorted(os.scandir(dir_path), key=lambda e: e.name)
         except OSError:
             return
         for ent in entries:
-            if len(out) >= MAX_FILES_SCAN:
+            if len(out) >= max_files_scan:
                 return
             # 跳过隐藏文件（.env/.gitignore 例外）
             if ent.name.startswith(".") and ent.name not in (".env", ".gitignore"):
@@ -103,19 +128,23 @@ def _walk_files(root: str) -> list[str]:
     return out
 
 
-def _read_text_limited(path: str) -> str | None:
+def _read_text_limited(
+    path: str,
+    max_file_bytes: int = MAX_FILE_BYTES,
+    max_content_chars: int = MAX_CONTENT_CHARS,
+) -> str | None:
     """读取文本文件，超限/二进制/异常返回 None。"""
     try:
         st = os.stat(path)
-        if not os.path.isfile(path) or st.st_size > MAX_FILE_BYTES:
+        if not os.path.isfile(path) or st.st_size > max_file_bytes:
             return None
         with open(path, "rb") as fh:
             buf = fh.read()
         if b"\x00" in buf:
             return None
         text = buf.decode("utf-8", errors="replace")
-        if len(text) > MAX_CONTENT_CHARS:
-            text = text[:MAX_CONTENT_CHARS] + f"\n…[truncated {len(text) - MAX_CONTENT_CHARS} chars]"
+        if len(text) > max_content_chars:
+            text = text[:max_content_chars] + f"\n…[truncated {len(text) - max_content_chars} chars]"
         return text
     except OSError:
         return None
@@ -123,21 +152,27 @@ def _read_text_limited(path: str) -> str | None:
 
 def snapshot_workspace(project_path: str) -> dict[str, str | None]:
     """快照工作区文本文件：{相对路径: 内容或 None}。"""
+    limits = _flow_wsdiff_limits()
     root = os.path.abspath(os.path.expanduser(project_path))
     snapshot: dict[str, str | None] = {}
-    for full in _walk_files(root):
+    for full in _walk_files(root, limits["max_files_scan"]):
         rel = os.path.relpath(full, root).replace(os.sep, "/")
-        snapshot[rel] = _read_text_limited(full)
+        snapshot[rel] = _read_text_limited(
+            full,
+            max_file_bytes=limits["max_file_bytes"],
+            max_content_chars=limits["max_content_chars"],
+        )
     return snapshot
 
 
 def diff_workspace(project_path: str, before: dict[str, str | None]) -> list[dict]:
     """对比执行前后差异，返回 FileDiff 列表。"""
+    limits = _flow_wsdiff_limits()
     after = snapshot_workspace(project_path)
     keys = sorted(set(before.keys()) | set(after.keys()))
     diffs: list[dict] = []
     for rel in keys:
-        if len(diffs) >= MAX_DIFFS:
+        if len(diffs) >= limits["max_diffs"]:
             break
         a = before.get(rel)
         b = after.get(rel)

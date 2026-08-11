@@ -13,8 +13,22 @@ import re
 import shutil
 import subprocess
 
-# worktree 根目录（AKM 复用 ~/.akm/flow_worktrees）
+# worktree 根目录默认值（AKM 复用 ~/.akm/flow_worktrees）；
+# 可通过 config.json 的 agent_flow.worktrees_root 自定义
 WORKTREES_ROOT = os.path.join(os.path.expanduser("~/.akm"), "flow_worktrees")
+
+
+def _worktrees_root() -> str:
+    """解析 worktree 根目录：优先 config.json 的 agent_flow.worktrees_root，否则默认 ~/.akm/flow_worktrees。"""
+    try:
+        from akm.config import load_config
+
+        configured = (load_config().get("agent_flow") or {}).get("worktrees_root")
+        if configured:
+            return os.path.abspath(os.path.expanduser(str(configured)))
+    except Exception:  # noqa: BLE001
+        pass
+    return WORKTREES_ROOT
 
 
 def is_truthy_var(value) -> bool:
@@ -86,7 +100,7 @@ def _safe_segment(s: str) -> str:
 
 def plan_worktree_paths(run_id: str, node_id: str | None = None) -> dict:
     """规划 worktree 目录与分支。"""
-    base = os.path.join(WORKTREES_ROOT, _safe_segment(run_id))
+    base = os.path.join(_worktrees_root(), _safe_segment(run_id))
     if node_id:
         return {
             "dir": os.path.join(base, "nodes", _safe_segment(node_id)),
@@ -153,7 +167,7 @@ def cleanup_run_worktrees(state: dict | None, run_id: str | None = None) -> list
             pass
     folder = None
     if run_id:
-        folder = os.path.join(WORKTREES_ROOT, _safe_segment(run_id))
+        folder = os.path.join(_worktrees_root(), _safe_segment(run_id))
     elif state and state.get("runPath"):
         folder = os.path.dirname(state["runPath"])
     if folder:

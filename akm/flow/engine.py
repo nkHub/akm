@@ -296,16 +296,36 @@ class WorkflowEngine:
         """
         if model.get("provider") == "mock":
             return self._mock_chat(model, messages)
+        # 运行参数从 config.json 的 agent_flow 读取（重试次数/退避/请求参数），
+        # 缺省用模块级默认值，便于按机器/场景调整而不改代码
+        from akm.config import load_config
+        _flow_cfg = load_config().get("agent_flow") or {}
+        try:
+            llm_retry_max = int(_flow_cfg.get("llm_retry_max") or _LLM_RETRY_MAX)
+        except (TypeError, ValueError):
+            llm_retry_max = _LLM_RETRY_MAX
+        try:
+            llm_retry_base_delay = float(_flow_cfg.get("llm_retry_base_delay") or _LLM_RETRY_BASE_DELAY)
+        except (TypeError, ValueError):
+            llm_retry_base_delay = _LLM_RETRY_BASE_DELAY
+        try:
+            temperature = float(_flow_cfg.get("llm_temperature") or 0.3)
+        except (TypeError, ValueError):
+            temperature = 0.3
+        try:
+            max_tokens = int(_flow_cfg.get("llm_max_tokens") or 4096)
+        except (TypeError, ValueError):
+            max_tokens = 4096
         body = {
             "model": model.get("model") or model.get("id"),
             "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 4096,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
             "stream": False,
         }
         http_client = getattr(self.app.state, "http_client", None)
         plugin_manager = getattr(self.app.state, "plugin_manager", None)
-        for attempt in range(_LLM_RETRY_MAX + 1):
+        for attempt in range(llm_retry_max + 1):
             result = await _forward_request(body, http_client, plugin_manager=plugin_manager)
             if result is None:
                 raise RuntimeError("LLM 转发不可用（http_client 未初始化）")
@@ -322,11 +342,11 @@ class WorkflowEngine:
                 )
                 return {"text": text, "tokensIn": tokens_in, "tokensOut": tokens_out}
             # 仅对 5xx 做自动重试（上游瞬时故障）；其余状态（4xx 等）直接失败
-            if status_code >= 500 and attempt < _LLM_RETRY_MAX:
-                retry_delay = _LLM_RETRY_BASE_DELAY * (2 ** attempt)
+            if status_code >= 500 and attempt < llm_retry_max:
+                retry_delay = llm_retry_base_delay * (2 ** attempt)
                 logger.warning(
                     "[Flow] LLM 请求失败（%s），%.1fs 后重试（第 %d 次，共 %d 次）：%s",
-                    status_code, retry_delay, attempt + 1, _LLM_RETRY_MAX + 1,
+                    status_code, retry_delay, attempt + 1, llm_retry_max + 1,
                     (response_body or "")[:200],
                 )
                 await asyncio.sleep(retry_delay)
@@ -410,10 +430,13 @@ class WorkflowEngine:
     def _wait_for_human(self, run: dict, node_id: str, message: str = "") -> asyncio.Future:
         """挂起当前 run 等待人工审批；每 run 单槽位（已有等待则 reject 新的）。"""
         run_id = run["id"]
-        # 自动放行开关：配置 flow_human_auto_approve=true（默认）时 human 节点不挂起，
+        # 自动放行开关：config.json 的 agent_flow.human_auto_approve（默认 true，
+        # 兼容迁移期顶层 flow_human_auto_approve）时 human 节点不挂起，
         # 直接返回已批准的 future，保证模板工作流可无人工干预跑通。
         from akm.config import load_config
-        if load_config().get("flow_human_auto_approve", True):
+        _cfg = load_config()
+        human_auto = (_cfg.get("agent_flow") or {}).get("human_auto_approve", _cfg.get("flow_human_auto_approve", True))
+        if human_auto:
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
             fut.set_result({"action": "approve", "note": "auto", "nodeId": node_id})

@@ -144,6 +144,21 @@ def test_resolve_pi_binary(monkeypatch):
     assert _resolve_pi_binary() == "/opt/pi-custom/pi"
 
 
+def test_pi_model_from_config(monkeypatch):
+    """agent_flow.pi_model 可强制指定 pi 编码节点使用的模型（环境变量为空时）。"""
+    import akm.config as cfg_mod
+
+    from akm.flow.pi_runner import resolve_pi_model_ref
+
+    monkeypatch.delenv("FLOW_PI_MODEL", raising=False)
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {"agent_flow": {"pi_model": "deepseek-v4-pro"}})
+    assert resolve_pi_model_ref(None)["ref"] == "deepseek-v4-pro"
+
+    # 配置模型优先级低于环境变量 FLOW_PI_MODEL（迁移期兼容）
+    monkeypatch.setenv("FLOW_PI_MODEL", "env-model")
+    assert resolve_pi_model_ref(None)["ref"] == "env-model"
+
+
 def test_resolve_model_catalog_splits_comma_models(monkeypatch):
     """catalog 构建：key 的 models 逗号串应切分为独立模型，'*' 取 provider_models。"""
     import akm.flow.models as fm
@@ -662,7 +677,9 @@ async def test_llm_chat_failure_audit_uses_request_model(monkeypatch, _monkey_fo
     monkeypatch.setattr(server_mod, "_submit_audit_log", _fake_submit_audit_log)
     monkeypatch.setattr(flow_engine, "_forward_request", _fake_forward)
     # 避免 5xx 自动重试的真实退避等待（重试耗尽后最终失败）
-    monkeypatch.setattr(flow_engine, "_LLM_RETRY_BASE_DELAY", 0.001)
+    import akm.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {"agent_flow": {"llm_retry_base_delay": 0.001}})
 
     eng = flow_engine.WorkflowEngine(_fake_app())
     model = {"id": "gpt-test", "name": "GPT Test", "provider": "openai", "model": "gpt-5.6-terra", "strengths": []}
@@ -679,10 +696,11 @@ async def test_llm_chat_retries_on_5xx_then_succeeds(monkeypatch, _monkey_forwar
     """LLM 节点对瞬时 5xx 自动重试，重试成功后正常返回并只写一条成功审计。"""
     import json
 
+    import akm.config as cfg_mod
     import akm.server as server_mod
     from akm.flow import engine as flow_engine
 
-    monkeypatch.setattr(flow_engine, "_LLM_RETRY_BASE_DELAY", 0.001)
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {"agent_flow": {"llm_retry_base_delay": 0.001}})
     submitted: list[dict] = []
     calls = {"n": 0}
 
@@ -712,3 +730,67 @@ async def test_llm_chat_retries_on_5xx_then_succeeds(monkeypatch, _monkey_forwar
     # 重试中间的失败尝试不落库，只有成功一次
     assert len(submitted) == 1
     assert submitted[0]["status_code"] == 200
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_reads_llm_params_from_config(monkeypatch, _monkey_forward):
+    """_llm_chat 的 temperature/max_tokens/重试参数读 agent_flow 配置。"""
+    import json
+
+    import akm.config as cfg_mod
+    import akm.server as server_mod
+    from akm.flow import engine as flow_engine
+
+    captured: dict = {}
+
+    async def _fake_submit_audit_log(app, data):
+        pass
+
+    async def _capture_forward(body, client, api_path="chat/completions", plugin_manager=None):
+        captured.update(body)
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        return {"status_code": 200, "body": json.dumps(payload), "key_alias": "t", "provider": "p", "model": "m"}
+
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {"agent_flow": {"llm_temperature": 0.9, "llm_max_tokens": 2048}})
+    monkeypatch.setattr(server_mod, "_submit_audit_log", _fake_submit_audit_log)
+    monkeypatch.setattr(flow_engine, "_forward_request", _capture_forward)
+
+    eng = flow_engine.WorkflowEngine(_fake_app())
+    model = {"id": "m", "name": "M", "provider": "p", "model": "deepseek-v4-pro", "strengths": []}
+    await eng._llm_chat(model, [{"role": "user", "content": "hi"}])
+
+    assert captured["temperature"] == 0.9
+    assert captured["max_tokens"] == 2048
+
+
+def test_worktrees_root_reads_config(monkeypatch):
+    """agent_flow.worktrees_root 自定义 worktree 沙箱根目录。"""
+    import akm.config as cfg_mod
+
+    from akm.flow import worktree as wt_mod
+
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {"agent_flow": {"worktrees_root": "/tmp/akm-wt"}})
+    paths = wt_mod.plan_worktree_paths("run123", "node456")
+    assert paths["dir"].startswith("/tmp/akm-wt/run123/nodes/node456")
+
+    # 未配置时回退默认 ~/.akm/flow_worktrees
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
+    assert wt_mod._worktrees_root() == wt_mod.WORKTREES_ROOT
+
+
+def test_wsdiff_limits_reads_config(monkeypatch):
+    """agent_flow.wsdiff_* 自定义工作区快照/差异边界。"""
+    import akm.config as cfg_mod
+
+    from akm.flow import workspace_diff as wsd
+
+    monkeypatch.setattr(
+        cfg_mod,
+        "load_config",
+        lambda: {"agent_flow": {"wsdiff_max_file_bytes": 1024, "wsdiff_max_files_scan": 5, "wsdiff_max_diffs": 3}},
+    )
+    limits = wsd._flow_wsdiff_limits()
+    assert limits == {"max_file_bytes": 1024, "max_files_scan": 5, "max_diffs": 3, "max_content_chars": 24_000}

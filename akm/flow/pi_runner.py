@@ -13,9 +13,27 @@ import signal
 import subprocess
 from typing import Any
 
-# pi 编码节点默认超时：1 小时（复杂任务可能长时间编码/测试）；
-# 仍可被 FLOW_PI_TIMEOUT_MS / FLOW_AGENT_TIMEOUT_MS 环境变量覆盖
-DEFAULT_TIMEOUT_MS = int(os.environ.get("FLOW_PI_TIMEOUT_MS") or os.environ.get("FLOW_AGENT_TIMEOUT_MS") or 3_600_000)
+def _pi_timeout_ms() -> int:
+    """解析 pi 编码节点超时（毫秒）。
+
+    优先级：环境变量 FLOW_PI_TIMEOUT_MS / FLOW_AGENT_TIMEOUT_MS >
+    config.json 的 ``agent_flow.pi_timeout_ms`` > 默认 1 小时（复杂任务可能
+    长时间编码/测试）。便于各机器自行调大/调小而不改代码。
+    """
+    env = os.environ.get("FLOW_PI_TIMEOUT_MS") or os.environ.get("FLOW_AGENT_TIMEOUT_MS")
+    if env:
+        try:
+            return max(1000, int(env))
+        except ValueError:
+            pass
+    try:
+        from akm.config import load_config
+        configured = (load_config().get("agent_flow") or {}).get("pi_timeout_ms")
+        if configured:
+            return max(1000, int(configured))
+    except (ValueError, TypeError):
+        pass
+    return 3_600_000
 
 
 def build_prompt(system_prompt: str, user_prompt: str) -> str:
@@ -157,9 +175,13 @@ def resolve_pi_model_ref(model: dict | None) -> dict:
 
     返回 {ref: str|None, reason}。裸网关 id 不传给 pi（会让 pi 猜错 provider），
     未映射时省略 --model 用 pi 默认。"""
-    forced = os.environ.get("FLOW_PI_MODEL", "").strip()
+    # 配置/环境变量强制指定模型：config.json 的 agent_flow.pi_model 优先，
+    # 环境变量 FLOW_PI_MODEL 兜底（迁移期兼容）
+    from akm.config import load_config
+    configured_model = (load_config().get("agent_flow") or {}).get("pi_model") or ""
+    forced = os.environ.get("FLOW_PI_MODEL", "").strip() or str(configured_model).strip()
     if forced:
-        return {"ref": forced, "reason": "FLOW_PI_MODEL"}
+        return {"ref": forced, "reason": "agent_flow.pi_model / FLOW_PI_MODEL"}
     wanted = (model.get("model") or model.get("id") or "") if model else ""
     wanted = re.sub(r"^gateway:", "", wanted).strip()
     if not wanted:
@@ -181,7 +203,7 @@ def resolve_pi_model_ref(model: dict | None) -> dict:
         return {"ref": f"oai/{wanted}", "reason": "heuristic oai/*"}
     return {
         "ref": None,
-        "reason": f'unmapped gateway model "{wanted}" → 使用 pi 默认模型（可设 FLOW_PI_MODEL 或改用 provider/id）',
+        "reason": f'unmapped gateway model "{wanted}" → 使用 pi 默认模型（可配置 agent_flow.pi_model 或改用 provider/id）',
     }
 
 
@@ -333,7 +355,7 @@ async def _run_pi_mock(opts: dict) -> dict:
         "## 结果\nSDK/CLI 不可用，返回模拟开发摘要。\n",
         "- 已解析上游产物\n",
         "- 跳过真实写文件\n",
-        "- 提示: 配置 ~/.pi/agent/models.json 中的 provider/model，或设 FLOW_PI_MODEL=ds/deepseek-v4-pro\n",
+        "- 提示: 配置 ~/.pi/agent/models.json 中的 provider/model，或设 agent_flow.pi_model=ds/deepseek-v4-pro\n",
     ]
     text = "".join(chunks)
     on_token = opts.get("on_token")
@@ -355,7 +377,7 @@ async def run_pi_agent(opts: dict) -> dict:
     opts: cwd / systemPrompt / userPrompt / model / timeoutMs / on_log / on_token。
     返回 {text, tokensIn, tokensOut, mode}。超时后不回退 mock（避免双开改同一仓库）。
     """
-    timeout_ms = opts.get("timeoutMs") or DEFAULT_TIMEOUT_MS
+    timeout_ms = opts.get("timeoutMs") or _pi_timeout_ms()
     resolved = resolve_pi_model_ref(opts.get("model"))
     ref = resolved["ref"]
     opts.get("on_log") and opts["on_log"](
@@ -370,7 +392,7 @@ async def run_pi_agent(opts: dict) -> dict:
         opts.get("on_log") and opts["on_log"](f"Pi CLI 失败: {msg}", "warn")
         if _is_timeout(err):
             opts.get("on_log") and opts["on_log"](
-                "CLI 超时后不回退 mock（避免重复改同一仓库）。可提高 FLOW_PI_TIMEOUT_MS 后重试。", "warn"
+                "CLI 超时后不回退 mock（避免重复改同一仓库）。可配置 agent_flow.pi_timeout_ms 后重试。", "warn"
             )
             raise
         if not _is_start_failure(err):

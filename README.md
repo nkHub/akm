@@ -396,10 +396,11 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 - 实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）。
 - 一期能力：LLM 节点 + 流程控制（拓扑 / 并行 / 条件 / loop 重入 / merge / router）。
 - 二期能力：编码节点（`pi-agent`，subprocess 调本机 `pi` CLI，失败回退 mock）、人工审批（`human`，`POST /v1/flow/runs/{id}/resume` 审批；`flow_human_auto_approve` 默认 `true` 自动放行，设 `false` 后节点挂起等待审批）、git worktree 沙箱（`variables.useWorktree`，`run` / `per-coding` 两种模式）、节点级 `retry`（`error` / `review_fail` 触发，指数退避）、路径锁（同一项目路径串行化）与工作区快照 diff（编码节点产出 `fileDiffs`）。
-- pi-agent 定位：优先读取 `~/.akm/config.json` 的 `agent_flow.pi_path` 显式指定的 pi 路径（各机器安装位置不同时可自定义，支持 `~` 展开）；未配置时自动在 PATH 与常见安装目录定位。pi 是 Node 脚本，要求 Node.js ≥22.19.0，运行时自动从 PATH / nvm 各版本中选择满足版本的 node 绝对路径直接执行（打包 app 经 GUI/launchctl 启动时环境 PATH 常为空，绕过 shebang 的 `env node`）。
+- pi-agent 定位：优先读取 `~/.akm/config.json` 的 `agent_flow.pi_path` 显式指定的 pi 路径（各机器安装位置不同时可自定义，支持 `~` 展开）；未配置时自动在 PATH 与常见安装目录定位。pi 是 Node 脚本，要求 Node.js ≥22.19.0，运行时自动从 PATH / nvm 各版本中选择满足版本的 node 绝对路径直接执行（打包 app 经 GUI/launchctl 启动时环境 PATH 常为空，绕过 shebang 的 `env node`）。超时默认 1 小时，可用 `agent_flow.pi_timeout_ms`（毫秒）或环境变量 `FLOW_PI_TIMEOUT_MS` / `FLOW_AGENT_TIMEOUT_MS` 覆盖。
 - 路径解析：`variables.projectPath` 支持绝对路径或相对路径；相对路径基于 `agent_workspace_root` 配置的工作区根目录解析（未配置时回退到进程当前目录）。
 - 运行参数：`POST /v1/flow/workflows/{id}/runs` 的 body 支持 `variables`（对象），覆盖合并进本次运行的变量（如 `{"prompt": "...", "variables": {"projectPath": "/path/to/proj", "language": "HTML"}}`），仅本次运行生效，不修改工作流定义。
-- 容错：LLM 节点对上游瞬时 5xx（网关时段性故障）自动重试（指数退避，最多重试 2 次），避免单次瞬时故障拖垮整个运行；4xx 视为请求本身问题不重试。
+- 容错：LLM 节点对上游瞬时 5xx（网关时段性故障）自动重试（指数退避，默认最多重试 2 次，可用 `agent_flow.llm_retry_max` 调整），避免单次瞬时故障拖垮整个运行；4xx 视为请求本身问题不重试。
+- `agent_flow` 配置组（`~/.akm/config.json`，集中管理工作流引擎行为，未配置时全部使用默认值）：`pi_path`（pi 可执行文件路径）、`pi_model`（强制 pi 使用的模型，环境变量 `FLOW_PI_MODEL` 优先）、`pi_timeout_ms`（编码节点超时毫秒，默认 3600000，环境变量 `FLOW_PI_TIMEOUT_MS` / `FLOW_AGENT_TIMEOUT_MS` 仍优先）、`llm_retry_max`（LLM 节点 5xx 重试次数，默认 2）、`llm_retry_base_delay`（重试退避基数秒，默认 1.0）、`llm_temperature`（LLM 节点请求温度，默认 0.3）、`llm_max_tokens`（LLM 节点请求最大 token，默认 4096）、`human_auto_approve`（布尔，覆盖顶层 `flow_human_auto_approve`）、`worktrees_root`（git worktree 沙箱根目录，默认 `~/.akm/flow_worktrees`）、`wsdiff_max_file_bytes`（工作区快照单文件上限，默认 120000）、`wsdiff_max_files_scan`（快照扫描文件上限，默认 800）、`wsdiff_max_diffs`（差异条目上限，默认 40）、`wsdiff_max_content_chars`（快照单文件内容字符上限，默认 24000）。
 - 内置工具：`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs` / `akm_flow_run_get`，可在对话里直接管理、驱动工作流，并通过 `akm_flow_run_get` 查询单次运行的节点级详情（状态/错误/输出正文与结构化产物/最近日志）定位卡住或失败的节点。
 
 ## 故障切换策略
