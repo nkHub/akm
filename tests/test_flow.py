@@ -610,3 +610,38 @@ async def test_engine_pi_coding_node_runs_pi_agent(_monkey_forward):
     code_node = next(n for n in wf["nodes"] if n["type"] == "code")
     assert final["nodeRuns"][code_node["id"]]["status"] == "succeeded"
     assert "output" in final["artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_failure_audit_uses_request_model(monkeypatch, _monkey_forward):
+    """LLM 失败路径的审计 model 应取请求体模型，而非 key 的 models 匹配列表（逗号拼接）。"""
+    import akm.server as server_mod
+    from akm.flow import engine as flow_engine
+
+    captured: dict = {}
+
+    async def _fake_submit_audit_log(app, data):
+        captured.update(data)
+
+    async def _fake_forward(body, client, api_path="chat/completions", plugin_manager=None):
+        # 模拟失败：result.model 是 key 的 models 匹配列表（逗号拼接）
+        return {
+            "status_code": 503,
+            "body": "",
+            "key_alias": "",
+            "provider": "",
+            "model": "gpt-5.6-terra,gpt-5.4-mini,gpt-5.4",
+            "latency_ms": 0,
+        }
+
+    monkeypatch.setattr(server_mod, "_submit_audit_log", _fake_submit_audit_log)
+    monkeypatch.setattr(flow_engine, "_forward_request", _fake_forward)
+
+    eng = flow_engine.WorkflowEngine(_fake_app())
+    model = {"id": "gpt-test", "name": "GPT Test", "provider": "openai", "model": "gpt-5.6-terra", "strengths": []}
+    with pytest.raises(RuntimeError) as exc:
+        await eng._llm_chat(model, [{"role": "user", "content": "审查以下代码"}])
+    assert "503" in str(exc.value)
+    # 审计 model 必须是请求体的单个模型，而不是 key 的 models 列表
+    assert captured.get("model") == "gpt-5.6-terra"
+    assert captured.get("status_code") == 503

@@ -349,7 +349,9 @@ class WorkflowEngine:
             await _submit_audit_log(self.app, {
                 "provider": str(result.get("provider", "") or ""),
                 "key_alias": str(result.get("key_alias", "") or ""),
-                "model": str(result.get("model", "") or body.get("model", "") or ""),
+                # model 优先取请求体里的实际模型；失败路径 result.get("model")
+                # 可能是 key 的 models 匹配列表（逗号拼接），不应写入审计
+                "model": str(body.get("model", "") or result.get("model", "") or ""),
                 "request_body": req_body_for_log,
                 "response_body": resp_for_log,
                 "status_code": status_code,
