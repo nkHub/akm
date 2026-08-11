@@ -160,6 +160,39 @@ async def test_run_includes_registered_tools_in_upstream_request(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_audit_records_cached_tokens(monkeypatch):
+    """成功响应的审计应记录上游上下文缓存命中/写入 token，而不是恒为 0。"""
+    audits = []
+
+    async def forward(*_args, **_kwargs):
+        return {
+            "status_code": 200,
+            "body": json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {
+                    "prompt_tokens": 150,
+                    "completion_tokens": 10,
+                    "total_tokens": 160,
+                    "prompt_tokens_details": {"cached_tokens": 100},
+                    "cache_creation_input_tokens": 30,
+                },
+            }),
+        }
+
+    async def audit(record):
+        audits.append(record)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    await AgentLoop(http_client=None, tool_registry=ToolRegistry(), audit_submitter=audit).run(
+        [{"role": "user", "content": "hi"}]
+    )
+
+    assert audits and audits[-1]["status_code"] == 200
+    assert audits[-1]["cached_tokens"] == 100
+    assert audits[-1]["cache_creation_tokens"] == 30
+
+
+@pytest.mark.asyncio
 async def test_run_whitelist_injects_only_client_declared_tools(monkeypatch):
     """客户端显式声明 tools 时，只注入客户端声明的工具 + 上下文管理框架工具。"""
     registry = ToolRegistry()

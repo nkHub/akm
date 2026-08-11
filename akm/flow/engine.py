@@ -336,9 +336,21 @@ class WorkflowEngine:
                 # 估算 token
                 tokens_in = len(json.dumps(messages, ensure_ascii=False)) // 4
                 tokens_out = max(len(text) // 4, 1)
+                # 从响应 usage 提取上游上下文缓存命中/写入 token
+                cached_tokens = 0
+                cache_creation_tokens = 0
+                try:
+                    from akm.agent_runtime.loop import _extract_cached_tokens
+
+                    resp_usage = (json.loads(response_body) or {}).get("usage") or {}
+                    cached_tokens, cache_creation_tokens = _extract_cached_tokens(resp_usage)
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    pass
                 await self._submit_audit(
                     body, result, status_code, response_body,
                     prompt_tokens=tokens_in, completion_tokens=tokens_out,
+                    cached_tokens=cached_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
                 )
                 return {"text": text, "tokensIn": tokens_in, "tokensOut": tokens_out}
             # 仅对 5xx 做自动重试（上游瞬时故障）；其余状态（4xx 等）直接失败
@@ -366,6 +378,8 @@ class WorkflowEngine:
         error: str = "",
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        cached_tokens: int = 0,
+        cache_creation_tokens: int = 0,
     ) -> None:
         """把 flow 引擎的一次 LLM 调用写入审计日志，来源标记为 flow。
 
@@ -401,6 +415,8 @@ class WorkflowEngine:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
+                "cached_tokens": cached_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
             })
         except Exception:
             logger.warning("[Flow] 审计日志写入失败", exc_info=True)

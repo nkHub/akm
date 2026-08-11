@@ -714,7 +714,11 @@ async def test_llm_chat_retries_on_5xx_then_succeeds(monkeypatch, _monkey_forwar
             return {"status_code": 503, "body": "", "key_alias": "", "provider": "", "model": "m", "latency_ms": 0}
         payload = {
             "choices": [{"message": {"role": "assistant", "content": "已完成"}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 6},
+            },
         }
         return {"status_code": 200, "body": json.dumps(payload), "key_alias": "t", "provider": "p", "model": "m"}
 
@@ -730,6 +734,9 @@ async def test_llm_chat_retries_on_5xx_then_succeeds(monkeypatch, _monkey_forwar
     # 重试中间的失败尝试不落库，只有成功一次
     assert len(submitted) == 1
     assert submitted[0]["status_code"] == 200
+    # 成功审计应带上游上下文缓存命中 token
+    assert submitted[0]["cached_tokens"] == 6
+    assert submitted[0]["cache_creation_tokens"] == 0
 
 
 @pytest.mark.asyncio
