@@ -459,9 +459,14 @@ function renderLogTable() {
     var countTokensBadge = hasCountTokensFallback ? '<span class="ml-1 text-cyan-400" title="该条 token 由 messages/count_tokens 回填">CT</span>' : '';
     var adapterFallbackBadge = hasAdapterFallback ? '<span class="ml-1 text-emerald-400" title="该条 token 由适配器收尾 usage 回填">AF</span>' : '';
     var estimateFallbackBadge = hasEstimateFallback ? '<span class="ml-1 text-yellow-300" title="该条 token 为轻量估算值（非上游真实 usage）">EST</span>' : '';
+    // ── 内部请求来源（x-akm-source：chat/flow/task）优先于 user-agent 推断 ──
     var sourceLabel = '-';
     var sourceClass = 'text-gray-600';
-    if (ua.includes('opencode')) { sourceLabel = 'OpenCode'; sourceClass = 'text-teal-400'; }
+    var akSource = String(headers['x-akm-source'] || '').toLowerCase();
+    if (akSource === 'chat') { sourceLabel = 'Chat'; sourceClass = 'text-emerald-400'; }
+    else if (akSource === 'flow') { sourceLabel = 'Flow'; sourceClass = 'text-purple-400'; }
+    else if (akSource === 'task') { sourceLabel = 'Task'; sourceClass = 'text-amber-400'; }
+    else if (ua.includes('opencode')) { sourceLabel = 'OpenCode'; sourceClass = 'text-teal-400'; }
     else if (ua.includes('claude-cli') || ua.includes('claude code')) { sourceLabel = 'Claude'; sourceClass = 'text-indigo-400'; }
     else if (ua.includes('codex')) { sourceLabel = 'Codex'; sourceClass = 'text-amber-400'; }
     else if (ua.includes('cursor')) { sourceLabel = 'Cursor'; sourceClass = 'text-purple-400'; }
