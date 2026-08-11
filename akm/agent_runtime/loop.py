@@ -708,8 +708,13 @@ class AgentLoop:
         completion_tokens: int,
         total_tokens: int,
         error: str = "",
+        source: str = "chat",
     ) -> None:
-        """如果注册了审计回调，则写入审计日志（来源标记为 agent）"""
+        """如果注册了审计回调，则写入审计日志。
+
+        来源标记通过 request_headers 的 x-akm-source 字段区分：
+        chat（/v1/agent 直接调用）、task（定时任务触发）。
+        """
         if self._audit_submitter is None:
             return
         try:
@@ -736,7 +741,7 @@ class AgentLoop:
                 "status_code": status_code,
                 "latency_ms": int(result.get("latency_ms", 0) or 0),
                 "error": error,
-                "request_headers": json.dumps({"user-agent": "agent/1.0"}),
+                "request_headers": json.dumps({"user-agent": "agent/1.0", "x-akm-source": source}),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
@@ -969,6 +974,7 @@ class AgentLoop:
         max_turns: int = 0,
         api_path: str = "chat/completions",
         workspace_root: str = "",
+        source: str = "chat",
     ) -> AgentResult:
         """运行 Agent Loop
 
@@ -1096,7 +1102,7 @@ class AgentLoop:
                 logger.warning("[AgentLoop] LLM 调用失败 (turn=%d): %s", turn, error_msg)
                 await self._try_audit(
                     result, model, body, response_body, status_code,
-                    0, 0, 0, error=error_msg,
+                    0, 0, 0, error=error_msg, source=source,
                 )
                 return AgentResult(
                     ok=False,
@@ -1122,10 +1128,11 @@ class AgentLoop:
             except json.JSONDecodeError:
                 pass
 
-            # 写入审计日志，来源标记为 agent
+            # 写入审计日志，来源标记为 chat（/v1/agent）或 task（定时任务）
             await self._try_audit(
                 result, model, body, response_body, status_code,
                 prompt_tokens, completion_tokens, prompt_tokens + completion_tokens,
+                source=source,
             )
 
             # 提取 tool_calls
@@ -1313,6 +1320,7 @@ class AgentLoop:
         api_path: str = "chat/completions",
         workspace_root: str = "",
         cancel_check: Callable[[], bool] | None = None,
+        source: str = "chat",
     ) -> AsyncGenerator[str, None]:
         """运行 Agent Loop 并流式返回 SSE 事件
 
@@ -1480,7 +1488,7 @@ class AgentLoop:
                         error_msg = str(result.get("error", error_msg) or error_msg or f"上游返回 HTTP {status_code}")
                         await self._try_audit(
                             result, model, body, response_body, status_code,
-                            0, 0, 0, error=error_msg,
+                            0, 0, 0, error=error_msg, source=source,
                         )
                         yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage, "compacted": compacted_count})
                         return
@@ -1538,7 +1546,7 @@ class AgentLoop:
                     error_msg = str(result.get("error", f"上游返回 HTTP {status_code}") or "")
                     await self._try_audit(
                         result, model, body, response_body, status_code,
-                        0, 0, 0, error=error_msg,
+                        0, 0, 0, error=error_msg, source=source,
                     )
                     yield _sse_event("error", {"error": error_msg, "turns": turn, "usage": total_usage, "compacted": compacted_count})
                     return
@@ -1565,6 +1573,7 @@ class AgentLoop:
             await self._try_audit(
                 result, model, body, response_body, status_code,
                 prompt_tokens, completion_tokens, total_tokens,
+                source=source,
             )
 
             # ── 从累积/重建的响应中提取 tool_calls ──

@@ -282,7 +282,11 @@ class WorkflowEngine:
         nr.setdefault("logs", []).append({"ts": flow_db.now_iso(), "level": level, "message": str(message)[:2000]})
 
     async def _llm_chat(self, model: dict, messages: list[dict]) -> dict:
-        """调用 LLM（一期直接复用 AKM 的 forward_request；mock 模型生成假内容）。"""
+        """调用 LLM（一期直接复用 AKM 的 forward_request；mock 模型生成假内容）。
+
+        每次真实 LLM 调用都会写入审计日志（来源标记为 flow），便于与
+        /v1/chat/completions（无来源标记）和 /v1/agent（chat/task）区分。
+        """
         if model.get("provider") == "mock":
             return self._mock_chat(model, messages)
         body = {
@@ -300,12 +304,64 @@ class WorkflowEngine:
         status_code = result.get("status_code") or 0
         response_body = result.get("body") or ""
         if status_code < 200 or status_code >= 300:
-            raise RuntimeError(f"LLM 请求失败（{status_code}）：{response_body[:500]}")
+            error_msg = f"LLM 请求失败（{status_code}）：{response_body[:500]}"
+            await self._submit_audit(body, result, status_code, response_body, error=error_msg)
+            raise RuntimeError(error_msg)
         text = _extract_text_content(response_body)
         # 估算 token
         tokens_in = len(json.dumps(messages, ensure_ascii=False)) // 4
         tokens_out = max(len(text) // 4, 1)
+        await self._submit_audit(
+            body, result, status_code, response_body,
+            prompt_tokens=tokens_in, completion_tokens=tokens_out,
+        )
         return {"text": text, "tokensIn": tokens_in, "tokensOut": tokens_out}
+
+    async def _submit_audit(
+        self,
+        body: dict,
+        result: dict,
+        status_code: int,
+        response_body: str,
+        error: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
+        """把 flow 引擎的一次 LLM 调用写入审计日志，来源标记为 flow。
+
+        复用 server 的审计提交链路（_submit_audit_log → AuditLogQueue 或
+        直接写 DB），请求/响应体是否落库遵循 log_request_body / log_response_body
+        配置，与转发请求的审计行为保持一致。
+        """
+        try:
+            from akm.config import load_config
+            from akm.server import _submit_audit_log
+
+            cfg = load_config()
+            save_request_body = bool(cfg.get("log_request_body", False))
+            save_response_body = bool(cfg.get("log_response_body", False))
+            resp_for_log = ""
+            if save_response_body:
+                resp_for_log = response_body
+                if len(resp_for_log) > 64000:
+                    resp_for_log = resp_for_log[:32000] + f"\n...(截断，共 {len(resp_for_log)} 字符)" + resp_for_log[-32000:]
+            req_body_for_log = json.dumps(body, ensure_ascii=False) if save_request_body else ""
+            await _submit_audit_log(self.app, {
+                "provider": str(result.get("provider", "") or ""),
+                "key_alias": str(result.get("key_alias", "") or ""),
+                "model": str(result.get("model", "") or body.get("model", "") or ""),
+                "request_body": req_body_for_log,
+                "response_body": resp_for_log,
+                "status_code": status_code,
+                "latency_ms": int(result.get("latency_ms", 0) or 0),
+                "error": error,
+                "request_headers": json.dumps({"user-agent": "akm-flow/1.0", "x-akm-source": "flow"}),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            })
+        except Exception:
+            logger.warning("[Flow] 审计日志写入失败", exc_info=True)
 
     def _mock_chat(self, model: dict, messages: list[dict]) -> dict:
         """mock 模型假内容（用于无 key 时的流程演示）。"""
