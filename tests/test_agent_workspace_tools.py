@@ -586,6 +586,56 @@ async def test_run_git_commit_requires_message(_workspace, monkeypatch):
     assert "message" in out["error"]
 
 
+@pytest.mark.asyncio
+async def test_run_git_dir_switches_repo(_workspace, monkeypatch):
+    """dir 参数切换到工作区内任意子目录仓库（等价 git -C）。"""
+    import subprocess as _sp
+
+    repo_a = _workspace / "repoA"
+    repo_b = _workspace / "repoB"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    _sp.run(["git", "init", "-q"], cwd=str(repo_a), capture_output=True, text=True)
+    _sp.run(["git", "init", "-q"], cwd=str(repo_b), capture_output=True, text=True)
+    (repo_a / "only-a.txt").write_text("a", encoding="utf-8")
+    (repo_b / "only-b.txt").write_text("b", encoding="utf-8")
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out_a = json.loads(await handlers["akm_run_git"](operation="status", dir="repoA"))
+    out_b = json.loads(await handlers["akm_run_git"](operation="status", dir=str(repo_b)))
+
+    assert out_a["exit_code"] == 0
+    assert "only-a.txt" in out_a["output"]
+    assert "only-b.txt" not in out_a["output"]
+    assert out_b["exit_code"] == 0
+    assert "only-b.txt" in out_b["output"]
+
+
+@pytest.mark.asyncio
+async def test_run_git_rejects_dir_outside_workspace(_workspace, monkeypatch):
+    """dir 越出工作区（绝对路径指向外部）必须拒绝。"""
+    import tempfile
+
+    outside = tempfile.mkdtemp()
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out = json.loads(await handlers["akm_run_git"](operation="status", dir=outside))
+
+    assert "error" in out
+    assert "dir 必须位于工作区内" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_git_rejects_dir_not_exist(_workspace, monkeypatch):
+    """dir 指向工作区内不存在的目录必须拒绝。"""
+    handlers = _handlers(monkeypatch, agent_git_enabled=True)
+
+    out = json.loads(await handlers["akm_run_git"](operation="status", dir="no/such/dir"))
+
+    assert "error" in out
+    assert "dir 不是存在的目录" in out["error"]
+
+
 # ── 工具注册集合 ──
 
 
@@ -640,6 +690,8 @@ def test_shell_and_git_schema(monkeypatch):
     assert shell_properties["command"]["type"] == "string"
     assert "operation" in git_properties
     assert "command" not in git_properties
+    assert "dir" in git_properties
+    assert git_properties["dir"]["type"] == "string"
 
 
 # ── xlsx 电子表格工具 ──

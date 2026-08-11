@@ -38,7 +38,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_delete_file` | 删除工作区内的文件或目录。默认只删除**单个文件**；`recursive=true` 可删除目录并递归清除其中所有内容（批量删除）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
 | `akm_xlsx` | 创建工作区内 `.xlsx` 文件（`action=create`，`data` 传二维数组或 `{工作表名: 二维数组}`，已存在需 `overwrite=true`）或修改已有文件的单元格（`action=edit`，`updates` 传 `[{"sheet","cell","value"}]`）；可选 `styles` / `column_widths` / `row_heights` / `merge_cells` / `freeze_panes` / `charts` 自定义样式、布局与图表；需开启 `agent_write_tools_enabled` |
 | `akm_run_shell` | 在工作区内用系统 shell 执行命令字符串并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
-| `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码（需开启 `agent_git_enabled`） |
+| `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码；`dir` 参数可切换工作区内任意仓库目录（含根目录），默认工作区根（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
 | `akm_send_notification` | 发送 macOS 原生系统通知，在当前 Mac 桌面弹出提醒（需通过菜单栏启动 AKM 才能正常展示，受 `agent_notify_enabled` 控制，默认开启）；适合推送任务完成、定时提醒等短消息，不产生网络流量 |
 | `akm_clipboard_get` | 读取当前 macOS 剪贴板文本内容，返回内容与长度（超过 10 万字符截断并标记 `truncated`） |
@@ -194,7 +194,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 `akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zsh_history` / `.gitconfig` / `.npmrc` 等）/ `/etc` / `/private/etc` / `/var/log` / `/var/db` / `/tmp` 等敏感路径与家目录列举），将越界风险从「无限制」降到「限制敏感读写」级别。此外，父进程若携带 `PYTHONHOME`/`PYTHONPATH`（py2app 打包的 app 内嵌 Python 运行时设置），执行前会被剥离，避免污染 shell 里外部 `python3` 使其启动即崩溃。
 
-`akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。
+`akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。可选 `dir` 参数指定 git 仓库目录（等价于 `git -C <dir>`，默认工作区根）：接受工作区内的相对或绝对路径（含根目录），用于切换不同仓库；越界（工作区外）会返回错误。`paths` 为相对 `dir` 的路径。
 
 `akm_xlsx` 通过 `action` 区分创建与修改，基于 `openpyxl`：
 
@@ -221,7 +221,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 - 相对路径中的 `..` 穿越工作区被拒绝；
 - 软链接指向工作区外时（resolve 后越界）被拒绝。
 
-越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv，`dir` 参数限定的仓库目录必须在工作区内。`akm_read_file` 单次最多读取 60000 字节，`akm_grep` 最多返回 100 条命中，目录列表最多返回 500 条，避免工具结果撑爆上下文。
 
 ## 自愈重试
 
