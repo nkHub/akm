@@ -1177,23 +1177,25 @@ async def test_builtin_flow_run_starts_engine(monkeypatch, tmp_path):
     started = {}
 
     class _FakeEngine:
-        async def start(self, wf, prompt, project_id="", requirement_id=""):
+        async def start(self, wf, prompt, project_id="", requirement_id="", variables=None):
             started["wf"] = wf
+            started["variables"] = variables
             return {
                 "id": "run_abc",
                 "workflowId": wf["id"],
                 "status": "running",
-                "input": {"prompt": prompt},
+                "input": {"prompt": prompt, "variables": variables or {}},
             }
 
     app = SimpleNamespace(state=SimpleNamespace(flow_engine=_FakeEngine()))
     handlers = _handlers(app)
 
-    r = await handlers["akm_flow_run"](workflow_id=wf_id, prompt="帮我写个脚本")
+    r = await handlers["akm_flow_run"](workflow_id=wf_id, prompt="帮我写个脚本", variables={"projectPath": "/tmp/x"})
     assert r["ok"] is True
     assert r["run"]["id"] == "run_abc"
     assert r["run"]["status"] == "running"
     assert started["wf"]["id"] == wf_id
+    assert started["variables"] == {"projectPath": "/tmp/x"}
 
     missing = await handlers["akm_flow_run"](workflow_id=wf_id, prompt="")
     assert "error" in missing
@@ -1232,4 +1234,59 @@ def test_builtin_flow_runs_lists_records(monkeypatch, tmp_path):
 
     filtered = handlers["akm_flow_runs"](workflow_id="wf_x")
     assert filtered["total"] == 0
+
+
+def test_builtin_flow_run_get_returns_node_details(monkeypatch, tmp_path):
+    """akm_flow_run_get 应返回节点级状态、错误与最近日志，用于定位卡住节点。"""
+    import akm.db as db
+    monkeypatch.setattr(db, "DB_DIR", str(tmp_path))
+    conn = db.get_connection()
+    db.init_db(conn)
+    from akm.flow.db import init_flow_db
+    init_flow_db()
+
+    class _FakeEngine:
+        def get_run(self, run_id):
+            if run_id != "run_abc":
+                return None
+            return {
+                "id": "run_abc",
+                "workflowId": "wf_1",
+                "status": "failed",
+                "pendingHumanNodeId": None,
+                "input": {"prompt": "实现登录", "variables": {"projectPath": "/tmp/x"}},
+                "totals": {"tokensIn": 10, "tokensOut": 20, "costUsd": 0},
+                "startedAt": "2026-01-01T00:00:00.000Z",
+                "finishedAt": "2026-01-01T00:00:01.000Z",
+                "workflowSnapshot": {
+                    "nodes": [{"id": "n1", "type": "code", "data": {"label": "实现", "executor": "pi-agent"}}]
+                },
+                "nodeRuns": {
+                    "n1": {
+                        "status": "failed",
+                        "error": "boom",
+                        "tokensIn": 10,
+                        "tokensOut": 5,
+                        "fileDiffs": [],
+                        "logs": [{"message": "第一次尝试"}],
+                    }
+                },
+            }
+
+    app = SimpleNamespace(state=SimpleNamespace(flow_engine=_FakeEngine()))
+    handlers = _handlers(app)
+
+    got = handlers["akm_flow_run_get"](run_id="run_abc")
+    assert got["run"]["id"] == "run_abc"
+    assert got["run"]["status"] == "failed"
+    assert got["run"]["variables"]["projectPath"] == "/tmp/x"
+    node = got["run"]["nodes"][0]
+    assert node["label"] == "实现"
+    assert node["executor"] == "pi-agent"
+    assert node["status"] == "failed"
+    assert node["error"] == "boom"
+    assert node["logs"] == ["第一次尝试"]
+
+    missing = handlers["akm_flow_run_get"](run_id="run_nope")
+    assert "error" in missing
 

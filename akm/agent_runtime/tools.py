@@ -1898,10 +1898,11 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             return {"error": f"工作流不存在: {wf_id}"}
         return {"deleted": True}
 
-    async def run_flow_workflow_tool(workflow_id: str, prompt: str) -> dict[str, Any]:
+    async def run_flow_workflow_tool(workflow_id: str, prompt: str, variables: dict | None = None) -> dict[str, Any]:
         """启动一次工作流运行并返回运行对象（含 run id 与初始状态）。
 
         运行在后台执行，可通过 akm_flow_runs 查询进度与结果。
+        variables 为本次运行的临时变量（如 projectPath / language），覆盖工作流默认 variables。
         """
         from akm.flow.db import get_workflow
 
@@ -1918,7 +1919,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         if engine is None:
             return {"error": "flow 引擎未初始化"}
         try:
-            run = await engine.start(wf, prompt)
+            run = await engine.start(wf, prompt, variables=variables or None)
         except ValueError as exc:
             return {"error": str(exc)}
         return {
@@ -1959,6 +1960,58 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 }
                 for r in runs
             ],
+        }
+
+    def get_flow_run_tool(run_id: str) -> dict[str, Any]:
+        """按 id 查询一次工作流运行的节点级详情，用于定位卡住或失败的节点。
+
+        返回各节点状态、错误信息、token 用量、文件改动数与最近日志（截断），
+        以及运行级 prompt / variables / totals。
+        """
+        engine = getattr(app.state, "flow_engine", None)
+        if engine is None:
+            return {"error": "flow 引擎未初始化"}
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return {"error": "run_id 不能为空"}
+        run = engine.get_run(run_id)
+        if run is None:
+            return {"error": f"运行不存在: {run_id}"}
+        nodes = (run.get("workflowSnapshot") or {}).get("nodes") or []
+        by_id = {n.get("id", ""): n for n in nodes}
+        node_summaries: list[dict[str, Any]] = []
+        for nid, nr in (run.get("nodeRuns") or {}).items():
+            node = by_id.get(nid, {})
+            data = node.get("data") or {}
+            logs = nr.get("logs") or []
+            node_summaries.append(
+                {
+                    "id": nid,
+                    "label": data.get("label") or node.get("type") or nid,
+                    "type": node.get("type", ""),
+                    "executor": data.get("executor", ""),
+                    "status": nr.get("status", ""),
+                    "error": str(nr.get("error") or "")[:500],
+                    "tokensIn": nr.get("tokensIn") or 0,
+                    "tokensOut": nr.get("tokensOut") or 0,
+                    "fileDiffs": len(nr.get("fileDiffs") or []),
+                    "logs": [str(l.get("message") or "")[:300] for l in logs[-5:]],
+                }
+            )
+        run_input = run.get("input") or {}
+        return {
+            "run": {
+                "id": run_id,
+                "workflowId": run.get("workflowId", ""),
+                "status": run.get("status", ""),
+                "pendingHumanNodeId": run.get("pendingHumanNodeId"),
+                "prompt": str(run_input.get("prompt") or "")[:500],
+                "variables": run_input.get("variables") or {},
+                "totals": run.get("totals", {}),
+                "startedAt": run.get("startedAt", ""),
+                "finishedAt": run.get("finishedAt", ""),
+                "nodes": node_summaries,
+            }
         }
 
     async def tavily_search_tool(
@@ -2651,6 +2704,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "properties": {
                     "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
                     "prompt": {"type": "string", "description": "用户提示词，作为工作流输入注入 {{input.prompt}}"},
+                    "variables": {"type": "object", "description": "本次运行的临时变量（如 projectPath / language），覆盖工作流默认 variables，仅本次生效，不修改工作流定义"},
                 },
                 "required": ["workflow_id", "prompt"],
             },
@@ -2671,6 +2725,20 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "required": [],
             },
             list_flow_runs_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_run_get",
+            "按 id 查询一次工作流运行的节点级详情：返回各节点状态、错误、token 用量与最近日志，用于定位运行卡住或失败的节点",
+            {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "运行 id（来自 akm_flow_runs / akm_flow_run）"},
+                },
+                "required": ["run_id"],
+            },
+            get_flow_run_tool,
         )
     )
     if load_config().get("agent_email_enabled"):

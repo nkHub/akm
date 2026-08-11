@@ -204,6 +204,31 @@ async def test_engine_runs_linear_workflow(_monkey_forward):
 
 
 @pytest.mark.asyncio
+async def test_engine_start_variables_override(_monkey_forward):
+    """启动时传入的 variables 应覆盖工作流默认值，且不修改工作流定义。"""
+    wf = hotfix_workflow()
+    wf["variables"]["projectPath"] = "."
+    wf["variables"]["language"] = "HTML"
+    app = _fake_app()
+    engine = WorkflowEngine(app)
+    run = await engine.start(
+        wf,
+        "修复某个 bug",
+        variables={"projectPath": "/tmp/proj-x", "language": "TS"},
+    )
+    # 本次运行的 input 与快照变量均为合并结果（运行参数优先）
+    assert run["input"]["variables"]["projectPath"] == "/tmp/proj-x"
+    assert run["input"]["variables"]["language"] == "TS"
+    assert run["workflowSnapshot"]["variables"]["projectPath"] == "/tmp/proj-x"
+    # 工作流定义本身不被修改
+    assert wf["variables"]["projectPath"] == "."
+    assert wf["variables"]["language"] == "HTML"
+    # 后台任务跑完，避免游离任务
+    await engine._tasks[run["id"]]
+    assert engine.get_run(run["id"])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_engine_condition_branch_pass(_monkey_forward):
     """review 结论 pass 时应走 test 分支，fix 保持 pending→skipped。"""
     wf = standard_dev_workflow()
