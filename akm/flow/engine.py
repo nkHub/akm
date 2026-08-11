@@ -534,9 +534,13 @@ class WorkflowEngine:
         run_id = run["id"]
         variables = workflow.get("variables") or {}
         project_path = variables.get("projectPath") or "."
-        # projectPath 相对路径 → 基于当前工作目录解析
+        # projectPath 相对路径 → 基于工作区根（agent_workspace_root）解析为绝对路径；
+        # 未配置工作区时回退到进程当前目录（保持开发态行为）
         if not os.path.isabs(project_path):
-            project_path = os.path.abspath(os.path.join(os.getcwd(), project_path))
+            from akm.config import load_config
+            workspace_root = str(load_config().get("agent_workspace_root") or "").strip()
+            base = os.path.abspath(os.path.expanduser(workspace_root)) if workspace_root else os.getcwd()
+            project_path = os.path.abspath(os.path.join(base, project_path))
         system = (node.get("data") or {}).get("systemPrompt") or "You are a coding agent."
         ctx = {
             "input": run["input"],
