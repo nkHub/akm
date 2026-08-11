@@ -56,7 +56,31 @@ class _FakeForward:
 
 
 @pytest.fixture
-def _monkey_forward(monkeypatch):
+def _monkey_forward(monkeypatch, tmp_path):
+    # 隔离真实 ~/.akm/config.json：相对 projectPath 一律基于临时 git 仓库解析，
+    # 避免读到用户真实 agent_workspace_root（~/Desktop），并保证 worktree 模式可用
+    import subprocess
+
+    import akm.config as cfg_mod
+
+    git_dir = tmp_path / "workspace"
+    git_dir.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=git_dir, check=False)
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@test", "commit", "-q", "--allow-empty", "-m", "init"],
+        cwd=git_dir,
+        check=False,
+    )
+    monkeypatch.setattr(
+        cfg_mod,
+        "load_config",
+        lambda: {
+            "agent_workspace_root": str(git_dir),
+            "log_request_body": False,
+            "log_response_body": False,
+            "flow_human_auto_approve": True,
+        },
+    )
     fake = _FakeForward()
     import akm.flow.engine as fe
 

@@ -396,6 +396,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 - 实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）。
 - 一期能力：LLM 节点 + 流程控制（拓扑 / 并行 / 条件 / loop 重入 / merge / router）。
 - 二期能力：编码节点（`pi-agent`，subprocess 调本机 `pi` CLI，失败回退 mock）、人工审批（`human`，`POST /v1/flow/runs/{id}/resume` 审批；`flow_human_auto_approve` 默认 `true` 自动放行，设 `false` 后节点挂起等待审批）、git worktree 沙箱（`variables.useWorktree`，`run` / `per-coding` 两种模式）、节点级 `retry`（`error` / `review_fail` 触发，指数退避）、路径锁（同一项目路径串行化）与工作区快照 diff（编码节点产出 `fileDiffs`）。
+- 路径解析：`variables.projectPath` 支持绝对路径或相对路径；相对路径基于 `agent_workspace_root` 配置的工作区根目录解析（未配置时回退到进程当前目录）。
 - 内置工具：`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs`，可在对话里直接管理并驱动工作流。
 
 ## 故障切换策略
