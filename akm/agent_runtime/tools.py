@@ -1363,8 +1363,14 @@ async def _run_git_tool(
     staged: bool = False,
     limit: int = 20,
     timeout: int = 0,
+    dir: str = "",
 ) -> str:
-    """执行固定集合的结构化 git 操作，不接受自由命令字符串。"""
+    """执行固定集合的结构化 git 操作，不接受自由命令字符串。
+
+    ``dir`` 指定 git 仓库目录（等价于 ``git -C <dir>``），默认空时使用工作区根；
+    可指向工作区内任意子目录（含根目录），便于对多个仓库分别操作；越界（工作区外）
+    会被拒绝。
+    """
     await _check_tool_enabled("agent_git_enabled", "akm_run_git")
     root = _workspace_root()
     if root is None:
@@ -1374,6 +1380,20 @@ async def _run_git_tool(
         safe_paths = _git_paths(paths)
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    raw_dir = str(dir or "").strip()
+    if raw_dir:
+        # 用户显式指定 git 目录：相对路径按工作区根拼接，绝对路径须位于工作区内
+        cwd = Path(raw_dir).expanduser()
+        if not cwd.is_absolute():
+            cwd = root / cwd
+        cwd = cwd.resolve()
+        if not _path_is_under(cwd, root):
+            return json.dumps({"error": f"dir 必须位于工作区内: {cwd}"}, ensure_ascii=False)
+        if not cwd.is_dir():
+            return json.dumps({"error": f"dir 不是存在的目录: {cwd}"}, ensure_ascii=False)
+    else:
+        cwd = root
 
     if operation == "status":
         command = ["status", "--short"]
@@ -1404,7 +1424,7 @@ async def _run_git_tool(
         "git", "-c", "core.pager=cat", "-c", "color.ui=false",
         "-c", "core.hooksPath=/dev/null", "--no-pager",
     ] + command
-    return await _run_workspace_argv(argv, root, timeout, f"git {operation}")
+    return await _run_workspace_argv(argv, cwd, timeout, f"git {operation}")
 
 
 # ---- 原生系统工具底层实现（剪贴板 / 系统信息 / 打开 / 前台应用）----
@@ -3060,6 +3080,7 @@ def build_workspace_tools() -> list[ToolDef]:
                     "staged": {"type": "boolean", "description": "diff 是否查看暂存区，默认 false"},
                     "limit": {"type": "integer", "description": "log 返回条数，1-100，默认 20"},
                     "timeout": {"type": "integer", "description": "超时秒数，1-300，默认 60"},
+                    "dir": {"type": "string", "description": "git 仓库目录（工作区内，可相对可绝对，含根目录），默认工作区根，等价于 git -C"},
                 },
                 "required": ["operation"],
             },
