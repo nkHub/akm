@@ -425,6 +425,8 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
 
 审计日志支持完整链路追溯（四段式）：`client_request_headers` / `client_request_body`（客户端原始内容，敏感头掩码，body 受 `log_request_body` 控制）/ `upstream_request_headers`（上游请求头）/ `upstream_response_body`（上游原始响应体，受 `log_response_body` 控制）；与既有 `request_body`（实际转发给上游的请求体）、`response_body`（发给客户端、转换后的响应）共同组成「客户端原始内容 → 上游实际内容」的完整链路。日志页详情抽屉提供「对话视图 / 客户端请求体 / 上游响应」三个常驻标签页，发生协议转换时追加「转换请求体 / 转换响应体」标签页。
 
+`request_headers` 会额外写入 `x-akm-source` 字段标记内部请求来源，便于在审计页区分三类自发调用：`chat`（`/v1/agent` 直接对话）、`task`（定时任务触发）、`flow`（工作流引擎 LLM 节点）；外部客户端发起的转发请求不含该字段。
+
 对话视图渲染约定：markdown 标题收敛到 1.15em 以内，代码块/引用/表格有独立底色边框；纯工具调用轮次渲染为「🔧 调用工具 xxx」摘要，避免显示成空回复。
 
 ## 健康监护

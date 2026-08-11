@@ -268,6 +268,7 @@ async def agent(request: Request):
         "max_turns": max_turns,
         "api_path": api_path,
         "workspace_root": workspace_root,
+        "source": "chat",
     }
     if stream:
         return StreamingResponse(

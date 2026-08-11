@@ -148,6 +148,7 @@ class TaskScheduler:
             max_turns=int(payload.get("max_turns", 0) or 0),
             api_path=payload.get("api_path", "chat/completions"),
             workspace_root=payload.get("workspace_root", ""),
+            source="task",
         )
         # 记录执行结果摘要到任务 payload，便于事后追溯
         summary = {
