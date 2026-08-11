@@ -37,10 +37,20 @@ def resolve_cwd(raw: str | None) -> str:
 def _resolve_pi_binary() -> str | None:
     """定位 pi CLI 绝对路径。
 
-    优先 ``shutil.which`` 走 PATH；GUI/launchctl 启动的打包 app 常缺
-    /usr/local/bin 等目录，再查常见安装位置兜底。找不到返回 None，
+    每台机器 pi 的安装位置不同，因此优先读取配置显式指定的路径
+    （config.json 的 ``agent_flow.pi_path``，支持 ``~`` 展开）；未配置时再
+    依次 ``shutil.which`` 走 PATH、扫描常见安装目录兜底。找不到返回 None，
     交由 ``_is_start_failure`` 判定后回退 mock。
     """
+    try:
+        from akm.config import load_config
+        configured = str(((load_config().get("agent_flow") or {}).get("pi_path") or "")).strip()
+        if configured:
+            expanded = os.path.abspath(os.path.expanduser(configured))
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
+    except Exception:  # noqa: BLE001
+        pass
     found = shutil.which("pi")
     if found:
         return found
@@ -55,6 +65,79 @@ def _resolve_pi_binary() -> str | None:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+# pi-coding-agent 要求的 Node 最低版本（cli 脚本用了 v flag 正则等新语法）
+_PI_MIN_NODE = (22, 19, 0)
+
+
+def _node_version_ok(node_bin: str, min_ver: tuple = _PI_MIN_NODE) -> bool:
+    """node 版本是否 >= min_ver（跑一次 node --version 解析）。"""
+    try:
+        out = subprocess.run([node_bin, "--version"], capture_output=True, text=True, timeout=10).stdout or ""
+        m = re.search(r"v(\d+)\.(\d+)\.(\d+)", out)
+        if not m:
+            return False
+        return tuple(int(x) for x in m.groups()) >= min_ver
+    except Exception:
+        return False
+
+
+def _nvm_node_candidates() -> list[str]:
+    """~/.nvm/versions/node/*/bin/node，按版本降序（仅收录 >= _PI_MIN_NODE）。"""
+    root = os.path.join(os.path.expanduser("~"), ".nvm", "versions", "node")
+    if not os.path.isdir(root):
+        return []
+    dirs: list[tuple[tuple, str]] = []
+    for name in os.listdir(root):
+        m = re.match(r"v(\d+)\.(\d+)\.(\d+)", name)
+        if not m:
+            continue
+        ver = tuple(int(x) for x in m.groups())
+        if ver < _PI_MIN_NODE:
+            continue
+        bin_path = os.path.join(root, name, "bin", "node")
+        if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+            dirs.append((ver, bin_path))
+    dirs.sort(key=lambda t: t[0], reverse=True)
+    return [p for _, p in dirs]
+
+
+def _resolve_node_binary() -> str | None:
+    """定位满足 pi 要求的 node 绝对路径（版本 >= 22.19.0）。
+
+    pi 是 node 脚本，shebang 走 ``#!/usr/bin/env node``；GUI/launchctl 启动的
+    打包 app 环境 PATH 常为空或不含 /usr/local/bin，且用户默认 node 可能是
+    旧版本（v18 跑不了新版 pi）。这里显式解析：PATH 里的 node（版本满足）→
+    nvm 各版本（>=22.19.0 取最高）→ 常见安装目录。都不满足返回 None。
+    """
+    found = shutil.which("node")
+    if found and _node_version_ok(found):
+        return found
+    for cand in _nvm_node_candidates():
+        return cand
+    for candidate in (
+        "/usr/local/bin/node",
+        "/opt/homebrew/bin/node",
+        "/opt/local/bin/node",
+        os.path.expanduser("~/.local/bin/node"),
+        "/usr/bin/node",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK) and _node_version_ok(candidate):
+            return candidate
+    return None
+
+
+def _pi_exec_command(pi_bin: str, node_bin: str | None) -> list[str]:
+    """构造 pi 的执行命令。
+
+    pi 常为 node 脚本（symlink → cli.js）；node 版本满足时用 ``node cli.js``
+    直接执行，绕过 shebang 的 env node（打包 app 缺 PATH 时 env 找不到 node）。
+    """
+    cli_js = os.path.realpath(pi_bin)
+    if node_bin and cli_js.endswith(".js") and os.path.isfile(cli_js):
+        return [node_bin, cli_js]
+    return [pi_bin]
 
 
 def _load_pi_models_file() -> dict | None:
@@ -158,8 +241,20 @@ async def _run_pi_cli(opts: dict, timeout_ms: int, model_ref: str | None) -> dic
         raise FileNotFoundError(
             "pi 命令不存在（PATH 与常见安装目录均未找到）：请安装 pi-coding-agent 或把其所在目录加入 PATH"
         )
+    # pi 是 node 脚本：用满足版本要求的 node 绝对路径直接执行真实 cli.js，
+    # 绕过 shebang 的 env node（打包 app 缺 PATH 时 env 找不到 node）；缺 node
+    # 时报明确错误让节点 failed，而不是回退 mock 造成「跑成功了但没有文件」。
+    cli_js = os.path.realpath(pi_bin)
+    node_bin = _resolve_node_binary()
+    if cli_js.endswith(".js") and os.path.isfile(cli_js) and not node_bin:
+        raise FileNotFoundError(
+            "pi 需要 Node.js ≥22.19.0，但未找到满足版本的 node（PATH 与常见安装目录均不含）："
+            "请用 nvm 安装新版 Node.js（如 nvm install 22）或在 PATH 中提供新版 node"
+        )
+    exec_args = _pi_exec_command(pi_bin, node_bin)
+    opts.get("on_log") and opts["on_log"](f"Pi 启动: {' '.join(exec_args)}（node={node_bin}）", "debug")
     proc = await asyncio.create_subprocess_exec(
-        pi_bin,
+        *exec_args,
         *args,
         cwd=cwd,
         env=env,

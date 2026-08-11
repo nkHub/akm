@@ -111,11 +111,16 @@ def _monkey_forward(monkeypatch, tmp_path):
 # ── 纯函数 ─────────────────────────────────────────────────────
 
 def test_resolve_pi_binary(monkeypatch):
-    """pi CLI 定位：which 优先，找不到再扫常见安装目录，全未命中返回 None。"""
+    """pi CLI 定位：配置 agent_flow.pi_path 优先，其次 which + 常见目录，全未命中 None。"""
     import os
     import shutil as sh
 
+    import akm.config as cfg_mod
+
     from akm.flow.pi_runner import _resolve_pi_binary
+
+    # 0) 默认未配置 agent_flow.pi_path，走自动定位
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {})
 
     # 1) which 命中时直接返回（打包 app 也能拿到绝对路径，不依赖 PATH）
     monkeypatch.setattr(sh, "which", lambda name: "/custom/pi")
@@ -130,6 +135,71 @@ def test_resolve_pi_binary(monkeypatch):
     # 3) 全部未命中返回 None（由 _is_start_failure 判定后回退 mock）
     monkeypatch.setattr(os.path, "isfile", lambda p: False)
     assert _resolve_pi_binary() is None
+
+    # 4) 显式配置 agent_flow.pi_path 优先于 which（支持 ~ 展开）
+    monkeypatch.setattr(sh, "which", lambda name: "/custom/pi")
+    monkeypatch.setattr(cfg_mod, "load_config", lambda: {"agent_flow": {"pi_path": "/opt/pi-custom/pi"}})
+    monkeypatch.setattr(os.path, "isfile", lambda p: p == "/opt/pi-custom/pi")
+    monkeypatch.setattr(os, "access", lambda p, mode: True)
+    assert _resolve_pi_binary() == "/opt/pi-custom/pi"
+
+
+def test_node_version_ok(monkeypatch):
+    """node 版本校验：解析 vX.Y.Z 并与 pi 的最低要求（>=22.19.0）比较。"""
+    import subprocess
+
+    from akm.flow.pi_runner import _node_version_ok
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="v22.19.0\n"))
+    assert _node_version_ok("/x/node")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="v18.20.8\n"))
+    assert not _node_version_ok("/x/node")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=""))
+    assert not _node_version_ok("/x/node")
+
+
+def test_resolve_node_binary(monkeypatch):
+    """node 定位：PATH 版本满足优先 → nvm（>=22.19.0）→ 常见目录；全不满足 None。"""
+    import os
+    import shutil as sh
+
+    from akm.flow import pi_runner as pr
+
+    # 1) PATH 里的 node 版本满足 → 直接用（nvm 不再扫）
+    monkeypatch.setattr(sh, "which", lambda name: "/usr/local/bin/node" if name == "node" else None)
+    monkeypatch.setattr(pr, "_node_version_ok", lambda *a, **k: True)
+    monkeypatch.setattr(pr, "_nvm_node_candidates", lambda: [])
+    assert pr._resolve_node_binary() == "/usr/local/bin/node"
+
+    # 2) PATH 版本不够 → 走 nvm 候选（版本满足）
+    monkeypatch.setattr(pr, "_node_version_ok", lambda bin, *a, **k: bin != "/usr/local/bin/node")
+    monkeypatch.setattr(pr, "_nvm_node_candidates", lambda: ["/Users/nk/.nvm/versions/node/v22.19.0/bin/node"])
+    assert pr._resolve_node_binary() == "/Users/nk/.nvm/versions/node/v22.19.0/bin/node"
+
+    # 3) 全部不满足 → None（_run_pi_cli 会据此明确报错而非 mock 假成功）
+    monkeypatch.setattr(sh, "which", lambda name: None)
+    monkeypatch.setattr(pr, "_nvm_node_candidates", lambda: [])
+    monkeypatch.setattr(pr, "_node_version_ok", lambda *a, **k: False)
+    monkeypatch.setattr(os.path, "isfile", lambda p: False)
+    assert pr._resolve_node_binary() is None
+
+
+def test_pi_exec_command(monkeypatch):
+    """pi 执行命令构造：node 存在且 cli.js → [node, cli.js]；否则直接用 pi。"""
+    import os
+
+    from akm.flow.pi_runner import _pi_exec_command
+
+    monkeypatch.setattr(
+        os.path, "realpath",
+        lambda p: "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    )
+    monkeypatch.setattr(os.path, "isfile", lambda p: p.endswith("cli.js"))
+    assert _pi_exec_command("/usr/local/bin/pi", "/Users/nk/.nvm/versions/node/v22.19.0/bin/node") == [
+        "/Users/nk/.nvm/versions/node/v22.19.0/bin/node",
+        "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    ]
+    assert _pi_exec_command("/usr/local/bin/pi", None) == ["/usr/local/bin/pi"]
 
 
 def test_structural_edges_excludes_loop():
