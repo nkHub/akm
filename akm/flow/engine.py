@@ -603,14 +603,21 @@ class WorkflowEngine:
             logger.exception("flow worktree 清理失败: %s", run.get("id"))
         run.pop("worktrees", None)
 
-    async def start(self, workflow: dict, prompt: str, project_id: str = "", requirement_id: str = "") -> dict:
-        """启动一次运行：冻结工作流快照，创建 run 并后台执行。"""
+    async def start(self, workflow: dict, prompt: str, project_id: str = "", requirement_id: str = "", variables: dict | None = None) -> dict:
+        """启动一次运行：冻结工作流快照，创建 run 并后台执行。
+
+        variables 为触发运行时的临时参数（如 projectPath / language），仅本次运行生效：
+        覆盖合并进工作流默认 variables（不修改工作流定义），并写入快照与 run.input.variables。
+        """
+        # 运行时变量覆盖工作流默认变量，仅影响本次运行的快照
+        merged_vars = {**(workflow.get("variables") or {}), **(variables or {})}
+        snapshot = {**workflow, "variables": merged_vars}
         run_id = flow_db.create_run_id()
         run: dict = {
             "id": run_id,
             "workflowId": workflow["id"],
             "status": "running",
-            "input": {"prompt": prompt, "files": []},
+            "input": {"prompt": prompt, "files": [], "variables": merged_vars},
             "projectId": project_id or None,
             "requirementId": requirement_id or None,
             "nodeRuns": {},
@@ -618,7 +625,7 @@ class WorkflowEngine:
             "startedAt": flow_db.now_iso(),
             "finishedAt": "",
             "totals": {"tokensIn": 0, "tokensOut": 0, "costUsd": 0},
-            "workflowSnapshot": workflow,
+            "workflowSnapshot": snapshot,
             "pendingHumanNodeId": None,
             "fileDiffs": {},
             "createdAt": flow_db.now_iso(),
@@ -626,7 +633,7 @@ class WorkflowEngine:
         self._runs[run_id] = run
         flow_db.insert_run(run)
         self._emit(run_id, {"type": "run_start", "runId": run_id, "workflowId": workflow["id"]})
-        self._tasks[run_id] = asyncio.create_task(self.execute(run, workflow))
+        self._tasks[run_id] = asyncio.create_task(self.execute(run, snapshot))
         return run
 
     def get_run(self, run_id: str) -> dict | None:

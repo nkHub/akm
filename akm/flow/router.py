@@ -212,6 +212,7 @@ async def start_run(wf_id: str, request: Request):
         prompt,
         project_id=body.get("projectId") or "",
         requirement_id=body.get("requirementId") or "",
+        variables=body.get("variables") or None,
     )
     return JSONResponse({"run": run}, status_code=201)
 
