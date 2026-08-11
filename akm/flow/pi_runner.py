@@ -13,7 +13,9 @@ import signal
 import subprocess
 from typing import Any
 
-DEFAULT_TIMEOUT_MS = int(os.environ.get("FLOW_PI_TIMEOUT_MS") or os.environ.get("FLOW_AGENT_TIMEOUT_MS") or 600_000)
+# pi 编码节点默认超时：1 小时（复杂任务可能长时间编码/测试）；
+# 仍可被 FLOW_PI_TIMEOUT_MS / FLOW_AGENT_TIMEOUT_MS 环境变量覆盖
+DEFAULT_TIMEOUT_MS = int(os.environ.get("FLOW_PI_TIMEOUT_MS") or os.environ.get("FLOW_AGENT_TIMEOUT_MS") or 3_600_000)
 
 
 def build_prompt(system_prompt: str, user_prompt: str) -> str:
