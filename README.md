@@ -399,7 +399,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 - pi-agent 定位：优先读取 `~/.akm/config.json` 的 `agent_flow.pi_path` 显式指定的 pi 路径（各机器安装位置不同时可自定义，支持 `~` 展开）；未配置时自动在 PATH 与常见安装目录定位。pi 是 Node 脚本，要求 Node.js ≥22.19.0，运行时自动从 PATH / nvm 各版本中选择满足版本的 node 绝对路径直接执行（打包 app 经 GUI/launchctl 启动时环境 PATH 常为空，绕过 shebang 的 `env node`）。
 - 路径解析：`variables.projectPath` 支持绝对路径或相对路径；相对路径基于 `agent_workspace_root` 配置的工作区根目录解析（未配置时回退到进程当前目录）。
 - 运行参数：`POST /v1/flow/workflows/{id}/runs` 的 body 支持 `variables`（对象），覆盖合并进本次运行的变量（如 `{"prompt": "...", "variables": {"projectPath": "/path/to/proj", "language": "HTML"}}`），仅本次运行生效，不修改工作流定义。
-- 内置工具：`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs` / `akm_flow_run_get`，可在对话里直接管理、驱动工作流，并通过 `akm_flow_run_get` 查询单次运行的节点级状态定位卡住/失败的节点。
+- 内置工具：`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs` / `akm_flow_run_get`，可在对话里直接管理、驱动工作流，并通过 `akm_flow_run_get` 查询单次运行的节点级详情（状态/错误/输出正文与结构化产物/最近日志）定位卡住或失败的节点。
 
 ## 故障切换策略
 

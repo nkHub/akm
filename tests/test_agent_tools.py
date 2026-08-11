@@ -1268,6 +1268,14 @@ def test_builtin_flow_run_get_returns_node_details(monkeypatch, tmp_path):
                         "tokensIn": 10,
                         "tokensOut": 5,
                         "fileDiffs": [],
+                        "output": {
+                            "text": "## 结论\nfail\n实现有 bug",
+                            "structured": {
+                                "conclusion": "fail",
+                                "sections": [{"title": "结论", "body": "fail\n实现有 bug"}],
+                                "files": ["src/login.ts"],
+                            },
+                        },
                         "logs": [{"message": "第一次尝试"}],
                     }
                 },
@@ -1286,6 +1294,10 @@ def test_builtin_flow_run_get_returns_node_details(monkeypatch, tmp_path):
     assert node["status"] == "failed"
     assert node["error"] == "boom"
     assert node["logs"] == ["第一次尝试"]
+    assert node["outputText"] == "## 结论\nfail\n实现有 bug"
+    assert node["structured"]["conclusion"] == "fail"
+    assert node["structured"]["files"] == ["src/login.ts"]
+    assert node["structured"]["sections"][0]["title"] == "结论"
 
     missing = handlers["akm_flow_run_get"](run_id="run_nope")
     assert "error" in missing

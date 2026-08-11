@@ -1980,10 +1980,15 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         nodes = (run.get("workflowSnapshot") or {}).get("nodes") or []
         by_id = {n.get("id", ""): n for n in nodes}
         node_summaries: list[dict[str, Any]] = []
+        from akm.flow.engine import output_to_text
+
         for nid, nr in (run.get("nodeRuns") or {}).items():
             node = by_id.get(nid, {})
             data = node.get("data") or {}
             logs = nr.get("logs") or []
+            # 节点输出摘要：正文截断，结构化产物保留 conclusion/sections/files
+            output = nr.get("output") or {}
+            structured = output.get("structured") or {}
             node_summaries.append(
                 {
                     "id": nid,
@@ -1995,6 +2000,18 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     "tokensIn": nr.get("tokensIn") or 0,
                     "tokensOut": nr.get("tokensOut") or 0,
                     "fileDiffs": len(nr.get("fileDiffs") or []),
+                    "outputText": str(output_to_text(output) or "")[:2000],
+                    "structured": {
+                        "conclusion": structured.get("conclusion", ""),
+                        "sections": [
+                            {
+                                "title": s.get("title", ""),
+                                "body": str(s.get("body") or "")[:500],
+                            }
+                            for s in (structured.get("sections") or [])
+                        ],
+                        "files": (structured.get("files") or [])[:20],
+                    },
                     "logs": [str(l.get("message") or "")[:300] for l in logs[-5:]],
                 }
             )
