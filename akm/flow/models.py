@@ -8,7 +8,7 @@ flow 原本通过 HTTP 拉取 AKM 网关的 /v1/models；并入 AKM 后改为直
 import re
 from typing import Any
 
-from akm.key_pool import list_keys
+from akm.key_pool import key_model_list, list_keys
 
 
 # ── ModelConfig 结构 ──────────────────────────────────────────
@@ -66,12 +66,10 @@ def resolve_model_catalog() -> list[dict]:
     except Exception:
         keys = []
     for key in keys:
-        models = set(key.get("provider_models") or [])
-        explicit = key.get("models") or []
-        if isinstance(explicit, str):
-            explicit = [explicit]
-        models.update(m for m in explicit if m not in (None, "", "*"))
-        for model in sorted(models):
+        # 用 key_model_list 统一解析：显式逗号串切分、'*' 取 provider_models、
+        # 空返回 []，避免把整串 models（如 "gpt-5.6-terra,gpt-5.4-mini,..."）
+        # 当成单个模型 id（曾导致 flow 请求 model 为整串 → key 池匹配不到 → 503）
+        for model in sorted(set(key_model_list(key))):
             if model in seen:
                 continue
             seen.add(model)

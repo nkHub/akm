@@ -144,6 +144,31 @@ def test_resolve_pi_binary(monkeypatch):
     assert _resolve_pi_binary() == "/opt/pi-custom/pi"
 
 
+def test_resolve_model_catalog_splits_comma_models(monkeypatch):
+    """catalog 构建：key 的 models 逗号串应切分为独立模型，'*' 取 provider_models。"""
+    import akm.flow.models as fm
+
+    keys = [
+        {"alias": "gs-codex", "models": "gpt-5.6-terra,gpt-5.4-mini,gpt-5.4", "provider_models": []},
+        {"alias": "opencode", "models": "*", "provider_models": ["deepseek-v4-pro", "deepseek-v4-flash", ""]},
+        {"alias": "empty", "models": "", "provider_models": []},
+    ]
+    monkeypatch.setattr(fm, "list_keys", lambda: keys)
+
+    catalog = fm.resolve_model_catalog()
+    ids = {m["id"] for m in catalog}
+
+    # 逗号串被拆分成独立模型条目，不再把整串当单个模型
+    assert "gpt-5.6-terra,gpt-5.4-mini,gpt-5.4" not in ids
+    for name in ("gpt-5.6-terra", "gpt-5.4-mini", "gpt-5.4", "deepseek-v4-pro", "deepseek-v4-flash"):
+        assert name in ids
+    # provider_models 中的空串被过滤；空 models 的 key 不贡献条目
+    assert "" not in ids
+    # find_model 能精确命中独立模型，而不是回退到列表第一个
+    hit = fm.find_model(catalog, "deepseek-v4-pro")
+    assert hit is not None and hit["id"] == "deepseek-v4-pro"
+
+
 def test_node_version_ok(monkeypatch):
     """node 版本校验：解析 vX.Y.Z 并与 pi 的最低要求（>=22.19.0）比较。"""
     import subprocess
