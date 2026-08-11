@@ -4,6 +4,7 @@ import asyncio
 import base64
 import ctypes
 import datetime
+import fnmatch
 import json
 import logging
 import mimetypes
@@ -55,6 +56,11 @@ _WORKSPACE_GREP_MAX_FILE_BYTES = 10 * 1024 * 1024
 _WORKSPACE_GREP_MAX_LINE_BYTES = 1024 * 1024
 # grep 单次扫描的全局字节预算：达到后停止继续遍历，防止全盘递归拖垮进程
 _WORKSPACE_GREP_MAX_SCAN_BYTES = 128 * 1024 * 1024
+# glob 遍历时剪枝跳过的目录名（与 grep 一致，跳过依赖/版本库/构建产物目录）
+_WORKSPACE_GLOB_EXCLUDE_DIRS = frozenset((".git", "node_modules", "__pycache__", "venv", ".venv", "build", "dist"))
+# glob 单次遍历的条目预算：达到后停止继续扫描并标记 truncated，
+# 防止 ``**`` 类大范围模式在事件循环/线程内全盘递归拖垮进程
+_WORKSPACE_GLOB_MAX_SCAN_ENTRIES = 200_000
 # 写文件工具允许写入的内容大小上限，防止模型一次写入 GB 级内容撑爆磁盘/内存
 _WORKSPACE_WRITE_MAX_BYTES = 10 * 1024 * 1024
 
@@ -447,11 +453,83 @@ async def _list_dir_tool(path: str = "") -> str:
     return json.dumps({"path": str(target), "entries": entries, "total": total}, ensure_ascii=False)
 
 
+def _glob_matches(rel_parts: tuple, pattern: str) -> bool:
+    """判断相对路径段是否与 glob 模式匹配（支持 ``**`` 跨目录）。
+
+    与 pathlib.Path.glob 的匹配语义保持一致：``**`` 匹配零个或多个目录段，
+    其余段用 fnmatch 逐段匹配。pathlib 的 Path.match 会把 ``*.py`` 误匹配到
+    深层文件，因此这里按段展开，保证 ``*.py`` 只匹配根级、``**/*.py`` 匹配任意层级。
+    """
+    pat_parts = [p for p in pattern.split("/") if p]
+    if not pat_parts:
+        return False
+    n, m = len(pat_parts), len(rel_parts)
+    # 动态规划：dp[i][j] 表示模式前 i 段能否匹配路径前 j 段
+    dp = [[False] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = True
+    for i in range(1, n + 1):
+        if pat_parts[i - 1] == "**":
+            dp[i][0] = dp[i - 1][0]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if pat_parts[i - 1] == "**":
+                # ** 可匹配零段（dp[i-1][j]）或多段（dp[i][j-1]）
+                dp[i][j] = dp[i - 1][j] or dp[i][j - 1]
+            else:
+                dp[i][j] = dp[i - 1][j - 1] and fnmatch.fnmatchcase(rel_parts[j - 1], pat_parts[i - 1])
+    return dp[n][m]
+
+
+def _glob_sync(root: Path, pattern: str) -> dict:
+    """在工作区内按 glob 模式同步匹配文件路径（相对工作区根目录返回）。
+
+    递归遍历时剪枝跳过隐藏目录与常见依赖/构建目录（node_modules/.git 等），
+    并设遍历条目预算，防止 ``**`` 类大范围模式全盘递归。该函数在
+    asyncio.to_thread 中执行，避免阻塞事件循环。
+    """
+    # 统一 resolve，确保与逐项 p.resolve() 的可比性（如 /var -> /private/var）
+    root = root.resolve()
+    matches = []
+    total = 0
+    scanned = 0
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        # 剪枝：隐藏目录与依赖/构建目录不进入递归
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in _WORKSPACE_GLOB_EXCLUDE_DIRS
+        ]
+        for name in dirnames + filenames:
+            scanned += 1
+            if scanned > _WORKSPACE_GLOB_MAX_SCAN_ENTRIES:
+                truncated = True
+                break
+            p = Path(dirpath, name)
+            # 与 grep 一致：逐项 resolve 后校验仍位于工作区内，
+            # 防止工作区内的软链接把匹配结果指向外部路径。
+            try:
+                if not _path_is_under(p.resolve(), root):
+                    continue
+            except OSError:
+                continue
+            rel_parts = p.relative_to(root).parts
+            if not _glob_matches(rel_parts, pattern):
+                continue
+            total += 1
+            if len(matches) < _WORKSPACE_GREP_MAX_RESULTS:
+                matches.append(str(Path(*rel_parts)))
+        if truncated:
+            break
+    matches.sort()
+    return {"pattern": pattern, "matches": matches, "total": total, "truncated": truncated}
+
+
 async def _glob_tool(pattern: str = "") -> str:
     """在工作区内按 glob 模式匹配文件路径（相对工作区根目录返回）。
 
     模式如 ``**/*.py``、``src/**/*.ts``。绝对模式或以 ``../`` 开头
-    试图离开工作区的模式会被拒绝。
+    试图离开工作区的模式会被拒绝。遍历在 asyncio.to_thread 中执行，
+    避免同步递归扫描（如 ``**/*``）阻塞事件循环。
     """
     pattern = str(pattern or "").strip()
     if not pattern:
@@ -461,26 +539,11 @@ async def _glob_tool(pattern: str = "") -> str:
     root = _workspace_root()
     if root is None:
         return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
-    matches = []
-    total = 0
     try:
-        for p in root.glob(pattern):
-            if not (p.is_file() or p.is_dir()):
-                continue
-            # 与 grep 一致：逐项 resolve 后校验仍位于工作区内，
-            # 防止工作区内的软链接把匹配结果指向外部路径。
-            try:
-                if not _path_is_under(p.resolve(), root):
-                    continue
-            except OSError:
-                continue
-            total += 1
-            if len(matches) < _WORKSPACE_GREP_MAX_RESULTS:
-                matches.append(str(p.relative_to(root)))
-    except (OSError, ValueError) as exc:
+        result = await asyncio.to_thread(_glob_sync, root, pattern)
+    except OSError as exc:
         return json.dumps({"error": f"匹配失败: {exc}"}, ensure_ascii=False)
-    matches.sort()
-    return json.dumps({"pattern": pattern, "matches": matches, "total": total}, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
 
 
 async def _grep_tool(
@@ -511,55 +574,65 @@ async def _grep_tool(
     if not root.is_dir():
         return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
 
-    results = []
-    scanned_bytes = 0
     try:
-        for p in root.rglob("*"):
-            if not p.is_file():
-                continue
-            # rglob 会返回工作区内指向外部文件的软链接，必须逐项 resolve
-            # 后再次校验，不能只校验 grep 的起始目录。
-            try:
-                if not _path_is_under(p.resolve(), root):
-                    continue
-            except OSError:
-                continue
-            # 跳过隐藏目录与常见二进制/版本库目录，避免命中无意义内容
-            rel = p.relative_to(root)
-            parts = rel.parts
-            if any(part.startswith(".") or part in ("node_modules", ".git", "__pycache__", "venv", ".venv", "build", "dist") for part in parts):
-                continue
-            # 资源预算：超大文件跳过、全局扫描字节预算封顶，防止全盘递归
-            # 逐行正则匹配拖垮进程（该循环在事件循环内同步执行）。
-            try:
-                size = p.stat().st_size
-            except OSError:
-                continue
-            if size > _WORKSPACE_GREP_MAX_FILE_BYTES:
-                continue
-            scanned_bytes += size
-            if scanned_bytes > _WORKSPACE_GREP_MAX_SCAN_BYTES:
-                break
-            try:
-                with open(p, "r", encoding="utf-8", errors="ignore") as fh:
-                    for lineno, line in enumerate(fh, start=1):
-                        # 跳过超长单行，避免灾难性正则（ReDoS）在超大输入上回退爆炸
-                        if len(line) > _WORKSPACE_GREP_MAX_LINE_BYTES:
-                            continue
-                        if rx.search(line):
-                            results.append({
-                                "file": str(rel),
-                                "line": lineno,
-                                "content": line.rstrip("\n").encode("utf-8")[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore"),
-                            })
-                            break
-            except OSError:
-                continue
-            if len(results) >= _WORKSPACE_GREP_MAX_RESULTS:
-                break
+        # 同步遍历与逐行正则匹配放到线程池执行，避免阻塞事件循环
+        results = await asyncio.to_thread(_grep_sync, root, rx)
     except OSError as exc:
         return json.dumps({"error": f"搜索失败: {exc}"}, ensure_ascii=False)
     return json.dumps({"pattern": pattern, "results": results, "total": len(results)}, ensure_ascii=False)
+
+
+def _grep_sync(root: Path, rx: re.Pattern) -> list[dict]:
+    """在工作区内同步按正则搜索文件内容，返回命中行结果列表。
+
+    rglob 会返回工作区内指向外部文件的软链接，必须逐项 resolve 后再次校验；
+    跳过隐藏目录与常见二进制/版本库目录，并按字节预算封顶，防止全盘递归
+    逐行正则匹配拖垮进程。该函数在 asyncio.to_thread 中执行。
+    """
+    results = []
+    scanned_bytes = 0
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            if not _path_is_under(p.resolve(), root):
+                continue
+        except OSError:
+            continue
+        # 跳过隐藏目录与常见二进制/版本库目录，避免命中无意义内容
+        rel = p.relative_to(root)
+        parts = rel.parts
+        if any(part.startswith(".") or part in ("node_modules", ".git", "__pycache__", "venv", ".venv", "build", "dist") for part in parts):
+            continue
+        # 资源预算：超大文件跳过、全局扫描字节预算封顶，防止全盘递归
+        # 逐行正则匹配拖垮线程池。
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if size > _WORKSPACE_GREP_MAX_FILE_BYTES:
+            continue
+        scanned_bytes += size
+        if scanned_bytes > _WORKSPACE_GREP_MAX_SCAN_BYTES:
+            break
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                for lineno, line in enumerate(fh, start=1):
+                    # 跳过超长单行，避免灾难性正则（ReDoS）在超大输入上回退爆炸
+                    if len(line) > _WORKSPACE_GREP_MAX_LINE_BYTES:
+                        continue
+                    if rx.search(line):
+                        results.append({
+                            "file": str(rel),
+                            "line": lineno,
+                            "content": line.rstrip("\n").encode("utf-8")[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore"),
+                        })
+                        break
+        except OSError:
+            continue
+        if len(results) >= _WORKSPACE_GREP_MAX_RESULTS:
+            break
+    return results
 
 
 async def _file_info_tool(path: str) -> str:

@@ -29,7 +29,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；本地路径仅允许工作区或上传目录，亦可传入 base64 数据 |
 | `akm_read_file` | 读取工作区内的文本文件（可指定 `offset` / `limit`），返回内容与起始行号；单文件超 50MB 拒绝，单次返回超 60KB 截断并标记 |
 | `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构 |
-| `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表 |
+| `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表；遍历跳过隐藏目录与 `node_modules`/`.git`/`build` 等依赖构建目录，并设条目预算防止全盘递归（超限时标记 `truncated`） |
 | `akm_grep` | 在工作区内按正则搜索文件内容，返回命中文件、行号与行内容（限制最多 100 条；单文件超 10MB 跳过） |
 | `akm_file_info` | 查询工作区内文件/目录的类型、大小与修改时间 |
 | `akm_write_file` | 写入/覆盖工作区内文件（需开启 `agent_write_tools_enabled`；单次内容超 10MB 拒绝） |
