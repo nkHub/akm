@@ -636,6 +636,8 @@ async def test_llm_chat_failure_audit_uses_request_model(monkeypatch, _monkey_fo
 
     monkeypatch.setattr(server_mod, "_submit_audit_log", _fake_submit_audit_log)
     monkeypatch.setattr(flow_engine, "_forward_request", _fake_forward)
+    # 避免 5xx 自动重试的真实退避等待（重试耗尽后最终失败）
+    monkeypatch.setattr(flow_engine, "_LLM_RETRY_BASE_DELAY", 0.001)
 
     eng = flow_engine.WorkflowEngine(_fake_app())
     model = {"id": "gpt-test", "name": "GPT Test", "provider": "openai", "model": "gpt-5.6-terra", "strengths": []}
@@ -645,3 +647,43 @@ async def test_llm_chat_failure_audit_uses_request_model(monkeypatch, _monkey_fo
     # 审计 model 必须是请求体的单个模型，而不是 key 的 models 列表
     assert captured.get("model") == "gpt-5.6-terra"
     assert captured.get("status_code") == 503
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_retries_on_5xx_then_succeeds(monkeypatch, _monkey_forward):
+    """LLM 节点对瞬时 5xx 自动重试，重试成功后正常返回并只写一条成功审计。"""
+    import json
+
+    import akm.server as server_mod
+    from akm.flow import engine as flow_engine
+
+    monkeypatch.setattr(flow_engine, "_LLM_RETRY_BASE_DELAY", 0.001)
+    submitted: list[dict] = []
+    calls = {"n": 0}
+
+    async def _fake_submit_audit_log(app, data):
+        submitted.append(data)
+
+    async def _flaky_forward(body, client, api_path="chat/completions", plugin_manager=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 第一次返回上游瞬时 503（body 空、0ms）
+            return {"status_code": 503, "body": "", "key_alias": "", "provider": "", "model": "m", "latency_ms": 0}
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": "已完成"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        return {"status_code": 200, "body": json.dumps(payload), "key_alias": "t", "provider": "p", "model": "m"}
+
+    monkeypatch.setattr(server_mod, "_submit_audit_log", _fake_submit_audit_log)
+    monkeypatch.setattr(flow_engine, "_forward_request", _flaky_forward)
+
+    eng = flow_engine.WorkflowEngine(_fake_app())
+    model = {"id": "gpt-test", "name": "GPT Test", "provider": "openai", "model": "gpt-test", "strengths": []}
+    out = await eng._llm_chat(model, [{"role": "user", "content": "hi"}])
+    # 第一次 503 → 重试一次成功，共 2 次调用
+    assert calls["n"] == 2
+    assert "已完成" in out["text"]
+    # 重试中间的失败尝试不落库，只有成功一次
+    assert len(submitted) == 1
+    assert submitted[0]["status_code"] == 200

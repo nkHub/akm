@@ -36,6 +36,10 @@ NODE_TYPES = ("intake", "plan", "code", "review", "test", "fix", "human", "route
 # 节点执行器（NodeExecutor）
 CODING_EXECUTORS = ("pi-agent",)
 
+# LLM 节点对上游瞬时 5xx 的自动重试（总尝试次数 = _LLM_RETRY_MAX + 1，指数退避）
+_LLM_RETRY_MAX = 2
+_LLM_RETRY_BASE_DELAY = 1.0
+
 
 # ── 纯函数（移植自 shared/index.ts）───────────────────────────
 
@@ -286,6 +290,9 @@ class WorkflowEngine:
 
         每次真实 LLM 调用都会写入审计日志（来源标记为 flow），便于与
         /v1/chat/completions（无来源标记）和 /v1/agent（chat/task）区分。
+
+        对上游瞬时 5xx（网关时段性故障）做自动重试（指数退避），减少工作流
+        因单次瞬时故障整次失败；4xx（请求本身问题）不重试，直接失败。
         """
         if model.get("provider") == "mock":
             return self._mock_chat(model, messages)
@@ -298,24 +305,37 @@ class WorkflowEngine:
         }
         http_client = getattr(self.app.state, "http_client", None)
         plugin_manager = getattr(self.app.state, "plugin_manager", None)
-        result = await _forward_request(body, http_client, plugin_manager=plugin_manager)
-        if result is None:
-            raise RuntimeError("LLM 转发不可用（http_client 未初始化）")
-        status_code = result.get("status_code") or 0
-        response_body = result.get("body") or ""
-        if status_code < 200 or status_code >= 300:
+        for attempt in range(_LLM_RETRY_MAX + 1):
+            result = await _forward_request(body, http_client, plugin_manager=plugin_manager)
+            if result is None:
+                raise RuntimeError("LLM 转发不可用（http_client 未初始化）")
+            status_code = result.get("status_code") or 0
+            response_body = result.get("body") or ""
+            if 200 <= status_code < 300:
+                text = _extract_text_content(response_body)
+                # 估算 token
+                tokens_in = len(json.dumps(messages, ensure_ascii=False)) // 4
+                tokens_out = max(len(text) // 4, 1)
+                await self._submit_audit(
+                    body, result, status_code, response_body,
+                    prompt_tokens=tokens_in, completion_tokens=tokens_out,
+                )
+                return {"text": text, "tokensIn": tokens_in, "tokensOut": tokens_out}
+            # 仅对 5xx 做自动重试（上游瞬时故障）；其余状态（4xx 等）直接失败
+            if status_code >= 500 and attempt < _LLM_RETRY_MAX:
+                retry_delay = _LLM_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "[Flow] LLM 请求失败（%s），%.1fs 后重试（第 %d 次，共 %d 次）：%s",
+                    status_code, retry_delay, attempt + 1, _LLM_RETRY_MAX + 1,
+                    (response_body or "")[:200],
+                )
+                await asyncio.sleep(retry_delay)
+                continue
             error_msg = f"LLM 请求失败（{status_code}）：{response_body[:500]}"
             await self._submit_audit(body, result, status_code, response_body, error=error_msg)
             raise RuntimeError(error_msg)
-        text = _extract_text_content(response_body)
-        # 估算 token
-        tokens_in = len(json.dumps(messages, ensure_ascii=False)) // 4
-        tokens_out = max(len(text) // 4, 1)
-        await self._submit_audit(
-            body, result, status_code, response_body,
-            prompt_tokens=tokens_in, completion_tokens=tokens_out,
-        )
-        return {"text": text, "tokensIn": tokens_in, "tokensOut": tokens_out}
+        # 兜底：循环内所有路径均已 return/raise，不应到达此处
+        raise RuntimeError("LLM 请求失败（重试次数耗尽）")
 
     async def _submit_audit(
         self,
