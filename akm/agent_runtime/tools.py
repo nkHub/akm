@@ -2080,14 +2080,16 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         top_k: int = 5,
         embedding_model: str = "",
         reranker_model: str = "",
+        workspace_root: str = "",
     ) -> str:
         """通过 markdown-kb 插件 HTTP 接口检索知识库，返回精选命中片段。
 
         以 HTTP 方式请求本机服务的 /api/markdown-kb/query 端点，与插件内部
         逻辑解耦。为控制模型上下文体积，每个命中只回传标题、文件名、相关度
         分数与截断后的正文摘要（前 500 字符），不会把完整 chunk 全量塞回。
-        Agent 请求存在有效工作区时，检索范围固定为当前工作区，避免模型通过
-        参数扩大到其他工作域；未配置工作区时仍可检索公共索引。
+        显式传入 workspace_root 时按指定目录检索（用于跨目录检索知识文档）；
+        未显式指定且 Agent 请求存在有效工作区时，检索范围固定为当前工作区，
+        避免模型通过参数扩大到其他工作域；未配置工作区时仍可检索公共索引。
         """
         question = str(question or "").strip()
         if not question:
@@ -2099,7 +2101,11 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             payload["embedding_model"] = str(embedding_model).strip()
         if str(reranker_model or "").strip():
             payload["reranker_model"] = str(reranker_model).strip()
-        if _request_workspace_root.get() is not None:
+        explicit_ws = str(workspace_root or "").strip()
+        if explicit_ws:
+            # 模型显式指定检索目录（跨目录/指定知识库场景），优先级最高
+            payload["workspace_root"] = explicit_ws
+        elif _request_workspace_root.get() is not None:
             try:
                 workspace_root = _workspace_root()
             except ValueError as exc:
@@ -2116,6 +2122,17 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(url, json=payload)
+                if resp.status_code == 400:
+                    # markdown-kb 插件用 400 表示「锁定目录下没有绑定知识文档 / 没有
+                    # 匹配内容」，属于正常业务提示而非错误，转成友好返回（空命中 + 说明），
+                    # 避免 Agent 误以为检索接口出错。
+                    try:
+                        detail = (resp.json() or {}).get("detail") or "没有匹配到相关文档"
+                    except Exception:
+                        detail = "没有匹配到相关文档"
+                    return json.dumps(
+                        {"results": [], "message": str(detail)[:200]}, ensure_ascii=False
+                    )
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
@@ -2582,6 +2599,7 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                     "top_k": {"type": "integer", "description": "返回命中条数，1 到 20，默认 5"},
                     "embedding_model": {"type": "string", "description": "向量模型，默认取插件配置"},
                     "reranker_model": {"type": "string", "description": "重排模型，默认取插件配置"},
+                    "workspace_root": {"type": "string", "description": "显式指定检索的知识库工作目录（绝对路径），用于跨目录检索；不传时自动锁定当前 Agent 工作区"},
                 },
                 "required": ["question"],
             },

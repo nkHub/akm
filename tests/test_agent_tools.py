@@ -221,6 +221,10 @@ class _FakeKbResponse:
         self._payload = payload
         self._status = status_code
 
+    @property
+    def status_code(self):
+        return self._status
+
     def raise_for_status(self):
         if self._status >= 400:
             raise RuntimeError(f"HTTP {self._status}")
@@ -319,7 +323,7 @@ async def test_builtin_kb_search_clamps_top_k_and_requires_question(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_builtin_kb_search_uses_current_request_workspace(monkeypatch):
-    """Agent 请求中的知识库检索必须固定为当前工作区，不能由模型指定路径。"""
+    """未显式传 workspace_root 时，检索自动固定为当前 Agent 工作区。"""
     client = _install_fake_kb_client(monkeypatch, {"ok": True, "hits": []})
     app = SimpleNamespace(state=SimpleNamespace())
     handler = _handlers(app)["akm_search_kb"]
@@ -336,6 +340,49 @@ async def test_builtin_kb_search_uses_current_request_workspace(monkeypatch):
     payload = client.calls[0]["json"]
     assert payload["workspace_root"] == "/global/workspace"
     assert "ignore_workspace" not in payload
+
+
+@pytest.mark.asyncio
+async def test_builtin_kb_search_explicit_workspace_root_overrides(monkeypatch):
+    """显式传 workspace_root 时按指定目录检索，覆盖自动工作区判定。"""
+    client = _install_fake_kb_client(monkeypatch, {"ok": True, "hits": []})
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_search_kb"]
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: {"agent_workspace_root": "/global/workspace"},
+    )
+    token = set_request_workspace_root("/global/workspace")
+    try:
+        await handler(question="组件", workspace_root="/docs/kb")
+    finally:
+        reset_request_workspace_root(token)
+
+    payload = client.calls[0]["json"]
+    assert payload["workspace_root"] == "/docs/kb"
+    assert "ignore_workspace" not in payload
+
+
+@pytest.mark.asyncio
+async def test_builtin_kb_search_400_no_match_is_friendly(monkeypatch):
+    """插件返回 400（锁定目录无绑定文档/无匹配）时应转为空结果+提示而非报错。"""
+    client = _install_fake_kb_client(
+        monkeypatch,
+        {"detail": "当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引"},
+        status_code=400,
+    )
+    app = SimpleNamespace(state=SimpleNamespace())
+    handler = _handlers(app)["akm_search_kb"]
+    token = set_request_workspace_root("")
+    try:
+        result = __import__("json").loads(await handler(question="腾讯企业邮箱"))
+    finally:
+        reset_request_workspace_root(token)
+
+    assert client.calls[0]["json"]["question"] == "腾讯企业邮箱"
+    assert result["results"] == []
+    assert "没有匹配" in result["message"]
+    assert "error" not in result
 
 
 @pytest.mark.asyncio
@@ -361,6 +408,7 @@ async def test_builtin_kb_search_registers_tool():
     assert "akm_search_kb" in tools
     assert tools["akm_search_kb"].parameters["required"] == ["question"]
     assert tools["akm_search_kb"].parameters["properties"]["top_k"]["description"]
+    assert "workspace_root" in tools["akm_search_kb"].parameters["properties"]
 
 
 def test_builtin_get_config_redacts_secret_fields(monkeypatch):
