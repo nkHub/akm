@@ -135,6 +135,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考与正文均实时以 `reasoning_delta` / `model_delta` 推送，工具调用事件按上游输出顺序穿插，`final` 收尾（详见「SSE 流式事件」） |
 | `workspace_root` | string | 否 | 本次请求的工作区根目录（绝对路径），只能指定为全局 `agent_workspace_root` 的子目录；不传或传空字符串时使用全局配置 |
+| `session_id` | string | 否 | 会话 ID（可选，需配合 `stream=true` 使用）。传入时自动落盘会复用同名会话文件做**增量合并**：以磁盘上已有历史为基线，按消息内容去重追加本次新增消息，同一逻辑对话只保留一份完整历史，不会重复保存多个内容重叠的独立文件；不传则每次请求新建一个独立会话文件（默认行为） |
 
 ## 上下文压缩
 

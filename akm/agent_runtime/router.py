@@ -217,6 +217,7 @@ async def _parse_agent_body(request: Request) -> tuple[dict[str, Any], JSONRespo
         "stream": stream_raw in ("1", "true", "yes", "on"),
         "max_turns": form.get("max_turns"),
         "workspace_root": str(form.get("workspace_root", "") or ""),
+        "session_id": str(form.get("session_id", "") or ""),
     }
     return body, None
 
@@ -250,6 +251,9 @@ async def agent(request: Request):
     api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
     stream = bool(body.get("stream", False))
     workspace_root = str(body.get("workspace_root", "") or "")
+    # 会话 ID：可选。客户端传了就在同一会话文件上做增量合并（避免同一逻辑
+    # 会话被保存成多个内容重叠的独立文件），留空则每次请求新建独立会话文件。
+    session_id = str(body.get("session_id", "") or "")
     # 回填的默认指令包含 {AKM_SOURCE_DIR} 等占位符，注入前替换为运行时实际路径
     instructions = _render_default_instructions(instructions, workspace_root)
     try:
@@ -282,6 +286,7 @@ async def agent(request: Request):
         "max_turns": max_turns,
         "api_path": api_path,
         "workspace_root": workspace_root,
+        "session_id": session_id,
         "source": "chat",
     }
     if stream:
@@ -294,12 +299,12 @@ async def agent(request: Request):
     depth_token = set_request_subagent_depth(subagent_depth)
     model_token = set_request_agent_model(model)
     try:
-        result = await agent_loop.run(messages, **options)
+        # 非流式 run() 不接受 session_id 参数，去掉避免 TypeError
+        result = await agent_loop.run(messages, **{k: v for k, v in options.items() if k != "session_id"})
     finally:
         reset_request_agent_model(model_token)
         reset_request_subagent_depth(depth_token)
     return JSONResponse(content=result.to_dict())
-
 
 def _agent_stream(
     agent_loop,

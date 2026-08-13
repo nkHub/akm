@@ -1368,6 +1368,7 @@ class AgentLoop:
         max_turns: int = 0,
         api_path: str = "chat/completions",
         workspace_root: str = "",
+        session_id: str = "",
         cancel_check: Callable[[], bool] | None = None,
         source: str = "chat",
     ) -> AsyncGenerator[str, None]:
@@ -1406,6 +1407,9 @@ class AgentLoop:
 
         Args:
             与 ``run()`` 相同。
+            session_id: 可选会话 ID。传入时复用同名会话文件做增量合并（按消息
+                        内容去重追加），同一多轮对话只保留一份完整历史；留空则
+                        每次请求新建一个独立会话文件（默认行为）。
             cancel_check: 可选回调，返回 True 表示本次请求应被中断。
 
         Yields:
@@ -1655,14 +1659,41 @@ class AgentLoop:
                         from akm.agent_runtime.sessions import SessionStore
 
                         _store = SessionStore()
-                        _store.save({
-                            "name": _store.next_name(),
-                            "model": model,
-                            "messages": working_messages,
-                            "workspace_root": workspace_root,
-                            "api_path": api_path,
-                            "instructions": instructions,
-                        })
+                        # 传了 session_id 时复用同名会话文件做增量合并：先读取
+                        # 磁盘上已有的完整历史作为基线，再按消息内容去重追加
+                        # 本次新增消息，避免同一逻辑会话被保存成多个内容重叠
+                        # 的独立文件；未传 session_id 时维持原有行为，每次请求
+                        # 新建一个独立会话文件。
+                        _session_id = str(session_id or "").strip()
+                        if _session_id:
+                            existing = _store.load(_session_id) or {}
+                            merged = list(existing.get("messages") or [])
+                            seen = {
+                                json.dumps(m, ensure_ascii=False, default=str)
+                                for m in merged
+                            }
+                            for m in working_messages:
+                                key = json.dumps(m, ensure_ascii=False, default=str)
+                                if key not in seen:
+                                    seen.add(key)
+                                    merged.append(m)
+                            _store.save({
+                                "name": _session_id,
+                                "model": model,
+                                "messages": merged,
+                                "workspace_root": workspace_root,
+                                "api_path": api_path,
+                                "instructions": instructions,
+                            })
+                        else:
+                            _store.save({
+                                "name": _store.next_name(),
+                                "model": model,
+                                "messages": working_messages,
+                                "workspace_root": workspace_root,
+                                "api_path": api_path,
+                                "instructions": instructions,
+                            })
                     except Exception:
                         pass
                 yield _sse_event("final", {
