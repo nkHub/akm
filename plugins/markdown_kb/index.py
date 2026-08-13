@@ -4778,16 +4778,17 @@ class Plugin(PluginBase):
         settings = self._settings()
         default_learn_prompt = (
             "你负责把一次 AI 协作对话提炼成可检索的 Markdown 知识条目。"
-            "只保留稳定、可复用的知识结论、原因、判断依据、修复方式和注意事项。"
+            "由你自主判断这段对话里真正有价值、稳定可复用的知识，自行决定提炼哪些内容、以什么结构组织，不要拘泥于固定模板。"
+            "只保留知识结论、原因、判断依据、修复方式和注意事项。"
             "不要输出触发关键词，不要把结果写成完整聊天记录。"
             "如果材料不足以沉淀为稳定知识，请返回 should_learn=false。"
             "你必须只返回 JSON 对象，不要输出代码块围栏。"
             "JSON 字段固定为："
             "should_learn(boolean), "
-            "title(string), "
-            "keywords(array[string], 3-8个核心中文/英文关键词，用于增强检索匹配度，提取文中核心概念和技术名词), "
-            "categories(array[string], 从以下类别中选择 1-3 个最匹配的: 技术实现、业务逻辑、架构设计、调试修复、配置部署、代码风格), "
-            "summary_markdown(string，使用 Markdown，可含小标题和列表，但不要包含最外层 # 标题，也不要包含\"关键原话摘录\"标题), "
+            "title(string，简短准确的知识点标题), "
+            "keywords(array[string]，自行提取 3-8 个核心中文/英文关键词，用于增强检索匹配度), "
+            "categories(array[string]，自行归纳 1-3 个最贴合的知识分类，不限固定类别，用最能概括该知识点的分类名), "
+            "summary_markdown(string，使用 Markdown，正文结构与组织方式由你自主决定，可含小标题和列表，但不要包含最外层 # 标题，也不要包含\"关键原话摘录\"标题), "
             "quotes(array[string]，最多 3 条关键原话摘录)。"
         )
         system_prompt = (settings.get("learn_summary_system_prompt") or "").strip() or default_learn_prompt

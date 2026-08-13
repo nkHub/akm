@@ -498,12 +498,14 @@ pages/member/integralwater/ 是积分流水页面。实现要点：
 ```
 JSON 字段固定为：
 should_learn(boolean),
-title(string),
-categories(array[string], 从以下类别中选择一个或多个: 技术实现、业务逻辑、架构设计、调试修复、配置部署、代码风格),
-keywords(array[string], 3-8个核心中文/英文关键词，用于增强检索匹配度，提取文中核心概念和技术名词),
+title(string，简短准确的知识点标题),
+keywords(array[string]，自行提取 3-8 个核心中文/英文关键词，用于增强检索匹配度),
+categories(array[string]，自行归纳 1-3 个最贴合的知识分类，不限固定类别，用最能概括该知识点的分类名),
 summary_markdown(string, ...),
 quotes(array[string], ...)
 ```
+
+> 说明：模型默认只做结构化包装，提炼哪些内容、正文如何组织、分类与关键词如何取，均由模型根据候选材料自主决定，不再限定固定类别枚举。
 
 ---
 
