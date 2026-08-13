@@ -261,6 +261,18 @@ async def agent(request: Request):
     if agent_loop is None:
         return JSONResponse(status_code=503, content={"detail": "Agent Loop 尚未初始化"})
 
+    # 子 agent 深度：子进程调用 /v1/agent 时通过请求头携带，供 akm_subagent_spawn
+    # 判断递归上限。主对话（无该头）为 0。用 ContextVar 注入请求上下文。
+    from akm.agent_runtime.tools import (
+        reset_request_subagent_depth,
+        set_request_subagent_depth,
+    )
+
+    try:
+        subagent_depth = max(0, int(request.headers.get("x-akm-subagent-depth", "0") or "0"))
+    except (TypeError, ValueError):
+        subagent_depth = 0
+
     options = {
         "model": model,
         "tools": tools if isinstance(tools, list) else None,
@@ -272,16 +284,26 @@ async def agent(request: Request):
     }
     if stream:
         return StreamingResponse(
-            _agent_stream(agent_loop, request, messages, options),
+            _agent_stream(agent_loop, request, messages, options, subagent_depth),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
-    result = await agent_loop.run(messages, **options)
+    depth_token = set_request_subagent_depth(subagent_depth)
+    try:
+        result = await agent_loop.run(messages, **options)
+    finally:
+        reset_request_subagent_depth(depth_token)
     return JSONResponse(content=result.to_dict())
 
 
-def _agent_stream(agent_loop, request: Request, messages: list[dict], options: dict) -> AsyncGenerator[str, None]:
+def _agent_stream(
+    agent_loop,
+    request: Request,
+    messages: list[dict],
+    options: dict,
+    subagent_depth: int = 0,
+) -> AsyncGenerator[str, None]:
     """包装 Agent 流式生成器，检测客户端断连并主动取消。
 
     客户端通过 AbortController 取消 /v1/agent 流式请求时，底层 TCP 连接会断开。
@@ -309,6 +331,12 @@ def _agent_stream(agent_loop, request: Request, messages: list[dict], options: d
                 return
 
         watcher = asyncio.create_task(_watch_disconnect())
+        from akm.agent_runtime.tools import (
+            reset_request_subagent_depth,
+            set_request_subagent_depth,
+        )
+
+        depth_token = set_request_subagent_depth(subagent_depth)
         try:
             async for event in agent_loop.run_stream(
                 messages,
@@ -317,6 +345,7 @@ def _agent_stream(agent_loop, request: Request, messages: list[dict], options: d
             ):
                 yield event
         finally:
+            reset_request_subagent_depth(depth_token)
             stream_ended.set()
             watcher.cancel()
             try:
