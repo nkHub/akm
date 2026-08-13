@@ -344,7 +344,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)） |
 | GET/POST | `/v1/tasks` | 定时任务接口：列表 / 创建（`agent_call`、`usage_query` 类型）；配套 `GET/PUT/DELETE /v1/tasks/{id}` 与 `POST /v1/tasks/{id}/run` 立即执行 |
-| GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见表后「工作流引擎」段） |
+| GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见 [`akm/flow/flow.md`](akm/flow/flow.md)） |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
@@ -384,25 +384,15 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。内置 `akm_ask_user` 澄清工具支持**交互式提问**：AI 认为信息不足时可中断本轮、向用户反问确认（支持自由输入框 / 单选 / 多选三种模式，由 `options` / `multiple` 参数控制），用户回答后携带上下文续跑（非流式返回 `ask_user` 字段，流式下发 `ask_user` 事件）。
 
+此外，`/v1/agent` 还支持**子 Agent 递归委托**：注入 `akm_subagent_spawn` / `akm_subagent_wait` / `akm_subagent_kill` / `akm_subagent_list` / `akm_subagent_status` 五个工具，主会话可以开启独立的子 Agent 子进程（子进程调用本机 `/v1/agent` 跑次级对话，进程级隔离、默认独立临时工作区），句柄式管理（spawn 返回 `task_id` → wait 等结果 / kill 终止；list 列出全部任务、status 查单任务详情与日志尾部）。嵌套层数由 `agent_subagent_max_depth` 控制（默认 `1`，即主会话能开子进程、子进程内不能再开下一级；调大可支持多级递归），并发上限 8，开关 `agent_subagent_enabled`（默认 `true`）。
+
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、配置、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
 
 ## 工作流引擎（/v1/flow）
 
-工作流引擎把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成 DAG 有向无环图：每个节点是一个步骤（LLM 节点执行提示词、`merge`/`router` 做流程控制），边上的 `condition` 决定分支走向、`loop` 边支持按预算重入（如审查不通过回到修复）。多路并行节点（如双模型竞赛）会同时执行，全部前驱完成后才汇聚。节点输出以 `artifacts` 累积，供下游 `{{artifacts.xxx}}` 模板引用；LLM 调用复用 AKM 代理网关（自动选 Key / 协议转换 / 重试）。
+工作流引擎把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成 DAG 有向无环图：节点为步骤（LLM 节点执行提示词、`merge`/`router` 做流程控制），边上的 `condition` 决定分支走向、`loop` 边支持按预算重入（如审查不通过回到修复），多路并行节点会同时执行，全部前驱完成后才汇聚。节点输出以 `artifacts` 累积，供下游 `{{artifacts.xxx}}` 模板引用；LLM 调用复用 AKM 代理网关（自动选 Key / 协议转换 / 重试）。支持内置模板（`standard_dev` / `hotfix` / `dual_model`）、人工审批、git worktree 沙箱、路径锁与工作区快照 diff。
 
-- 内置模板：`standard_dev`（标准开发，含 review→fix 循环）、`hotfix`（快速热修）、`dual_model`（双模型并行竞赛），可一键实例化为工作流。
-- 数据表：`flow_workflows`（工作流定义，节点/边以 JSON 存储）与 `flow_runs`（每次运行快照 `data_json`），位于 `~/.akm/akm.db`。
-- 运行管理：`POST /v1/flow/workflows/{id}/runs` 传入 `prompt` 启动；`GET /v1/flow/runs/{id}/events` 提供 SSE 事件流（`run_start` / `node_start` / `log` / `token` / `node_end` / `run_end`），断线重连先收到完整 `snapshot`。
-- 实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）。
-- 一期能力：LLM 节点 + 流程控制（拓扑 / 并行 / 条件 / loop 重入 / merge / router）。
-- 二期能力：编码节点（`pi-agent`，subprocess 调本机 `pi` CLI，失败回退 mock）、人工审批（`human`，`POST /v1/flow/runs/{id}/resume` 审批；`flow_human_auto_approve` 默认 `true` 自动放行，设 `false` 后节点挂起等待审批）、git worktree 沙箱（`variables.useWorktree`，`run` / `per-coding` 两种模式）、节点级 `retry`（`error` / `review_fail` 触发，指数退避）、路径锁（同一项目路径串行化）与工作区快照 diff（编码节点产出 `fileDiffs`）。
-- pi-agent 定位：优先读取 `~/.akm/config.json` 的 `agent_flow.pi_path` 显式指定的 pi 路径（各机器安装位置不同时可自定义，支持 `~` 展开）；未配置时自动在 PATH 与常见安装目录定位。pi 是 Node 脚本，要求 Node.js ≥22.19.0，运行时自动从 PATH / nvm 各版本中选择满足版本的 node 绝对路径直接执行（打包 app 经 GUI/launchctl 启动时环境 PATH 常为空，绕过 shebang 的 `env node`）。超时默认 1 小时，可用 `agent_flow.pi_timeout_ms`（毫秒）或环境变量 `FLOW_PI_TIMEOUT_MS` / `FLOW_AGENT_TIMEOUT_MS` 覆盖。
-- 路径解析：`variables.projectPath` 支持绝对路径或相对路径；相对路径基于 `agent_workspace_root` 配置的工作区根目录解析（未配置时回退到进程当前目录）。
-- 运行参数：`POST /v1/flow/workflows/{id}/runs` 的 body 支持 `variables`（对象），覆盖合并进本次运行的变量（如 `{"prompt": "...", "variables": {"projectPath": "/path/to/proj", "language": "HTML"}}`），仅本次运行生效，不修改工作流定义。
-- 容错：LLM 节点对上游瞬时 5xx（网关时段性故障）自动重试（指数退避，默认最多重试 2 次，可用 `agent_flow.llm_retry_max` 调整），避免单次瞬时故障拖垮整个运行；4xx 视为请求本身问题不重试。
-- `agent_flow` 配置组（`~/.akm/config.json`，集中管理工作流引擎行为，未配置时全部使用默认值）：`pi_path`（pi 可执行文件路径）、`pi_model`（强制 pi 使用的模型，环境变量 `FLOW_PI_MODEL` 优先）、`pi_timeout_ms`（编码节点超时毫秒，默认 3600000，环境变量 `FLOW_PI_TIMEOUT_MS` / `FLOW_AGENT_TIMEOUT_MS` 仍优先）、`llm_retry_max`（LLM 节点 5xx 重试次数，默认 2）、`llm_retry_base_delay`（重试退避基数秒，默认 1.0）、`llm_temperature`（LLM 节点请求温度，默认 0.3）、`llm_max_tokens`（LLM 节点请求最大 token，默认 4096）、`human_auto_approve`（布尔，覆盖顶层 `flow_human_auto_approve`）、`worktrees_root`（git worktree 沙箱根目录，默认 `~/.akm/flow_worktrees`）、`wsdiff_max_file_bytes`（工作区快照单文件上限，默认 120000）、`wsdiff_max_files_scan`（快照扫描文件上限，默认 800）、`wsdiff_max_diffs`（差异条目上限，默认 40）、`wsdiff_max_content_chars`（快照单文件内容字符上限，默认 24000）。
-- 内置工具：`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs` / `akm_flow_run_get`，可在对话里直接管理、驱动工作流，并通过 `akm_flow_run_get` 查询单次运行的节点级详情（状态/错误/输出正文与结构化产物/最近日志）定位卡住或失败的节点。
-- 子 Agent 递归委托：`/v1/agent` 注入 `akm_subagent_spawn` / `akm_subagent_wait` / `akm_subagent_kill` / `akm_subagent_list` / `akm_subagent_status` 五个工具，主会话可以开启独立的子 Agent 子进程（子进程调用本机 `/v1/agent` 跑次级对话，进程级隔离、默认独立临时工作区），句柄式管理（spawn 返回 `task_id` → wait 等结果 / kill 终止；list 列出全部任务、status 查单任务详情与日志尾部）。嵌套层数由 `agent_subagent_max_depth` 控制（默认 `1`，即主会话能开子进程、子进程内不能再开下一级；调大可支持多级递归），并发上限 8，开关 `agent_subagent_enabled`（默认 `true`）。
+完整文档见 [`akm/flow/flow.md`](akm/flow/flow.md)，涵盖 HTTP 接口、数据表、内置模板、运行变量、节点能力（LLM / 编码 / 审批 / worktree / retry）、pi-agent 定位、`agent_flow` 配置组与内置工具。
 
 ## 故障切换策略
 
