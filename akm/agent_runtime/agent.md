@@ -54,6 +54,9 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_flow_delete` | 删除一条工作流及其全部运行记录，返回是否删除成功 |
 | `akm_flow_run` | 启动一次工作流运行：传入工作流 id 与用户提示词 `prompt`，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态 |
 | `akm_flow_runs` | 列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 `workflow_id` 过滤 |
+| `akm_subagent_spawn` | 开启一个独立的子 Agent 子进程，子进程调用本机 `/v1/agent` 运行次级对话（进程级隔离，默认独立临时工作区，不污染当前工作区）；返回 `task_id` 与初始状态。嵌套层数由 `agent_subagent_max_depth` 控制（默认 1，即主会话可开子进程、子进程内不能再开下一级） |
+| `akm_subagent_wait` | 等待指定子 Agent 完成并返回其结果（`final_message` 文本）；`timeout_ms` 默认 600000，超时返回「仍在运行」而非失败，可稍后再次查询或用 `akm_subagent_kill` 终止 |
+| `akm_subagent_kill` | 终止指定子 Agent 子进程（含其进程组），返回是否成功 |
 | `akm_ask_user` | 向用户提出澄清问题并等待回答：当用户请求信息不完整、存在歧义或缺少关键参数时调用，本轮立即中断并把问题返回给客户端，用户回答后携带上下文续跑。支持三种交互模式：不传 `options` 时用户自由文本回答；传 `options` 时用户从候选中单选（`multiple` 缺省 `false`）；传 `options` + `multiple: true` 时多选（详见「交互式澄清提问」） |
 
 ## 配置
@@ -72,6 +75,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行。**注意：这不是文件系统沙箱**，命令可访问工作区之外（如 `/etc`、家目录），仅以工作区为 cwd，启用前应确认调用方可信 |
 | `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区与临时目录，全局禁写（仅放行工作区/TMP/`/dev`），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zprofile` / `.bash_profile` / `.bashrc` / `.zsh_history` / `.bash_history` / `.gitconfig` / `.git-credentials` / `.npmrc` / `.netrc`）/ `/etc` / `/private/etc` / `/var/log` / `/private/var/log` / `/var/db` / `/private/var/db` / `/tmp` / `/private/tmp` 等敏感路径，同时拒绝 `~` 的目录列举（`file-read-metadata`）；系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
+| `agent_subagent_enabled` | `true` | 是否启用子 Agent 递归委托工具（`akm_subagent_spawn` / `akm_subagent_wait` / `akm_subagent_kill`），默认开启；子 Agent 通过子进程调用本机 `/v1/agent`，进程级隔离 |
+| `agent_subagent_max_depth` | `1` | 子 Agent 最大嵌套层数：默认 1 表示主会话（depth 0）能开启子进程会话、子进程内（depth ≥ 1）不能再开下一级；调大后允许更深的多级递归委托（`akm_subagent_spawn` 在达到上限时返回错误而非报错） |
 | `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
 | `agent_notify_enabled` | `true` | 是否启用 Agent 原生通知工具（`akm_send_notification`），默认开启；通过菜单栏启动 AKM 时可弹出 macOS 系统通知 |
 | `agent_native_tools_enabled` | `true` | 是否启用 Agent 原生系统工具（`akm_clipboard_get` / `akm_clipboard_set` / `akm_system_info` / `akm_open` / `akm_frontmost_app`），默认开启；直接调用本机剪贴板、系统信息与前台应用（pyobjc，不受 akm_run_shell 沙箱约束） |

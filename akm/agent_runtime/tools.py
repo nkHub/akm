@@ -11,8 +11,10 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import smtplib
 import subprocess
+import sys
 import tempfile
 import uuid
 from contextvars import ContextVar
@@ -1427,6 +1429,237 @@ async def _run_git_tool(
     return await _run_workspace_argv(argv, cwd, timeout, f"git {operation}")
 
 
+# ---- 子 Agent 递归委托（subagent）----
+# 主 Agent 开启一个独立子进程，子进程 HTTP 调用 /v1/agent 运行一个全新的
+# 次级对话（独立上下文、独立工作区、进程级隔离），主 Agent 拿到 task_id 后
+# 可等待结果或终止。深度与并发均有上限，防止 agent 无限递归委托。
+
+# 子 agent 最大嵌套深度：0 为主对话，spawn 一次 depth+1，达到上限后拒绝
+_SUBAGENT_DEFAULT_MAX_DEPTH = 1
+# 同时运行中的子 agent 最大数量，防止一次性 spawn 过多拖垮服务
+_SUBAGENT_MAX_CONCURRENT = 8
+# akm_subagent_wait 默认等待超时（毫秒），超时返回「仍在运行」而非失败
+_SUBAGENT_DEFAULT_TIMEOUT_MS = 600_000
+# akm_subagent_wait 允许的最大等待超时（毫秒）
+_SUBAGENT_WAIT_MAX_MS = 3_600_000
+# 子 agent 结果回传的最大字符数（与读文件工具一致，防止撑爆模型上下文）
+_SUBAGENT_RESULT_MAX_CHARS = 60_000
+# 子进程 runner 脚本所在根目录（~/.akm/agent_subagents/<task_id>/）
+_SUBAGENT_RUN_ROOT = "~/.akm/agent_subagents"
+
+# 请求级子 agent 深度：由 /v1/agent 路由根据请求头 X-Akm-Subagent-Depth 设置，
+# 子 agent 内部再 spawn 时据此判断是否超过递归上限。用 ContextVar 保证并发请求隔离。
+_request_subagent_depth: ContextVar[int] = ContextVar("agent_request_subagent_depth", default=0)
+
+
+def set_request_subagent_depth(depth: int) -> Any:
+    """设置当前请求的子 agent 深度，返回供 reset 使用的 token。"""
+    try:
+        parsed = max(0, int(depth or 0))
+    except (TypeError, ValueError):
+        parsed = 0
+    return _request_subagent_depth.set(parsed)
+
+
+def reset_request_subagent_depth(token) -> None:
+    """恢复 set_request_subagent_depth 之前的子 agent 深度上下文。"""
+    _request_subagent_depth.reset(token)
+
+
+# 运行中的子 agent 注册表：task_id -> {proc, status, depth, workspace, log_path, ...}
+_SUBAGENT_TASKS: dict[str, dict] = {}
+
+
+def _subagent_runner_src() -> str:
+    """子 agent runner 脚本源码（写入临时文件后以子进程执行）。
+
+    子进程只依赖 Python 标准库 urllib，调用本机 AKM 的 /v1/agent 非流式接口，
+    输出 final_message 文本到 stdout（父进程重定向到日志文件）。
+    """
+    return r'''# -*- coding: utf-8 -*-
+"""子 Agent runner：调用本机 AKM /v1/agent 运行一个独立的次级对话。"""
+import json
+import sys
+import urllib.request
+
+base, workspace, model, depth, prompt = sys.argv[1:6]
+body = {
+    "messages": [{"role": "user", "content": prompt}],
+    "stream": False,
+}
+if workspace:
+    body["workspace_root"] = workspace
+if model:
+    body["model"] = model
+req = urllib.request.Request(
+    base + "/v1/agent",
+    data=json.dumps(body).encode("utf-8"),
+    headers={"Content-Type": "application/json", "X-Akm-Subagent-Depth": depth},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=1800) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+except Exception as exc:  # 网络错误 / 非 2xx
+    print(f"[subagent] 子代理调用失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+    sys.exit(1)
+if not data.get("ok"):
+    print(f"[subagent] 子代理未成功: {data.get('error') or 'unknown error'}", file=sys.stderr)
+    sys.exit(1)
+final = data.get("final_message") or {}
+content = final.get("content") if isinstance(final, dict) else final
+if isinstance(content, list):
+    # 多段 content（OpenAI 风格）只取文本段
+    text = "\n".join(
+        str(part.get("text", "")) for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    )
+    content = text
+print(str(content or ""))
+'''
+
+
+async def subagent_spawn_tool(
+    prompt: str,
+    model: str = "",
+    workspace_root: str = "",
+    timeout_ms: int = 0,
+) -> str:
+    """开启一个独立的子 agent 子进程，子进程调用 /v1/agent 运行次级对话。
+
+    返回 task_id 与初始状态；主 Agent 随后用 akm_subagent_wait 等待结果、
+    akm_subagent_kill 终止。子 agent 默认使用独立临时工作区，互不影响。
+    """
+    if not load_config().get("agent_subagent_enabled", True):
+        return json.dumps({"error": "工具 akm_subagent_spawn 未启用：请在 config.json 设置 agent_subagent_enabled=true"}, ensure_ascii=False)
+    depth = _request_subagent_depth.get()
+    max_depth = max(0, int(load_config().get("agent_subagent_max_depth", _SUBAGENT_DEFAULT_MAX_DEPTH)))
+    if depth >= max_depth:
+        return json.dumps({"error": f"子 agent 嵌套层数已达上限（{max_depth} 层），当前层不允许再开启子进程会话，请在本会话内自行完成该任务，避免无限递归委托"}, ensure_ascii=False)
+    if len(_SUBAGENT_TASKS) >= _SUBAGENT_MAX_CONCURRENT:
+        return json.dumps({"error": f"并发子 agent 数量已达上限（{_SUBAGENT_MAX_CONCURRENT}）"}, ensure_ascii=False)
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        return json.dumps({"error": "prompt 不能为空"}, ensure_ascii=False)
+    model = str(model or "").strip()
+
+    task_id = f"sub_{uuid.uuid4().hex[:8]}"
+    task_dir = Path(_SUBAGENT_RUN_ROOT).expanduser() / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    # 子 agent 工作区：显式指定则复用（须为存在的目录），否则用独立临时目录
+    ws = str(workspace_root or "").strip()
+    if ws:
+        ws_path = Path(ws).expanduser().resolve()
+        if not ws_path.is_dir():
+            return json.dumps({"error": f"workspace_root 不是存在的目录: {ws_path}"}, ensure_ascii=False)
+        ws = str(ws_path)
+    else:
+        ws_dir = task_dir / "workspace"
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        ws = str(ws_dir)
+
+    script_path = task_dir / "run_agent.py"
+    script_path.write_text(_subagent_runner_src(), encoding="utf-8")
+    log_path = task_dir / "subagent.log"
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "PYTHONPATH")}
+    try:
+        with open(log_path, "ab") as log_fh:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(script_path),
+                _akm_api_base_url(),
+                ws,
+                model,
+                str(depth + 1),
+                prompt,
+                cwd=str(task_dir),
+                env=env,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except OSError as exc:
+        return json.dumps({"error": f"启动子 agent 失败: {exc}"}, ensure_ascii=False)
+
+    _SUBAGENT_TASKS[task_id] = {
+        "id": task_id,
+        "proc": proc,
+        "status": "running",
+        "depth": depth + 1,
+        "model": model,
+        "workspace": ws,
+        "log_path": str(log_path),
+        "task_dir": str(task_dir),
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    return json.dumps({
+        "task_id": task_id,
+        "status": "running",
+        "depth": depth + 1,
+        "workspace": ws,
+        "log_path": str(log_path),
+    }, ensure_ascii=False)
+
+
+async def subagent_wait_tool(task_id: str, timeout_ms: int = 600_000) -> str:
+    """等待指定子 agent 完成并返回其结果（final_message 文本）。"""
+    task_id = str(task_id or "").strip()
+    entry = _SUBAGENT_TASKS.get(task_id)
+    if entry is None:
+        return json.dumps({"error": f"未找到子 agent 任务: {task_id}"}, ensure_ascii=False)
+    proc = entry["proc"]
+    timeout = max(1, min(int(timeout_ms or _SUBAGENT_DEFAULT_TIMEOUT_MS), _SUBAGENT_WAIT_MAX_MS)) / 1000.0
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return json.dumps({
+            "task_id": task_id,
+            "status": "running",
+            "message": f"子 agent 尚未完成（已等待 {int(timeout)} 秒），可稍后再次调用本工具查询，或用 akm_subagent_kill 终止",
+        }, ensure_ascii=False)
+    text = ""
+    try:
+        text = Path(entry["log_path"]).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    encoded = text.encode("utf-8")
+    if len(encoded) > _SUBAGENT_RESULT_MAX_CHARS:
+        text = encoded[-_SUBAGENT_RESULT_MAX_CHARS:].decode("utf-8", errors="ignore")
+    ok = proc.returncode == 0
+    entry["status"] = "succeeded" if ok else "failed"
+    entry["exit_code"] = proc.returncode
+    return json.dumps({
+        "task_id": task_id,
+        "status": entry["status"],
+        "exit_code": proc.returncode,
+        "output": text,
+    }, ensure_ascii=False)
+
+
+async def subagent_kill_tool(task_id: str) -> str:
+    """终止指定子 agent 子进程（含其进程组）。"""
+    task_id = str(task_id or "").strip()
+    entry = _SUBAGENT_TASKS.get(task_id)
+    if entry is None:
+        return json.dumps({"error": f"未找到子 agent 任务: {task_id}"}, ensure_ascii=False)
+    proc = entry["proc"]
+    if proc.returncode is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.5)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        except (ProcessLookupError, PermissionError):
+            pass
+    entry["status"] = "killed"
+    return json.dumps({"ok": True, "task_id": task_id, "status": "killed"}, ensure_ascii=False)
+
+
 # ---- 原生系统工具底层实现（剪贴板 / 系统信息 / 打开 / 前台应用）----
 # 模块级辅助函数，便于测试单独 mock；工具入口在 build_builtin_tools 内。
 
@@ -2107,11 +2340,11 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             payload["workspace_root"] = explicit_ws
         elif _request_workspace_root.get() is not None:
             try:
-                workspace_root = _workspace_root()
+                ws_auto = _workspace_root()
             except ValueError as exc:
                 return json.dumps({"error": str(exc)}, ensure_ascii=False)
-            if workspace_root is not None:
-                payload["workspace_root"] = str(workspace_root)
+            if ws_auto is not None:
+                payload["workspace_root"] = str(ws_auto)
             else:
                 # AgentLoop 即使未传 workspace_root 也会设置空的请求上下文。
                 # 此时沿用公共索引检索，不能因此禁用原本无需工作区的知识库。
@@ -2886,6 +3119,47 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 frontmost_app_tool,
             )
         )
+    if load_config().get("agent_subagent_enabled", True):
+        tools.append(ToolDef(
+            "akm_subagent_spawn",
+            "开启一个独立的子 agent：启动子进程调用 /v1/agent 运行一个全新的次级对话（独立上下文、独立工作区、进程级隔离）。返回 task_id，随后用 akm_subagent_wait 等待结果、akm_subagent_kill 终止。适合把独立子任务（并行调研、独立文档撰写等）委托给子 agent，不影响主对话。可指定 model 与 workspace_root；嵌套层数与并发有上限",
+            {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "子 agent 的任务指令，越明确越好"},
+                    "model": {"type": "string", "description": "子 agent 使用的模型，留空继承默认"},
+                    "workspace_root": {"type": "string", "description": "子 agent 的工作区目录（须为已存在目录），留空使用独立临时目录"},
+                    "timeout_ms": {"type": "integer", "description": "预留参数，暂不生效"},
+                },
+                "required": ["prompt"],
+            },
+            subagent_spawn_tool,
+        ))
+        tools.append(ToolDef(
+            "akm_subagent_wait",
+            "等待指定的子 agent 完成并返回其结果（子对话 final_message 文本）。任务仍在运行时返回 status=running，可稍后再次调用；超时由 timeout_ms 控制（默认 600000 毫秒）",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "akm_subagent_spawn 返回的 task_id"},
+                    "timeout_ms": {"type": "integer", "description": "等待超时毫秒数，1-3600000，默认 600000"},
+                },
+                "required": ["task_id"],
+            },
+            subagent_wait_tool,
+        ))
+        tools.append(ToolDef(
+            "akm_subagent_kill",
+            "终止指定的子 agent 子进程（含其进程组），终止后不可恢复",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "akm_subagent_spawn 返回的 task_id"},
+                },
+                "required": ["task_id"],
+            },
+            subagent_kill_tool,
+        ))
     return tools
 
 

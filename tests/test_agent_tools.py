@@ -1,3 +1,7 @@
+import asyncio
+import json
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -5,8 +9,13 @@ import pytest
 from akm.agent_runtime.tools import (
     build_builtin_tools,
     build_workspace_tools,
+    reset_request_subagent_depth,
     reset_request_workspace_root,
+    set_request_subagent_depth,
     set_request_workspace_root,
+    subagent_kill_tool,
+    subagent_spawn_tool,
+    subagent_wait_tool,
 )
 
 
@@ -1349,4 +1358,222 @@ def test_builtin_flow_run_get_returns_node_details(monkeypatch, tmp_path):
 
     missing = handlers["akm_flow_run_get"](run_id="run_nope")
     assert "error" in missing
+
+
+# ── 子 Agent 递归委托（akm_subagent_*）──
+
+
+class _FakeSubProc:
+    """模拟 asyncio.create_subprocess_exec 返回的 Process 对象。"""
+
+    def __init__(self, pid=999999):
+        self.pid = pid
+        self.returncode = None
+
+    async def wait(self):
+        self.returncode = 0
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_subagent_tools_registered_and_gated(monkeypatch, tmp_path):
+    """agent_subagent_enabled 默认开启时注册三个工具；显式关闭则不注册。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_SUBAGENT_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"agent_subagent_enabled": True}
+    )
+    names = {tool.name for tool in build_builtin_tools(SimpleNamespace())}
+    assert {"akm_subagent_spawn", "akm_subagent_wait", "akm_subagent_kill"} <= names
+
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"agent_subagent_enabled": False}
+    )
+    names2 = {tool.name for tool in build_builtin_tools(SimpleNamespace())}
+    assert "akm_subagent_spawn" not in names2
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_starts_child(monkeypatch, tmp_path):
+    """主会话（depth=0）spawn 创建子进程并登记任务，深度+1 传给子进程。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    captured = {}
+
+    async def _fake_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeSubProc()
+
+    monkeypatch.setattr(tools_mod, "_SUBAGENT_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"agent_subagent_enabled": True}
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+    tools_mod._SUBAGENT_TASKS.clear()
+    try:
+        out = json.loads(await subagent_spawn_tool("把目录内容整理成总结"))
+
+        assert out["status"] == "running"
+        assert out["task_id"].startswith("sub_")
+        assert out["depth"] == 1
+        entry = tools_mod._SUBAGENT_TASKS[out["task_id"]]
+        assert entry["status"] == "running"
+        assert os.path.isdir(out["workspace"])
+        # 子进程用当前解释器执行 runner，剥离 PYTHONHOME/PYTHONPATH
+        assert captured["args"][0] == sys.executable
+        assert "PYTHONPATH" not in captured["kwargs"]["env"]
+        assert "PYTHONHOME" not in captured["kwargs"]["env"]
+        # 深度参数 depth+1 传入（runner 会写进 X-Akm-Subagent-Depth header）
+        assert captured["args"][5] == "1"
+    finally:
+        tools_mod._SUBAGENT_TASKS.clear()
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_depth_limit_default_and_configurable(monkeypatch, tmp_path):
+    """默认只开放二级（depth>=1 拒绝再开）；agent_subagent_max_depth=2 时允许再下一级。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_SUBAGENT_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"agent_subagent_enabled": True}
+    )
+    tools_mod._SUBAGENT_TASKS.clear()
+    try:
+        # 默认 max_depth=1：子 agent（depth=1）内再 spawn 被拒绝
+        tok = set_request_subagent_depth(1)
+        try:
+            out = json.loads(await subagent_spawn_tool("再开一层"))
+            assert "error" in out
+            assert "嵌套层数已达上限" in out["error"]
+        finally:
+            reset_request_subagent_depth(tok)
+
+        # 配置 max_depth=2：depth=1 可再 spawn（二级子 agent）
+        monkeypatch.setattr(
+            tools_mod,
+            "load_config",
+            lambda: {"agent_subagent_enabled": True, "agent_subagent_max_depth": 2},
+        )
+
+        async def _fake_exec2(*args, **kwargs):
+            return _FakeSubProc()
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec2)
+        tok2 = set_request_subagent_depth(1)
+        try:
+            out2 = json.loads(await subagent_spawn_tool("可以开下一级"))
+            assert out2["status"] == "running"
+            assert out2["depth"] == 2
+        finally:
+            reset_request_subagent_depth(tok2)
+
+        # depth=2 且 max=2：拒绝
+        tok3 = set_request_subagent_depth(2)
+        try:
+            out3 = json.loads(await subagent_spawn_tool("再再开"))
+            assert "error" in out3
+        finally:
+            reset_request_subagent_depth(tok3)
+    finally:
+        tools_mod._SUBAGENT_TASKS.clear()
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_validations(monkeypatch, tmp_path):
+    """prompt 空 / workspace 不存在 / 开关关闭均拒绝。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    monkeypatch.setattr(tools_mod, "_SUBAGENT_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"agent_subagent_enabled": True}
+    )
+    tools_mod._SUBAGENT_TASKS.clear()
+    try:
+        out = json.loads(await subagent_spawn_tool("   "))
+        assert "prompt 不能为空" in out["error"]
+
+        out2 = json.loads(await subagent_spawn_tool("x", workspace_root=str(tmp_path / "nope")))
+        assert "workspace_root 不是存在的目录" in out2["error"]
+
+        monkeypatch.setattr(
+            tools_mod, "load_config", lambda: {"agent_subagent_enabled": False}
+        )
+        out3 = json.loads(await subagent_spawn_tool("x"))
+        assert "未启用" in out3["error"]
+    finally:
+        tools_mod._SUBAGENT_TASKS.clear()
+
+
+@pytest.mark.asyncio
+async def test_subagent_wait_reads_log_and_completed(monkeypatch, tmp_path):
+    """wait 在子进程完成后读取日志返回 succeeded 与输出。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    log = tmp_path / "subagent.log"
+    log.write_text("子代理结果文本", encoding="utf-8")
+    tools_mod._SUBAGENT_TASKS["sub_abc"] = {
+        "id": "sub_abc",
+        "proc": _FakeSubProc(),
+        "status": "running",
+        "log_path": str(log),
+    }
+    try:
+        out = json.loads(await subagent_wait_tool("sub_abc", timeout_ms=5000))
+        assert out["status"] == "succeeded"
+        assert out["exit_code"] == 0
+        assert "子代理结果文本" in out["output"]
+    finally:
+        tools_mod._SUBAGENT_TASKS.pop("sub_abc", None)
+
+
+@pytest.mark.asyncio
+async def test_subagent_wait_timeout_returns_running(monkeypatch, tmp_path):
+    """wait 超时返回「仍在运行」而非失败，允许主 agent 稍后查询或 kill。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    class _SlowSubProc:
+        returncode = None
+
+        async def wait(self):
+            await asyncio.sleep(60)
+
+    tools_mod._SUBAGENT_TASKS["sub_slow"] = {
+        "id": "sub_slow",
+        "proc": _SlowSubProc(),
+        "status": "running",
+        "log_path": str(tmp_path / "x.log"),
+    }
+    try:
+        out = json.loads(await subagent_wait_tool("sub_slow", timeout_ms=10))
+        assert out["status"] == "running"
+        assert "尚未完成" in out["message"]
+    finally:
+        tools_mod._SUBAGENT_TASKS.pop("sub_slow", None)
+
+
+@pytest.mark.asyncio
+async def test_subagent_wait_not_found_and_kill(monkeypatch, tmp_path):
+    """未知任务报错；kill 终止登记的子进程并置为 killed。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    out = json.loads(await subagent_wait_tool("sub_missing"))
+    assert "未找到" in out["error"]
+    out2 = json.loads(await subagent_kill_tool("sub_missing"))
+    assert "未找到" in out2["error"]
+
+    tools_mod._SUBAGENT_TASKS["sub_kill"] = {
+        "id": "sub_kill",
+        "proc": _FakeSubProc(),
+        "status": "running",
+    }
+    try:
+        out3 = json.loads(await subagent_kill_tool("sub_kill"))
+        assert out3["ok"] is True
+        assert out3["status"] == "killed"
+        assert tools_mod._SUBAGENT_TASKS["sub_kill"]["status"] == "killed"
+    finally:
+        tools_mod._SUBAGENT_TASKS.pop("sub_kill", None)
 
