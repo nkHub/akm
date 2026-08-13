@@ -243,14 +243,17 @@ def parse_session_file(filepath: Path) -> dict | None:
 
 
 def load_scanned_records(data_root: Path) -> dict[str, dict]:
-    """加载已处理 session 记录。"""
+    """加载已处理 session 记录。
+
+    扫描记录损坏时直接抛错，避免静默重置导致已扫描会话被重复处理。
+    """
     path = data_root / SCANNED_SESSIONS_FILE
     if not path.exists():
         return {}
     try:
         return json.loads(path.read_text("utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"[markdown_kb] scanned_sessions.json 损坏，拒绝启动: {path} ({exc})") from exc
 
 
 def save_scanned_records(data_root: Path, records: dict[str, dict]) -> None:

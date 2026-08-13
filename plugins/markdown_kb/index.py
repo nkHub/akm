@@ -288,16 +288,16 @@ class JsonIndexStore(IndexStore):
         self.logger = logger
 
     def load(self) -> dict:
-        """读取索引文件，失败时回退为空索引。"""
+        """读取索引文件，文件存在但损坏时直接报错。"""
         if not self.index_path.exists():
             return {"documents": [], "last_rebuilt_at": None}
         try:
             data = json.loads(self.index_path.read_text("utf-8"))
-        except Exception:
-            self.logger.warning("[markdown_kb] 索引文件损坏，已按空索引处理: %s", self.index_path)
-            return {"documents": [], "last_rebuilt_at": None}
+        except Exception as exc:
+            # 索引文件损坏时直接抛错，避免静默重置导致全量重建丢失已有索引
+            raise RuntimeError(f"[markdown_kb] 索引文件损坏，拒绝启动: {self.index_path} ({exc})") from exc
         if not isinstance(data, dict):
-            return {"documents": [], "last_rebuilt_at": None}
+            raise RuntimeError(f"[markdown_kb] 索引文件结构非法，拒绝启动: {self.index_path}")
         data.setdefault("documents", [])
         data.setdefault("last_rebuilt_at", None)
         return data
@@ -1392,11 +1392,38 @@ class Plugin(PluginBase):
         """初始化本地数据目录。
 
         数据目录默认放在 `~/.akm/markdown_kb/`，避免项目级示例插件把用户上传内容写回仓库。
+
+        启动时会主动校验全部本地 JSON 状态文件，任一文件损坏直接抛错，
+        由宿主标记插件加载失败，避免“静默重置”掩盖数据损坏问题。
         """
         global _plugin_instance
         _plugin_instance = self
         self._ensure_runtime_ready()
+        self._validate_state_files()
         self.logger.info("[markdown_kb] 数据目录已就绪: %s", self._data_root)
+
+    def _validate_state_files(self) -> None:
+        """启动时校验本地 JSON 状态文件，损坏即抛错。
+
+        逐个读取并解析：
+        1. learn_records.json 学习幂等记录；
+        2. organizer_state.json 自动整理状态；
+        3. doc_manifest.json 文档清单；
+        4. file_bindings.json 文件工作目录绑定；
+        5. scanned_sessions.json 扫描去重记录；
+        6. 索引 store 快照（SQLite 或 JsonIndexStore）。
+
+        任一文件存在但解析失败时抛 ``RuntimeError``，让 on_load 失败，
+        从而在宿主层面体现为插件启动失败，而不是静默重置为空数据。
+        """
+        self._load_learn_records()
+        self._load_organizer_state()
+        self._load_doc_manifest()
+        self._load_file_bindings()
+        if getattr(self, "_data_root", None) is not None:
+            session_scanner.load_scanned_records(self._data_root)
+        if getattr(self, "_store", None) is not None:
+            self._store.load()
 
     def _ensure_runtime_ready(self) -> None:
         if getattr(self, "_store", None) is not None:
@@ -1433,8 +1460,9 @@ class Plugin(PluginBase):
         if manifest_path is not None and manifest_path.exists():
             try:
                 data = json.loads(manifest_path.read_text("utf-8"))
-            except Exception:
-                data = []
+            except Exception as exc:
+                # 文档清单损坏时直接抛错，避免静默重置后文档注册信息丢失
+                raise RuntimeError(f"[markdown_kb] doc_manifest.json 损坏，拒绝启动: {manifest_path} ({exc})") from exc
             if isinstance(data, list):
                 entries = [self._normalize_doc_entry(item) for item in data if isinstance(item, dict)]
                 return self._merge_unmanaged_docs_into_manifest(entries)
@@ -1550,10 +1578,11 @@ class Plugin(PluginBase):
             return {}
         try:
             data = json.loads(bindings_path.read_text("utf-8"))
-        except Exception:
-            return {}
+        except Exception as exc:
+            # 文件绑定表损坏时直接抛错，避免静默重置导致工作目录绑定丢失
+            raise RuntimeError(f"[markdown_kb] file_bindings.json 损坏，拒绝启动: {bindings_path} ({exc})") from exc
         if not isinstance(data, dict):
-            return {}
+            raise RuntimeError(f"[markdown_kb] file_bindings.json 结构非法，拒绝启动: {bindings_path}")
         result = {}
         for key, value in data.items():
             file_name = Path(str(key or "")).name
@@ -2732,8 +2761,9 @@ class Plugin(PluginBase):
             return {"message_count": 0, "last_organize_at": ""}
         try:
             return json.loads(path.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {"message_count": 0, "last_organize_at": ""}
+        except (json.JSONDecodeError, OSError) as exc:
+            # organizer 状态损坏时直接抛错，避免静默重置导致自动整理周期错乱
+            raise RuntimeError(f"[markdown_kb] organizer_state.json 损坏，拒绝启动: {path} ({exc})") from exc
 
     def _save_organizer_state(self, state: dict) -> None:
         """保存 organizer 持久化状态。"""
@@ -5004,10 +5034,11 @@ class Plugin(PluginBase):
             return {}
         try:
             data = json.loads(path.read_text("utf-8"))
-        except Exception:
-            return {}
+        except Exception as exc:
+            # 学习幂等记录损坏时直接抛错，避免静默重置导致 dedupe 去重失效、重复入库
+            raise RuntimeError(f"[markdown_kb] learn_records.json 损坏，拒绝启动: {path} ({exc})") from exc
         if not isinstance(data, dict):
-            return {}
+            raise RuntimeError(f"[markdown_kb] learn_records.json 结构非法，拒绝启动: {path}")
         result = {}
         for key, value in data.items():
             normalized_key = str(key or "").strip()

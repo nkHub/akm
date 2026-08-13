@@ -702,6 +702,8 @@ POST /api/markdown-kb/scan-sessions
 
 dedupe_key = `{source}:{session_id}`，Codex 和 Claude 各自的 session_id 天然不会冲突。
 
+> **状态文件损坏策略**：`scanned_sessions.json`、`organizer_state.json`、`learn_records.json`、`doc_manifest.json`、`file_bindings.json` 以及索引快照等本地 JSON 状态文件，在插件启动（`on_load`）时会被主动校验。任一文件**存在但解析失败**时不再静默重置为空数据，而是直接抛错让插件加载失败（宿主标记 `runtime_ready=False` 并记录错误日志），避免「静默重置」掩盖数据损坏、导致 dedupe 去重失效或扫描记录丢失。文件不存在仍视为首次运行，正常初始化。
+
 ---
 
 ## 八、自动整理记忆
