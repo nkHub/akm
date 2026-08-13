@@ -14,7 +14,9 @@ from akm.agent_runtime.tools import (
     set_request_subagent_depth,
     set_request_workspace_root,
     subagent_kill_tool,
+    subagent_list_tool,
     subagent_spawn_tool,
+    subagent_status_tool,
     subagent_wait_tool,
 )
 
@@ -1576,4 +1578,59 @@ async def test_subagent_wait_not_found_and_kill(monkeypatch, tmp_path):
         assert tools_mod._SUBAGENT_TASKS["sub_kill"]["status"] == "killed"
     finally:
         tools_mod._SUBAGENT_TASKS.pop("sub_kill", None)
+
+
+def test_subagent_list_lists_tasks_by_recency(monkeypatch, tmp_path):
+    """list 按创建时间倒序列出全部子 agent 任务摘要。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    tools_mod._SUBAGENT_TASKS.clear()
+    tools_mod._SUBAGENT_TASKS["sub_old"] = {
+        "id": "sub_old", "status": "running", "depth": 1, "model": "m1",
+        "workspace": "/tmp/w1", "created_at": "2026-01-01T00:00:00",
+    }
+    tools_mod._SUBAGENT_TASKS["sub_new"] = {
+        "id": "sub_new", "status": "succeeded", "depth": 1, "model": "",
+        "workspace": "/tmp/w2", "created_at": "2026-01-01T00:01:00",
+    }
+    try:
+        out = json.loads(subagent_list_tool())
+        assert [t["task_id"] for t in out["tasks"]] == ["sub_new", "sub_old"]
+        assert out["tasks"][0]["status"] == "succeeded"
+        assert out["tasks"][1]["workspace"] == "/tmp/w1"
+        # 空表场景
+        tools_mod._SUBAGENT_TASKS.clear()
+        out_empty = json.loads(subagent_list_tool())
+        assert out_empty["tasks"] == []
+    finally:
+        tools_mod._SUBAGENT_TASKS.clear()
+
+
+def test_subagent_status_returns_detail_and_log_tail(monkeypatch, tmp_path):
+    """status 返回单任务详情与日志尾部，超长截断并标记。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    log = tmp_path / "subagent.log"
+    log.write_text("短日志内容", encoding="utf-8")
+    tools_mod._SUBAGENT_TASKS["sub_det"] = {
+        "id": "sub_det", "status": "running", "depth": 1, "model": "ds",
+        "workspace": "/tmp/w", "log_path": str(log), "created_at": "2026-01-01T00:00:00",
+        "proc": _FakeSubProc(),
+    }
+    try:
+        out = json.loads(subagent_status_tool("sub_det"))
+        assert out["task_id"] == "sub_det"
+        assert out["depth"] == 1
+        assert "短日志内容" in out["log_tail"]
+        assert "log_truncated" not in out
+        # 超长日志截断
+        log.write_text("x" * 5000, encoding="utf-8")
+        out2 = json.loads(subagent_status_tool("sub_det"))
+        assert out2["log_truncated"] is True
+        assert len(out2["log_tail"]) <= 2000
+        # 未找到
+        out3 = json.loads(subagent_status_tool("sub_missing"))
+        assert "未找到" in out3["error"]
+    finally:
+        tools_mod._SUBAGENT_TASKS.pop("sub_det", None)
 

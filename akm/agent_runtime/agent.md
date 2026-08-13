@@ -57,6 +57,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_subagent_spawn` | 开启一个独立的子 Agent 子进程，子进程调用本机 `/v1/agent` 运行次级对话（进程级隔离，默认独立临时工作区，不污染当前工作区）；返回 `task_id` 与初始状态。嵌套层数由 `agent_subagent_max_depth` 控制（默认 1，即主会话可开子进程、子进程内不能再开下一级） |
 | `akm_subagent_wait` | 等待指定子 Agent 完成并返回其结果（`final_message` 文本）；`timeout_ms` 默认 600000，超时返回「仍在运行」而非失败，可稍后再次查询或用 `akm_subagent_kill` 终止 |
 | `akm_subagent_kill` | 终止指定子 Agent 子进程（含其进程组），返回是否成功 |
+| `akm_subagent_list` | 列出全部子 Agent 任务（按创建时间倒序）：返回每个任务的 `task_id`、状态、嵌套层数、模型、工作区与创建时间 |
+| `akm_subagent_status` | 查询单个子 Agent 任务详情：返回状态、嵌套层数、模型、工作区、日志路径、退出码与日志尾部（最多 2000 字符，超长会截断并标记 `log_truncated`） |
 | `akm_ask_user` | 向用户提出澄清问题并等待回答：当用户请求信息不完整、存在歧义或缺少关键参数时调用，本轮立即中断并把问题返回给客户端，用户回答后携带上下文续跑。支持三种交互模式：不传 `options` 时用户自由文本回答；传 `options` 时用户从候选中单选（`multiple` 缺省 `false`）；传 `options` + `multiple: true` 时多选（详见「交互式澄清提问」） |
 
 ## 配置
