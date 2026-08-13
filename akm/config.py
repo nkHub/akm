@@ -69,6 +69,7 @@ DEFAULTS = {
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
         "独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。"
     ),  # Agent 默认系统指令（客户端未传 instructions 时使用）
+    "agent_session_auto_save": True,    # /v1/agent 会话是否自动落盘到 ~/.akm/agent_sessions/（默认开启：请求结束自动保存完整对话历史，供 akm_load_session/akm_list_sessions 串联回顾使用；设为 false 可保持无状态不写磁盘）
     "tavily_api_key": "",               # Tavily 联网搜索 API Key（Agent 内置 tavily_search 工具使用）
     # Key 管理
     "rate_limit_cooldown_sec": 60,      # 限流冷却秒数，被 429 后多久恢复可用
@@ -107,6 +108,7 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_tool_retry_max_retries",
     "agent_api_token",
     "agent_default_instructions",
+    "agent_session_auto_save",
     "tavily_api_key",
 ]
 

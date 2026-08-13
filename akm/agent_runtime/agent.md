@@ -4,7 +4,7 @@
 
 每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
-Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、`sessions.py` 负责会话持久化（`/v1/agent` 请求结束后自动落盘到 `~/.akm/agent_sessions/*.json`，供 `akm_load_session` / `akm_list_sessions` 工具及客户端回顾使用）。
+Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、`sessions.py` 负责会话持久化（`/v1/agent` 请求结束自动落盘到 `~/.akm/agent_sessions/*.json`，供 `akm_load_session` / `akm_list_sessions` 工具及客户端回顾使用；设置 `agent_session_auto_save=false` 可关闭，保持无状态不写磁盘）。
 
 服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具与工作区文件工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。工作区文件工具（`akm_read_file` 等）需在 config.json 配置 `agent_workspace_root` 才会注册，写工具与 shell 工具默认不注册（见「工作区文件工具」章节）。客户端显式声明同名已注册工具时，服务端会保留客户端的授权意图，但始终使用服务端工具定义，避免参数契约不一致：
 
@@ -92,6 +92,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
 | `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 `Authorization: Bearer <token>` 或 `X-Agent-Token` |
 | `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
+| `agent_session_auto_save` | `true` | 是否把 `/v1/agent` 会话自动落盘到 `~/.akm/agent_sessions/`，默认开启（请求结束时自动保存完整对话历史，供 `akm_load_session` / `akm_list_sessions` 串联回顾使用）；设为 `false` 则保持无状态、不写磁盘 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
 ## 请求格式

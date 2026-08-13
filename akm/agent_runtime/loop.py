@@ -728,6 +728,10 @@ class AgentLoop:
         self._max_tool_calls = max(
             1, int(load_config().get("agent_max_tool_calls", 30) or 30)
         )
+        # /v1/agent 会话自动落盘开关（默认开启）：流式请求结束时把完整对话历史
+        # 保存到 ~/.akm/agent_sessions/，供 akm_load_session / akm_list_sessions
+        # 串联回顾使用；设为 false 时保持无状态，不写磁盘。
+        self._session_auto_save = bool(load_config().get("agent_session_auto_save", True))
         self._audit_submitter = audit_submitter
 
     async def _try_audit(
@@ -1642,23 +1646,25 @@ class AgentLoop:
                 if reasoning_content:
                     final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
-                # 自动保存会话到磁盘：/v1/agent 请求结束后自动落盘，供
-                # akm_load_session 工具或客户端回顾恢复对话。保存失败不
-                # 阻塞主流程（目录权限等问题不会导致请求异常）。
-                try:
-                    from akm.agent_runtime.sessions import SessionStore
+                # 自动保存会话到磁盘：默认开启（agent_session_auto_save=true），
+                # /v1/agent 请求结束后自动保存到 ~/.akm/agent_sessions/，供
+                # akm_load_session 工具或客户端回顾恢复对话；设为 false 则跳过。
+                # 保存失败不阻塞主流程（目录权限等问题不会导致请求异常）。
+                if self._session_auto_save:
+                    try:
+                        from akm.agent_runtime.sessions import SessionStore
 
-                    _store = SessionStore()
-                    _store.save({
-                        "name": _store.next_name(),
-                        "model": model,
-                        "messages": working_messages,
-                        "workspace_root": workspace_root,
-                        "api_path": api_path,
-                        "instructions": instructions,
-                    })
-                except Exception:
-                    pass
+                        _store = SessionStore()
+                        _store.save({
+                            "name": _store.next_name(),
+                            "model": model,
+                            "messages": working_messages,
+                            "workspace_root": workspace_root,
+                            "api_path": api_path,
+                            "instructions": instructions,
+                        })
+                    except Exception:
+                        pass
                 yield _sse_event("final", {
                     "final_message": final_message,
                     "messages": working_messages,
