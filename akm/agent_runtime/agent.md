@@ -281,41 +281,9 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 
 ### 工作流引擎：`/v1/flow`
 
-服务内置一个 DAG 工作流引擎（实现位于 `akm/flow/`），把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成有向无环图：节点为步骤（`intake` / `plan` / `code` / `review` / `test` / `fix` / `human` / `router` / `merge` / `output`），边上的 `condition` 决定分支（`pass` / `fail` / 子串匹配）、`loop` 边支持按预算重入（如审查不通过回到修复）。多路并行节点同时执行，全部前驱完成后才汇聚（fan-in）。节点输出以 `artifacts` 累积，下游模板用 `{{artifacts.xxx}}` 引用；LLM 调用复用 AKM 代理网关。鉴权与 `/v1/agent` 一致。
+服务内置一个 DAG 工作流引擎（实现位于 `akm/flow/`），把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成有向无环图：节点为步骤（`intake` / `plan` / `code` / `review` / `test` / `fix` / `human` / `router` / `merge` / `output`），边上的 `condition` 决定分支、`loop` 边支持按预算重入，多路并行节点同时执行、全部前驱完成后汇聚（fan-in）。节点输出以 `artifacts` 累积，下游模板用 `{{artifacts.xxx}}` 引用；LLM 调用复用 AKM 代理网关。鉴权与 `/v1/agent` 一致。
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/v1/flow/health` | 引擎健康检查 |
-| GET | `/v1/flow/models` | 可用模型目录（从 AKM Key 模型列表构建，附 mock 兜底） |
-| GET | `/v1/flow/workflows` | 工作流列表 |
-| POST | `/v1/flow/workflows` | 创建工作流（`name` 必填） |
-| GET/PUT/DELETE | `/v1/flow/workflows/{id}` | 查询 / 更新 / 删除工作流（删除连带运行记录） |
-| GET | `/v1/flow/templates` | 内置模板列表（standard_dev / hotfix / dual_model） |
-| POST | `/v1/flow/templates/{id}/instantiate` | 实例化模板为工作流（重新生成全部 id） |
-| POST | `/v1/flow/workflows/{id}/runs` | 启动运行（`prompt` 必填），返回 `201` 与运行对象 |
-| GET | `/v1/flow/runs` | 运行分页列表（`workflow_id` / `limit` ≤500 / `offset`） |
-| GET | `/v1/flow/runs/{id}` | 查询运行完整快照 |
-| POST | `/v1/flow/runs/{id}/cancel` | 取消运行（运行中/等待审批节点标 cancelled，待激活标 skipped） |
-| POST | `/v1/flow/runs/{id}/resume` | 人工审批：body `{action: approve\|reject, note?, nodeId?}`；运行须处于 `waiting_human`，否则 `409` |
-| GET | `/v1/flow/runs/{id}/events` | SSE 事件流（先发完整 `snapshot`，再转发 `run_start` / `node_start` / `log` / `token` / `human_wait` / `node_end` / `run_end`，每 1 秒 `ping`） |
-
-工作流运行变量（`variables`）：
-
-| 变量 | 说明 |
-|------|------|
-| `projectPath` | 编码节点的工作项目路径（相对当前进程 cwd 或绝对路径） |
-| `maxNodeVisits` | 单节点最大访问次数（loop 预算），默认 `3`，取值钳制到 `[1, 20]` |
-| `useWorktree` | `true` 时编码节点用 git worktree 沙箱隔离；`false`（默认）直接在工作项目目录执行 |
-| `worktreeMode` | `run`（整个运行共享一个沙箱）或 `per-coding`（每个编码节点独立沙箱，可真并行写） |
-| `keepWorktree` | `true` 时运行结束后保留 worktree，否则自动清理 |
-
-节点 `data` 的 `retry` 字段支持重试：`{max: N, on: "error"}`（LLM/代理调用失败重试，指数退避 `400ms×attempt`）或 `{on: "review_fail"}`（审查结论为 `fail` 时同节点重执行）。编码节点（`code` / `fix` / `test`）调用本机 `pi` CLI（失败回退 mock 摘要），执行前后对项目目录做工作区快照 diff，产出写入 `run.fileDiffs`；同一项目路径通过路径锁串行化，避免并发写冲突。`human` 节点默认自动放行（`flow_human_auto_approve` 为 `true`），设为 `false` 后运行在审批节点挂起（`waiting_human`），经 `resume` 批准/驳回后继续或终止。
-
-配置项：
-
-| 配置项 | 默认值 | 说明 |
-|--------|--------|------|
-| `flow_human_auto_approve` | `true` | 工作流（/v1/flow）的 human 人工审批节点是否自动放行；默认 true 保持内置模板可直接跑通，设为 false 后节点挂起等待 `POST /runs/{id}/resume` 审批 |
+工作流的 HTTP 接口、内置模板、运行变量、节点能力（LLM / 编码 / 人工审批 / worktree / retry）、pi-agent 定位、`agent_flow` 配置组与内置工具，详见 [`akm/flow/flow.md`](../flow/flow.md)。
 
 ## 用量统计
 
