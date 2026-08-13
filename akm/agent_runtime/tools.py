@@ -1660,6 +1660,57 @@ async def subagent_kill_tool(task_id: str) -> str:
     return json.dumps({"ok": True, "task_id": task_id, "status": "killed"}, ensure_ascii=False)
 
 
+def subagent_list_tool() -> str:
+    """列出所有已创建的子 agent 任务（含运行中 / 已完成 / 已终止），按创建时间倒序。"""
+    rows = sorted(
+        _SUBAGENT_TASKS.values(),
+        key=lambda e: e.get("created_at", ""),
+        reverse=True,
+    )
+    items = [
+        {
+            "task_id": e.get("id"),
+            "status": e.get("status"),
+            "depth": e.get("depth"),
+            "model": e.get("model") or "",
+            "workspace": e.get("workspace") or "",
+            "created_at": e.get("created_at") or "",
+        }
+        for e in rows
+    ]
+    return json.dumps({"tasks": items}, ensure_ascii=False)
+
+
+def subagent_status_tool(task_id: str) -> str:
+    """查看指定子 agent 任务的完整信息：状态 / 深度 / 模型 / 工作区 / 日志尾部。"""
+    task_id = str(task_id or "").strip()
+    entry = _SUBAGENT_TASKS.get(task_id)
+    if entry is None:
+        return json.dumps({"error": f"未找到子 agent 任务: {task_id}"}, ensure_ascii=False)
+    proc = entry["proc"]
+    info = {
+        "task_id": entry.get("id"),
+        "status": entry.get("status"),
+        "depth": entry.get("depth"),
+        "model": entry.get("model") or "",
+        "workspace": entry.get("workspace") or "",
+        "log_path": entry.get("log_path") or "",
+        "created_at": entry.get("created_at") or "",
+        "exit_code": proc.returncode,
+    }
+    text = ""
+    try:
+        text = Path(entry["log_path"]).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    encoded = text.encode("utf-8")
+    if len(encoded) > 2000:
+        text = encoded[-2000:].decode("utf-8", errors="ignore")
+        info["log_truncated"] = True
+    info["log_tail"] = text
+    return json.dumps(info, ensure_ascii=False)
+
+
 # ---- 原生系统工具底层实现（剪贴板 / 系统信息 / 打开 / 前台应用）----
 # 模块级辅助函数，便于测试单独 mock；工具入口在 build_builtin_tools 内。
 
@@ -3159,6 +3210,27 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "required": ["task_id"],
             },
             subagent_kill_tool,
+        ))
+        tools.append(ToolDef(
+            "akm_subagent_list",
+            "列出所有已创建的子 agent 任务（运行中 / 已完成 / 已终止）的概要：task_id / status / depth / model / workspace / 创建时间，按创建时间倒序，用于了解当前有哪些子任务",
+            {
+                "type": "object",
+                "properties": {},
+            },
+            subagent_list_tool,
+        ))
+        tools.append(ToolDef(
+            "akm_subagent_status",
+            "查看指定子 agent 任务的完整信息：状态 / 深度 / 模型 / 工作区 / 日志路径 / 退出码，以及日志文件尾部（最多 2000 字符），用于排查子任务结果或卡住原因",
+            {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "akm_subagent_spawn 返回的 task_id"},
+                },
+                "required": ["task_id"],
+            },
+            subagent_status_tool,
         ))
     return tools
 
