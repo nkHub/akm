@@ -9,8 +9,10 @@ import pytest
 from akm.agent_runtime.tools import (
     build_builtin_tools,
     build_workspace_tools,
+    reset_request_agent_model,
     reset_request_subagent_depth,
     reset_request_workspace_root,
+    set_request_agent_model,
     set_request_subagent_depth,
     set_request_workspace_root,
     subagent_kill_tool,
@@ -1429,6 +1431,42 @@ async def test_subagent_spawn_starts_child(monkeypatch, tmp_path):
         assert "PYTHONHOME" not in captured["kwargs"]["env"]
         # 深度参数 depth+1 传入（runner 会写进 X-Akm-Subagent-Depth header）
         assert captured["args"][5] == "1"
+    finally:
+        tools_mod._SUBAGENT_TASKS.clear()
+
+
+@pytest.mark.asyncio
+async def test_subagent_spawn_inherits_parent_model(monkeypatch, tmp_path):
+    """子进程未显式传模型时默认继承父会话模型；显式传则优先显式值。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    captured = {}
+
+    async def _fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return _FakeSubProc()
+
+    monkeypatch.setattr(tools_mod, "_SUBAGENT_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"agent_subagent_enabled": True}
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+    tools_mod._SUBAGENT_TASKS.clear()
+    try:
+        # 父会话模型存在且 spawn 未传模型 → 继承父模型（args[4] 是 model 位置）
+        tok = set_request_agent_model("deepseek-v4-pro")
+        try:
+            out = json.loads(await subagent_spawn_tool("整理文档"))
+            assert out["status"] == "running"
+            assert captured["args"][4] == "deepseek-v4-pro"
+            assert tools_mod._SUBAGENT_TASKS[out["task_id"]]["model"] == "deepseek-v4-pro"
+        finally:
+            reset_request_agent_model(tok)
+
+        # 显式传模型时优先用显式值，不覆盖父模型
+        out2 = json.loads(await subagent_spawn_tool("整理文档", model="glm-5.2"))
+        assert out2["status"] == "running"
+        assert captured["args"][4] == "glm-5.2"
     finally:
         tools_mod._SUBAGENT_TASKS.clear()
 

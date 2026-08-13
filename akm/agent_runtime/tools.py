@@ -1466,6 +1466,25 @@ def reset_request_subagent_depth(token) -> None:
     _request_subagent_depth.reset(token)
 
 
+# 请求级父会话模型：由 /v1/agent 路由设置，供 akm_subagent_spawn 未显式指定模型时
+# 继承父会话所用模型（子进程默认与父进程一致）。ContextVar 保证并发请求隔离。
+_request_agent_model: ContextVar[str] = ContextVar("agent_request_model", default="")
+
+
+def set_request_agent_model(model: str) -> Any:
+    """设置当前请求的父会话模型，返回供 reset 使用的 token。"""
+    try:
+        parsed = str(model or "").strip()
+    except Exception:
+        parsed = ""
+    return _request_agent_model.set(parsed)
+
+
+def reset_request_agent_model(token) -> None:
+    """恢复 set_request_agent_model 之前的父会话模型上下文。"""
+    _request_agent_model.reset(token)
+
+
 # 运行中的子 agent 注册表：task_id -> {proc, status, depth, workspace, log_path, ...}
 _SUBAGENT_TASKS: dict[str, dict] = {}
 
@@ -1542,6 +1561,9 @@ async def subagent_spawn_tool(
     if not prompt:
         return json.dumps({"error": "prompt 不能为空"}, ensure_ascii=False)
     model = str(model or "").strip()
+    if not model:
+        # 未显式指定模型时，继承父会话（当前 /v1/agent 请求）所用的模型
+        model = str(_request_agent_model.get() or "").strip()
 
     task_id = f"sub_{uuid.uuid4().hex[:8]}"
     task_dir = Path(_SUBAGENT_RUN_ROOT).expanduser() / task_id

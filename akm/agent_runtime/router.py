@@ -264,7 +264,9 @@ async def agent(request: Request):
     # 子 agent 深度：子进程调用 /v1/agent 时通过请求头携带，供 akm_subagent_spawn
     # 判断递归上限。主对话（无该头）为 0。用 ContextVar 注入请求上下文。
     from akm.agent_runtime.tools import (
+        reset_request_agent_model,
         reset_request_subagent_depth,
+        set_request_agent_model,
         set_request_subagent_depth,
     )
 
@@ -290,9 +292,11 @@ async def agent(request: Request):
         )
 
     depth_token = set_request_subagent_depth(subagent_depth)
+    model_token = set_request_agent_model(model)
     try:
         result = await agent_loop.run(messages, **options)
     finally:
+        reset_request_agent_model(model_token)
         reset_request_subagent_depth(depth_token)
     return JSONResponse(content=result.to_dict())
 
@@ -332,11 +336,14 @@ def _agent_stream(
 
         watcher = asyncio.create_task(_watch_disconnect())
         from akm.agent_runtime.tools import (
+            reset_request_agent_model,
             reset_request_subagent_depth,
+            set_request_agent_model,
             set_request_subagent_depth,
         )
 
         depth_token = set_request_subagent_depth(subagent_depth)
+        model_token = set_request_agent_model(str(options.get("model", "") or ""))
         try:
             async for event in agent_loop.run_stream(
                 messages,
@@ -345,6 +352,7 @@ def _agent_stream(
             ):
                 yield event
         finally:
+            reset_request_agent_model(model_token)
             reset_request_subagent_depth(depth_token)
             stream_ended.set()
             watcher.cancel()
