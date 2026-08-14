@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-08-14T18:22:12+0800",
+  "generated_at": "2026-08-14T18:35:35+0800",
   "plugins": {
     "agent-tools": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "纯前端离线工具箱（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 /tools 即可使用",
       "category": "app",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent-tools-0.1.0.zip",
-      "sha256": "9e58bae09c27a80decf611acf3840d2e9dd84bc5c8fa5783326aeaeb1bdf2238",
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent-tools-0.1.1.zip",
+      "sha256": "ce8e594a1a8e6da8c6589e1abc43737ef266377b9065d574d1a44333e444a17e",
       "size": 252741
     },
     "agent_chat": {
