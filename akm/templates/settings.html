@@ -27,6 +27,13 @@
         </div>
         <akm-switch id="cfg-menu-usage" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">自动更新</h4>
+          <p class="text-xs text-gray-500 mt-0.5">发现新版本后自动下载并重启安装（关闭后需通过菜单栏「检查更新」手动确认）</p>
+        </div>
+        <akm-switch id="cfg-auto-update" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
       <akm-settings-card align="start">
         <div>
           <h4 class="text-sm font-semibold text-white">服务端口</h4>
@@ -264,6 +271,7 @@ var _httpProxyEnabled = false;
 var _jsonViewerMaxTextLength = 600000;
 var _launchAtLogin = false;
 var _menuBarShowUsage = false;
+var _autoUpdate = true;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -329,6 +337,8 @@ function loadConfig() {
     updateLaunchLoginToggle();
     _menuBarShowUsage = cfg.menu_bar_show_usage === true;
     updateMenuUsageToggle();
+    _autoUpdate = cfg.auto_update !== false;
+    updateAutoUpdateToggle();
     document.getElementById('cost-pricing-table').value = cfg.cost_pricing_table || '';
     _httpProxyEnabled = cfg.http_proxy_enabled === true;
     updateHttpProxyToggle();
@@ -409,6 +419,18 @@ function toggleMenuUsage() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({menu_bar_show_usage: _menuBarShowUsage})
+  });
+}
+
+function updateAutoUpdateToggle() { _updateSwitch('cfg-auto-update', _autoUpdate); }
+
+function toggleAutoUpdate() {
+  _autoUpdate = !_autoUpdate;
+  updateAutoUpdateToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({auto_update: _autoUpdate})
   });
 }
 
@@ -814,6 +836,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (launchLoginEl) launchLoginEl.addEventListener('click', toggleLaunchAtLogin);
   var menuUsageEl = document.getElementById('cfg-menu-usage');
   if (menuUsageEl) menuUsageEl.addEventListener('click', toggleMenuUsage);
+  var autoUpdateEl = document.getElementById('cfg-auto-update');
+  if (autoUpdateEl) autoUpdateEl.addEventListener('click', toggleAutoUpdate);
   loadConfig();
   loadAgents();
 });

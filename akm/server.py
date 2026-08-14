@@ -2166,6 +2166,23 @@ async def plugin_menu(request: Request):
     return request.app.state.plugin_manager.get_menu()
 
 
+@app.get("/api/plugin-market")
+async def plugin_market(request: Request):
+    """插件市场列表（来自 GitHub plugins/ 目录，带 5 分钟内存缓存）"""
+    pm = request.app.state.plugin_manager
+    return await pm.fetch_market_plugins()
+
+
+@app.post("/api/plugin-market/{name}/install")
+async def plugin_market_install(name: str, request: Request):
+    """从 GitHub 市场安装/更新插件到 ~/.akm/plugins/{name}/"""
+    pm = request.app.state.plugin_manager
+    result = await pm.install_market_plugin(name)
+    if result.get("ok"):
+        return result
+    return JSONResponse(result, status_code=400)
+
+
 @app.get("/api/plugin-config/{name}")
 async def plugin_get_config(name: str, request: Request):
     """读取插件配置"""

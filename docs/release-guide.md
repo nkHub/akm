@@ -163,16 +163,18 @@ updater = SparkleUpdater(
 
 **适用场景**：托管在 GitHub，用户群体偏技术
 
-**原理**：启动时请求 GitHub Releases API 获取最新版本号，与本地比对，有更新则在菜单栏添加「新版可用」提示。
+**原理**：启动时请求 GitHub Releases API 获取最新版本号，与本地比对，有更新则按 `auto_update` 配置决定静默下载安装或弹窗确认。
 
 **当前选型**：✅ 采用方案 C（当前项目更新管理基线）
 
 **落地步骤**：
 
 1. 统一版本号来源（`akm/__init__.py`）并确保发布时先升级版本号。
-2. 启动时调用 `releases/latest` 检查最新 tag。
-3. 当 `latest != __version__` 时，在菜单栏显示「更新到 vX.Y.Z」。
-4. 点击菜单项后打开对应 Release 页面，让用户手动下载并替换 `.app`。
+2. 启动时调用 `releases/latest` 检查最新 tag，并匹配 Release 资产中的 `.zip` 更新包（架构优先，`_pick_zip_download_url`）。
+3. 有更新时（`_handle_update_info`）：
+   - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。
+   - `auto_update` 关闭：在菜单栏插入「更新到 vX.Y.Z」菜单项，点击后弹窗确认再下载安装。
+4. 菜单栏「检查更新」：立即检查并弹窗展示 Release Note（`releases/latest` 返回的 `body`），用户点击「立即更新」才下载安装；无更新时弹窗提示已是最新。
 5. 为避免触发 GitHub API 限流，结果建议本地缓存 24 小时（已有 `CHECK_INTERVAL = 86400`）。
 
 **实现示例** (`akm/menubar.py`)：
@@ -231,8 +233,8 @@ def check_update():
 
 5. **发布后自检**
    - 打开 `https://api.github.com/repos/<owner>/<repo>/releases/latest`。
-   - 确认返回的 `tag_name`、`html_url` 与刚发布版本一致。
-   - 本地启动应用验证菜单栏是否出现更新提示。
+   - 确认返回的 `tag_name`、`html_url`、`assets`（含 arm64 `.zip`）与刚发布版本一致。
+   - 本地启动应用验证菜单栏是否出现更新提示 / 弹窗，以及 zip 更新包能否被正确下载替换。
 
 > 若本次发布涉及 `config.json` 的隐藏配置项（例如 `stats_include_estimated_usage`、`image_request_timeout_sec`），发布说明里应明确写出默认值、适用链路和“不会在设置页展示”，避免用户误以为功能未生效或界面漏项。
 
@@ -252,15 +254,18 @@ git status
 
 > 发布时以 `akm/__init__.py` 中的 `__version__` 为主版本源；若同时维护 `pyproject.toml` 的包元数据版本，两者也应保持一致。例如本次发布若版本号为 `0.1.14`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.14` 保持一致。
 
-2. **构建分发包（Apple Silicon DMG）**
+2. **构建分发包（Apple Silicon DMG + zip）**
 
 ```bash
-# 清理旧产物、构建 .app 并生成版本化 arm64 DMG
+# 清理旧产物、构建 .app，并生成版本化 arm64 DMG 与 zip 更新包
 # 需要预先安装：brew install create-dmg
 ./scripts/build_m1_dmg.sh
 
 # 产物：dist/AI Key Manager-${VERSION}-arm64.dmg
+#      dist/AI Key Manager-${VERSION}-arm64.zip（自动更新专用，zip 根目录直接包含 .app）
 ```
+
+> zip 更新包是自动更新的下载源（`_pick_zip_download_url` 匹配 `.zip` 资产），发布时必须一并上传；缺失 zip 时自动更新会失败并提示到 Release 页面手动下载。
 
 3. **创建并推送版本标签**
 
@@ -278,6 +283,7 @@ git push origin v0.2.0
 ```bash
 gh release create v0.2.0 \
   "dist/AI Key Manager-0.2.0-arm64.dmg" \
+  "dist/AI Key Manager-0.2.0-arm64.zip" \
   --title "v0.2.0" \
   --notes "- 新增功能 X\n- 修复问题 Y"
 ```
@@ -298,15 +304,16 @@ gh release list
 VER=$(python -c 'from akm import __version__; print(__version__)')
 TAG="v${VER}"
 DMG="dist/AI Key Manager-${VER}-arm64.dmg"
+ZIP="dist/AI Key Manager-${VER}-arm64.zip"
 
 git tag -a "$TAG" -m "release: $TAG"
 git push origin main && git push origin "$TAG"
 
-gh release create "$TAG" "$DMG" --title "$TAG" --generate-notes
+gh release create "$TAG" "$DMG" "$ZIP" --title "$TAG" --generate-notes
 ```
 
-**优点**：无需托管额外文件，完全免费  
-**缺点**：用户需手动下载替换 `.app`
+**优点**：无需托管额外文件，完全免费，支持自动/手动下载安装并重启  
+**缺点**：依赖 GitHub Releases API，zip 更新包需随每次发布上传
 
 ---
 

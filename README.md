@@ -29,7 +29,7 @@ mv pyproject.toml.bak pyproject.toml
 # 推荐：使用脚本打包（自动处理 pyproject 备份恢复）
 ./scripts/build_app.sh
 
-# 发布 arm64 DMG（会清理旧 build/dist，并复用 build_app.sh）
+# 发布 arm64 DMG 与自动更新 zip（会清理旧 build/dist，并复用 build_app.sh）
 ./scripts/build_m1_dmg.sh
 
 # 可选：清理构建缓存后重新打包
@@ -37,7 +37,9 @@ rm -rf build dist
 python setup.py py2app
 ```
 
-应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
+应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。
+
+打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后下载 zip、解压替换并自动重启；菜单栏「检查更新」可手动检查并弹窗展示 Release Note。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
 
 ## 快速开始
 
@@ -130,7 +132,7 @@ akm-menubar
 | 菜单项 | 说明 |
 |--------|------|
 | 🟢/🟡/🔴 状态 | 运行中 / 启动中 / 失败 |
-| 打开管理 | 浏览器打开 Web 管理台 |
+| 应用管理 | 浏览器打开 Web 管理台 |
 | 重启服务 | 停止并重新启动代理（端口变更后生效） |
 | 退出 | 退出应用 |
 
@@ -164,7 +166,7 @@ akm-menubar
     </tr>
     <tr>
       <td style="white-space: nowrap;">插件</td>
-      <td>插件列表、启用/禁用开关、上传 .zip 安装、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
+      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（从 GitHub 仓库 plugins/ 目录一键安装/更新第三方插件，弹窗分页展示，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">设置</td>
@@ -207,6 +209,7 @@ akm-menubar
   "use_native_user_agent": false,
   "launch_at_login": false,
   "menu_bar_show_usage": false,
+  "auto_update": true,
   "http_proxy_enabled": false,
   "http_proxy_url": "",
   "http_client_max_connections": 8,
@@ -243,6 +246,7 @@ akm-menubar
 |--------|--------|------|
 | `launch_at_login` | `false` | 开机自启动（仅打包后的 `.app` 生效） |
 | `menu_bar_show_usage` | `false` | 菜单栏显示今日用量（Token 数 / 费用交替展示） |
+| `auto_update` | `true` | 自动更新：发现新版本后静默下载 zip 并替换重启；关闭后需手动「检查更新」确认 |
 | `wake_recover_delay_sec` | `8` | 菜单栏应用收到系统唤醒事件后，执行本地 ready 检查与上游探活前的等待秒数；VPN/Wi-Fi/代理恢复偏慢的机器可调大 |
 
 ### 图片
@@ -379,6 +383,8 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | DELETE | `/api/plugins/{name}` | 删除第三方插件 |
 | POST | `/api/plugins/upload` | 上传 .zip 安装第三方插件 |
 | GET/POST | `/api/plugin-config/{name}` | 插件配置读写 |
+| GET | `/api/plugin-market` | 插件市场列表（GitHub plugins/ 目录，带 5 分钟缓存） |
+| POST | `/api/plugin-market/{name}/install` | 从 GitHub 市场拉取并覆盖安装/更新插件 |
 
 ## Agent Loop
 
@@ -506,7 +512,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
 | `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传。`error_handler` 首次加载默认开启；`model_matcher` 标记为必需（`required: true`），不可禁用。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即拉取 Git 最新文件覆盖 `~/.akm/plugins/{name}/`，已加载插件覆盖后提示重启服务生效）。`error_handler` 首次加载默认开启；`model_matcher` 标记为必需（`required: true`），不可禁用。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
 
 每个插件实例拥有独立 `config`；`on_load` 返回 `False` 或抛异常时插件保持未就绪，残留的 API、插件页面和静态资源返回 503；管理台保存配置后调用 `on_config_changed` 刷新缓存状态。
 
