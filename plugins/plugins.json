@@ -1,0 +1,167 @@
+{
+  "generated_at": "2026-08-14T14:41:19+0800",
+  "plugins": {
+    "agent_chat": {
+      "version": "0.1.1",
+      "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
+      "category": "app",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.1.zip",
+      "sha256": "331e3f5224c50ffa5701fe93e7e894c65854c90685231a7aebe797c65de9effc",
+      "size": 1234960
+    },
+    "budget_gate": {
+      "version": "0.1.0",
+      "description": "预算闸门：按全局/模型/用户累计估算费用，超过日预算或滚动窗口预算后阻断新请求（不能替代供应商账单）",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/budget_gate-0.1.0.zip",
+      "sha256": "de71be82a759e6a0f2b24ebdf120a49fe29250f4a46a041abd95a5ca4c28d84a",
+      "size": 7606
+    },
+    "cache_proxy": {
+      "version": "0.1.0",
+      "description": "本地响应缓存：对非流式、无工具调用的相同请求在 TTL 内短路返回，进程内内存缓存",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/cache_proxy-0.1.0.zip",
+      "sha256": "c7f95a603930f8519e118b1b0dc5b9383a1c3ba1f522ec87e3fc10e9358d2599",
+      "size": 4823
+    },
+    "data_filter_guard": {
+      "version": "0.1.2",
+      "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/data_filter_guard-0.1.2.zip",
+      "sha256": "b67d1c19411dca68e3bc2b9325697d7796ed7fd618ed3bbbb5aa51a2d5f7e713",
+      "size": 25437
+    },
+    "fallback_router": {
+      "version": "0.1.0",
+      "description": "模型失败降级：命中指定状态码或网络错误后改用备用模型并重新选 Key",
+      "category": "handler",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/fallback_router-0.1.0.zip",
+      "sha256": "d4a5cb412b45e7cc403b56a7e180a5f9a4a4cf0057c47599cd5ae666b62e2e10",
+      "size": 3005
+    },
+    "frontend_static_server": {
+      "version": "0.1.0",
+      "description": "托管 Vue、React 等前端构建产物，支持自定义访问路径和 SPA History 路由回退",
+      "category": "app",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/frontend_static_server-0.1.0.zip",
+      "sha256": "f29d3eac7ec00c8b1da75e0019ec734d0644d7e1baf905a82ca1059ed7a50f04",
+      "size": 4578
+    },
+    "key_source_guard": {
+      "version": "0.1.0",
+      "description": "按客户端 User-Agent 来源绑定指定上游 Key；来源不匹配时跳过该 Key",
+      "category": "matcher",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/key_source_guard-0.1.0.zip",
+      "sha256": "6b01a7c8b1d50f9ac89a7d22292a38a333d00e1cdfebc2e2bb0962aa5caec86f",
+      "size": 2878
+    },
+    "markdown_kb": {
+      "version": "0.1.0",
+      "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
+      "category": "app",
+      "has_menu": true,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.0.zip",
+      "sha256": "97baaf5aecfc75c7578f13e8b6b35ebfd682a3deccd112ac7e1be0f917df26b2",
+      "size": 1121084
+    },
+    "mcp_tool_gateway": {
+      "version": "0.1.0",
+      "description": "MCP/工具网关：注册本地 HTTP 工具、可选注入到模型 tools 声明，并提供受控调用 API（与 tool_policy_guard 互补，不替代本机沙箱）",
+      "category": "app",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/mcp_tool_gateway-0.1.0.zip",
+      "sha256": "5e5a52426915fa8dbeae21219dec85d9958e239922487d8158b373221c2a76eb",
+      "size": 7429
+    },
+    "prompt_booster": {
+      "version": "0.1.0",
+      "description": "附加提示词注入：在请求发送到 AI 供应商之前注入自定义 system prompt 或指令",
+      "category": "filter",
+      "has_menu": true,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/prompt_booster-0.1.0.zip",
+      "sha256": "cbba1c345898ec5d23b4f9a4501dd835bf44cd8e66669ac144d69a32514aceb4",
+      "size": 5621
+    },
+    "prompt_profiles": {
+      "version": "0.1.0",
+      "description": "提示词配置集：按模型、接口和客户端规则叠加注入 system prompt 或 instructions",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/prompt_profiles-0.1.0.zip",
+      "sha256": "824600787fec0120c0290c2a7f62ea14ed5a2b76ce5afc244685757b730b19b5",
+      "size": 3585
+    },
+    "protocol_converter": {
+      "version": "0.1.0",
+      "description": "协议格式转换：Responses↔Chat、Messages↔Chat、Chat↔Responses/Messages",
+      "category": "converter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/protocol_converter-0.1.0.zip",
+      "sha256": "c76c25fb5a20de821aa12fb012b655731e2e249846ad59678612730b5c05b9e4",
+      "size": 49557
+    },
+    "provider_health_probe": {
+      "version": "0.1.0",
+      "description": "供应商健康探测：手动或定时复用 Key 连通性测试，提供脱敏状态快照 API",
+      "category": "app",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/provider_health_probe-0.1.0.zip",
+      "sha256": "dcf8daff78ae32ead24903daeb868dc25f2a2492b81cc728bdec8101cfc21088",
+      "size": 3901
+    },
+    "rate_limit_guard": {
+      "version": "0.1.0",
+      "description": "本地限流：按全局/模型/用户限制 RPM、RPH 与并发；超限在转发前返回 429",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/rate_limit_guard-0.1.0.zip",
+      "sha256": "0dc7e6f72938a94aed907249a939992c5188972da88b18df2452867ad86fb4c4",
+      "size": 3972
+    },
+    "response_schema_guard": {
+      "version": "0.1.0",
+      "description": "结构化响应校验：校验调用方声明的 JSON 模式，失败时告警或返回协议兼容错误",
+      "category": "post",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/response_schema_guard-0.1.0.zip",
+      "sha256": "e228599ae465330db6452ad8f01f1bcc1b0a304d89ee16a0650ecd7f690941ff",
+      "size": 3595
+    },
+    "tool_policy_guard": {
+      "version": "0.1.0",
+      "description": "工具策略：限制声明或续接中的工具名称与危险参数，支持告警或阻断请求",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/tool_policy_guard-0.1.0.zip",
+      "sha256": "40165a1965096694ca0b62d50e000c142f1365ae769bdbb49470c2b28c781fda",
+      "size": 3850
+    },
+    "usage_quota_guard": {
+      "version": "0.1.0",
+      "description": "本地窗口配额：按 Key 和模型限制请求次数及实际响应 Token，用尽后自动跳过当前 Key",
+      "category": "matcher",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/usage_quota_guard-0.1.0.zip",
+      "sha256": "e2eb9dc617a6c34f50ef4343c6f3c7f678e060531c87126672e8a70bf597215a",
+      "size": 4114
+    },
+    "webhook_notifier": {
+      "version": "0.3.0",
+      "description": "Webhook / 原生 App 告警：上游失败、安全拦截或慢请求时异步去重通知",
+      "category": "post",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/webhook_notifier-0.3.0.zip",
+      "sha256": "98f464acbabc864134f63b2705f54c11a8b7678b18f294c6e2680add2b291178",
+      "size": 7465
+    }
+  }
+}

@@ -174,7 +174,7 @@ updater = SparkleUpdater(
 3. 有更新时（`_handle_update_info`）：
    - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。
    - `auto_update` 关闭：在菜单栏插入「更新到 vX.Y.Z」菜单项，点击后弹窗确认再下载安装。
-4. 菜单栏「检查更新」：立即检查并弹窗展示 Release Note（`releases/latest` 返回的 `body`），用户点击「立即更新」才下载安装；无更新时弹窗提示已是最新。
+4. 菜单栏「检查更新」：立即检查并弹窗展示 Release Note（`releases/latest` 返回的 `body`），用户点击「立即更新」才下载安装；无更新时弹窗提示已是最新。点击「立即更新」后在**同一个自定义弹窗**（NSWindow + NSScrollView 可滚动 Release Note + NSProgressIndicator，主线程创建/刷新，后台线程只写进度数值）内于内容区底部实时显示下载百分比，下载完成转为安装动画；弹窗为现代卡片式外观（透明标题栏 + 内容延伸到标题栏、粗体标题配 accent 色版本号、圆角浅底 Release Note 卡片、分隔线，全部使用系统语义色自动适配深色/浅色模式）；底部按钮并排（左侧「取消」、右侧「立即更新」），确认后右侧按钮变「取消更新」并禁用左侧「取消」，点击「取消更新」中断下载并清理临时更新包，弹窗保留并恢复「立即更新」供重试；安装成功后自动关闭弹窗并重启；失败时弹窗关闭并弹窗提示原因。
 5. 为避免触发 GitHub API 限流，结果建议本地缓存 24 小时（已有 `CHECK_INTERVAL = 86400`）。
 
 **实现示例** (`akm/menubar.py`)：
@@ -235,6 +235,12 @@ def check_update():
    - 打开 `https://api.github.com/repos/<owner>/<repo>/releases/latest`。
    - 确认返回的 `tag_name`、`html_url`、`assets`（含 arm64 `.zip`）与刚发布版本一致。
    - 本地启动应用验证菜单栏是否出现更新提示 / 弹窗，以及 zip 更新包能否被正确下载替换。
+
+6. **插件市场发布（`scripts/publish_plugins.sh`）**
+   - 插件市场与 App 更新独立：每个插件打包为 `{name}-{version}.zip` 上传到固定 tag（默认 `plugin-market`），并生成/提交 `plugins/plugins.json` 索引。
+   - 每次修改插件（含 `agent_chat/dist` 构建产物）后执行：`./scripts/publish_plugins.sh`（自动打包、上传、生成索引、提交），再 `git push origin main` 使索引生效。
+   - 仅验证不发布：`./scripts/publish_plugins.sh --no-upload`（只打包 + 生成索引）；指定 tag：`--tag vX`。
+   - 索引走 `raw.githubusercontent.com`、插件 zip 走 `github.com/releases/download`，均不消耗 `api.github.com` 匿名配额，从根上避免市场接口被 403 限流。
 
 > 若本次发布涉及 `config.json` 的隐藏配置项（例如 `stats_include_estimated_usage`、`image_request_timeout_sec`），发布说明里应明确写出默认值、适用链路和“不会在设置页展示”，避免用户误以为功能未生效或界面漏项。
 

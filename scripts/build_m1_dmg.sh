@@ -72,6 +72,8 @@ echo "[5/7] 生成 DMG: $DMG_PATH"
 # 导致 .VolumeIcon.icns 和 .background 在 DMG 中可见。此处临时修补。
 CREATE_DMG=$(readlink -f /opt/homebrew/bin/create-dmg 2>/dev/null || echo "/opt/homebrew/bin/create-dmg")
 if [[ -f "$CREATE_DMG" ]]; then
+  # 先还原该行为原始状态（无论此前被修补过多少次，都统一还原），保证修补幂等。
+  sed -i '' 's#^SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns".*#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#' "$CREATE_DMG"
   # 在 SetFile -c icnC 后追加 SetFile -a V 隐藏 .VolumeIcon.icns 和 .background
   sed -i '' 's#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#&; SetFile -a V "$MOUNT_DIR/.VolumeIcon.icns"; SetFile -a V "$MOUNT_DIR/.background"#' "$CREATE_DMG"
 fi
@@ -86,9 +88,9 @@ create-dmg \
   --app-drop-link 459 199 \
   "$DMG_PATH" \
   "$APP_PATH"
-# 还原 create-dmg
+# 还原 create-dmg（无论修补了多少次，统一还原为原始单行）
 if [[ -f "$CREATE_DMG" ]]; then
-  sed -i '' 's#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"; SetFile -a V "$MOUNT_DIR/.VolumeIcon.icns"; SetFile -a V "$MOUNT_DIR/.background"#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#' "$CREATE_DMG"
+  sed -i '' 's#^SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns".*#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#' "$CREATE_DMG"
 fi
 
 echo "[6/7] 生成 zip 更新包"

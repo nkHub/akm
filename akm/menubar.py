@@ -31,6 +31,20 @@ from akm.proxy import test_key_connectivity
 NSWorkspace: Any = None
 NSWorkspaceDidWakeNotification: Any = None
 NSObject: Any = object
+NSWindow: Any = None
+NSProgressIndicator: Any = None
+NSTextField: Any = None
+NSButton: Any = None
+NSMakeRect: Any = None
+NSScrollView: Any = None
+NSTextView: Any = None
+NSView: Any = None
+NSColor: Any = None
+NSFont: Any = None
+NSAttributedString: Any = None
+NSMutableAttributedString: Any = None
+NSForegroundColorAttributeName: Any = None
+NSFontAttributeName: Any = None
 
 try:
     _appkit = importlib.import_module("AppKit")
@@ -40,6 +54,25 @@ try:
         _appkit, "NSWorkspaceDidWakeNotification", None
     )
     NSObject = getattr(_foundation, "NSObject", object)
+    # 进度窗口组件：用于「立即更新」时展示下载/安装进度。
+    NSWindow = getattr(_appkit, "NSWindow", None)
+    NSProgressIndicator = getattr(_appkit, "NSProgressIndicator", None)
+    NSTextField = getattr(_appkit, "NSTextField", None)
+    NSButton = getattr(_appkit, "NSButton", None)
+    NSMakeRect = getattr(_foundation, "NSMakeRect", None)
+    # 可滚动内容区组件：用于「发现新版本」弹窗展示完整 Release Note
+    NSScrollView = getattr(_appkit, "NSScrollView", None)
+    NSTextView = getattr(_appkit, "NSTextView", None)
+    # 弹窗美化组件：配色 / 字体 / 富文本（accent 色高亮版本号）
+    NSView = getattr(_appkit, "NSView", None)
+    NSColor = getattr(_appkit, "NSColor", None)
+    NSFont = getattr(_appkit, "NSFont", None)
+    NSAttributedString = getattr(_appkit, "NSAttributedString", None)
+    NSMutableAttributedString = getattr(_appkit, "NSMutableAttributedString", None)
+    NSForegroundColorAttributeName = getattr(
+        _appkit, "NSForegroundColorAttributeName", None
+    )
+    NSFontAttributeName = getattr(_appkit, "NSFontAttributeName", None)
 except ImportError:
     pass
 
@@ -70,17 +103,36 @@ def _bundle_app_path() -> str:
     return os.path.abspath(os.path.join(exe_dir, "..", ".."))
 
 
-def _download_file(url: str, dest: str) -> bool:
-    """流式下载远程文件到 dest，返回是否成功；失败只记日志不抛异常。"""
+class _UpdateCancelled(Exception):
+    """用户点击「取消下载」后中断更新流程的内部控制信号。"""
+
+
+def _download_file(url: str, dest: str, progress_cb=None, cancel_check=None) -> bool:
+    """流式下载远程文件到 dest，返回是否成功；失败只记日志不抛异常。
+
+    progress_cb(done_bytes, total_bytes) 在每块数据写盘后回调，
+    total_bytes 为 None 表示响应头未提供长度。
+    cancel_check 为可选的可调用对象，每块数据后调用；返回 True 时中断下载
+    并抛 _UpdateCancelled，由调用方按「用户取消」处理。
+    """
     try:
         with httpx.stream(
             "GET", url, follow_redirects=True, timeout=UPDATE_DOWNLOAD_TIMEOUT
         ) as resp:
             resp.raise_for_status()
+            total = int(resp.headers.get("content-length") or 0) or None
+            done = 0
             with open(dest, "wb") as f:
                 for chunk in resp.iter_bytes():
+                    if cancel_check and cancel_check():
+                        raise _UpdateCancelled()
                     f.write(chunk)
+                    done += len(chunk)
+                    if progress_cb:
+                        progress_cb(done, total)
         return True
+    except _UpdateCancelled:
+        raise
     except Exception as exc:
         logger.warning("下载更新包失败: %s", exc)
         return False
@@ -147,6 +199,21 @@ class _WakeObserver(NSObject):
 
     def handleWake_(self, _notification):
         self.app._schedule_wake_recovery()
+
+
+class _UpdateCancelTarget(NSObject):
+    """进度窗口「取消下载」按钮的 action target，把点击事件转成 Python 回调。"""
+
+    def initWithCallback_(self, callback):
+        self = self.init()
+        if self is None:
+            return None
+        self.callback = callback
+        return self
+
+    def handleClick_(self, _sender):
+        if self.callback:
+            self.callback()
 
 
 def _round_corners(input_path: str) -> str:
@@ -221,6 +288,27 @@ class AKMApp(rumps.App):
         # 待主线程弹出的对话框请求（后台线程只写入，避免跨线程调用 AppKit）：
         # (title, message, ok, cancel, other, handler)，handler 接收点击按钮文本。
         self._pending_alert: tuple | None = None
+        # 待主线程打开的「发现新版本」自定义弹窗请求：后台检查线程写入待打开信息。
+        self._pending_update_dialog: dict | None = None
+        # 「发现新版本」自定义弹窗状态（主线程创建/刷新/关闭，后台线程只写进度数值）。
+        # 该弹窗是更新确认与进度展示的容器：确认 → 进度条 → 可取消更新。
+        self._update_dialog = None              # NSWindow 实例，None 表示未打开
+        self._update_dialog_note_view = None    # NSTextView 实例（可滚动 Release Note）
+        self._update_dialog_progress_bar = None # NSProgressIndicator 实例（初始隐藏）
+        self._update_dialog_cancel_btn = None   # 底部左侧「取消」NSButton
+        self._update_dialog_ok_btn = None       # 底部右侧「立即更新」/「取消更新」NSButton
+        self._update_dialog_status_label = None # 进度/状态文字 NSTextField（进度条上方）
+        self._update_dialog_state = "confirm"   # confirm / downloading / cancelled
+        self._update_dialog_info: dict = {}     # 弹窗对应的更新信息（供下载线程使用）
+        self._update_progress_value = 0.0 # 后台线程写入的下载进度（0-100）
+        self._update_progress_done = False  # 下载完成标志，安装阶段转不确定进度
+        self._update_failed_msg = ""      # 更新失败原因，主线程检测后关窗并弹框
+        self._update_cancel_requested = False  # 用户点击「取消更新」后置 True，下载循环检测后中断
+        # 弹窗右侧按钮（立即更新 / 取消更新 状态切换）与两个按钮的 action target：
+        # target 复用 _UpdateCancelTarget（通用回调封装），持有引用防止被 GC 回收。
+        self._update_dialog_ok_target = None
+        self._update_cancelled_msg = ""   # 更新被用户取消的提示文案，主线程检测后恢复弹窗
+        self._progress_timer = None       # 快速刷新进度窗口的定时器
 
         # 原生功能：开机自启动 & 菜单栏用量展示
         self._launch_login_enabled: bool | None = None  # 上次同步状态，避免重复调用 SMAppService
@@ -345,9 +433,13 @@ class AKMApp(rumps.App):
         否则失败时额外弹对话框告知用户。
         """
         if self._updating:
+            if not silent and self._update_dialog is not None:
+                # 已有更新任务在执行，让主线程在弹窗内提示
+                self._update_failed_msg = "已有更新任务正在执行，请稍候"
             return
         self._updating = True
         self._updating_msg = ""
+        zip_path = ""
         try:
             download_url = info.get("download_url") or ""
             latest = info.get("latest", "")
@@ -365,10 +457,28 @@ class AKMApp(rumps.App):
             cache_dir = os.path.join(os.path.expanduser("~/.akm"), "updates")
             os.makedirs(cache_dir, exist_ok=True)
             zip_path = os.path.join(cache_dir, f"AI Key Manager-{latest}-{int(time.time())}.zip")
-            if not _download_file(download_url, zip_path):
+
+            def _on_download_progress(done: int, total: int | None):
+                # 状态栏与进度窗口共用百分比；无长度信息时退化为已下载字节数
+                if total:
+                    pct = min(100, round(done * 100 / total))
+                    self._update_progress_value = float(pct)
+                    self._updating_msg = f"正在下载 v{latest}... {pct}%"
+                else:
+                    mb = round(done / 1024 / 1024, 1)
+                    self._updating_msg = f"正在下载 v{latest}... {mb}MB"
+
+            if not _download_file(
+                download_url,
+                zip_path,
+                progress_cb=_on_download_progress,
+                cancel_check=lambda: self._update_cancel_requested,
+            ):
                 raise RuntimeError("更新包下载失败，请检查网络后重试")
 
-            # 2. 解压 zip，找到其中的 .app
+            # 2. 解压 zip，找到其中的 .app（下载完成：进度条转不确定动画）
+            self._update_progress_value = 100.0
+            self._update_progress_done = True
             self._updating_msg = "正在安装..."
             tmp_dir = tempfile.mkdtemp(prefix="akm-update-")
             new_app = _extract_app(zip_path, tmp_dir)
@@ -392,12 +502,28 @@ class AKMApp(rumps.App):
             self._updating_msg = ""
             self._relaunch_pending = True
             self._safe_notify("AKM 更新完成", f"已更新到 v{latest}，即将自动重启")
+        except _UpdateCancelled:
+            # 用户点击「取消下载」：中断更新，清理临时 zip，通知后结束（不视为失败）
+            logger.warning("用户取消更新下载")
+            self._updating_msg = ""
+            try:
+                if zip_path and os.path.exists(zip_path):
+                    os.remove(zip_path)
+            except Exception:
+                pass
+            self._safe_notify("AKM 更新", "已取消更新下载")
+            # 通知主线程关闭进度窗口（复用失败通道的关闭逻辑但走取消分支）
+            self._update_cancelled_msg = "已取消更新下载"
         except Exception as exc:
             logger.warning("自动更新失败: %s", exc)
             self._updating_msg = ""
             self._safe_notify("AKM 更新失败", str(exc))
             if not silent:
-                self._queue_alert("更新失败", str(exc), "确定", None, None)
+                if self._update_dialog is not None:
+                    # 弹窗已打开：交由主线程在弹窗内提示失败原因
+                    self._update_failed_msg = str(exc)
+                else:
+                    self._queue_alert("更新失败", str(exc), "确定", None, None)
         finally:
             self._updating = False
 
@@ -409,33 +535,360 @@ class AKMApp(rumps.App):
             _schedule_relaunch(target)
         rumps.quit_application()
 
+    # ── 「发现新版本」自定义弹窗（确认 + 进度 + 取消更新） ──
+
+    def _open_update_dialog(self, info: dict) -> None:
+        """在主线程打开「发现新版本」自定义弹窗。
+
+        弹窗是更新确认与进度展示的容器：
+        初始显示 Release Note 与底部「取消 / 立即更新」按钮；
+        点击「立即更新」后在内容区底部显示进度条，右侧按钮变为「取消更新」；
+        下载可被中断，中断后弹窗保留并恢复「立即更新」。
+        组件缺失时静默降级为状态栏进度。
+
+        外观为现代 macOS 卡片式弹窗：透明标题栏 + 内容延伸到标题栏、
+        大号粗体标题配 accent 色版本号、圆角浅底 Release Note 卡片、
+        分隔线与底部主按钮，全部使用系统语义色以适配深色/浅色模式。
+        """
+        if self._update_dialog is not None:
+            return
+        if not NSWindow or not NSProgressIndicator or not NSTextField or NSMakeRect is None:
+            logger.warning("AppKit 组件不可用，更新弹窗降级为状态栏展示")
+            return
+        try:
+            w = 560
+            h = 480
+            # 透明标题栏 + 内容延伸到标题栏（FullSizeContentView = 1<<15），
+            # 保留系统圆角、阴影与红绿灯关闭按钮，背景由系统自动适配深浅色。
+            window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, w, h),
+                1 | 2 | (1 << 15),  # Titled | Closable | FullSizeContentView
+                2,                  # NSBackingStoreBuffered
+                False,
+            )
+            window.setTitle_("发现新版本")
+            window.setTitlebarAppearsTransparent_(True)
+            window.setTitleVisibility_(1)  # NSWindowTitleHidden：隐藏标题文字
+
+            content = window.contentView()
+
+            # 顶部留白：为透明标题栏（约 28pt）让位
+            top_pad = 44
+            latest = info.get("latest", "")
+
+            # ---- 标题行：粗体「发现新版本」+ accent 色版本号（富文本） ----
+            title_label = NSTextField.alloc().initWithFrame_(NSMakeRect(24, h - top_pad - 34, w - 48, 34))
+            title_label.setBezeled_(False)
+            title_label.setDrawsBackground_(False)
+            title_label.setEditable_(False)
+            title_label.setSelectable_(False)
+            if (
+                NSFont is not None
+                and NSColor is not None
+                and NSAttributedString is not None
+                and NSMutableAttributedString is not None
+                and NSForegroundColorAttributeName is not None
+                and NSFontAttributeName is not None
+            ):
+                attrs = NSMutableAttributedString.alloc().initWithString_("发现新版本  ")
+                attrs.addAttribute_value_range_(
+                    NSFontAttributeName, NSFont.boldSystemFontOfSize_(20), (0, len("发现新版本  "))
+                )
+                attrs.addAttribute_value_range_(
+                    NSForegroundColorAttributeName, NSColor.labelColor(), (0, len("发现新版本  "))
+                )
+                ver = NSAttributedString.alloc().initWithString_attributes_(
+                    f"v{latest}",
+                    {
+                        NSFontAttributeName: NSFont.boldSystemFontOfSize_(20),
+                        NSForegroundColorAttributeName: NSColor.controlAccentColor(),
+                    },
+                )
+                attrs.appendAttributedString_(ver)
+                title_label.setAttributedStringValue_(attrs)
+            else:
+                title_label.setStringValue_(f"发现新版本 v{latest}")
+                if NSFont is not None:
+                    title_label.setFont_(NSFont.boldSystemFontOfSize_(20))
+
+            # ---- 副标题：当前版本（次要灰字） ----
+            subtitle_label = NSTextField.alloc().initWithFrame_(NSMakeRect(24, h - top_pad - 60, w - 48, 18))
+            subtitle_label.setStringValue_(f"当前版本 v{__version__}")
+            subtitle_label.setBezeled_(False)
+            subtitle_label.setDrawsBackground_(False)
+            subtitle_label.setEditable_(False)
+            subtitle_label.setSelectable_(False)
+            if NSFont is not None:
+                subtitle_label.setFont_(NSFont.systemFontOfSize_(12))
+            if NSColor is not None:
+                subtitle_label.setTextColor_(NSColor.secondaryLabelColor())
+
+            # ---- 分隔线 ----
+            if NSView is not None and NSColor is not None:
+                sep = NSView.alloc().initWithFrame_(NSMakeRect(24, h - top_pad - 74, w - 48, 1))
+                sep.setWantsLayer_(True)
+                sep.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+                content.addSubview_(sep)
+
+            # ---- 「更新内容」小节标题 ----
+            section_label = NSTextField.alloc().initWithFrame_(NSMakeRect(24, h - top_pad - 94, w - 48, 16))
+            section_label.setStringValue_("更新内容")
+            section_label.setBezeled_(False)
+            section_label.setDrawsBackground_(False)
+            section_label.setEditable_(False)
+            section_label.setSelectable_(False)
+            if NSFont is not None:
+                section_label.setFont_(NSFont.systemFontOfSize_(11))
+            if NSColor is not None:
+                section_label.setTextColor_(NSColor.secondaryLabelColor())
+            content.addSubview_(section_label)
+
+            # ---- 可滚动的 Release Note：圆角浅底卡片 ----
+            note_view = None
+            note_top = h - top_pad - 118  # 内容区顶部 y 坐标（小节标题下方留 24）
+            if NSScrollView is not None and NSTextView is not None:
+                note_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, w - 48, 200))
+                note_view.setString_(str(info.get("body") or "（该版本未填写更新说明）"))
+                note_view.setEditable_(False)
+                note_view.setSelectable_(True)
+                note_view.setDrawsBackground_(False)  # 让卡片背景透出
+                if NSFont is not None:
+                    note_view.setFont_(NSFont.systemFontOfSize_(13))
+                if NSColor is not None:
+                    note_view.setTextColor_(NSColor.labelColor())
+                    # 文本与卡片内边距：pyobjc 下 NSSize 从 Foundation 获取
+                    _ns_size = getattr(_foundation, "NSSize", None)
+                    if _ns_size is not None:
+                        note_view.setTextContainerInset_(_ns_size(12, 10))
+                scroll = NSScrollView.alloc().initWithFrame_(
+                    NSMakeRect(24, 100, w - 48, note_top - 100)
+                )
+                scroll.setDocumentView_(note_view)
+                scroll.setHasVerticalScroller_(True)
+                scroll.setAutohidesScrollers_(True)
+                scroll.setBorderType_(0)  # NSNoBorder
+                if NSColor is not None:
+                    scroll.setDrawsBackground_(True)
+                    scroll.setBackgroundColor_(NSColor.textBackgroundColor())
+                if NSView is not None:
+                    # 卡片圆角
+                    scroll.setWantsLayer_(True)
+                    scroll.layer().setCornerRadius_(8.0)
+                content.addSubview_(scroll)
+
+            # ---- 状态文字标签（进度条上方）：初始提示，下载/安装时展示进度文案 ----
+            status_label = NSTextField.alloc().initWithFrame_(NSMakeRect(24, 70, w - 48, 18))
+            status_label.setStringValue_("是否立即下载并自动安装？安装完成后应用将自动重启。")
+            status_label.setBezeled_(False)
+            status_label.setDrawsBackground_(False)
+            status_label.setEditable_(False)
+            status_label.setSelectable_(False)
+            if NSFont is not None:
+                status_label.setFont_(NSFont.systemFontOfSize_(12))
+            if NSColor is not None:
+                status_label.setTextColor_(NSColor.secondaryLabelColor())
+
+            # 确定进度条（0-100），下载完成后切为不确定动画；初始隐藏
+            bar = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(24, 40, w - 48, 18))
+            bar.setStyle_(getattr(_appkit, "NSProgressIndicatorBarStyle", 0))
+            bar.setIndeterminate_(False)
+            bar.setMinValue_(0.0)
+            bar.setMaxValue_(100.0)
+            bar.setDoubleValue_(0.0)
+            bar.setHidden_(True)
+
+            # ---- 底部按钮排：左侧「取消」、右侧「立即更新」/「取消更新」 ----
+            cancel_btn = None
+            ok_btn = None
+            if NSButton is not None:
+                cancel_btn = NSButton.alloc().initWithFrame_(NSMakeRect(24, 12, 110, 28))
+                cancel_btn.setTitle_("取消")
+                cancel_btn.setBezelStyle_(1)  # NSRoundedBezelStyle
+                self._update_dialog_cancel_target = _UpdateCancelTarget.alloc().initWithCallback_(
+                    self._on_dialog_cancel_clicked
+                )
+                cancel_btn.setTarget_(self._update_dialog_cancel_target)
+                cancel_btn.setAction_(b"handleClick:")
+                content.addSubview_(cancel_btn)
+
+                ok_btn = NSButton.alloc().initWithFrame_(NSMakeRect(w - 134, 12, 110, 28))
+                ok_btn.setTitle_("立即更新")
+                ok_btn.setBezelStyle_(1)  # NSRoundedBezelStyle
+                # 设为主按钮（Enter 键触发），系统渲染为 accent 色默认按钮样式
+                ok_btn.setKeyEquivalent_("\r")
+                self._update_dialog_ok_target = _UpdateCancelTarget.alloc().initWithCallback_(
+                    self._on_dialog_ok_clicked
+                )
+                ok_btn.setTarget_(self._update_dialog_ok_target)
+                ok_btn.setAction_(b"handleClick:")
+                content.addSubview_(ok_btn)
+
+            content.addSubview_(title_label)
+            content.addSubview_(subtitle_label)
+            content.addSubview_(status_label)
+            content.addSubview_(bar)
+
+            self._update_dialog = window
+            self._update_dialog_note_view = note_view
+            self._update_dialog_status_label = status_label
+            self._update_dialog_progress_bar = bar
+            self._update_dialog_cancel_btn = cancel_btn
+            self._update_dialog_ok_btn = ok_btn
+            self._update_dialog_state = "confirm"
+            self._update_dialog_info = info
+            self._update_progress_value = 0.0
+            self._update_progress_done = False
+            self._update_cancel_requested = False
+            # 窗口居中，并提到前台（菜单栏应用无 dock 图标也能显示）
+            window.center()
+            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront_(None)
+        except Exception as exc:
+            logger.warning("打开更新弹窗失败: %s", exc)
+            self._update_dialog = None
+            self._update_dialog_note_view = None
+            self._update_dialog_status_label = None
+            self._update_dialog_progress_bar = None
+            self._update_dialog_cancel_btn = None
+            self._update_dialog_ok_btn = None
+            self._update_dialog_state = "confirm"
+            self._update_dialog_info = {}
+
+    def _on_dialog_cancel_clicked(self):
+        """弹窗左侧「取消」按钮回调：未开始下载时点击，关闭弹窗放弃更新。"""
+        if self._update_dialog_state != "confirm":
+            return
+        self._close_update_dialog()
+
+    def _on_dialog_ok_clicked(self):
+        """弹窗右侧按钮回调：confirm 状态开始更新；downloading 状态请求取消。"""
+        if self._update_dialog is None:
+            return
+        if self._update_dialog_state == "confirm":
+            # 确认更新：显示进度条、右侧按钮变「取消更新」、禁用左侧「取消」防误关
+            self._update_dialog_state = "downloading"
+            self._update_progress_value = 0.0
+            self._update_progress_done = False
+            self._update_cancel_requested = False
+            if self._update_dialog_progress_bar is not None:
+                self._update_dialog_progress_bar.setHidden_(False)
+                self._update_dialog_progress_bar.setIndeterminate_(False)
+                self._update_dialog_progress_bar.setDoubleValue_(0.0)
+            if self._update_dialog_status_label is not None:
+                self._update_dialog_status_label.setStringValue_("正在准备更新...")
+            if self._update_dialog_ok_btn is not None:
+                self._update_dialog_ok_btn.setTitle_("取消更新")
+            if self._update_dialog_cancel_btn is not None:
+                self._update_dialog_cancel_btn.setEnabled_(False)
+            info = self._update_dialog_info or {}
+            if info.get("has_update"):
+                threading.Thread(
+                    target=self._perform_update, args=(info, False), daemon=True
+                ).start()
+        elif self._update_dialog_state == "downloading":
+            # 点击「取消更新」：请求中断下载并禁用按钮防重复点击
+            self._update_cancel_requested = True
+            if self._update_dialog_ok_btn is not None:
+                self._update_dialog_ok_btn.setTitle_("正在取消...")
+                self._update_dialog_ok_btn.setEnabled_(False)
+
+    def _refresh_update_dialog(self) -> None:
+        """刷新弹窗内容（主线程定时调用，读取后台线程写入的进度状态）。"""
+        if self._update_dialog is None:
+            return
+        try:
+            if self._update_dialog_progress_bar is not None:
+                if self._update_progress_done:
+                    # 下载完成进入安装阶段：切换为不确定进度动画
+                    self._update_dialog_progress_bar.setIndeterminate_(True)
+                    self._update_dialog_progress_bar.startAnimation_(None)
+                else:
+                    self._update_dialog_progress_bar.setIndeterminate_(False)
+                    self._update_dialog_progress_bar.setDoubleValue_(self._update_progress_value)
+            if self._update_dialog_status_label is not None:
+                msg = self._updating_msg or "正在准备更新..."
+                self._update_dialog_status_label.setStringValue_(msg)
+        except Exception as exc:
+            logger.warning("刷新更新弹窗失败: %s", exc)
+
+    def _reset_dialog_to_confirm(self, hint: str) -> None:
+        """取消更新后恢复弹窗为初始状态（保留弹窗），并在状态标签展示提示。"""
+        if self._update_dialog is None:
+            return
+        try:
+            self._update_dialog_state = "confirm"
+            if self._update_dialog_progress_bar is not None:
+                self._update_dialog_progress_bar.stopAnimation_(None)
+                self._update_dialog_progress_bar.setHidden_(True)
+            if self._update_dialog_status_label is not None:
+                self._update_dialog_status_label.setStringValue_(hint)
+            if self._update_dialog_ok_btn is not None:
+                self._update_dialog_ok_btn.setTitle_("立即更新")
+                self._update_dialog_ok_btn.setEnabled_(True)
+            if self._update_dialog_cancel_btn is not None:
+                self._update_dialog_cancel_btn.setEnabled_(True)
+        except Exception as exc:
+            logger.warning("恢复更新弹窗状态失败: %s", exc)
+
+    def _close_update_dialog(self) -> None:
+        """关闭弹窗并清理状态（主线程调用）。"""
+        if self._update_dialog is None:
+            return
+        try:
+            if self._update_dialog_progress_bar is not None:
+                self._update_dialog_progress_bar.stopAnimation_(None)
+            self._update_dialog.close()
+        except Exception as exc:
+            logger.warning("关闭更新弹窗失败: %s", exc)
+        finally:
+            self._update_dialog = None
+            self._update_dialog_note_view = None
+            self._update_dialog_status_label = None
+            self._update_dialog_progress_bar = None
+            self._update_dialog_cancel_btn = None
+            self._update_dialog_ok_btn = None
+            self._update_dialog_cancel_target = None
+            self._update_dialog_ok_target = None
+            self._update_dialog_state = "confirm"
+            self._update_dialog_info = {}
+            self._update_progress_value = 0.0
+            self._update_progress_done = False
+            self._update_failed_msg = ""
+            self._update_cancel_requested = False
+            self._update_cancelled_msg = ""
+
+    def _on_update_progress_tick(self, _):
+        """进度定时器回调：弹窗存在时刷新进度，失败关窗弹框，取消则恢复弹窗。"""
+        try:
+            if self._update_failed_msg:
+                msg = self._update_failed_msg
+                self._update_failed_msg = ""
+                self._close_update_dialog()
+                self._queue_alert("更新失败", msg, "确定", None, None)
+                return
+            if self._update_cancelled_msg:
+                # 用户取消了下载：保留弹窗并恢复初始状态，无需弹失败框
+                msg = self._update_cancelled_msg
+                self._update_cancelled_msg = ""
+                self._reset_dialog_to_confirm(msg)
+                self._safe_notify("AKM 更新", msg)
+                return
+            if self._update_dialog is not None:
+                self._refresh_update_dialog()
+        except Exception as exc:
+            logger.warning("更新弹窗定时回调失败: %s", exc)
+
     def _open_release_page(self, _):
         """点击更新菜单后打开 Release 页面。"""
         if self._update_url:
             webbrowser.open(self._update_url)
 
     def _on_update_menu_click(self, _):
-        """点击“更新到 vX.Y.Z”菜单项：弹确认框，确认后开始下载安装。"""
+        """点击“更新到 vX.Y.Z”菜单项：打开「发现新版本」自定义弹窗确认更新。"""
         info = self._last_update_info or {}
         if not info.get("has_update"):
             return
-        latest = info.get("latest", "")
-        release_url = info.get("url", "")
-        try:
-            clicked = rumps.alert(
-                "发现新版本",
-                f"检测到新版本 v{latest}（当前 v{__version__}）。\n是否立即下载并自动安装？安装完成后应用将自动重启。",
-                "立即更新",
-                "取消",
-                "打开 Release 页面",
-            )
-        except Exception as exc:
-            logger.warning("弹更新确认框失败: %s", exc)
-            return
-        if clicked == "立即更新":
-            threading.Thread(target=self._perform_update, args=(info, False), daemon=True).start()
-        elif clicked == "打开 Release 页面" and release_url:
-            webbrowser.open(release_url)
+        self._open_update_dialog(info)
 
     def _queue_alert(self, title: str, message: str, ok=None, cancel=None, other=None) -> None:
         """把弹窗请求写入待处理队列，由主线程 tick 弹出。
@@ -472,21 +925,9 @@ class AKMApp(rumps.App):
                     None,
                 )
                 return
-            # 有更新：弹窗展示 Release Note，用户确认后再下载安装
-            latest = info.get("latest", "")
-            body = str(info.get("body") or "").strip()
-            # Release Note 可能很长，截断避免对话框内容溢出
-            if len(body) > 800:
-                body = body[:800] + "\n…（详见 Release 页面）"
-            self._queue_alert(
-                "发现新版本",
-                f"检测到新版本 v{latest}（当前 v{__version__}）。\n\n"
-                f"版本更新内容：\n{body}\n\n"
-                f"是否立即下载并自动安装？安装完成后应用将自动重启。",
-                "立即更新",
-                "取消",
-                "打开 Release 页面",
-            )
+            # 有更新：交给主线程打开「发现新版本」自定义弹窗（展示 Release Note 并确认）
+            # 后台线程只写入待打开信息，避免跨线程创建 NSWindow。
+            self._pending_update_dialog = info
 
         threading.Thread(target=do_check, daemon=True).start()
 
@@ -555,9 +996,12 @@ class AKMApp(rumps.App):
             logger.warning("注册系统唤醒监听失败: %s", exc)
 
     def _start_native_timer(self):
-        """启动原生功能定时器：开机自启动同步 + 菜单栏用量刷新。"""
+        """启动原生功能定时器：开机自启动同步 + 菜单栏用量刷新 + 更新进度窗口刷新。"""
         self._native_timer = rumps.Timer(self._on_native_tick, 5)
         self._native_timer.start()
+        # 进度窗口刷新走独立短间隔定时器，保证下载进度平滑更新（窗口未打开时无开销）。
+        self._progress_timer = rumps.Timer(self._on_update_progress_tick, 0.5)
+        self._progress_timer.start()
 
     def _on_native_tick(self, _):
         """每 5 秒回调一次：同步开机自启动状态 + 刷新菜单栏用量 + 处理待执行操作。
@@ -570,24 +1014,24 @@ class AKMApp(rumps.App):
         # 更新安装完成：执行退出+重启（重启脚本会延迟拉起新应用）。
         if self._relaunch_pending:
             self._relaunch_pending = False
+            self._close_update_dialog()
             self._do_relaunch()
             return
-        # 后台检查线程提交的弹窗请求：在主线程弹出，并按点击结果执行后续动作。
+        # 后台检查线程提交的「发现新版本」弹窗请求：在主线程打开自定义弹窗。
+        if self._pending_update_dialog:
+            info = self._pending_update_dialog
+            self._pending_update_dialog = None
+            if self._update_dialog is None:
+                self._open_update_dialog(info)
+            return
+        # 后台线程提交的简单系统弹窗请求（无更新提示 / 更新失败提示等）。
         if self._pending_alert:
             title, message, ok, cancel, other = self._pending_alert
             self._pending_alert = None
             try:
-                clicked = rumps.alert(title, message, ok, cancel, other)
+                rumps.alert(title, message, ok, cancel, other)
             except Exception as exc:
                 logger.warning("弹窗失败: %s", exc)
-                return
-            info = self._last_update_info or {}
-            if clicked == "立即更新":
-                threading.Thread(
-                    target=self._perform_update, args=(info, False), daemon=True
-                ).start()
-            elif clicked == "打开 Release 页面" and info.get("url"):
-                webbrowser.open(info.get("url", ""))
             return
         try:
             self._sync_launch_at_login()

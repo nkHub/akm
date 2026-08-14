@@ -29,18 +29,21 @@ _PLUGIN_ARCHIVE_MAX_BYTES = 20 * 1024 * 1024
 _PLUGIN_ARCHIVE_MAX_FILES = 500
 _PLUGIN_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 
-# ── 插件市场（GitHub 源） ──────────────────────────────────────────
-# 市场仓库与分支：插件列表来自该仓库的 plugins/ 目录（git/trees 一次拉全树，
-# 单文件内容用 raw.githubusercontent.com 拉取）。与 App 更新用的 GITHUB_REPO 一致。
+# ── 插件市场（GitHub Release + 索引） ─────────────────────────────
+# 市场索引与插件 zip 均来自 GitHub，但全部走 raw.githubusercontent.com /
+# github.com/releases/download，不消耗 api.github.com 匿名配额，因此不会再
+# 触发 60 次/小时的 API 限流（403）。索引由 scripts/publish_plugins.sh 生成：
+# 每个插件打包为 {name}-{version}.zip 上传到固定 Release tag，再写入
+# plugins/plugins.json（含 version / description / category / has_menu /
+# zip_url / sha256 / size）。
 _MARKET_REPO = "nkHub/akm"
 _MARKET_BRANCH = "main"
-_MARKET_TREE_URL = f"https://api.github.com/repos/{_MARKET_REPO}/git/trees/{_MARKET_BRANCH}?recursive=1"
 _MARKET_RAW_URL = f"https://raw.githubusercontent.com/{_MARKET_REPO}/{_MARKET_BRANCH}/"
-# 市场数据内存缓存有效期（秒）。打开插件页会拉取一次，5 分钟内不重复请求，
-# 避免频繁命中 GitHub API 限流（未认证 60 次/小时）。
+# 市场索引文件相对仓库根路径（raw 拉取）
+_MARKET_INDEX_PATH = "plugins/plugins.json"
+# 市场数据内存缓存有效期（秒）。打开插件页会拉取一次，5 分钟内不重复请求。
 _MARKET_CACHE_TTL = 300
-# 单插件目录最大文件数与总下载大小，避免异常目录拖垮请求。
-_MARKET_PLUGIN_MAX_FILES = 200
+# 单插件 zip 下载上限（字节），避免异常大包拖垮下载与磁盘。
 _MARKET_PLUGIN_MAX_BYTES = 30 * 1024 * 1024
 
 
@@ -112,6 +115,8 @@ class PluginManager:
         # self._market_cache_at 记录拉取时间，超时后重新请求。
         self._market_cache: list | None = None
         self._market_cache_at: float = 0.0
+        # 插件市场安装/更新进度：name → {total, done, message}，前端轮询展示
+        self._market_install_progress: dict = {}
 
     # ── 配置读写（内部） ──
 
@@ -712,18 +717,13 @@ class PluginManager:
             "hot": False,
         }
 
-    # ── 插件市场（GitHub 源拉取） ──
+    # ── 插件市场（GitHub Release + 索引） ──
 
-    async def _fetch_market_file(
-        self, rel_path: str, client: httpx.AsyncClient | None = None
-    ) -> str | None:
+    async def _fetch_market_file(self, rel_path: str) -> str | None:
         """从市场仓库 raw 地址下载单个文件内容；失败返回 None。"""
         try:
-            if client is not None:
-                resp = await client.get(_MARKET_RAW_URL + rel_path)
-            else:
-                async with httpx.AsyncClient(timeout=30) as c:
-                    resp = await c.get(_MARKET_RAW_URL + rel_path)
+            async with httpx.AsyncClient(timeout=30) as c:
+                resp = await c.get(_MARKET_RAW_URL + rel_path)
             if resp.status_code != 200:
                 return None
             return resp.text
@@ -741,8 +741,14 @@ class PluginManager:
         except Exception:
             return None
 
-    def _build_market_item(self, name: str, meta: PluginMeta) -> dict:
-        """组装单条市场插件信息，并比对本地安装状态（仅第三方来源可更新）。"""
+    def _build_market_item(self, name: str, info: dict) -> dict:
+        """组装单条市场插件信息，并比对本地安装状态（仅第三方来源可更新）。
+
+        Args:
+            name: 插件名
+            info: plugins/plugins.json 索引中该插件的条目
+                  （version / description / category / has_menu / zip_url / sha256 / size）
+        """
         local_source = self._plugin_sources.get(name)
         third_party_dir = self._third_party_dir / name
 
@@ -756,20 +762,25 @@ class PluginManager:
         elif local_source is not None:
             installed_version = self._plugin_metas[name].version
 
+        market_version = str(info.get("version") or "")
         # 仅对"已安装且来源为第三方"的插件标记可更新；内置/项目源码跟随 App/源码，
         # 不通过市场更新，避免覆盖开发环境或内置代码。
         has_update = bool(
             installed
             and local_source == "third_party"
             and installed_version
-            and version_greater(meta.version, installed_version)
+            and market_version
+            and version_greater(market_version, installed_version)
         )
         return {
-            "name": meta.name,
-            "version": meta.version,
-            "description": meta.description,
-            "category": meta.category,
-            "has_menu": meta.has_menu,
+            "name": name,
+            "version": market_version,
+            "description": str(info.get("description") or ""),
+            "category": str(info.get("category") or ""),
+            "has_menu": bool(info.get("has_menu")),
+            # 下载信息（install_market_plugin 使用），透传索引中的 zip 地址与 sha256
+            "zip_url": str(info.get("zip_url") or ""),
+            "sha256": str(info.get("sha256") or ""),
             "installed": installed,
             "installed_version": installed_version,
             "local_source": local_source,
@@ -777,48 +788,34 @@ class PluginManager:
         }
 
     async def fetch_market_plugins(self) -> dict:
-        """拉取 GitHub 插件市场列表（git/trees 全树 + raw 逐个 plugin.json）。
+        """拉取 GitHub 插件市场列表（拉取 plugins/plugins.json 索引）。
 
-        结果带 5 分钟内存缓存：打开插件页自动拉取，短时间内重复打开不重复请求，
-        降低 GitHub 未认证 API 限流风险。返回 {"ok": True, "cached": bool, "plugins": [...]}。
+        索引由 scripts/publish_plugins.sh 生成，存于仓库 main 分支，经
+        raw.githubusercontent.com 拉取（不消耗 api.github.com 配额，避免 403）。
+        结果带 5 分钟内存缓存：打开插件页自动拉取，短时间内重复打开不重复请求。
+        返回 {"ok": True, "cached": bool, "plugins": [...]}。
         """
         now = time.time()
         if self._market_cache is not None and now - self._market_cache_at < _MARKET_CACHE_TTL:
             return {"ok": True, "cached": True, "plugins": self._market_cache}
 
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                tree_resp = await client.get(_MARKET_TREE_URL)
-                if tree_resp.status_code != 200:
-                    return {"ok": False, "error": f"获取插件市场目录失败: HTTP {tree_resp.status_code}"}
-                tree = tree_resp.json().get("tree", [])
+            content = await self._fetch_market_file(_MARKET_INDEX_PATH)
+            if not content:
+                return {"ok": False, "error": "获取插件市场索引失败（plugins/plugins.json）"}
+            try:
+                index = json.loads(content)
+            except Exception:
+                return {"ok": False, "error": "插件市场索引格式错误"}
+            raw_plugins = index.get("plugins", {})
+            if not isinstance(raw_plugins, dict):
+                return {"ok": False, "error": "插件市场索引缺少 plugins 字段"}
 
-                # 筛选 plugins/*/plugin.json，得到插件目录清单
-                plugin_names = []
-                for entry in tree:
-                    path = entry.get("path", "")
-                    parts = path.split("/")
-                    if (
-                        entry.get("type") == "blob"
-                        and len(parts) == 3
-                        and parts[0] == "plugins"
-                        and parts[2] == "plugin.json"
-                    ):
-                        plugin_names.append(parts[1])
-
-                # 逐个拉取 plugin.json，与本地安装状态比对
-                result = []
-                for name in sorted(set(plugin_names)):
-                    content = await self._fetch_market_file(
-                        f"plugins/{name}/plugin.json", client=client
-                    )
-                    if not content:
-                        continue
-                    try:
-                        meta = PluginMeta.model_validate_json(content)
-                    except Exception:
-                        continue
-                    result.append(self._build_market_item(name, meta))
+            result = []
+            for name, info in raw_plugins.items():
+                if not _is_valid_plugin_name(name) or not isinstance(info, dict):
+                    continue
+                result.append(self._build_market_item(name, info))
         except Exception as e:
             logger.error(f"[PluginManager] 拉取插件市场失败: {e}")
             return {"ok": False, "error": "无法连接 GitHub，插件市场拉取失败"}
@@ -828,10 +825,13 @@ class PluginManager:
         return {"ok": True, "cached": False, "plugins": result}
 
     async def install_market_plugin(self, name: str) -> dict:
-        """从 GitHub 市场拉取插件目录并覆盖到 ~/.akm/plugins/{name}/。
+        """从 GitHub 市场下载插件 zip 并覆盖到 ~/.akm/plugins/{name}/。
 
-        按用户决策不热重载：已加载的第三方插件覆盖后提示重启服务生效；
-        全新插件则沿用 zip 安装的即时加载逻辑。
+        数据源：插件市场索引（plugins/plugins.json）中的 zip_url + sha256。
+        zip 经 releases/download 下载（不消耗 api.github.com 配额），
+        校验 sha256 后安全解压，再覆盖本地目录。按用户决策不热重载：
+        已加载的第三方插件覆盖后提示重启服务生效；全新插件则沿用 zip
+        安装的即时加载逻辑。
         """
         if not _is_valid_plugin_name(name):
             return {"ok": False, "error": "非法插件名"}
@@ -839,68 +839,125 @@ class PluginManager:
         if self._plugin_sources.get(name) == "builtin":
             return {"ok": False, "error": "内置插件跟随 App 版本，不通过市场更新"}
 
-        # 1) 拉取仓库全树，筛选该插件目录下的全部文件路径
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                tree_resp = await client.get(_MARKET_TREE_URL)
-                if tree_resp.status_code != 200:
-                    return {"ok": False, "error": f"获取插件目录失败: HTTP {tree_resp.status_code}"}
-                tree = tree_resp.json().get("tree", [])
-        except Exception as e:
-            logger.error(f"[PluginManager] 拉取插件目录失败 {name}: {e}")
-            return {"ok": False, "error": "无法连接 GitHub，请检查网络"}
+        # 1) 从市场索引中取该插件的 zip 下载信息（复用缓存，必要时重新拉取）
+        entry = None
+        for item in (self._market_cache or []):
+            if item.get("name") == name:
+                entry = item
+                break
+        if entry is None:
+            fetched = await self.fetch_market_plugins()
+            if not fetched.get("ok"):
+                return {"ok": False, "error": fetched.get("error", "获取插件市场索引失败")}
+            for item in fetched.get("plugins", []):
+                if item.get("name") == name:
+                    entry = item
+                    break
+        if entry is None:
+            return {"ok": False, "error": f"插件市场未找到 '{name}'"}
 
-        prefix = f"plugins/{name}/"
-        blob_paths = [
-            entry.get("path", "")
-            for entry in tree
-            if entry.get("type") == "blob" and entry.get("path", "").startswith(prefix)
-        ]
-        if not blob_paths:
-            return {"ok": False, "error": f"GitHub 上未找到插件 '{name}'"}
-        if len(blob_paths) > _MARKET_PLUGIN_MAX_FILES:
-            return {"ok": False, "error": f"插件 '{name}' 文件过多，已中止下载"}
+        zip_url = str(entry.get("zip_url") or "")
+        expected_sha256 = str(entry.get("sha256") or "").lower()
+        if not zip_url:
+            return {"ok": False, "error": f"插件 '{name}' 缺少下载地址（索引未记录 zip_url）"}
 
-        # 2) 逐个下载到临时目录（复用同一 client，避免每次开连接）
+        # 2) 下载 zip 到临时目录（流式写入，进度按字节数汇报）
+        import hashlib
         import tempfile
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            total = 0
-            async with httpx.AsyncClient(timeout=30) as client:
-                for rel in blob_paths:
-                    content = await self._fetch_market_file(rel, client=client)
-                    if content is None:
-                        return {"ok": False, "error": f"下载 {rel} 失败，请稍后重试"}
-                    total += len(content)
-                    if total > _MARKET_PLUGIN_MAX_BYTES:
-                        return {"ok": False, "error": f"插件 '{name}' 体积超出限制，已中止"}
-                    target = root / rel[len("plugins/"):]
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, "utf-8")
+        # 初始化安装进度：供前端轮询 /api/plugin-market/progress 展示进度条
+        self._market_install_progress[name] = {
+            "total": 0,
+            "done": 0,
+            "message": f"正在下载 {name}...",
+        }
 
-            plugin_root = root / name
-            meta_path = plugin_root / "plugin.json"
-            if not meta_path.exists():
-                return {"ok": False, "error": "插件缺少 plugin.json"}
-            try:
-                meta = PluginMeta.model_validate_json(meta_path.read_text("utf-8"))
-            except Exception:
-                return {"ok": False, "error": "plugin.json 格式错误"}
-            if not (plugin_root / "index.py").exists():
-                return {"ok": False, "error": "插件缺少 index.py"}
+        zip_bytes = b""
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                async with client.stream("GET", zip_url) as resp:
+                    if resp.status_code != 200:
+                        self._market_install_progress.pop(name, None)
+                        return {"ok": False, "error": f"下载 {name} 失败: HTTP {resp.status_code}"}
+                    content_length = int(resp.headers.get("content-length") or 0)
+                    self._market_install_progress[name]["total"] = content_length
+                    chunks = []
+                    done = 0
+                    async for chunk in resp.aiter_bytes():
+                        chunks.append(chunk)
+                        done += len(chunk)
+                        self._market_install_progress[name]["done"] = done
+                        self._market_install_progress[name]["message"] = (
+                            f"正在下载 {name}... ({done // 1024}KB"
+                            + (f"/{content_length // 1024}KB" if content_length else "")
+                            + ")"
+                        )
+                    zip_bytes = b"".join(chunks)
+        except Exception as e:
+            self._market_install_progress.pop(name, None)
+            logger.error(f"[PluginManager] 下载市场插件失败 {name}: {e}")
+            return {"ok": False, "error": "无法连接 GitHub，请检查网络"}
 
-            # 3) 覆盖 ~/.akm/plugins/{name}/
-            dest = self._third_party_dir / name
-            self._third_party_dir.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(plugin_root, dest)
+        if not zip_bytes:
+            self._market_install_progress.pop(name, None)
+            return {"ok": False, "error": f"下载 {name} 结果为空，请稍后重试"}
+        if len(zip_bytes) > _MARKET_PLUGIN_MAX_BYTES:
+            self._market_install_progress.pop(name, None)
+            return {"ok": False, "error": f"插件 '{name}' 体积超出限制，已中止"}
 
-        # 4) 使市场缓存失效，下次拉取为最新
+        # 3) sha256 完整性校验（索引未提供时跳过）
+        if expected_sha256:
+            actual = hashlib.sha256(zip_bytes).hexdigest()
+            if actual != expected_sha256:
+                self._market_install_progress.pop(name, None)
+                return {"ok": False, "error": f"插件 '{name}' 校验失败（sha256 不匹配）"}
+
+        # 4) 安全解压：先校验归档成员路径与预算，再写入临时目录
+        self._market_install_progress[name]["message"] = f"正在解压 {name}..."
+        import io
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                _validate_plugin_archive(zf)
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    extract_root = Path(tmpdir)
+                    zf.extractall(extract_root)
+                    # zip 根目录直接含 {name}/，与发布脚本约定一致
+                    plugin_root = extract_root / name
+                    meta_path = plugin_root / "plugin.json"
+                    if not meta_path.exists():
+                        self._market_install_progress.pop(name, None)
+                        return {"ok": False, "error": "插件缺少 plugin.json"}
+                    try:
+                        meta = PluginMeta.model_validate_json(meta_path.read_text("utf-8"))
+                    except Exception:
+                        self._market_install_progress.pop(name, None)
+                        return {"ok": False, "error": "plugin.json 格式错误"}
+                    if not (plugin_root / "index.py").exists():
+                        self._market_install_progress.pop(name, None)
+                        return {"ok": False, "error": "插件缺少 index.py"}
+
+                    # 5) 覆盖 ~/.akm/plugins/{name}/
+                    self._market_install_progress[name]["message"] = f"正在写入 {name}..."
+                    dest = self._third_party_dir / name
+                    self._third_party_dir.mkdir(parents=True, exist_ok=True)
+                    if dest.exists():
+                        shutil.rmtree(dest)
+                    shutil.copytree(plugin_root, dest)
+        except ValueError as e:
+            self._market_install_progress.pop(name, None)
+            return {"ok": False, "error": str(e)}
+        except Exception as e:
+            self._market_install_progress.pop(name, None)
+            logger.error(f"[PluginManager] 解压市场插件失败 {name}: {e}")
+            return {"ok": False, "error": f"解压 {name} 失败，请重试"}
+        finally:
+            self._market_install_progress.pop(name, None)
+
+        # 6) 使市场缓存失效，下次拉取为最新
         self._market_cache = None
 
-        # 5) 已加载的第三方插件：覆盖 + 提示重启（不热重载）
+        # 7) 已加载的第三方插件：覆盖 + 提示重启（不热重载）
         local_source = self._plugin_sources.get(name)
         if local_source == "third_party":
             return {
@@ -961,6 +1018,23 @@ class PluginManager:
             "version": meta.version,
             "restart": True,
             "message": f"已安装到 ~/.akm/plugins/{name}/，下次启动服务后生效",
+        }
+
+    def get_market_install_progress(self, name: str) -> dict:
+        """查询插件市场安装/更新进度，供前端轮询展示进度条。
+
+        无进行中任务时返回 {"ok": True, "active": False}；进行中返回文件数与进度文案。
+        """
+        info = self._market_install_progress.get(name)
+        if not info:
+            return {"ok": True, "active": False, "name": name}
+        return {
+            "ok": True,
+            "active": True,
+            "name": name,
+            "total": info.get("total", 0),
+            "done": info.get("done", 0),
+            "message": info.get("message", ""),
         }
 
     # ── 插件删除 ──

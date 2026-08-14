@@ -2183,6 +2183,13 @@ async def plugin_market_install(name: str, request: Request):
     return JSONResponse(result, status_code=400)
 
 
+@app.get("/api/plugin-market/progress")
+async def plugin_market_progress(name: str, request: Request):
+    """查询插件市场安装/更新进度，前端轮询用于进度条展示"""
+    pm = request.app.state.plugin_manager
+    return pm.get_market_install_progress(name)
+
+
 @app.get("/api/plugin-config/{name}")
 async def plugin_get_config(name: str, request: Request):
     """读取插件配置"""
