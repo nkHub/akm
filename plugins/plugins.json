@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-14T18:35:35+0800",
+  "generated_at": "2026-08-14T18:43:53+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.1",
@@ -7,8 +7,8 @@
       "category": "app",
       "has_menu": false,
       "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent-tools-0.1.1.zip",
-      "sha256": "ce8e594a1a8e6da8c6589e1abc43737ef266377b9065d574d1a44333e444a17e",
-      "size": 252741
+      "sha256": "76f083dc7798ba74db2c4d220856f4a6b1330fee87aa5bb47207428bfd070478",
+      "size": 252887
     },
     "agent_chat": {
       "version": "0.1.2",
