@@ -22,6 +22,7 @@ from typing import Any
 
 from akm.flow import db as flow_db
 from akm.flow import models as flow_models
+from akm.flow import opencode_runner
 from akm.flow import pi_runner
 from akm.flow import workspace_diff
 from akm.flow import worktree as worktree_mod
@@ -259,8 +260,11 @@ class WorkflowEngine:
         """解析节点执行器（移植自 engine resolveExecutor）。"""
         data = node.get("data") or {}
         raw = data.get("executor")
-        if raw in ("codex-cli", "opencode-cli"):
+        if raw == "codex-cli":
+            # codex-cli 执行器暂缓上线（codex CLI 下载/环境未就绪），先回退到 pi-agent
             return "pi-agent"
+        if raw == "opencode-cli":
+            return "opencode-cli"
         if raw in ("llm", "pi-agent", "human", "none"):
             return raw
         ntype = node.get("type")
@@ -586,11 +590,11 @@ class WorkflowEngine:
                 progress["activated"].add(nid)
         return progress
 
-    # ── pi-agent 编码执行 ─────────────────────────────────────
+    # ── 编码节点执行（pi-agent / opencode-cli）──────────────────
 
-    async def _run_pi_coding_node(self, workflow: dict, run: dict, node: dict, models: list[dict]) -> dict:
-        """执行 pi-agent 编码节点：解析 cwd（worktree 策略）→ 加锁 →
-        快照 → 跑 pi → 差异对比。返回 {text, tokensIn, tokensOut, fileDiffs}。"""
+    async def _run_coding_node(self, workflow: dict, run: dict, node: dict, models: list[dict], executor: str) -> dict:
+        """执行编码节点：解析 cwd（worktree 策略）→ 加锁 →
+        快照 → 跑 CLI（pi / opencode）→ 差异对比。返回 {text, tokensIn, tokensOut, fileDiffs}。"""
         node_id = node["id"]
         run_id = run["id"]
         variables = workflow.get("variables") or {}
@@ -625,7 +629,7 @@ class WorkflowEngine:
             before = workspace_diff.snapshot_workspace(cwd)
             model = self._model_for(workflow, node, models)
             model_dict = model if model else None
-            result = await pi_runner.run_pi_agent({
+            runner_opts = {
                 "cwd": cwd,
                 "systemPrompt": system,
                 "userPrompt": user_prompt,
@@ -634,7 +638,11 @@ class WorkflowEngine:
                 "on_token": lambda text: self._emit(run_id, {
                     "type": "token", "runId": run_id, "nodeId": node_id, "text": text,
                 }),
-            })
+            }
+            if executor == "opencode-cli":
+                result = await opencode_runner.run_opencode_agent(runner_opts)
+            else:
+                result = await pi_runner.run_pi_agent(runner_opts)
             node_diffs = workspace_diff.diff_workspace(cwd, before)
         finally:
             release_lock()
@@ -960,9 +968,9 @@ class WorkflowEngine:
                         }
                         system = data.get("systemPrompt") or "You are a helpful assistant."
                         user_prompt = render_template(data.get("userPromptTemplate", ""), ctx)
-                        if executor == "pi-agent":
-                            # 编码节点：走 pi CLI + worktree 沙箱
-                            coding = await self._run_pi_coding_node(workflow, run, node, models)
+                        if executor in ("pi-agent", "opencode-cli"):
+                            # 编码节点：走 CLI（pi / opencode）+ worktree 沙箱
+                            coding = await self._run_coding_node(workflow, run, node, models, executor)
                             result_text = coding.get("text", "")
                             t_in = coding.get("tokensIn", 0)
                             t_out = coding.get("tokensOut", 0)

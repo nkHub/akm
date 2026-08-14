@@ -399,9 +399,9 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 ## 工作流引擎（/v1/flow）
 
-工作流引擎把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成 DAG 有向无环图：节点为步骤（LLM 节点执行提示词、`merge`/`router` 做流程控制），边上的 `condition` 决定分支走向、`loop` 边支持按预算重入（如审查不通过回到修复），多路并行节点会同时执行，全部前驱完成后才汇聚。节点输出以 `artifacts` 累积，供下游 `{{artifacts.xxx}}` 模板引用；LLM 调用复用 AKM 代理网关（自动选 Key / 协议转换 / 重试）。支持内置模板（`standard_dev` / `hotfix` / `dual_model`）、人工审批、git worktree 沙箱、路径锁与工作区快照 diff。
+工作流引擎把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成 DAG 有向无环图：节点为步骤（LLM 节点执行提示词、`merge`/`router` 做流程控制），边上的 `condition` 决定分支走向、`loop` 边支持按预算重入（如审查不通过回到修复），多路并行节点会同时执行，全部前驱完成后才汇聚。节点输出以 `artifacts` 累积，供下游 `{{artifacts.xxx}}` 模板引用；LLM 调用复用 AKM 代理网关（自动选 Key / 协议转换 / 重试）。编码节点支持执行器（`data.executor`）：`pi-agent`（默认，本机 `pi` CLI）、`opencode-cli`（本机 Opencode CLI）；`codex-cli`（本机 Codex CLI）runner 已预留，暂回退到 `pi-agent`。支持内置模板（`standard_dev` / `hotfix` / `dual_model`）、人工审批、git worktree 沙箱、路径锁与工作区快照 diff。
 
-完整文档见 [`akm/flow/flow.md`](akm/flow/flow.md)，涵盖 HTTP 接口、数据表、内置模板、运行变量、节点能力（LLM / 编码 / 审批 / worktree / retry）、pi-agent 定位、`agent_flow` 配置组与内置工具。
+完整文档见 [`akm/flow/flow.md`](akm/flow/flow.md)，涵盖 HTTP 接口、数据表、内置模板、运行变量、节点能力（LLM / 编码 / 审批 / worktree / retry）、执行器定位（pi / opencode / codex）、`agent_flow` 配置组与内置工具。
 
 ## 故障切换策略
 

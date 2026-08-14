@@ -2,7 +2,7 @@
 
 `POST /v1/flow` 提供 DAG 工作流引擎，把「需求 → 方案 → 编码 → 审查 → 测试 → 交付」拆成有向无环图：每个节点是一个步骤（`intake` / `plan` / `code` / `review` / `test` / `fix` / `human` / `router` / `merge` / `output`），边上的 `condition` 决定分支走向（`pass` / `fail` / 子串匹配）、`loop` 边支持按预算重入（如审查不通过回到修复）。多路并行节点（如双模型竞赛）同时执行，全部前驱完成后才汇聚（fan-in）。节点输出以 `artifacts` 累积，供下游 `{{artifacts.xxx}}` 模板引用；LLM 调用复用 AKM 代理网关（自动选 Key / 协议转换 / 重试），鉴权与 `/v1/agent` 一致。
 
-实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）、`worktree.py`（git worktree 沙箱）、`workspace_diff.py`（工作区快照 diff）、`path_lock.py`（路径锁）、`pi_runner.py`（编码节点子进程 runner）。
+实现位于 `akm/flow/`：`engine.py`（执行引擎）、`router.py`（路由）、`db.py`（持久化）、`models.py`（模型目录解析）、`templates.py`（内置模板）、`worktree.py`（git worktree 沙箱）、`workspace_diff.py`（工作区快照 diff）、`path_lock.py`（路径锁）、`pi_runner.py` / `codex_runner.py` / `opencode_runner.py`（编码节点子进程 runner）。
 
 ## HTTP 接口
 
@@ -57,7 +57,7 @@
 
 - **LLM 节点**：执行提示词，输出以 `artifacts` 累积；对上游瞬时 5xx（网关时段性故障）自动重试（指数退避，默认最多重试 2 次，可用 `agent_flow.llm_retry_max` 调整），避免单次瞬时故障拖垮整个运行；4xx 视为请求本身问题不重试。
 - **流程控制**：拓扑排序 / 并行执行 / 条件分支 / loop 重入 / `merge` 汇聚 / `router` 路由。
-- **编码节点**（`code` / `fix` / `test`）：调用本机 `pi` CLI（subprocess），失败回退 mock 摘要；执行前后对项目目录做工作区快照 diff，产出写入 `run.fileDiffs`；同一项目路径通过路径锁串行化，避免并发写冲突。
+- **编码节点**（`code` / `fix` / `test`）：通过节点 `data.executor` 选择执行器——`pi-agent`（默认，本机 `pi` CLI，失败回退 mock 摘要）、`opencode-cli`（本机 Opencode CLI `opencode run`）；`codex-cli`（本机 Codex CLI）已预留 runner 但当前暂缓上线，节点里配置该执行器时自动回退到 `pi-agent`。CLI 执行器启动失败或超时直接让节点 failed（不做 mock 兜底）。执行前后对项目目录做工作区快照 diff，产出写入 `run.fileDiffs`；同一项目路径通过路径锁串行化，避免并发写冲突。
 - **人工审批**（`human`）：默认自动放行（`flow_human_auto_approve` / `agent_flow.human_auto_approve` 为 `true`），设为 `false` 后运行在审批节点挂起（`waiting_human`），经 `resume` 批准/驳回后继续或终止。
 - **git worktree 沙箱**（`variables.useWorktree`）：`run` / `per-coding` 两种模式，隔离编码过程避免污染工作目录。
 - **节点级重试**：`data.retry` 字段支持 `{max: N, on: "error"}`（LLM/代理调用失败重试，指数退避 `400ms×attempt`）或 `{on: "review_fail"}`（审查结论为 `fail` 时同节点重执行）。
@@ -65,6 +65,13 @@
 ## pi-agent 定位
 
 优先读取 `~/.akm/config.json` 的 `agent_flow.pi_path` 显式指定的 pi 路径（各机器安装位置不同时可自定义，支持 `~` 展开）；未配置时自动在 PATH 与常见安装目录定位。pi 是 Node 脚本，要求 Node.js ≥22.19.0，运行时自动从 PATH / nvm 各版本中选择满足版本的 node 绝对路径直接执行（打包 app 经 GUI/launchctl 启动时环境 PATH 常为空，绕过 shebang 的 `env node`）。超时默认 1 小时，可用 `agent_flow.pi_timeout_ms`（毫秒）或环境变量 `FLOW_PI_TIMEOUT_MS` / `FLOW_AGENT_TIMEOUT_MS` 覆盖。
+
+## opencode-cli / codex-cli 执行器
+
+节点 `data.executor` 设为 `opencode-cli` 时走 Opencode CLI（`opencode run --format json --dir <cwd>`）；`codex-cli` 的 runner（`codex exec -s workspace-write --skip-git-repo-check --json -o <lastmsg>`）已实现但暂缓上线，当前 `_resolve_executor` 将其回退到 `pi-agent`，待 codex CLI 环境就绪后在 `akm/flow/engine.py` 恢复接线即可。均通过 `data.systemPrompt` / `data.userPromptTemplate` 构造提示词，stdin 关闭（避免等待输入卡死），stdout 逐行解析事件流实时推送 token，结果取 `-o` 最后消息（codex）或 JSONL `type=text` 事件（opencode）。超时默认 1 小时，终止进程树（SIGTERM → 2.5s 后 SIGKILL）。
+
+- codex 默认复用 codex 自身配置（如 `~/.codex/config.toml` 已把 base_url 指向本机 AKM 代理，则 Key 管理/审计自动复用 AKM 链路）；也可设 `agent_flow.codex_use_akm_proxy: true` 强制注入 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 指向本机 AKM `/v1`。
+- opencode 使用自身配置/登录（`~/.config/opencode`），不注入代理 env。
 
 ## 配置项（`agent_flow` 配置组）
 
@@ -75,6 +82,15 @@
 | `pi_path` | - | pi 可执行文件路径 |
 | `pi_model` | - | 强制 pi 使用的模型（环境变量 `FLOW_PI_MODEL` 优先） |
 | `pi_timeout_ms` | `3600000` | 编码节点超时毫秒（环境变量 `FLOW_PI_TIMEOUT_MS` / `FLOW_AGENT_TIMEOUT_MS` 仍优先） |
+| `codex_path` | - | codex 可执行文件路径（未配置时自动定位 PATH 与常见安装目录） |
+| `codex_model` | - | 强制 codex 使用的模型（`-m` 参数；环境变量 `FLOW_CODEX_MODEL` 优先） |
+| `codex_timeout_ms` | `3600000` | codex 编码节点超时毫秒（环境变量 `FLOW_CODEX_TIMEOUT_MS` 优先） |
+| `codex_use_akm_proxy` | `false` | `true` 时注入 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 强制 codex 走本机 AKM 代理 |
+| `codex_proxy_base_url` | - | 覆盖注入的 `OPENAI_BASE_URL`（默认 `http://127.0.0.1:{server_port}/v1`） |
+| `codex_api_key` | - | 覆盖注入的 `OPENAI_API_KEY`（默认占位 `akm-local`） |
+| `opencode_path` | - | opencode 可执行文件路径（未配置时自动定位 PATH 与常见安装目录） |
+| `opencode_model` | - | 强制 opencode 使用的模型（`-m` 参数；环境变量 `FLOW_OPENCODE_MODEL` 优先） |
+| `opencode_timeout_ms` | `3600000` | opencode 编码节点超时毫秒（环境变量 `FLOW_OPENCODE_TIMEOUT_MS` 优先） |
 | `llm_retry_max` | `2` | LLM 节点 5xx 重试次数 |
 | `llm_retry_base_delay` | `1.0` | 重试退避基数秒 |
 | `llm_temperature` | `0.3` | LLM 节点请求温度 |
