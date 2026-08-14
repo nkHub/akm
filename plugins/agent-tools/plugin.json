@@ -1,6 +1,6 @@
 {
   "name": "agent-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "has_menu": false,
   "category": "app",
   "description": "纯前端离线工具箱（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 /tools 即可使用",
