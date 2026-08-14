@@ -861,7 +861,9 @@ function renderPluginList(plugins) {
         convertsInfo = '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400" title="插件未启用，无法进入页面">打开</span>';
       }
       var siteLink = '';
-      if (p.name === 'frontend_static_server' && p.enabled && p.site_path) {
+      // 已启用且挂载了站点路径的插件（如 frontend_static_server、agent_chat）
+      // 显示跳转箭头，点击在新标签页打开挂载的站点。
+      if (p.enabled && p.site_path) {
         siteLink = '<a href="' + esc(p.site_path) + '" target="_blank" rel="noopener noreferrer" class="inline-flex h-5 w-5 items-center justify-center text-gray-400 hover:text-white transition-colors" title="在新标签页打开站点" aria-label="在新标签页打开站点">&#8599;</a>';
       }
 
