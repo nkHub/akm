@@ -605,7 +605,7 @@ function openMarketModal() {
 
 function loadMarket() {
   var body = document.getElementById('plugin-market-modal-body');
-  if (body) body.innerHTML = '<div class="text-xs text-gray-500">拉取插件市场...</div>';
+  if (body) body.innerHTML = '<div class="flex items-center justify-center h-full"><div class="flex items-center gap-2 text-gray-500 text-xs"><svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>拉取插件市场...</div></div>';
   fetch('/api/plugin-market').then(function(r){return r.json()}).then(function(data){
     if (!data.ok) {
       if (body) body.innerHTML = '<div class="text-xs text-red-400">市场拉取失败: ' + esc(data.error || '') + '</div>';
@@ -703,8 +703,24 @@ function marketGo(target) {
 function installMarketPlugin(name) {
   if (!confirm('确认从 GitHub 市场拉取并覆盖插件 "' + name + '"？')) return;
   var body = document.getElementById('plugin-market-modal-body');
-  if (body) body.innerHTML = '<div class="text-xs text-gray-500">正在拉取 ' + esc(name) + ' ...</div>';
+  if (body) body.innerHTML = '<div class="flex flex-col items-center justify-center h-full gap-4"><div class="flex items-center gap-2 text-gray-500 text-xs"><svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>正在安装 ' + esc(name) + ' ...</div><div class="w-64 h-2 rounded-full bg-surface border border-border overflow-hidden"><div id="mkt-progress-bar" class="h-full bg-indigo-500 transition-all duration-200" style="width:0%"></div></div><div id="mkt-progress-text" class="text-xs text-gray-400">0%</div></div>';
+
+  // 轮询安装进度：后端每次安装只保留该插件的进度记录，active=false 表示已完成或未开始
+  var pollTimer = setInterval(function(){
+    fetch('/api/plugin-market/progress?name=' + encodeURIComponent(name))
+      .then(function(r){return r.json()})
+      .then(function(p){
+        if (!p.ok || !p.active) return;
+        var bar = document.getElementById('mkt-progress-bar');
+        var txt = document.getElementById('mkt-progress-text');
+        if (bar && p.total > 0) bar.style.width = Math.round(p.done * 100 / p.total) + '%';
+        if (txt && p.total > 0) txt.textContent = Math.round(p.done * 100 / p.total) + '%';
+      })
+      .catch(function(){});
+  }, 400);
+
   fetch('/api/plugin-market/' + encodeURIComponent(name) + '/install', {method: 'POST'}).then(function(r){return r.json()}).then(function(data){
+    clearInterval(pollTimer);
     if (data.ok) {
       alert(data.message || '操作完成');
       loadMarket();
@@ -714,6 +730,7 @@ function installMarketPlugin(name) {
       loadMarket();
     }
   }).catch(function(e){
+    clearInterval(pollTimer);
     alert('网络错误: ' + e.message);
     loadMarket();
   });
