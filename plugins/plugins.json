@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-14T14:52:21+0800",
+  "generated_at": "2026-08-14T15:04:06+0800",
   "plugins": {
     "agent_chat": {
       "version": "0.1.1",
@@ -7,7 +7,7 @@
       "category": "app",
       "has_menu": false,
       "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.1.zip",
-      "sha256": "331e3f5224c50ffa5701fe93e7e894c65854c90685231a7aebe797c65de9effc",
+      "sha256": "7c8ae65a187c29c64510958bde1748998d5364ab9e97a6b02e7c888ead47ef2f",
       "size": 1234960
     },
     "budget_gate": {
