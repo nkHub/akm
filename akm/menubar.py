@@ -45,6 +45,9 @@ NSAttributedString: Any = None
 NSMutableAttributedString: Any = None
 NSForegroundColorAttributeName: Any = None
 NSFontAttributeName: Any = None
+NSImage: Any = None
+NSPasteboard: Any = None
+NSAlert: Any = None
 
 try:
     _appkit = importlib.import_module("AppKit")
@@ -73,6 +76,11 @@ try:
         _appkit, "NSForegroundColorAttributeName", None
     )
     NSFontAttributeName = getattr(_appkit, "NSFontAttributeName", None)
+    # 「关于」弹窗：logo 图标显示（NSImage）与版本号复制（NSPasteboard）
+    NSImage = getattr(_appkit, "NSImage", None)
+    NSPasteboard = getattr(_appkit, "NSPasteboard", None)
+    # 原生「关于」弹窗（NSAlert）：顶部 logo + 软件名称，底部并排按钮
+    NSAlert = getattr(_appkit, "NSAlert", None)
 except ImportError:
     pass
 
@@ -85,6 +93,9 @@ CHECK_INTERVAL = 86400
 UPDATE_DOWNLOAD_TIMEOUT = 600
 # 静默（自动）更新在应用启动后等待的秒数：避免刚启动就被更新重启打断用户操作。
 AUTO_UPDATE_STARTUP_DELAY_SEC = 60.0
+# NSAlert.runModal 的按钮返回码：第一个 addButtonWithTitle_ 是主按钮（右侧，响应 Enter），
+# 依次对应 1000/1001/1002。rumps.alert 透传该值，不取模转换。
+NSAlertFirstButtonReturn = 1000
 
 logger = logging.getLogger("akm.menubar")
 DEFAULT_WAKE_RECOVER_DELAY_SEC = 8.0
@@ -322,6 +333,7 @@ class AKMApp(rumps.App):
             rumps.MenuItem(title="应用管理", callback=self.open_admin),
             None,  # 分隔线
             rumps.MenuItem(title="检查更新", callback=self.check_update_now),
+            rumps.MenuItem(title="关于 AKM", callback=self.show_about_dialog),
             rumps.MenuItem(title="重启服务", callback=self.restart_server),
             rumps.MenuItem(title="退出", callback=self.quit_app),
         ]
@@ -892,6 +904,61 @@ class AKMApp(rumps.App):
         if not info.get("has_update"):
             return
         self._open_update_dialog(info)
+
+    def _find_app_logo_path(self) -> str:
+        """定位应用 logo 图片路径：打包环境在 .app/Contents/Resources，开发环境在项目根目录。"""
+        bundle = _bundle_app_path()
+        if bundle:
+            cand = os.path.join(bundle, "Contents", "Resources", "logo.png")
+            if os.path.isfile(cand):
+                return cand
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cand = os.path.join(root, "logo.png")
+        return cand if os.path.isfile(cand) else ""
+
+    def _copy_version_to_clipboard(self) -> None:
+        """把当前版本号写入系统剪贴板，并弹出系统通知确认。"""
+        text = f"v{__version__}"
+        try:
+            if NSPasteboard is None:
+                logger.warning("NSPasteboard 不可用，无法复制版本号")
+                return
+            pb = NSPasteboard.generalPasteboard()
+            pb.clearContents()
+            pb.setString_forType_(
+                text, getattr(_appkit, "NSPasteboardTypeString", "public.utf8-plain-text")
+            )
+            self._safe_notify("AI Key Manager", f"已复制版本号 {text}")
+        except Exception as exc:
+            logger.warning("复制版本号失败: %s", exc)
+
+    def show_about_dialog(self, _):
+        """点击「关于 AKM」：弹出 macOS 原生关于框（NSAlert）。
+
+        外观沿用最初的系统原生弹窗样式：顶部为应用 logo 图标 + 软件名称标题，
+        正文居中显示版本号，底部并排「复制版本号」与「取消」按钮。
+        """
+        if NSAlert is None or NSImage is None:
+            logger.warning("AppKit 组件不可用，无法显示关于弹窗")
+            return
+        try:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("AI Key Manager")
+            alert.setInformativeText_(f"版本 v{__version__}")
+            # 菜单栏应用无 dock 图标，需手动把 logo 设为弹窗图标
+            logo_path = self._find_app_logo_path()
+            if logo_path:
+                img = NSImage.alloc().initWithContentsOfFile_(logo_path)
+                if img is not None:
+                    alert.setIcon_(img)
+            # 第一个 add 的按钮为主按钮（右侧、响应 Enter），复制是主要操作
+            alert.addButtonWithTitle_("复制")
+            alert.addButtonWithTitle_("取消")
+            clicked = alert.runModal()
+            if clicked == NSAlertFirstButtonReturn:
+                self._copy_version_to_clipboard()
+        except Exception as exc:
+            logger.warning("关于弹窗失败: %s", exc)
 
     def _queue_alert(self, title: str, message: str, ok=None, cancel=None, other=None) -> None:
         """把弹窗请求写入待处理队列，由主线程 tick 弹出。
