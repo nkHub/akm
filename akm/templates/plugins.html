@@ -33,6 +33,9 @@
   <div id="plugin-market-modal-body">
     <div class="text-xs text-gray-500">加载中...</div>
   </div>
+  <div data-modal-footer>
+    <div id="plugin-market-pagination" class="flex items-center justify-between hidden"></div>
+  </div>
 </akm-modal>
 
 <akm-modal id="plugin-config-modal" title="插件配置" max-width="max-w-3xl" panel-class="max-h-[80vh] flex flex-col" body-class="p-4 overflow-y-auto flex-1 min-h-0">
@@ -622,9 +625,11 @@ function loadMarket() {
 
 function renderMarket() {
   var body = document.getElementById('plugin-market-modal-body');
+  var pagination = document.getElementById('plugin-market-pagination');
   if (!body) return;
   if (!_marketList.length) {
     body.innerHTML = '<div class="text-xs text-gray-500">市场中暂无插件</div>';
+    if (pagination) pagination.classList.add('hidden');
     return;
   }
   var pages = Math.max(1, Math.ceil(_marketList.length / _marketPageSize));
@@ -667,19 +672,21 @@ function renderMarket() {
   });
   html += '</div>';
 
-  // 分页控件
-  html += '<div class="flex items-center justify-between mt-4 pt-3 border-t border-border">';
-  html += '<span class="text-xs text-gray-500">共 ' + _marketList.length + ' 个插件</span>';
-  html += '<div class="flex items-center gap-2">';
-  html += '<button type="button" onclick="marketGo(0)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>首页</button>';
-  html += '<button type="button" onclick="marketPage(-1)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>上一页</button>';
-  html += '<span class="text-xs text-gray-400">' + (_marketPage + 1) + ' / ' + pages + '</span>';
-  html += '<button type="button" onclick="marketPage(1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>下一页</button>';
-  html += '<button type="button" onclick="marketGo(-1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>末页</button>';
-  html += '</div>';
-  html += '</div>';
-
   body.innerHTML = html;
+
+  // 分页控件：固定渲染在弹窗底部（data-modal-footer 区域），随弹窗滚动列表固定不动
+  if (pagination) {
+    pagination.classList.remove('hidden');
+    var ph = '<span class="text-xs text-gray-500">共 ' + _marketList.length + ' 个插件</span>';
+    ph += '<div class="flex items-center gap-2">';
+    ph += '<button type="button" onclick="marketGo(0)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>首页</button>';
+    ph += '<button type="button" onclick="marketPage(-1)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>上一页</button>';
+    ph += '<span class="text-xs text-gray-400">' + (_marketPage + 1) + ' / ' + pages + '</span>';
+    ph += '<button type="button" onclick="marketPage(1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>下一页</button>';
+    ph += '<button type="button" onclick="marketGo(-1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>末页</button>';
+    ph += '</div>';
+    pagination.innerHTML = ph;
+  }
 }
 
 function marketPage(delta) {
