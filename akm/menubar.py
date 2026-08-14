@@ -341,7 +341,9 @@ class AKMApp(rumps.App):
                 timeout=10,
             )
             if resp.status_code != 200:
-                return {"has_update": False}
+                # 非 200（常见为匿名限流 403 / 网络 5xx）：不能当作「已是最新」，
+                # 否则会误导用户。返回检查失败标记，由调用方决定提示方式。
+                return {"has_update": False, "check_error": f"GitHub 返回 HTTP {resp.status_code}"}
 
             payload = resp.json()
             latest = payload.get("tag_name", "").lstrip("v")
@@ -357,7 +359,8 @@ class AKMApp(rumps.App):
                 }
         except Exception:
             # 更新检查属于非关键路径：网络异常、API 失败都不影响主功能，静默降级即可。
-            pass
+            # 但需要向用户提示「检查失败」，避免误报为「已是最新」。
+            return {"has_update": False, "check_error": "网络异常，无法连接 GitHub"}
         return {"has_update": False}
 
     @staticmethod
@@ -914,6 +917,16 @@ class AKMApp(rumps.App):
                 return
             # 记录本次检查结果，供弹窗确认后的更新流程使用
             self._last_update_info = info
+            if info.get("check_error"):
+                # 检查失败（如 GitHub 匿名限流 403）：如实提示，不误报「已是最新」
+                self._queue_alert(
+                    "检查更新失败",
+                    f"{info.get('check_error')}\n\n请稍后重试，或在设置中关闭后重新开启自动更新。",
+                    "好的",
+                    None,
+                    None,
+                )
+                return
             if not info.get("has_update"):
                 # 无更新：弹窗提示已是最新，并清理可能残留的过期更新菜单项
                 self._apply_update_menu({"has_update": False})

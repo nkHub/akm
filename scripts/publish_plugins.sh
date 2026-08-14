@@ -143,7 +143,7 @@ git add "$INDEX_FILE"
 if git diff --cached --quiet; then
   echo "索引无变化，跳过提交"
 else
-  git commit -m "chore(plugins): 更新插件市场索引（$TAG）"
+  git commit -m "chore(plugins): 更新插件市场索引（${TAG}）"
 fi
 
 echo "完成: 请 push 使索引生效 → git push origin main"

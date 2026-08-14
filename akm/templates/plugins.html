@@ -29,7 +29,7 @@
 {% endblock %}
 
 {% block extra_html %}
-<akm-modal id="plugin-market-modal" title="插件市场" max-width="max-w-3xl" panel-class="flex flex-col h-[560px]" body-class="p-4 overflow-y-auto flex-1 min-h-0">
+<akm-modal id="plugin-market-modal" title="插件市场" max-width="max-w-4xl" panel-class="flex flex-col h-[560px]" body-class="p-4 overflow-y-auto flex-1 min-h-0">
   <div id="plugin-market-modal-body">
     <div class="text-xs text-gray-500">加载中...</div>
   </div>
@@ -703,7 +703,7 @@ function marketGo(target) {
 function installMarketPlugin(name) {
   if (!confirm('确认从 GitHub 市场拉取并覆盖插件 "' + name + '"？')) return;
   var body = document.getElementById('plugin-market-modal-body');
-  if (body) body.innerHTML = '<div class="flex flex-col items-center justify-center h-full gap-4"><div class="flex items-center gap-2 text-gray-500 text-xs"><svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>正在安装 ' + esc(name) + ' ...</div><div class="w-64 h-2 rounded-full bg-surface border border-border overflow-hidden"><div id="mkt-progress-bar" class="h-full bg-indigo-500 transition-all duration-200" style="width:0%"></div></div><div id="mkt-progress-text" class="text-xs text-gray-400">0%</div></div>';
+  if (body) body.innerHTML = '<div class="flex flex-col items-center justify-center h-full gap-5"><div class="relative h-28 w-28"><svg class="h-28 w-28 -rotate-90" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="rgba(148,163,184,0.2)" stroke-width="7"></circle><circle id="mkt-ring-bar" cx="50" cy="50" r="42" fill="none" stroke="#6366f1" stroke-width="7" stroke-linecap="round" stroke-dasharray="263.9" stroke-dashoffset="263.9" style="transition: stroke-dashoffset 0.2s"></circle></svg><div id="mkt-progress-text" class="absolute inset-0 flex items-center justify-center text-sm font-semibold text-gray-200">0%</div></div><div id="mkt-progress-status" class="text-xs text-gray-500">正在安装 ' + esc(name) + ' ...</div></div>';
 
   // 轮询安装进度：后端每次安装只保留该插件的进度记录，active=false 表示已完成或未开始
   var pollTimer = setInterval(function(){
@@ -711,10 +711,15 @@ function installMarketPlugin(name) {
       .then(function(r){return r.json()})
       .then(function(p){
         if (!p.ok || !p.active) return;
-        var bar = document.getElementById('mkt-progress-bar');
+        var ring = document.getElementById('mkt-ring-bar');
         var txt = document.getElementById('mkt-progress-text');
-        if (bar && p.total > 0) bar.style.width = Math.round(p.done * 100 / p.total) + '%';
-        if (txt && p.total > 0) txt.textContent = Math.round(p.done * 100 / p.total) + '%';
+        var status = document.getElementById('mkt-progress-status');
+        if (p.total > 0) {
+          var pct = Math.max(0, Math.min(100, Math.round(p.done * 100 / p.total)));
+          if (ring) ring.style.strokeDashoffset = (263.9 * (1 - pct / 100)).toFixed(1);
+          if (txt) txt.textContent = pct + '%';
+        }
+        if (status && p.message) status.textContent = p.message;
       })
       .catch(function(){});
   }, 400);
@@ -933,6 +938,7 @@ function deletePlugin(name) {
   fetch('/api/plugins/' + encodeURIComponent(name), {method: 'DELETE'}).then(function(r){return r.json()}).then(function(data){
     if (data.ok) {
       loadPlugins();
+      loadMarket();
     } else {
       alert(data.error || '删除失败');
     }
