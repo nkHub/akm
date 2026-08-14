@@ -28,9 +28,12 @@ ipify / ipwho.is）外，不依赖任何后端接口。
 
 ```bash
 cd tools
-VITE_BASE_PATH='./' npm run build
+VITE_BASE='./' VITE_BASE_PATH=/tools npm run build
 rm -rf ../ccs/plugins/agent-tools/dist
 cp -R dist/* ../ccs/plugins/agent-tools/dist/
 ```
 
-`VITE_BASE_PATH='./'` 使产物资源引用为相对路径（可挂载到子路径）。
+`VITE_BASE='./'` 使产物资源引用为相对路径（可挂载到子路径）；
+`VITE_BASE_PATH` 需与插件 `route_prefix` 保持一致（默认 `/tools`），
+它同时作为前端路由 `BrowserRouter` 的 basename，两者不一致会导致
+路由无法匹配、页面空白（此前误传 `./` 导致 basename 变成 `/./`）。
