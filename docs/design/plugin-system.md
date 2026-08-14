@@ -35,6 +35,8 @@
 
 `agent_chat` 是同一模式的**内置产物型** `app` 插件：它把构建好的 `/v1/agent` Web 聊天界面（AetherAI 对话窗口）产物直接打进插件目录 `dist/`，`on_load` 用 `self._static_dir.parent / "dist"` 定位产物并挂载到 `route_prefix`（默认 `/chat`），启用即用、无需配置绝对路径，属于不带菜单、默认关闭的免配置前端站点。其产物以 `base: './'` 相对路径构建，并以空 `VITE_AKM_API_URL` 走同源 `/v1/agent`，因此可在任意子路径下运行且不依赖代理前缀。
 
+`agent-tools` 是与 `agent_chat` 同构的**内置产物型** `app` 插件：把同级 `tools` 项目的构建产物打进插件目录 `dist/`，`on_load` 挂载到 `route_prefix`（默认 `/tools`），启用即用。它是纯前端离线工具箱（JSON/YAML 格式化、时间戳转换、哈希、二维码、颜色、正则、IP 查询等），除 IP 查询工具调用 ipapi.co / ipify / ipwho.is 等公共 API 外不依赖任何后端接口。产物同样以 `base: './'`（即 `VITE_BASE_PATH='./'`）相对路径构建，可在任意子路径下运行。
+
 ## 二、来源与优先级
 
 | 来源 | 路径 | 说明 |

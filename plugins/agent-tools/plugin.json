@@ -1,0 +1,27 @@
+{
+  "name": "agent-tools",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "app",
+  "description": "纯前端离线工具箱（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 /tools 即可使用",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 200,
+  "hooks": {},
+  "settings": [
+    {
+      "key": "route_prefix",
+      "label": "访问路径",
+      "type": "string",
+      "default": "/tools",
+      "description": "工具箱挂载路径，例如 /tools 或 /util。不能使用 /、/api、/v1、/admin、/health、/debug。修改路径后需要重启服务。"
+    },
+    {
+      "key": "spa_fallback",
+      "label": "启用 SPA 路由回退",
+      "type": "boolean",
+      "default": true,
+      "description": "将不存在的无扩展名路径返回 index.html。工具箱为单页应用，建议保持开启。"
+    }
+  ]
+}
