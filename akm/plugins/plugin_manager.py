@@ -874,7 +874,8 @@ class PluginManager:
 
         zip_bytes = b""
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
+            # releases/download URL 会 302 重定向到实际对象存储，必须显式跟随
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
                 async with client.stream("GET", zip_url) as resp:
                     if resp.status_code != 200:
                         self._market_install_progress.pop(name, None)
@@ -1084,6 +1085,9 @@ class PluginManager:
         plugin_configs.pop(name, None)
         cfg["plugin_configs"] = plugin_configs
         self._save_config_json(cfg)
+
+        # 删除会改变插件的 installed 状态，使市场缓存失效以便下次拉取刷新
+        self._market_cache = None
 
         return {
             "ok": True,

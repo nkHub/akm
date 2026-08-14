@@ -39,7 +39,7 @@ python setup.py py2app
 
 应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。
 
-打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后下载 zip、解压替换并自动重启；菜单栏「检查更新」可手动检查，有更新时在自定义弹窗内展示可滚动 Release Note，确认后同一弹窗实时显示下载/安装进度，下载期间右侧按钮变「取消更新」可中断并重试，无更新则弹窗提示已是最新。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
+打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后下载 zip、解压替换并自动重启；菜单栏「检查更新」可手动检查，有更新时在自定义弹窗内展示可滚动 Release Note，确认后同一弹窗实时显示下载/安装进度，下载期间右侧按钮变「取消更新」可中断并重试，无更新则弹窗提示已是最新；检查失败（如 GitHub 匿名限流 403）会如实提示「检查更新失败」，不会误报「已是最新」。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
 
 ## 快速开始
 
@@ -166,7 +166,7 @@ akm-menubar
     </tr>
     <tr>
       <td style="white-space: nowrap;">插件</td>
-      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（plugins/plugins.json 索引 + GitHub Release zip 一键安装/更新第三方插件，弹窗分页展示，下载/更新带进度条，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
+      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（plugins/plugins.json 索引 + GitHub Release zip 一键安装/更新第三方插件，弹窗分页展示，下载/更新以圆环进度实时展示，删除插件后市场状态自动刷新，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">设置</td>

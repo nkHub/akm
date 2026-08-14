@@ -116,7 +116,7 @@ akm/
 
 当前实现中，`PluginManager` 的实际加载顺序是：`akm/plugins/` 内置插件 -> 项目根目录 `plugins/` -> `~/.akm/plugins/` 第三方插件。三者仍共享同一套“插件名全局唯一”约束，后加载来源遇到重名时会被跳过。
 
-**插件市场**：第三方插件还可从 GitHub 仓库的 `plugins/` 目录直接安装/更新。市场发布走「索引 + zip」方案：`scripts/publish_plugins.sh` 把每个插件打包为 `{name}-{version}.zip` 上传到 GitHub Release 固定 tag（默认 `plugin-market`），再生成并提交 `plugins/plugins.json` 索引（含 `version / description / category / has_menu / zip_url / sha256 / size`）。运行时拉取该索引（`raw.githubusercontent.com` 直连，不消耗 `api.github.com` 匿名配额，因此不再触发 60 次/小时的 API 限流 403），带约 5 分钟内存缓存。前端插件页「选择 .zip 文件」按钮旁的「插件市场」按钮弹出列表（分页展示，弹窗高度固定），拉取中与安装中均以居中 spinner 提示；对已安装的第三方插件比对版本，低于市场版本时在列表卡片与已加载插件卡片上显示「更新」。点击安装/更新后后端从 `zip_url` 流式下载，校验 `sha256` 后安全解压并覆盖 `~/.akm/plugins/{name}/`（内置插件跟随 App 版本、项目本地插件开发源码均不通过市场更新）。下载过程中后端按字节记录进度（`GET /api/plugin-market/progress`），前端轮询该接口在弹窗内实时显示进度条。
+**插件市场**：第三方插件还可从 GitHub 仓库的 `plugins/` 目录直接安装/更新。市场发布走「索引 + zip」方案：`scripts/publish_plugins.sh` 把每个插件打包为 `{name}-{version}.zip` 上传到 GitHub Release 固定 tag（默认 `plugin-market`），再生成并提交 `plugins/plugins.json` 索引（含 `version / description / category / has_menu / zip_url / sha256 / size`）。运行时拉取该索引（`raw.githubusercontent.com` 直连，不消耗 `api.github.com` 匿名配额，因此不再触发 60 次/小时的 API 限流 403），带约 5 分钟内存缓存。前端插件页「选择 .zip 文件」按钮旁的「插件市场」按钮弹出列表（弹窗分页展示且高度固定，宽度较宽便于显示插件描述），拉取中与安装中均以居中 spinner 提示；对已安装的第三方插件比对版本，低于市场版本时在列表卡片与已加载插件卡片上显示「更新」。点击安装/更新后后端从 `zip_url` 流式下载（`releases/download` 会 302 重定向到对象存储，下载需显式跟随重定向），校验 `sha256` 后安全解压并覆盖 `~/.akm/plugins/{name}/`（内置插件跟随 App 版本、项目本地插件开发源码均不通过市场更新）。下载过程中后端按字节记录进度（`GET /api/plugin-market/progress`），前端轮询该接口在弹窗中央以圆环进度（SVG ring + 百分比）实时展示，不再占用列表区域；安装/更新成功后重新拉取市场刷新各插件 installed 状态，删除插件同样会失效后端市场缓存并刷新前端列表，避免「已删除仍显示已安装」。
 
 
 ## 五、plugin.json 定义
