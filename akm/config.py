@@ -29,6 +29,7 @@ DEFAULTS = {
     # macOS 原生功能
     "launch_at_login": False,  # 开机自启动（仅打包后的 .app 生效，通过 SMAppService 注册）
     "menu_bar_show_usage": False,  # 菜单栏显示今日用量（Token 数 / 费用交替展示）
+    "auto_update": True,  # 自动更新：检测到新版本后静默下载、安装并重启；关闭则仅菜单栏提示，点击后确认再更新
     # 上游连接池：控制 AKM 访问上游供应商时的并发连接数
     "http_client_max_connections": 8,   # 每个上游路由的最大并发连接数
     "http_client_max_keepalive": 2,     # 每个上游路由的 keep-alive 连接数
@@ -207,6 +208,8 @@ def load_config() -> dict:
     merged["cost_pricing_table"] = _normalize_cost_pricing_table(merged["cost_pricing_table"])
     merged["http_proxy_enabled"] = merged.get("http_proxy_enabled") is True
     merged["http_proxy_url"] = normalize_http_proxy_url(merged.get("http_proxy_url", ""))
+    # macOS 原生功能：自动更新默认开启，仅显式设为 false 才关闭
+    merged["auto_update"] = merged.get("auto_update") is not False
     # 连接池参数：确保为合理整数，防止配置异常导致连接池初始化失败
     merged["http_client_max_connections"] = max(1, int(merged.get("http_client_max_connections", 8) or 8))
     merged["http_client_max_keepalive"] = max(0, int(merged.get("http_client_max_keepalive", 2) or 2))
@@ -263,6 +266,8 @@ def save_config(data: dict) -> None:
     current.update(data)
     current["http_proxy_enabled"] = current.get("http_proxy_enabled") is True
     current["http_proxy_url"] = normalize_http_proxy_url(current.get("http_proxy_url", ""))
+    # macOS 原生功能：自动更新默认开启，仅显式设为 false 才关闭
+    current["auto_update"] = current.get("auto_update") is not False
     # 连接池参数：确保为合理整数/浮点，防止配置异常导致连接池初始化失败
     current["http_client_max_connections"] = max(1, int(current.get("http_client_max_connections", 8) or 8))
     current["http_client_max_keepalive"] = max(0, int(current.get("http_client_max_keepalive", 2) or 2))

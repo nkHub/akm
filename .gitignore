@@ -11,6 +11,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+# agent_chat 插件的 dist 目录需要完整随插件一起拉取，不被屏蔽
+!plugins/agent_chat/dist/
 downloads/
 eggs/
 .eggs/

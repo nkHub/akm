@@ -116,6 +116,8 @@ akm/
 
 当前实现中，`PluginManager` 的实际加载顺序是：`akm/plugins/` 内置插件 -> 项目根目录 `plugins/` -> `~/.akm/plugins/` 第三方插件。三者仍共享同一套“插件名全局唯一”约束，后加载来源遇到重名时会被跳过。
 
+**插件市场**：第三方插件还可从 GitHub 仓库的 `plugins/` 目录直接安装/更新，无需上传 zip。市场数据经 `git/trees?recursive=1` 一次拉取全树、再逐个 `raw.githubusercontent.com` 拉取 `plugin.json`，带约 5 分钟内存缓存。前端插件页「选择 .zip 文件」按钮旁的「插件市场」按钮弹出列表（分页展示），对已安装的第三方插件比对版本，低于市场版本时在列表卡片与已加载插件卡片上显示「更新」，点击即拉取 Git 最新文件覆盖 `~/.akm/plugins/{name}/`。内置插件跟随 App 版本不通过市场更新；项目本地插件（开发环境源码）也不通过市场更新，避免覆盖源码。
+
 
 ## 五、plugin.json 定义
 
@@ -638,6 +640,20 @@ async def toggle_plugin(name: str, request: Request):
 async def plugin_menu(request: Request):
     return request.app.state.plugin_manager.get_menu()
 
+# 插件市场（GitHub 源）
+@app.get("/api/plugin-market")
+async def plugin_market(request: Request):
+    """返回 GitHub plugins/ 目录的市场插件列表（git/trees + raw plugin.json，
+    带约 5 分钟内存缓存），每项含本地安装状态 installed / installed_version /
+    has_update（仅第三方来源可更新）。"""
+    return await request.app.state.plugin_manager.fetch_market_plugins()
+
+@app.post("/api/plugin-market/{name}/install")
+async def plugin_market_install(name: str, request: Request):
+    """从 GitHub 市场拉取插件目录并覆盖到 ~/.akm/plugins/{name}/。
+    已加载的第三方插件覆盖后提示重启生效；全新插件即时加载。"""
+    return await request.app.state.plugin_manager.install_market_plugin(name)
+
 # 新增插件配置 API
 @app.get("/api/plugin-config/{name}")
 async def plugin_get_config(name: str, request: Request):
@@ -853,6 +869,7 @@ class Plugin(PluginBase):
 - 插件代码在 akm 进程中运行，拥有完整权限（包括数据库），仅应由信任的开发者编写
 - `plugin.json` 中不包含可执行代码
 - 上传安装包的插件名只能包含字母、数字、下划线和连字符；归档最多 20MB、500 个成员、解压后总量最多 100MB，非法路径或超出预算会在写入插件目录前被拒绝
+- 插件市场拉取同样受安全名称校验约束（`_is_valid_plugin_name`），单插件最多 200 个文件、总大小最多 30MB，文件内容仅来自固定的 GitHub 仓库（`nkHub/akm` 的 `main` 分支），写入路径被限制在 `~/.akm/plugins/{name}/` 内
 - `PluginBase` 中的数据库访问为共享连接，插件需自行管理事务和锁
 - 插件加载失败时打印警告但不阻止 akm 启动
 - hook 执行异常被捕获，不影响请求正常流程

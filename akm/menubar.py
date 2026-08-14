@@ -3,12 +3,16 @@
 import os
 import sys
 import time
-import threading
-import webbrowser
-import socket
+import json
+import shutil
+import platform
 import logging
 import asyncio
-import json
+import threading
+import tempfile
+import subprocess
+import webbrowser
+import socket
 from datetime import datetime
 
 import importlib
@@ -17,6 +21,7 @@ from typing import Any
 import httpx
 import rumps
 from akm import __version__
+from akm.version import version_greater
 from akm.config import get as config_get
 from akm.key_pool import list_keys
 from akm.proxy import test_key_connectivity
@@ -43,57 +48,74 @@ except ImportError:
 GITHUB_REPO = "nkHub/akm"
 # 更新检查时间间隔（秒）。这里使用 24 小时，避免每次唤醒都请求 API，降低限流风险。
 CHECK_INTERVAL = 86400
+# 更新包下载超时（秒）：zip 内含完整 Python 运行时，体积较大，给足下载时间。
+UPDATE_DOWNLOAD_TIMEOUT = 600
+# 静默（自动）更新在应用启动后等待的秒数：避免刚启动就被更新重启打断用户操作。
+AUTO_UPDATE_STARTUP_DELAY_SEC = 60.0
 
 logger = logging.getLogger("akm.menubar")
 DEFAULT_WAKE_RECOVER_DELAY_SEC = 8.0
 
 
-def _version_greater(a: str, b: str) -> bool:
-    """按语义化版本比较 a > b（逐段数字比较，忽略前导 v 与尾部分隔符）。
+def _bundle_app_path() -> str:
+    """返回当前运行中的 .app bundle 路径。
 
-    规则：
-    1. 先逐段比较数字部分（0.2.0 > 0.1.99、0.1.22 > 0.1.21）。
-    2. 数字部分完全相等时，无后缀（正式版）大于有后缀（预发布版）：
-       0.1.22 > 0.1.22-beta。
-    3. 两段都是非纯数字段时退化为字符串比较，保证不抛异常。
+    仅打包后的 frozen 环境有效（sys.executable 指向
+    `<app>/Contents/MacOS/<可执行名>`，向上两级即可回到 .app 目录）。
+    开发环境下返回空串，表示不执行自动更新替换。
     """
-    def _split(v: str) -> tuple[list[int], str | None]:
-        """拆分版本号为数字段列表与末尾后缀（无后缀为 None）。"""
-        raw = v.strip().lstrip("v").rstrip(".")
-        nums: list[int] = []
-        suffix: str | None = None
-        for seg in raw.split("."):
-            if not seg:
-                continue
-            head = ""
-            for ch in seg:
-                if ch.isdigit():
-                    head += ch
-                else:
-                    break
-            if head:
-                nums.append(int(head))
-                if head != seg and suffix is None:
-                    suffix = seg[len(head):]
-            elif suffix is None:
-                suffix = seg
-        return nums, suffix
+    if not hasattr(sys, "frozen"):
+        return ""
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.abspath(os.path.join(exe_dir, "..", ".."))
 
-    na, sa = _split(a)
-    nb, sb = _split(b)
-    for x, y in zip(na, nb):
-        if x != y:
-            return x > y
-    if len(na) != len(nb):
-        return len(na) > len(nb)
-    # 数字完全相等：无后缀 > 有后缀（pre-release 语义）
-    if sa is None and sb is not None:
+
+def _download_file(url: str, dest: str) -> bool:
+    """流式下载远程文件到 dest，返回是否成功；失败只记日志不抛异常。"""
+    try:
+        with httpx.stream(
+            "GET", url, follow_redirects=True, timeout=UPDATE_DOWNLOAD_TIMEOUT
+        ) as resp:
+            resp.raise_for_status()
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_bytes():
+                    f.write(chunk)
         return True
-    if sb is None and sa is not None:
+    except Exception as exc:
+        logger.warning("下载更新包失败: %s", exc)
         return False
-    if sa is not None and sb is not None:
-        return sa > sb
-    return False
+
+
+def _extract_app(zip_path: str, dest_dir: str) -> str:
+    """用系统 ditto 解压 zip 到 dest_dir，返回解压出的 .app 目录路径。
+
+    使用 ditto 而非 zipfile 是为了完整保留可执行文件的权限与符号链接
+    （py2app 产物需要这些才能正常启动）。解压结果里没有 .app 时返回空串。
+    """
+    subprocess.run(["/usr/bin/ditto", "-x", "-k", zip_path, dest_dir], check=True)
+    for name in os.listdir(dest_dir):
+        if name.endswith(".app"):
+            return os.path.join(dest_dir, name)
+    return ""
+
+
+def _schedule_relaunch(app_path: str) -> None:
+    """生成一个延时后 open 新应用的独立脚本并 detached 执行，随后调用方退出当前应用。
+
+    不能直接 `open`：新进程与旧进程 bundle id 相同，若旧进程尚未完全退出，
+    `open` 只会激活旧实例。这里先睡几秒等旧进程退出，再拉起新应用。
+    """
+    script = os.path.join(tempfile.gettempdir(), f"akm-relaunch-{int(time.time() * 1000)}.sh")
+    try:
+        with open(script, "w", encoding="utf-8") as f:
+            f.write("#!/bin/bash\n")
+            f.write("sleep 4\n")
+            f.write(f'open "{app_path}"\n')
+            f.write(f'rm -f "{script}"\n')
+        os.chmod(script, 0o755)
+        subprocess.Popen(["/bin/bash", script], start_new_session=True)
+    except Exception as exc:
+        logger.warning("生成重启脚本失败: %s", exc)
 
 
 
@@ -188,6 +210,17 @@ class AKMApp(rumps.App):
         self._wake_notification_center = None
         # 更新菜单项对象。默认没有更新提示，只有检测到新版本后才动态插入菜单。
         self.update_item: rumps.MenuItem | None = None
+        # 最近一次检测到的更新信息（含 zip 下载地址），供菜单点击/确认框使用
+        self._last_update_info: dict = {}
+        # 更新流程状态（后台线程写入，主线程 tick 读取）
+        self._updating = False          # 是否正在执行更新，防止重复触发
+        self._updating_msg = ""         # 当前更新进度文案，非空时状态栏展示
+        self._relaunch_pending = False  # 更新安装完成，待主线程执行退出+重启
+        self._last_auto_update_at = 0.0 # 上次静默更新触发时间，防止频繁触发
+        self._started_at = time.time()  # 应用启动时间，用于静默更新的启动缓冲
+        # 待主线程弹出的对话框请求（后台线程只写入，避免跨线程调用 AppKit）：
+        # (title, message, ok, cancel, other, handler)，handler 接收点击按钮文本。
+        self._pending_alert: tuple | None = None
 
         # 原生功能：开机自启动 & 菜单栏用量展示
         self._launch_login_enabled: bool | None = None  # 上次同步状态，避免重复调用 SMAppService
@@ -198,8 +231,9 @@ class AKMApp(rumps.App):
         self.status_item = rumps.MenuItem(title="🟡 启动中...")
         self.menu = [
             self.status_item,
-            rumps.MenuItem(title="打开管理", callback=self.open_admin),
+            rumps.MenuItem(title="应用管理", callback=self.open_admin),
             None,  # 分隔线
+            rumps.MenuItem(title="检查更新", callback=self.check_update_now),
             rumps.MenuItem(title="重启服务", callback=self.restart_server),
             rumps.MenuItem(title="退出", callback=self.quit_app),
         ]
@@ -224,22 +258,237 @@ class AKMApp(rumps.App):
             payload = resp.json()
             latest = payload.get("tag_name", "").lstrip("v")
             # 只有线上版本大于本地版本才提示更新；本地与线上相等或本地更新均不提示
-            if latest and _version_greater(latest, __version__):
+            if latest and version_greater(latest, __version__):
                 return {
                     "has_update": True,
                     "latest": latest,
                     "current": __version__,
                     "url": payload.get("html_url", ""),
+                    "body": payload.get("body") or "",
+                    "download_url": self._pick_zip_download_url(payload.get("assets") or []),
                 }
         except Exception:
             # 更新检查属于非关键路径：网络异常、API 失败都不影响主功能，静默降级即可。
             pass
         return {"has_update": False}
 
+    @staticmethod
+    def _pick_zip_download_url(assets: list) -> str:
+        """从 Release 资产中挑选 zip 更新包下载地址。
+
+        匹配规则：优先选择与当前机器架构（arm64/x86_64）匹配且以 .zip 结尾的资产，
+        其次退回任意 .zip 资产；没有任何 zip 时返回空串（表示该版本未提供自动更新包）。
+        """
+        arch = platform.machine().lower()
+        zip_names = [
+            a.get("name", "")
+            for a in assets
+            if str(a.get("name", "")).lower().endswith(".zip")
+        ]
+        if not zip_names:
+            return ""
+        for name in zip_names:
+            if arch in name.lower():
+                for a in assets:
+                    if a.get("name") == name:
+                        return str(a.get("browser_download_url", "") or "")
+        # 无架构匹配时退回任意 zip，保证通用 Release 也能自动更新
+        for a in assets:
+            if str(a.get("name", "")).lower().endswith(".zip"):
+                return str(a.get("browser_download_url", "") or "")
+        return ""
+
+    def _safe_notify(self, title: str, message: str) -> None:
+        """发送系统通知，失败只记日志不打断更新流程。"""
+        try:
+            rumps.notification(str(title), "", str(message))
+        except Exception as exc:
+            logger.warning("更新通知发送失败: %s", exc)
+
+    def _handle_update_info(self, info: dict) -> None:
+        """根据检查结果与自动更新开关决定后续动作：静默更新 / 菜单提示 / 忽略。"""
+        if not info.get("has_update"):
+            self._apply_update_menu(info)
+            return
+        # 开发环境（未打包成 .app）无法替换自身，只保留菜单提示，不静默更新。
+        if not hasattr(sys, "frozen"):
+            self._apply_update_menu(info)
+            return
+        auto_update = config_get("auto_update", True) is not False
+        if auto_update:
+            self._start_auto_update(info)
+        else:
+            self._apply_update_menu(info)
+
+    def _start_auto_update(self, info: dict) -> None:
+        """按自动更新开关触发静默更新：启动初期延迟执行，并做去重保护。"""
+        if self._updating:
+            return
+        if time.time() - self._last_auto_update_at < 60:
+            # 避免启动首查与 24h 轮询重叠导致重复下载
+            return
+        self._last_auto_update_at = time.time()
+        delay = max(0.0, AUTO_UPDATE_STARTUP_DELAY_SEC - (time.time() - self._started_at))
+        logger.info("检测到新版本 v%s，%.0f 秒后自动更新", info.get("latest", ""), delay)
+        threading.Timer(delay, self._start_auto_update_exec, args=(info,)).start()
+
+    def _start_auto_update_exec(self, info: dict) -> None:
+        """延迟到点后真正开始静默更新（后台线程执行下载/安装）。"""
+        if self._updating:
+            return
+        threading.Thread(target=self._perform_update, args=(info, True), daemon=True).start()
+
+    def _perform_update(self, info: dict, silent: bool) -> None:
+        """后台线程执行完整更新流程：下载 zip → 解压 → 校验 → 替换 .app → 重启。
+
+        silent 为 True 表示静默模式（自动更新开关开启），失败只发系统通知；
+        否则失败时额外弹对话框告知用户。
+        """
+        if self._updating:
+            return
+        self._updating = True
+        self._updating_msg = ""
+        try:
+            download_url = info.get("download_url") or ""
+            latest = info.get("latest", "")
+            if not latest or not download_url:
+                raise RuntimeError("当前 Release 未提供 zip 更新包，请到 Release 页面手动下载")
+            if not hasattr(sys, "frozen"):
+                raise RuntimeError("开发环境不执行自动更新")
+            target = _bundle_app_path()
+            if not target or not os.path.isdir(target):
+                raise RuntimeError("无法定位当前应用安装位置")
+
+            # 1. 下载 zip 到 ~/.akm/updates
+            self._updating_msg = f"正在下载 v{latest}..."
+            self._safe_notify("AKM 更新", f"正在下载 v{latest} 更新包")
+            cache_dir = os.path.join(os.path.expanduser("~/.akm"), "updates")
+            os.makedirs(cache_dir, exist_ok=True)
+            zip_path = os.path.join(cache_dir, f"AI Key Manager-{latest}-{int(time.time())}.zip")
+            if not _download_file(download_url, zip_path):
+                raise RuntimeError("更新包下载失败，请检查网络后重试")
+
+            # 2. 解压 zip，找到其中的 .app
+            self._updating_msg = "正在安装..."
+            tmp_dir = tempfile.mkdtemp(prefix="akm-update-")
+            new_app = _extract_app(zip_path, tmp_dir)
+            if not new_app or not os.path.isdir(new_app):
+                raise RuntimeError("更新包内容无效，未找到 .app")
+
+            # 3. 备份当前 .app 后替换为新版本，替换失败时回滚旧版本
+            backup_dir = os.path.join(cache_dir, "backups")
+            os.makedirs(backup_dir, exist_ok=True)
+            backup = os.path.join(backup_dir, f"AI Key Manager-{__version__}.app")
+            shutil.rmtree(backup, ignore_errors=True)
+            os.rename(target, backup)
+            try:
+                shutil.move(new_app, target)
+            except Exception:
+                shutil.rmtree(target, ignore_errors=True)
+                os.rename(backup, target)
+                raise
+
+            # 4. 交给主线程退出并重启（重启脚本在旧进程退出后才 open 新应用）
+            self._updating_msg = ""
+            self._relaunch_pending = True
+            self._safe_notify("AKM 更新完成", f"已更新到 v{latest}，即将自动重启")
+        except Exception as exc:
+            logger.warning("自动更新失败: %s", exc)
+            self._updating_msg = ""
+            self._safe_notify("AKM 更新失败", str(exc))
+            if not silent:
+                self._queue_alert("更新失败", str(exc), "确定", None, None)
+        finally:
+            self._updating = False
+
+    def _do_relaunch(self) -> None:
+        """更新安装完成后重启应用：先生成延时 open 脚本再退出当前实例。"""
+        target = _bundle_app_path()
+        logger.warning("更新安装完成，准备重启应用: %s", target)
+        if target and os.path.isdir(target):
+            _schedule_relaunch(target)
+        rumps.quit_application()
+
     def _open_release_page(self, _):
         """点击更新菜单后打开 Release 页面。"""
         if self._update_url:
             webbrowser.open(self._update_url)
+
+    def _on_update_menu_click(self, _):
+        """点击“更新到 vX.Y.Z”菜单项：弹确认框，确认后开始下载安装。"""
+        info = self._last_update_info or {}
+        if not info.get("has_update"):
+            return
+        latest = info.get("latest", "")
+        release_url = info.get("url", "")
+        try:
+            clicked = rumps.alert(
+                "发现新版本",
+                f"检测到新版本 v{latest}（当前 v{__version__}）。\n是否立即下载并自动安装？安装完成后应用将自动重启。",
+                "立即更新",
+                "取消",
+                "打开 Release 页面",
+            )
+        except Exception as exc:
+            logger.warning("弹更新确认框失败: %s", exc)
+            return
+        if clicked == "立即更新":
+            threading.Thread(target=self._perform_update, args=(info, False), daemon=True).start()
+        elif clicked == "打开 Release 页面" and release_url:
+            webbrowser.open(release_url)
+
+    def _queue_alert(self, title: str, message: str, ok=None, cancel=None, other=None) -> None:
+        """把弹窗请求写入待处理队列，由主线程 tick 弹出。
+
+        后台线程禁止直接调用 AppKit（rumps.alert），因此先写入队列，
+        主线程 `_on_native_tick` 消费后再弹出，保证线程安全。
+        """
+        self._pending_alert = (title, message, ok, cancel, other)
+
+    def check_update_now(self, _):
+        """菜单“检查更新”：立即检查一次并弹窗反馈结果。
+
+        有更新时展示 Release Note 并让用户确认是否立即更新；
+        无更新时弹窗提示已是最新版本。
+        """
+        if self._updating:
+            self._safe_notify("检查更新", "更新正在执行中，请稍候")
+            return
+
+        def do_check():
+            info = self._fetch_update_info()
+            if self._updating:
+                return
+            # 记录本次检查结果，供弹窗确认后的更新流程使用
+            self._last_update_info = info
+            if not info.get("has_update"):
+                # 无更新：弹窗提示已是最新，并清理可能残留的过期更新菜单项
+                self._apply_update_menu({"has_update": False})
+                self._queue_alert(
+                    "检查更新",
+                    f"当前已是最新版本 v{__version__}",
+                    "好的",
+                    None,
+                    None,
+                )
+                return
+            # 有更新：弹窗展示 Release Note，用户确认后再下载安装
+            latest = info.get("latest", "")
+            body = str(info.get("body") or "").strip()
+            # Release Note 可能很长，截断避免对话框内容溢出
+            if len(body) > 800:
+                body = body[:800] + "\n…（详见 Release 页面）"
+            self._queue_alert(
+                "发现新版本",
+                f"检测到新版本 v{latest}（当前 v{__version__}）。\n\n"
+                f"版本更新内容：\n{body}\n\n"
+                f"是否立即下载并自动安装？安装完成后应用将自动重启。",
+                "立即更新",
+                "取消",
+                "打开 Release 页面",
+            )
+
+        threading.Thread(target=do_check, daemon=True).start()
 
     def _apply_update_menu(self, info: dict):
         """根据检查结果动态维护“更新到 vX.Y.Z”菜单项。"""
@@ -258,30 +507,31 @@ class AKMApp(rumps.App):
         if not latest or not release_url:
             return
 
+        self._last_update_info = info
         title = f"更新到 v{latest}"
         if self.update_item is None:
-            self.update_item = rumps.MenuItem(title=title, callback=self._open_release_page)
+            self.update_item = rumps.MenuItem(title=title, callback=self._on_update_menu_click)
             self._update_url = release_url
-            # 插在“打开管理”后面，保证更新入口显眼但不干扰状态项。
-            self.menu.insert_after("打开管理", self.update_item)
+            # 插在“应用管理”后面，保证更新入口显眼但不干扰状态项。
+            self.menu.insert_after("应用管理", self.update_item)
             return
 
         self.update_item.title = title
         self._update_url = release_url
 
     def _start_update_checker(self):
-        """后台循环检查更新并更新菜单提示。"""
+        """后台循环检查更新：按自动更新开关静默更新或维护菜单提示。"""
 
         def run_checker():
             # 首次立即检查一次，启动后尽快给用户反馈。
             info = self._fetch_update_info()
-            self._apply_update_menu(info)
+            self._handle_update_info(info)
 
             # 后续按固定间隔轮询，避免频繁请求 API。
             while True:
                 time.sleep(CHECK_INTERVAL)
                 info = self._fetch_update_info()
-                self._apply_update_menu(info)
+                self._handle_update_info(info)
 
         threading.Thread(target=run_checker, daemon=True).start()
 
@@ -313,6 +563,32 @@ class AKMApp(rumps.App):
         """每 5 秒回调一次：同步开机自启动状态 + 刷新菜单栏用量 + 处理待执行操作。
         所有操作在 rumps 主线程执行，安全更新 UI。"""
         import akm
+        # 更新进行中：优先展示更新进度，暂停常规状态刷新。
+        if self._updating_msg:
+            self.status_item.title = f"🔄 {self._updating_msg}"
+            return
+        # 更新安装完成：执行退出+重启（重启脚本会延迟拉起新应用）。
+        if self._relaunch_pending:
+            self._relaunch_pending = False
+            self._do_relaunch()
+            return
+        # 后台检查线程提交的弹窗请求：在主线程弹出，并按点击结果执行后续动作。
+        if self._pending_alert:
+            title, message, ok, cancel, other = self._pending_alert
+            self._pending_alert = None
+            try:
+                clicked = rumps.alert(title, message, ok, cancel, other)
+            except Exception as exc:
+                logger.warning("弹窗失败: %s", exc)
+                return
+            info = self._last_update_info or {}
+            if clicked == "立即更新":
+                threading.Thread(
+                    target=self._perform_update, args=(info, False), daemon=True
+                ).start()
+            elif clicked == "打开 Release 页面" and info.get("url"):
+                webbrowser.open(info.get("url", ""))
+            return
         try:
             self._sync_launch_at_login()
         except Exception:

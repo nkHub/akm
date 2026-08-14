@@ -20,10 +20,10 @@ if [[ "$ARCH" != "arm64" ]]; then
   echo "警告: 当前机器架构为 ${ARCH}，该脚本用于 Apple Silicon(M1/M2) 构建。"
 fi
 
-echo "[1/4] 清理旧构建产物"
+echo "[1/7] 清理旧构建产物"
 rm -rf build dist
 
-echo "[2/4] 使用 py2app 打包 .app"
+echo "[2/7] 使用 py2app 打包 .app"
 # 复用现有构建脚本：其中包含 pyproject.toml 临时挪走/恢复逻辑，避免 py2app 与 PEP 517 配置冲突。
 "$ROOT_DIR/scripts/build_app.sh"
 
@@ -34,7 +34,7 @@ fi
 
 BIN_PATH="${APP_PATH}/Contents/MacOS/${APP_NAME}"
 if [[ -f "$BIN_PATH" ]]; then
-  echo "[3/4] 校验可执行架构"
+  echo "[3/7] 校验可执行架构"
   file "$BIN_PATH"
 fi
 
@@ -42,7 +42,7 @@ DMG_PATH="dist/${APP_NAME}-${VERSION}-arm64.dmg"
 
 # 生成 DMG 背景图：这里使用 Python + Pillow 动态生成，避免仓库额外维护二进制图片资源。
 # 背景设计目标：浅色渐变 + 轻提示文案，用户打开 DMG 后可以直接看到“把左侧应用拖到右侧 Applications”。
-echo "[4/5] 生成 DMG 背景图"
+echo "[4/7] 生成 DMG 背景图"
 python - <<'PY'
 from PIL import Image, ImageDraw
 
@@ -67,7 +67,7 @@ draw.polygon([(298, 195), (338, 195), (338, 182), (364, 208), (338, 234), (338, 
 img.save("/tmp/akm-dmg-background.png", "PNG")
 PY
 
-echo "[5/6] 生成 DMG: $DMG_PATH"
+echo "[5/7] 生成 DMG: $DMG_PATH"
 # create-dmg 第 487 行只执行 SetFile -c icnC，缺少 SetFile -a V 隐藏位，
 # 导致 .VolumeIcon.icns 和 .background 在 DMG 中可见。此处临时修补。
 CREATE_DMG=$(readlink -f /opt/homebrew/bin/create-dmg 2>/dev/null || echo "/opt/homebrew/bin/create-dmg")
@@ -91,4 +91,13 @@ if [[ -f "$CREATE_DMG" ]]; then
   sed -i '' 's#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"; SetFile -a V "$MOUNT_DIR/.VolumeIcon.icns"; SetFile -a V "$MOUNT_DIR/.background"#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#' "$CREATE_DMG"
 fi
 
+echo "[6/7] 生成 zip 更新包"
+# 更新程序通过 ditto -x -k 解压，zip 根目录需直接包含 .app；
+# 这里用 ditto 打包以便与解压端保持一致（保留权限与符号链接）。
+ZIP_PATH="dist/${APP_NAME}-${VERSION}-arm64.zip"
+pushd "$ROOT_DIR/dist" >/dev/null
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${APP_NAME}-${VERSION}-arm64.zip"
+popd >/dev/null
+
 echo "完成: $DMG_PATH"
+echo "完成: $ZIP_PATH"
