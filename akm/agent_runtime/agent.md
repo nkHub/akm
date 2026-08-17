@@ -408,7 +408,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 
 ## SSE 流式事件（`stream: true`）
 
-事件顺序约定：**思考（`reasoning_delta`）与正文（`model_delta`）按模型输出顺序实时流式下发**，工具轮正文同样实时流出，工具事件（`turn_start`/`tool_call`/`tool_result`）随后出现，最终以 `final` 收尾。
+事件顺序约定：**思考（`reasoning_delta`）与正文（`model_delta`）按模型输出顺序实时流式下发**，工具轮正文同样实时流出，工具事件（`turn_start`/`tool_call`/`tool_result`）随后出现，每个自然停顿点（当前轮输出完整收尾处）下发一次 `turn_pause`，最终以 `final` 收尾。
 
 | 事件 | 说明 |
 |------|------|
@@ -420,6 +420,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
 | `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
 | `ask_user` | AI 调用 `akm_ask_user` 向用户澄清提问，本轮中断；`data` 含 `question` / `options` / `multiple`（`options` 为空数组表示自由文本回答，非空则单选或多选）/ `messages`（含本轮调用与 `awaiting_user` 结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端展示问题与选择控件、用户回答后携带 messages 续跑 |
+| `turn_pause` | 自然停顿点：当前轮 LLM 输出（正文/思考）已完整收尾，`data` 含 `turn` / `messages`（当前工作上下文快照，供客户端在回复中途插入引导后续跑）/ `usage` / `compacted`。客户端若要在回复途中打断换方向或补充内容，可在此事件后中断请求并携带快照续跑，避免半截残话；无插入需求时忽略即可（`ask_user` 等待回答与 `tool_retry` 自愈重试路径不触发） |
 | `cancelled` | 手动中断（客户端通过 AbortController 取消流式请求断开连接，服务端主动检测到断连），`data` 含 `turns` / `usage` / `compacted`；随后流结束，不再下发 `final` |
 | `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |
 | `error` | 错误终止，含 `data.error` / `data.turns` / `data.usage` / `data.compacted` |
@@ -439,6 +440,8 @@ data: {"event":"tool_call","data":{"name":"get_weather","arguments":{"city":"bei
 data: {"event":"tool_result","data":{"name":"get_weather","result":"{\"city\":\"beijing\",\"temp\":25}"}}
 
 data: {"event":"model_delta","data":{"turn":2,"content":"北京今天..."}}
+
+data: {"event":"turn_pause","data":{"turn":2,"messages":[...],"usage":{...},"compacted":0}}
 
 data: {"event":"final","data":{"final_message":{"role":"assistant","content":"北京今天..."},"turns":2,"usage":{...}}}
 ```

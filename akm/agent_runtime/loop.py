@@ -1383,6 +1383,10 @@ class AgentLoop:
         - ``tool_retry``      — 工具调用失败触发的自愈重试（agent_tool_retry_max_retries>0 时），
                                 data 含 turn / retry_count / max_retries / error；随后服务端注入
                                 一条 system 修正提示并强制模型修正参数后重新调用
+        - ``turn_pause``      — 自然停顿点：当前轮 LLM 输出（正文/思考）已完整下发，且其
+                                working_messages 快照随事件提供。客户端若要在回复中途插入引导
+                                （打断换方向或补充内容），应在此事件后从容中断并携带该快照续跑，
+                                可避免半截内容（data 含 turn / messages / usage / compacted）
         - ``context_warning`` — 上下文占用接近上限（超过 agent_context_warning_ratio 比例），
                                 data 含 estimated_tokens / max_tokens / remaining_tokens / ratio / compacted
         - ``ask_user``        — AI 需要向用户澄清提问（调用 akm_ask_user），data 含 question /
@@ -1696,6 +1700,15 @@ class AgentLoop:
                             })
                     except Exception:
                         pass
+                # 自然停顿点：本轮输出（final_message 已入列）完整，即将下发 final。
+                # 客户端若在回复中途输入了引导消息，可在此打断当前流、携带完整
+                # working_messages 快照续跑，避免半截残话或不必要的后续轮次。
+                yield _sse_event("turn_pause", {
+                    "turn": turn,
+                    "messages": working_messages,
+                    "usage": total_usage,
+                    "compacted": compacted_count,
+                })
                 yield _sse_event("final", {
                     "final_message": final_message,
                     "messages": working_messages,
@@ -1850,6 +1863,17 @@ class AgentLoop:
                     self._tool_retry_max,
                 )
                 continue
+
+            # 自然停顿点：本轮工具调用已全部执行完、即将进入下一轮 LLM 调用前。
+            # 客户端若在回复中途输入了引导消息，可在此时打断当前流、携带完整
+            # working_messages 快照续跑（ask_user 等待回答与自愈重试走自身分支，
+            # 不会到达这里，保证停顿点只出现在「本轮完整收尾」之后）。
+            yield _sse_event("turn_pause", {
+                "turn": turn,
+                "messages": working_messages,
+                "usage": total_usage,
+                "compacted": compacted_count,
+            })
 
         logger.warning("[AgentLoop] 达到最大轮次限制 %d", _max_turns)
         yield _sse_event("error", {

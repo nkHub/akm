@@ -391,7 +391,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 ## Agent Loop
 
-`POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。内置 `akm_ask_user` 澄清工具支持**交互式提问**：AI 认为信息不足时可中断本轮、向用户反问确认（支持自由输入框 / 单选 / 多选三种模式，由 `options` / `multiple` 参数控制），用户回答后携带上下文续跑（非流式返回 `ask_user` 字段，流式下发 `ask_user` 事件）。
+`POST /v1/agent` 提供多轮 LLM 工具调用编排能力：请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。内置 `akm_ask_user` 澄清工具支持**交互式提问**：AI 认为信息不足时可中断本轮、向用户反问确认（支持自由输入框 / 单选 / 多选三种模式，由 `options` / `multiple` 参数控制），用户回答后携带上下文续跑（非流式返回 `ask_user` 字段，流式下发 `ask_user` 事件）。流式模式下每个自然停顿点（当前轮输出完整收尾处）会下发 `turn_pause` 事件并携带工作消息快照，客户端可在回复中途插入引导（打断换方向或补充内容）后带着快照续跑，不会产生半截残话。
 
 此外，`/v1/agent` 还支持**子 Agent 递归委托**：注入 `akm_subagent_spawn` / `akm_subagent_wait` / `akm_subagent_kill` / `akm_subagent_list` / `akm_subagent_status` 五个工具，主会话可以开启独立的子 Agent 子进程（子进程调用本机 `/v1/agent` 跑次级对话，进程级隔离、默认独立临时工作区），句柄式管理（spawn 返回 `task_id` → wait 等结果 / kill 终止；list 列出全部任务、status 查单任务详情与日志尾部）。嵌套层数由 `agent_subagent_max_depth` 控制（默认 `1`，即主会话能开子进程、子进程内不能再开下一级；调大可支持多级递归），并发上限 8，开关 `agent_subagent_enabled`（默认 `true`）。
 

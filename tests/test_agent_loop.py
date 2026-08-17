@@ -48,8 +48,13 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert [event["event"] for event in events] == ["reasoning_delta", "model_delta", "reasoning_delta", "model_delta", "final"]
+    assert [event["event"] for event in events] == ["reasoning_delta", "model_delta", "reasoning_delta", "model_delta", "turn_pause", "final"]
     assert [event["data"]["content"] for event in events[:4]] == ["先", "你", "思考", "好"]
+    # 停顿点：final 下发前先通知客户端「本轮输出已完整」并携带完整消息快照
+    assert events[4]["event"] == "turn_pause"
+    assert events[4]["data"]["turn"] == 1
+    assert events[4]["data"]["messages"][-1] == events[-1]["data"]["final_message"]
+    assert events[4]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
     assert events[-1]["data"]["final_message"]["content"] == "你好"
     assert events[-1]["data"]["final_message"]["reasoning_content"] == "先思考"
     assert events[-1]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
@@ -78,9 +83,13 @@ async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=registry)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "天气"}])])
 
-    assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "model_delta", "final"]
+    assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "turn_pause", "model_delta", "turn_pause", "final"]
     assert events[1]["data"] == {"name": "get_weather", "arguments": {"city": "beijing"}}
     assert events[2]["data"]["result"] == '{"city": "beijing", "temp": 25}'
+    # 工具轮完整收尾后、进入下一轮 LLM 前，应下发停顿点并携带含工具结果的消息快照
+    assert events[3]["event"] == "turn_pause"
+    assert events[3]["data"]["turn"] == 1
+    assert events[3]["data"]["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": '{"city": "beijing", "temp": 25}'}
     assert calls[1]["messages"][-2]["tool_calls"][0]["function"]["name"] == "get_weather"
     assert calls[1]["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": '{"city": "beijing", "temp": 25}'}
     ToolRegistry.reset()
@@ -107,13 +116,14 @@ async def test_run_stream_streams_content_realtime_then_tools(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=registry)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "北京天气"}])])
 
-    # 顺序：思考 → 工具轮正文(model_delta) → 工具 → 最终主体(model_delta) → final
+    # 顺序：思考 → 工具轮正文(model_delta) → 工具 → 停顿点 → 最终主体(model_delta) → 停顿点 → final
     assert [event["event"] for event in events] == [
-        "reasoning_delta", "model_delta", "turn_start", "tool_call", "tool_result", "model_delta", "final",
+        "reasoning_delta", "model_delta", "turn_start", "tool_call", "tool_result", "turn_pause", "model_delta", "turn_pause", "final",
     ]
     assert events[0]["data"]["content"] == "用户想查天气"
     assert events[1]["data"]["content"] == "我来查一下天气"
-    assert events[-2]["data"]["content"] == "北京晴天"
+    assert events[-3]["data"]["content"] == "北京晴天"
+    assert events[-1]["data"]["final_message"]["content"] == "北京晴天"
     assert events[-1]["data"]["final_message"]["content"] == "北京晴天"
     ToolRegistry.reset()
 
@@ -971,7 +981,7 @@ async def test_run_stream_reuses_proxy_prefetched_aiter(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert [event["event"] for event in events] == ["model_delta", "model_delta", "final"]
+    assert [event["event"] for event in events] == ["model_delta", "model_delta", "turn_pause", "final"]
     assert [event["data"]["content"] for event in events[:2]] == ["你", "好"]
     assert events[-1]["data"]["final_message"]["content"] == "你好"
 
@@ -1198,3 +1208,21 @@ async def test_run_stream_ask_user_with_options(monkeypatch):
     assert ask["options"] == ["基础", "专业"]
     assert ask["multiple"] is True
     assert ask["turns"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_stream_turn_pause_ask_user_path_does_not_pause(monkeypatch):
+    """ask_user 分支是等待用户回答的交互停顿，不应再下发 turn_pause 干扰客户端。"""
+    response = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "akm_ask_user", "arguments": "{\"question\":\"继续吗？\"}"}}]}}]}),
+        "data: [DONE]\n\n",
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
+
+    assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "ask_user"]
