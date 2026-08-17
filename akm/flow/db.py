@@ -242,6 +242,22 @@ def list_runs(workflow_id: str | None = None, limit: int = 100, offset: int = 0)
         conn.close()
 
 
+def list_runs_running() -> list[dict]:
+    """列出仍处于 running 状态的运行记录（服务重启后遗留的僵尸 run）。
+
+    服务重启会丢光引擎内存里的 asyncio 任务，DB 中这些记录无人推进，
+    会永远停在 running。启动时用它对残留 run 统一收尾。
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM flow_runs WHERE status = 'running' ORDER BY created_at DESC"
+        ).fetchall()
+        return [_run_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def update_run(run_id: str, run: dict) -> None:
     """整对象更新运行快照（status/started/finished/data_json）。"""
     conn = get_connection()

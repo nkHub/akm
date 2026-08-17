@@ -801,3 +801,56 @@ def test_wsdiff_limits_reads_config(monkeypatch):
     )
     limits = wsd._flow_wsdiff_limits()
     assert limits == {"max_file_bytes": 1024, "max_files_scan": 5, "max_diffs": 3, "max_content_chars": 24_000}
+
+
+def test_engine_recover_stale_runs_marks_failed(_isolated_db):
+    """启动时清理 DB 中残留 running 状态的僵尸运行（服务重启会丢内存任务）。"""
+    # 造一条 status='running' 的僵尸运行：一个节点 running、一个节点 pending
+    wf = standard_dev_workflow()
+    t = flow_db.now_iso()
+    run = {
+        "id": "run_stale01",
+        "workflowId": wf["id"],
+        "status": "running",
+        "input": {"prompt": "旧任务"},
+        "workflowSnapshot": wf,
+        "nodeRuns": {
+            "node_n1": {"nodeId": "node_n1", "status": "running", "logs": []},
+            "node_n2": {"nodeId": "node_n2", "status": "pending", "logs": []},
+        },
+        "artifacts": {},
+        "totals": {},
+        "startedAt": t,
+        "createdAt": t,
+        "finishedAt": "",
+    }
+    flow_db.insert_run(run)
+
+    engine = WorkflowEngine(_fake_app())
+    restored = flow_db.get_run("run_stale01")
+    assert restored is not None
+    assert restored["status"] == "failed"
+    assert restored["finishedAt"]
+    assert restored["nodeRuns"]["node_n1"]["status"] == "failed"
+    assert "服务重启" in (restored["nodeRuns"]["node_n1"].get("error") or "")
+    assert restored["nodeRuns"]["node_n2"]["status"] == "skipped"
+
+
+def test_db_list_runs_running(_isolated_db):
+    """list_runs_running 只返回 running 状态的运行。"""
+    t = flow_db.now_iso()
+    for rid, status in [("run_a", "running"), ("run_b", "succeeded"), ("run_c", "failed")]:
+        flow_db.insert_run({
+            "id": rid,
+            "workflowId": "wf_x",
+            "status": status,
+            "input": {},
+            "workflowSnapshot": {"nodes": [], "edges": []},
+            "nodeRuns": {},
+            "artifacts": {},
+            "totals": {},
+            "startedAt": t,
+            "createdAt": t,
+            "finishedAt": t if status != "running" else "",
+        })
+    assert {r["id"] for r in flow_db.list_runs_running()} == {"run_a"}

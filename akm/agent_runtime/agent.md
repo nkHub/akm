@@ -54,6 +54,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_flow_delete` | 删除一条工作流及其全部运行记录，返回是否删除成功 |
 | `akm_flow_run` | 启动一次工作流运行：传入工作流 id 与用户提示词 `prompt`，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态 |
 | `akm_flow_runs` | 列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 `workflow_id` 过滤 |
+| `akm_flow_cancel` | 中止一次工作流运行（取消）：按 `run_id` 中断正在执行的节点、跳过待执行节点，运行置为 `cancelled`；适用于卡住或不再等待的运行 |
 | `akm_subagent_spawn` | 开启一个独立的子 Agent 子进程，子进程调用本机 `/v1/agent` 运行次级对话（进程级隔离，默认独立临时工作区，不污染当前工作区）；返回 `task_id` 与初始状态。嵌套层数由 `agent_subagent_max_depth` 控制（默认 1，即主会话可开子进程、子进程内不能再开下一级） |
 | `akm_subagent_wait` | 等待指定子 Agent 完成并返回其结果（`final_message` 文本）；`timeout_ms` 默认 600000，超时返回「仍在运行」而非失败，可稍后再次查询或用 `akm_subagent_kill` 终止 |
 | `akm_subagent_kill` | 终止指定子 Agent 子进程（含其进程组），返回是否成功 |

@@ -24,6 +24,8 @@
 | POST | `/v1/flow/runs/{id}/resume` | 人工审批：body `{action: approve\|reject, note?, nodeId?}`；运行须处于 `waiting_human`，否则 `409` |
 | GET | `/v1/flow/runs/{id}/events` | SSE 事件流（先发完整 `snapshot`，再转发 `run_start` / `node_start` / `log` / `token` / `human_wait` / `node_end` / `run_end`，每 1 秒 `ping`），断线重连先收到完整 `snapshot` |
 
+> 服务重启后，引擎启动时会自动清理 DB 中残留 `running` 状态的运行（重启导致进程内执行任务丢失、无人推进的僵尸记录），统一标记为 `failed`，可通过运行列表/详情观察。已结束（`succeeded` / `failed` / `cancelled`）的记录不受影响。
+
 ## 数据表
 
 - `flow_workflows`：工作流定义，节点/边以 JSON 存储。
@@ -104,7 +106,7 @@
 
 ## 内置工具
 
-`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs` / `akm_flow_run_get`，可在对话里直接管理、驱动工作流：
+`/v1/agent` 注入 `akm_flow_list` / `akm_flow_get` / `akm_flow_save` / `akm_flow_delete` / `akm_flow_run` / `akm_flow_runs` / `akm_flow_run_get` / `akm_flow_cancel`，可在对话里直接管理、驱动工作流：
 
 - `akm_flow_list`：列出已配置的工作流（id / 名称 / 描述 / 节点数 / 更新时间，不含完整定义）。
 - `akm_flow_get`：按 id 读取工作流完整定义（nodes / edges / variables）。
@@ -113,3 +115,4 @@
 - `akm_flow_run`：传入工作流 id 与 `prompt` 启动后台运行，返回运行 id 与初始状态。
 - `akm_flow_runs`：列出运行记录（可按 `workflow_id` 过滤）。
 - `akm_flow_run_get`：查询单次运行的节点级详情（状态/错误/输出正文与结构化产物/最近日志），定位卡住或失败的节点。
+- `akm_flow_cancel`：按 `run_id` 中止一次运行（正在执行的节点中断、待执行的节点跳过，置为 `cancelled`），适用于卡住或不再等待的运行。
