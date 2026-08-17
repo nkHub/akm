@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-17T16:11:24+0800",
+  "generated_at": "2026-08-17T16:34:02+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.2",
@@ -11,13 +11,13 @@
       "size": 252887
     },
     "agent_chat": {
-      "version": "0.1.3",
+      "version": "0.1.4",
       "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
       "category": "app",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.3.zip",
-      "sha256": "531538aab6e6c563494b32b4cab156c447f194c29c4c03795df01f34e88f02ab",
-      "size": 1235003
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.4.zip",
+      "sha256": "f761080fb35bf1cf338f7c9cc90af1eb3f3d7675b7683764848a5b757eeaedf5",
+      "size": 1235105
     },
     "budget_gate": {
       "version": "0.1.0",
