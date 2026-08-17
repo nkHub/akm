@@ -2357,6 +2357,31 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             }
         }
 
+    async def cancel_flow_run_tool(run_id: str) -> dict[str, Any]:
+        """中止一次工作流运行（取消）。
+
+        正在执行的节点会中断，待执行的节点跳过，运行整体置为 cancelled。
+        已结束或已取消的运行返回其当前状态而不报错；不存在的运行返回 error。
+        """
+        engine = getattr(app.state, "flow_engine", None)
+        if engine is None:
+            return {"error": "flow 引擎未初始化"}
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return {"error": "run_id 不能为空"}
+        run = await engine.cancel(run_id)
+        if run is None:
+            return {"error": f"运行不存在: {run_id}"}
+        return {
+            "ok": True,
+            "run": {
+                "id": run.get("id", run_id),
+                "workflowId": run.get("workflowId", ""),
+                "status": run.get("status", "cancelled"),
+                "finishedAt": run.get("finishedAt", ""),
+            },
+        }
+
     async def tavily_search_tool(
         query: str,
         max_results: int = 5,
@@ -3100,6 +3125,20 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 "required": ["run_id"],
             },
             get_flow_run_tool,
+        )
+    )
+    tools.append(
+        ToolDef(
+            "akm_flow_cancel",
+            "中止一次工作流运行（取消）：正在执行的节点中断、待执行的节点跳过，运行置为 cancelled；对卡住或不想再等的运行使用",
+            {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "运行 id（来自 akm_flow_runs / akm_flow_run）"},
+                },
+                "required": ["run_id"],
+            },
+            cancel_flow_run_tool,
         )
     )
     if load_config().get("agent_email_enabled"):

@@ -225,6 +225,34 @@ class WorkflowEngine:
         self._runs: dict[str, dict] = {}
         # run_id → asyncio.Future[dict]，human 审批等待槽位（每 run 单槽）
         self._human_waits: dict[str, asyncio.Future] = {}
+        self._recover_stale_runs()
+
+    def _recover_stale_runs(self) -> int:
+        """启动时清理残留 running 状态的 run。
+
+        服务重启会丢失引擎内存中的全部 asyncio 任务（_tasks），而 DB 里这些
+        run 记录仍停留在 running，无任务推进会永远卡死。启动时扫描并统一
+        收尾：把整个 run 置为 failed，运行中的节点置为 failed（带原因说明），
+        待激活节点置为 skipped，并写入 finishedAt。
+        """
+        stale = flow_db.list_runs_running()
+        if not stale:
+            return 0
+        recovered = 0
+        for run in stale:
+            run_id = run.get("id", "")
+            run["status"] = "failed"
+            run["finishedAt"] = flow_db.now_iso()
+            for nr in (run.get("nodeRuns") or {}).values():
+                if nr.get("status") == "running":
+                    nr["status"] = "failed"
+                    nr["error"] = "服务重启导致运行中断，已由启动清理收尾"
+                elif nr.get("status") == "pending":
+                    nr["status"] = "skipped"
+            flow_db.update_run(run_id, run)
+            logger.warning("[flow] 清除僵尸运行 %s（status=running 且无活跃任务，标记 failed）", run_id)
+            recovered += 1
+        return recovered
 
     # ── 事件总线 ──────────────────────────────────────────────
 
@@ -713,8 +741,8 @@ class WorkflowEngine:
         return flow_db.get_run(run_id)
 
     async def cancel(self, run_id: str) -> dict | None:
-        """取消运行。"""
-        run = self._runs.get(run_id)
+        """取消运行。内存无该 run 时回退读库（支持清理 DB-only 的僵尸记录）。"""
+        run = self._runs.get(run_id) or flow_db.get_run(run_id)
         if run is None or run.get("status") in ("succeeded", "failed", "cancelled"):
             return run
         run["status"] = "cancelled"
