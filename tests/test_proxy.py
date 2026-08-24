@@ -1574,3 +1574,112 @@ async def test_forward_stream_first_byte_timeout_switches_key(monkeypatch):
     assert result["key_alias"] == "fast"
     assert result["first_chunk"] == b"data: {\"x\":2}\n\n"
     assert slow_resp.closed is True
+
+
+@pytest.mark.asyncio
+async def test_forward_attempts_records_failed_and_success(monkeypatch):
+    """逐次尝试记录 attempts：失败尝试携带上游返回内容片段，成功尝试不携带。"""
+    keys_called = []
+
+    async def pick_key_mock(model, exclude_aliases=None):
+        keys_called.append(model)
+        if len(keys_called) == 1:
+            return {"alias": "k1", "provider": "openai", "api_key": "sk-a",
+                    "base_url": "https://api.openai.com"}
+        return {"alias": "k2", "provider": "openai", "api_key": "sk-b",
+                "base_url": "https://api.openai.com"}
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", pick_key_mock)
+    monkeypatch.setattr("akm.proxy.mark_rate_limited", lambda alias: None)
+    monkeypatch.setattr("akm.proxy.set_status", lambda alias, status: None)
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [
+        FakeStreamResponse(429, '{"error":{"message":"rate limited"}}'),
+        FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}'),
+    ])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
+        client=mock_client,
+    )
+    assert result["status_code"] == 200
+    assert result["key_alias"] == "k2"
+    attempts = result.get("attempts") or []
+    assert len(attempts) >= 2
+    # 第一条：k1 429 失败，附带上游返回内容片段
+    a0 = attempts[0]
+    assert a0["status_code"] == 429
+    assert a0["key_alias"] == "k1"
+    assert a0["response_body"] == '{"error":{"message":"rate limited"}}'
+    assert a0.get("error")
+    # 最后一条：k2 200 成功，不携带返回内容
+    a_last = attempts[-1]
+    assert a_last["status_code"] == 200
+    assert a_last["key_alias"] == "k2"
+    assert not a_last.get("response_body")
+
+
+@pytest.mark.asyncio
+async def test_forward_local_only_502_excludes_select_key_record(monkeypatch):
+    """无可用 key 的 select_key 本地 502 不应进入 attempts。
+
+    该状态码没有真实 Key，与「逐次尝试」语义不符（前端原始报错 tab 顶部
+    已有错误诊断红块展示）。注意：每条真实 Key 的失败仍会被逐条记录。
+    """
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value=None))
+    mock_client = AsyncMock()
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
+        client=mock_client,
+    )
+    assert result["status_code"] in (502, 503)
+    # attempts 应为空：本地合成的 select_key 记录不再写入，也没有任何真实 Key 被尝试
+    attempts = result.get("attempts") or []
+    assert not any(a.get("phase") == "select_key" for a in attempts)
+    assert not any(a.get("phase") == "exhausted" for a in attempts)
+
+
+@pytest.mark.asyncio
+async def test_forward_attempts_excludes_exhausted_local_record(monkeypatch):
+    """有匹配 key 但全部尝试失败时，attempts 不应包含 exhausted 本地合成的 502。
+
+    该记录没有真实 Key，与「逐次尝试」语义不符，各 Key 的失败已逐条记录。
+    """
+    picked = []
+
+    async def pick_key_multi(model, exclude_aliases=None):
+        picked.append({"model": model, "exclude": list(exclude_aliases or [])})
+        # 第一次给 k1，之后给 k2：两者都失败，让 while 循环跑满 2 次后走 exhausted
+        return {"alias": "k1", "provider": "openai", "api_key": "sk-a",
+                "base_url": "https://api.openai.com"} if not exclude_aliases else {"alias": "k2", "provider": "openai", "api_key": "sk-b", "base_url": "https://api.openai.com"}
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", pick_key_multi)
+    monkeypatch.setattr("akm.proxy.pick_wildcard_key_async", AsyncMock(return_value=None))
+    monkeypatch.setattr("akm.proxy.mark_rate_limited", lambda alias: None)
+    monkeypatch.setattr("akm.proxy.set_status", lambda alias, status: None)
+    # 限制尝试次数与单 key 重试，保证请求量可控且走完 exhausted 兜底
+    monkeypatch.setattr("akm.proxy.load_config", lambda: {
+        "proxy_max_key_tries": 2,
+        "proxy_max_retries_per_key": 0,
+        "proxy_retry_backoff_base_sec": 0.1,
+    })
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [
+        FakeStreamResponse(429, '{"error":{"message":"rate limited"}}'),
+        FakeStreamResponse(429, '{"error":{"message":"rate limited"}}'),
+    ])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
+        client=mock_client,
+    )
+    assert result["status_code"] == 502
+    assert "所有 key 均已尝试但均失败" in result["error"]
+    attempts = result.get("attempts") or []
+    assert len(attempts) >= 2
+    # exhausted 本地合成 502 不应进入 attempts；各 Key 失败记录保留
+    assert not any(a.get("phase") == "exhausted" for a in attempts)
+    assert attempts[-1]["key_alias"] == "k2"
+    assert attempts[-1]["status_code"] == 429

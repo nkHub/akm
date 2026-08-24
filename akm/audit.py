@@ -34,8 +34,9 @@ def _do_write(data: dict) -> None:
              response_body, status_code, latency_ms, error,
              request_headers,
              prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens,
-             client_request_headers, client_request_body, upstream_request_headers, upstream_response_body)
-             VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             client_request_headers, client_request_body, upstream_request_headers, upstream_response_body,
+             attempts)
+             VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data.get("provider", ""),
             data.get("key_alias", ""),
@@ -55,6 +56,7 @@ def _do_write(data: dict) -> None:
             data.get("client_request_body", ""),
             data.get("upstream_request_headers", ""),
             data.get("upstream_response_body", ""),
+            data.get("attempts", ""),
         ),
     )
     conn.commit()

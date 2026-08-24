@@ -1301,3 +1301,40 @@ async def test_run_stream_turn_pause_ask_user_path_does_not_pause(monkeypatch):
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
     assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "ask_user"]
+
+
+@pytest.mark.asyncio
+async def test_run_audit_records_attempts(monkeypatch):
+    """代理审计应透传 proxy 返回的逐次 key 尝试记录（attempts）。"""
+    audits = []
+
+    async def forward(*_args, **_kwargs):
+        return {
+            "status_code": 502,
+            "body": "",
+            "key_alias": "",
+            "provider": "",
+            "model": "gpt-4",
+            "error": "所有 key 均已尝试但均失败",
+            "latency_ms": 0,
+            "attempts": [
+                {"phase": "upstream", "status_code": 429, "key_alias": "k1",
+                 "provider": "openai", "error": "429 (key: k1)",
+                 "error_type": "http", "latency_ms": 500, "attempt": 0,
+                 "response_body": '{"error":{"message":"rate limited"}}'},
+            ],
+        }
+
+    async def audit(record):
+        audits.append(record)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    await AgentLoop(http_client=None, tool_registry=ToolRegistry(), audit_submitter=audit).run(
+        [{"role": "user", "content": "hi"}]
+    )
+
+    assert audits and audits[-1]["status_code"] == 502
+    attempts_json = audits[-1]["attempts"]
+    assert "429" in attempts_json
+    assert "k1" in attempts_json
+    assert "rate limited" in attempts_json

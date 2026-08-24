@@ -340,6 +340,37 @@ async def forward_request(
     use_fallback = False  # 精确匹配耗尽后启用通配符兜底
     selection_skip_reason = ""
 
+    # 本次请求逐次尝试的记录（attempts）：供审计「原始报错」tab 使用
+    attempts: list[dict] = []
+    attempts_max = 24  # 上限，防止极端重试/循环把审计 payload 撑爆
+
+    def _record_attempt(meta: dict, response_body: str = "") -> None:
+        """记录一次 key 尝试（成功或失败）。失败尝试附带返回内容片段。"""
+        if len(attempts) >= attempts_max:
+            return
+        entry: dict = {
+            "phase": str(meta.get("phase", "") or ""),
+            "status_code": int(meta.get("status_code", 0) or 0),
+            "key_alias": str(meta.get("key_alias", "") or ""),
+            "provider": str(meta.get("provider", "") or ""),
+            "error": str(meta.get("error", "") or ""),
+            "error_type": str(meta.get("error_type", "") or ""),
+            "latency_ms": int(meta.get("latency_ms", 0) or 0),
+            "attempt": int(meta.get("attempt", 0) or 0),
+        }
+        is_ok = bool(meta.get("ok", False))
+        if is_ok:
+            # 成功尝试不记录返回内容（上游正常响应已在其他 tab 展示，避免重复）
+            attempts.append(entry)
+            return
+        body_snippet = response_body or str(meta.get("response_body_for_log", "") or "")
+        if body_snippet:
+            # 失败片段截断，避免超大错误响应撑爆日志
+            entry["response_body"] = body_snippet[:4000]
+        if is_ok and entry["phase"].startswith("stream"):
+            entry["stream"] = True
+        attempts.append(entry)
+
     # 请求级上下文：业务 body 与插件状态分离，贯穿本次 forward 全生命周期
     ctx = RequestContext(
         body if isinstance(body, dict) else {},
@@ -348,20 +379,28 @@ async def forward_request(
     )
     model = ctx.model or model
 
-    async def _emit_on_response_meta(meta: dict):
-        """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。"""
-        if not plugin_manager:
-            return meta
-        try:
-            result = await plugin_manager.run_hook("on_response", ctx=ctx, response=meta)
-            if isinstance(result, RequestContext) and isinstance(result.response, dict):
-                return result.response
-            if isinstance(result, dict) and "response" in result:
-                return result["response"]
-        except Exception:
-            # hook 内异常由插件管理器隔离；此处双保险避免影响主链路
-            pass
-        return meta
+    async def _emit_on_response_meta(meta: dict, record: bool = True):
+        """触发插件 on_response 生命周期钩子，向插件暴露请求/响应元信息。
+
+        meta 最终值（插件改写后或原样）在 record=True 时记录进 attempts，
+        供审计「原始报错」tab 使用。record=False 仅触发插件 hook、不产生
+        尝试记录（如 exhausted 兜底的本地合成 502 没有真实 Key，不应冒充
+        一次尝试）。
+        """
+        out_meta = meta
+        if plugin_manager:
+            try:
+                result = await plugin_manager.run_hook("on_response", ctx=ctx, response=meta)
+                if isinstance(result, RequestContext) and isinstance(result.response, dict):
+                    out_meta = result.response
+                elif isinstance(result, dict) and "response" in result:
+                    out_meta = result["response"]
+            except Exception:
+                # hook 内异常由插件管理器隔离；此处双保险避免影响主链路
+                pass
+        if record:
+            _record_attempt(out_meta)
+        return out_meta
 
     # ── 插件 hook: on_request（模型名映射等预处理）──
     if plugin_manager:
@@ -401,6 +440,7 @@ async def forward_request(
                 "security_action": security_action,
                 "security_reason": security_reason,
                 "request_context": ctx,
+                "attempts": attempts,
             }
 
     # ── 模型未指定时不进入选 Key 流程 ──
@@ -419,7 +459,7 @@ async def forward_request(
             "latency_ms": 0,
             "error": err_msg,
             "api_path": api_path,
-        })
+        }, record=False)
         return {
             "status_code": 400,
             "body": json.dumps({"error": err_msg}, ensure_ascii=False),
@@ -428,6 +468,7 @@ async def forward_request(
             "model": model,
             "error": err_msg,
             "latency_ms": 0,
+            "attempts": attempts,
         }
 
     while tries < _proxy_max_key_tries():
@@ -449,6 +490,7 @@ async def forward_request(
             else:
                 err_msg = _diagnose_no_key(model, tried_aliases)
                 status_code = 502 if tried_aliases else 503
+            # select_key 本地合成状态码（无真实 Key）不进入 attempts，与 exhausted 同理
             await _emit_on_response_meta({
                 "ok": False,
                 "phase": "select_key",
@@ -459,7 +501,7 @@ async def forward_request(
                 "latency_ms": 0,
                 "error": err_msg,
                 "api_path": api_path,
-            })
+            }, record=False)
             return {
                 "status_code": status_code,
                 "body": "",
@@ -468,6 +510,7 @@ async def forward_request(
                 "model": model,
                 "error": err_msg,
                 "latency_ms": 0,
+                "attempts": attempts,
             }
 
         # 候选 Key 只有真正发往上游后才应视为已尝试；插件可能在下一阶段替换它。
@@ -561,6 +604,7 @@ async def forward_request(
                     "model": model,
                     "error": err_msg,
                     "latency_ms": 0,
+                    "attempts": attempts,
                 }
 
         # 构建上游 URL：转换后走目标路径
@@ -745,6 +789,13 @@ async def forward_request(
                             "model": model or "",
                         },
                     )
+                # 失败尝试：读取上游返回内容片段，透传给审计供「原始报错」展示
+                err_body_fragment = ""
+                try:
+                    err_raw = await resp.aread()
+                    err_body_fragment = (err_raw or b"").decode("utf-8", errors="replace")[:4000]
+                except Exception:
+                    err_body_fragment = ""
                 await resp.aclose()
                 await _emit_on_response_meta({
                     "ok": False,
@@ -760,6 +811,7 @@ async def forward_request(
                     "api_path": api_path,
                     "upstream_api_path": upstream_api_path,
                     "action": action,
+                    "response_body_for_log": err_body_fragment,
                 })
                 if action == "retry" and attempt < _proxy_max_retries_per_key():
                     await asyncio.sleep(_proxy_retry_backoff_base() * (2 ** attempt))
@@ -852,6 +904,21 @@ async def forward_request(
                 #
                 # request_context 必须回传：插件 bag（如 reverse_map）与改写后的
                 # request 都在 ctx 上；server 侧不能读入口原始 body。
+                # 流式成功：记录一次成功尝试（不读响应体，内容在 server 侧流转）。
+                _record_attempt({
+                    "ok": True,
+                    "phase": "upstream",
+                    "status_code": resp.status_code,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": "",
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                    "stream": True,
+                })
                 return {
                     "stream": True,
                     "status_code": resp.status_code,
@@ -866,6 +933,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "attempts": attempts,
                 }
 
             # 非流式客户端：直接读取上游普通 JSON 响应。
@@ -934,6 +1002,7 @@ async def forward_request(
                 "model": model,
                 "error": response_meta.get("error", "") if isinstance(response_meta, dict) else "",
                 "latency_ms": latency,
+                "attempts": attempts,
             }
 
         # 当前 key 彻底失败，日志回调记录失败尝试
@@ -962,6 +1031,8 @@ async def forward_request(
                 "error": last_error,
             })
 
+    # exhausted 兜底的本地合成 502 不进入 attempts：它没有真实 Key，
+    # 与「逐次尝试」语义不符（各 Key 的失败已在前面逐条记录）
     await _emit_on_response_meta({
         "ok": False,
         "phase": "exhausted",
@@ -972,7 +1043,7 @@ async def forward_request(
         "latency_ms": 0,
         "error": "所有 key 均已尝试但均失败",
         "api_path": api_path,
-    })
+    }, record=False)
     return {
         "status_code": 502,
         "body": "",
@@ -981,6 +1052,7 @@ async def forward_request(
         "model": model,
         "error": "所有 key 均已尝试但均失败",
         "latency_ms": 0,
+        "attempts": attempts,
     }
 
 

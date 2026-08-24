@@ -748,6 +748,7 @@ class AgentLoop:
         source: str = "chat",
         cached_tokens: int = 0,
         cache_creation_tokens: int = 0,
+        client_request_body: dict | list | None | str = None,
     ) -> None:
         """如果注册了审计回调，则写入审计日志。
 
@@ -756,6 +757,10 @@ class AgentLoop:
 
         cached_tokens / cache_creation_tokens 记录上游上下文缓存命中与写入的
         token 数（上游支持自动缓存时可能大于 0）。
+
+        client_request_body 是客户端发来的原始请求体（与 request_body 加工后的
+        上游请求体区分，对应 audit_logs.client_request_body 列）。未传时回退
+        使用 request_body，保证直连路径与 agent 路径在该列上口径一致。
         """
         if self._audit_submitter is None:
             return
@@ -772,8 +777,29 @@ class AgentLoop:
                 if len(resp_for_log) > 64000:
                     resp_for_log = resp_for_log[:32000] + f"\n...(截断，共 {len(resp_for_log)} 字符)" + resp_for_log[-32000:]
             req_body_for_log = ""
+            client_req_for_log = ""
             if save_request_body:
                 req_body_for_log = json.dumps(request_body, ensure_ascii=False)
+                client_req_src = request_body if client_request_body is None else client_request_body
+                if isinstance(client_req_src, str):
+                    client_req_for_log = client_req_src
+                else:
+                    client_req_for_log = json.dumps(client_req_src, ensure_ascii=False, default=str)
+            up_resp_for_log = ""
+            if save_response_body:
+                up_resp_for_log = str(result.get("upstream_response_body_for_log", "") or "") or resp_for_log
+                if len(up_resp_for_log) > 64000:
+                    up_resp_for_log = up_resp_for_log[:32000] + f"\n...(截断，共 {len(up_resp_for_log)} 字符)" + up_resp_for_log[-32000:]
+            attempts_for_log = ""
+            raw_attempts = result.get("attempts")
+            if raw_attempts:
+                try:
+                    if isinstance(raw_attempts, str):
+                        attempts_for_log = raw_attempts
+                    else:
+                        attempts_for_log = json.dumps(raw_attempts, ensure_ascii=False, default=str)[:120000]
+                except Exception:
+                    attempts_for_log = ""
             await self._audit_submitter({
                 "provider": str(result.get("provider", "") or ""),
                 "key_alias": str(result.get("key_alias", "") or ""),
@@ -789,6 +815,11 @@ class AgentLoop:
                 "total_tokens": total_tokens,
                 "cached_tokens": cached_tokens,
                 "cache_creation_tokens": cache_creation_tokens,
+                "client_request_headers": str(result.get("client_request_headers_for_log", "") or ""),
+                "client_request_body": client_req_for_log,
+                "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
+                "upstream_response_body": up_resp_for_log,
+                "attempts": attempts_for_log,
             })
         except Exception:
             logger.warning("[AgentLoop] 审计日志写入失败", exc_info=True)
