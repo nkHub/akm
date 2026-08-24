@@ -56,6 +56,8 @@ DEFAULTS = {
     "agent_email_enabled": False,       # 是否启用 Agent 发邮件工具（akm_send_email）
     "agent_notify_enabled": True,       # 是否启用 Agent 原生通知工具（akm_send_notification，macOS 系统通知）
     "agent_native_tools_enabled": True, # 是否启用 Agent 原生系统工具（akm_clipboard_get/akm_clipboard_set/akm_system_info/akm_open/akm_frontmost_app：剪贴板读写、系统信息、打开 URL/文件/应用、查询前台应用）
+    "agent_read_image_enabled": True,   # 是否启用 Agent 读图工具（akm_read_image：调用视觉模型描述图片）
+    "agent_vision_model": "gpt-5.6-luna",  # Agent 读图使用的视觉模型（akm_read_image）；与 image_supported_models（图片生成模型）相互独立
     "flow_human_auto_approve": True,    # 是否自动放行工作流（/v1/flow）的 human 人工审批节点（默认 true 保持模板可直接跑通；设为 false 时 human 节点挂起等待 /runs/{id}/resume 审批）
     "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
     "agent_email_smtp_port": 465,       # SMTP 端口：465 走 SSL，587 走 STARTTLS（由 agent_email_smtp_ssl 决定是否启用 SSL）
@@ -99,6 +101,8 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_email_enabled",
     "agent_notify_enabled",
     "agent_native_tools_enabled",
+    "agent_read_image_enabled",
+    "agent_vision_model",
     "agent_email_smtp_host",
     "agent_email_smtp_port",
     "agent_email_smtp_user",
@@ -235,6 +239,7 @@ def load_config() -> dict:
     merged["agent_email_enabled"] = merged.get("agent_email_enabled") is True
     merged["agent_notify_enabled"] = merged.get("agent_notify_enabled") is not False
     merged["agent_native_tools_enabled"] = merged.get("agent_native_tools_enabled") is not False
+    merged["agent_read_image_enabled"] = merged.get("agent_read_image_enabled") is not False
     merged["agent_email_smtp_ssl"] = merged.get("agent_email_smtp_ssl") is not False
     merged["agent_email_smtp_port"] = max(1, _safe_int(merged.get("agent_email_smtp_port"), 465))
     merged["agent_max_tool_calls"] = max(1, _safe_int(merged.get("agent_max_tool_calls"), 30))
@@ -292,6 +297,7 @@ def save_config(data: dict) -> None:
     current["agent_email_enabled"] = current.get("agent_email_enabled") is True
     current["agent_notify_enabled"] = current.get("agent_notify_enabled") is not False
     current["agent_native_tools_enabled"] = current.get("agent_native_tools_enabled") is not False
+    current["agent_read_image_enabled"] = current.get("agent_read_image_enabled") is not False
     current["agent_email_smtp_ssl"] = current.get("agent_email_smtp_ssl") is not False
     current["agent_email_smtp_port"] = max(1, _safe_int(current.get("agent_email_smtp_port"), 465))
     current["agent_max_tool_calls"] = max(1, _safe_int(current.get("agent_max_tool_calls"), 30))

@@ -2486,6 +2486,83 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             )
         return json.dumps({"results": results}, ensure_ascii=False)
 
+    async def read_image_tool(
+        prompt: str = "",
+        image_path: str = "",
+        image_base64: str = "",
+        model: str = "",
+    ) -> str:
+        """调用配置的视觉模型描述一张图片，返回图片的文字描述。
+
+        图片来源二选一：image_path 读取服务器本地文件；或 image_base64 直接传入
+        base64 数据（可带 data:image/...;base64, 前缀，适合直接使用对话中的
+        data URL）。本质是一次多模态 chat/completions 请求：把图片作为
+        image_url 内容块连同可选提示词发给视觉模型，返回模型生成的描述文本。
+        视觉模型取 agent_config.agent_vision_model（默认 gpt-5.6-luna；与图片生成的
+        image_supported_models 相互独立）；未启用 agent_read_image_enabled 时
+        该工具不会注入声明。
+        """
+        cfg = load_config()
+        if not cfg.get("agent_read_image_enabled", True):
+            return json.dumps(
+                {"error": "akm_read_image 未启用：请先在 config.json 的 agent_config 中设置 agent_read_image_enabled=true"},
+                ensure_ascii=False,
+            )
+        try:
+            image_file = _resolve_image(image_path, image_base64)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        filename, image_bytes, content_type = image_file
+        if not str(model or "").strip():
+            model = str(cfg.get("agent_vision_model") or "").strip()
+        if not model:
+            return json.dumps(
+                {"error": "未配置视觉模型：请在 agent_config 中设置 agent_vision_model（如 gpt-5.6-luna）"},
+                ensure_ascii=False,
+            )
+        base64_data = base64.b64encode(image_bytes).decode("ascii")
+        mime_type = content_type or "image/png"
+        image_url = f"data:{mime_type};base64,{base64_data}"
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt or "请描述这张图片的内容。"},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        ]
+        body: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+        pool = getattr(app.state, "http_client", None)
+        if pool is None or not getattr(pool, "is_route_pool", False):
+            return json.dumps({"error": "HTTP 连接池未就绪"}, ensure_ascii=False)
+        client = await pool.get_client(
+            provider="", key_alias="", model=model, api_path="chat/completions"
+        )
+        try:
+            # 函数内导入避免 akm.proxy 与 agent_runtime 之间循环依赖
+            from akm.proxy import forward_request
+
+            result = await forward_request(
+                body,
+                client,
+                api_path="chat/completions",
+                request_timeout=_image_request_timeout(),
+            )
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_read_image 失败: %s", exc)
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        if result.get("error") or int(result.get("status_code", 0) or 0) >= 400:
+            err = result.get("error") or f"HTTP {result.get('status_code')}"
+            return json.dumps({"error": err}, ensure_ascii=False)
+        # 导入复用 loop 的三协议文本提取（Chat/Responses/Messages）
+        from akm.agent_runtime.loop import _extract_text_content
+
+        text = _extract_text_content(str(result.get("body") or ""))
+        if not text:
+            return json.dumps({"error": "视觉模型未返回文本内容"}, ensure_ascii=False)
+        return json.dumps({"image": filename, "model": model, "description": text}, ensure_ascii=False)
+
     async def generate_image_tool(
         prompt: str,
         model: str = "",
@@ -2974,6 +3051,22 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             edit_image_tool,
         ),
     ]
+    if load_config().get("agent_read_image_enabled", True):
+        tools.append(ToolDef(
+            "akm_read_image",
+            "调用配置的视觉模型描述一张图片，返回图片的文字描述。图片来源二选一：image_path 传服务器本地图片文件绝对路径；或 image_base64 传图片 base64 数据（可带 data:image/...;base64, 前缀，可直接使用对话中图片的 data URL）。视觉模型取 agent_config.agent_vision_model（默认 gpt-5.6-luna，与图片生成的 image_supported_models 相互独立）；模型未支持视觉时调用会失败",
+            {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "本地图片文件的绝对路径，与 image_base64 二选一"},
+                    "image_base64": {"type": "string", "description": "图片 base64 数据（可带 data:image/...;base64, 前缀），与 image_path 二选一，优先级更高"},
+                    "prompt": {"type": "string", "description": "对图片的描述要求或提问，留空默认请模型描述图片内容"},
+                    "model": {"type": "string", "description": "视觉模型，默认取 agent_vision_model（默认 gpt-5.6-luna）"},
+                },
+                "required": [],
+            },
+            read_image_tool,
+        ))
     tools.append(
         ToolDef(
             "akm_list_tasks",
