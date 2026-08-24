@@ -27,6 +27,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；本地路径仅允许工作区或上传目录，亦可传入 base64 数据 |
+| `akm_read_image` | 调用配置的视觉模型描述一张图片（图片来源 `image_path` 本地文件或 `image_base64` data URL），返回图片的文字描述；本质是一次多模态 chat/completions 请求，视觉模型取 `agent_config.agent_vision_model`（默认 `gpt-5.6-luna`，与图片生成的 `image_supported_models` 相互独立） |
 | `akm_read_file` | 读取工作区内的文本文件（可指定 `offset` / `limit`），返回内容与起始行号；单文件超 50MB 拒绝，单次返回超 60KB 截断并标记 |
 | `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构 |
 | `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表；遍历跳过隐藏目录与 `node_modules`/`.git`/`build` 等依赖构建目录，并设条目预算防止全盘递归（超限时标记 `truncated`） |
@@ -83,6 +84,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_email_enabled` | `false` | 是否启用 Agent 发邮件工具（`akm_send_email`），默认关闭需显式开启并配置 SMTP |
 | `agent_notify_enabled` | `true` | 是否启用 Agent 原生通知工具（`akm_send_notification`），默认开启；通过菜单栏启动 AKM 时可弹出 macOS 系统通知 |
 | `agent_native_tools_enabled` | `true` | 是否启用 Agent 原生系统工具（`akm_clipboard_get` / `akm_clipboard_set` / `akm_system_info` / `akm_open` / `akm_frontmost_app`），默认开启；直接调用本机剪贴板、系统信息与前台应用（pyobjc，不受 akm_run_shell 沙箱约束） |
+| `agent_read_image_enabled` | `true` | 是否启用 Agent 读图工具（`akm_read_image`：调用视觉模型描述图片），默认开启；关闭后不注册该工具 |
+| `agent_vision_model` | `gpt-5.6-luna` | `akm_read_image` 使用的视觉模型（与图片生成的 `image_supported_models` 相互独立） |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
 | `agent_email_smtp_port` | `465` | SMTP 端口：465 走 SSL，587 走 STARTTLS（由 `agent_email_smtp_ssl` 决定是否用 SSL） |
 | `agent_email_smtp_user` | `""` | SMTP 登录账号；`agent_email_from` 留空时默认作为发件人 |
