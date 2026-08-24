@@ -274,6 +274,24 @@ def _build_client_headers_for_log(request: Request) -> str:
     return json.dumps(redact_headers(raw), ensure_ascii=False)
 
 
+def _attempts_to_log(result: dict) -> str:
+    """把 proxy 返回的逐次 key 尝试记录（attempts）序列化成审计日志用 JSON 文本。
+
+    proxy 在每次尝试（成功或失败）后收集 key/provider/status/error/latency，
+    result['attempts'] 为列表。这里转成稳定 JSON 落库，供「原始报错」tab 展示
+    多个 key 各自的状态码与失败返回内容。
+    """
+    raw = result.get("attempts")
+    if not raw:
+        return ""
+    try:
+        if isinstance(raw, str):
+            return raw[:120000]
+        return json.dumps(raw, ensure_ascii=False, default=str)[:120000]
+    except Exception:
+        return ""
+
+
 def _safe_request_body_for_log(body) -> str:
     """把请求体转换成适合审计日志落库的稳定 JSON 文本。
 
@@ -2924,6 +2942,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "client_request_body": client_request_body_for_log,
                         "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
                         "upstream_response_body": raw_body_str if save_response_body else "",
+                        "attempts": _attempts_to_log(result),
                     })
                     logger.info(f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)")
 
@@ -3001,6 +3020,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             "client_request_body": client_request_body_for_log,
             "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
             "upstream_response_body": str(result.get("upstream_response_body_for_log", "") or "") if save_response_body else "",
+            "attempts": _attempts_to_log(result),
         })
 
         if result["key_alias"]:
