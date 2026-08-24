@@ -1,6 +1,6 @@
 {
   "name": "agent_chat",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "has_menu": false,
   "category": "app",
   "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
