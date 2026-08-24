@@ -128,6 +128,19 @@ def _save_uploaded_image(data: bytes, content_type: str) -> str:
     return str(path)
 
 
+def _agent_upload_http_url(filename: str) -> str:
+    """把上传目录中的文件名拼成可访问的 HTTP 地址，用于替换本地绝对路径。
+
+    服务端 ``GET /agent-uploads/{filename}`` 路由按文件名提供
+    ``agent_upload_dir`` 目录下文件的访问。提示文本中使用该地址而不是
+    本机绝对路径：既便于前端直接展示图片，也避免把本地磁盘路径暴露给
+    模型上下文。解析时 akm_read_image / akm_edit_image 会按文件名回退到
+    agent_upload_dir 命中真实落盘文件，依旧可用。
+    """
+    port = int(load_config().get("server_port", 8800) or 8800)
+    return f"http://127.0.0.1:{port}/agent-uploads/{filename}"
+
+
 async def _append_file_messages(messages: list[dict], files: list, model: str = "") -> tuple[list[dict] | None, str]:
     """读取上传文件，并作为独立的 user 消息追加到对话末尾。
 
@@ -160,14 +173,21 @@ async def _append_file_messages(messages: list[dict], files: list, model: str = 
             if not vision_ok:
                 # 模型不支持视觉：图片不进入上下文，仅提示模型用 akm_read_image 读图
                 saved_path = ""
+                saved_url = ""
                 try:
                     saved_path = _save_uploaded_image(data, content_type)
+                    saved_url = _agent_upload_http_url(Path(saved_path).name)
                 except OSError as exc:
                     logger.warning("[Agent] 保存上传图片失败: %s", exc)
                 text = f"用户上传了图片文件：{filename}。当前模型不支持直接视觉输入，无法直接查看该图片。"
-                if saved_path:
+                if saved_url:
                     text += (
-                        f"\n图片已保存至：{saved_path}。如需了解图片内容，"
+                        f"\n图片已保存至：{saved_url}。如需了解图片内容，"
+                        f"请调用 akm_read_image 工具并传入 image_path={saved_url}。"
+                    )
+                elif saved_path:
+                    text += (
+                        f"\n图片已保存至（仅本地可见）：{saved_path}。如需了解图片内容，"
                         f"请调用 akm_read_image 工具并传入 image_path={saved_path}。"
                     )
                 else:
@@ -176,15 +196,22 @@ async def _append_file_messages(messages: list[dict], files: list, model: str = 
                 continue
             b64 = base64.b64encode(data).decode("ascii")
             saved_path = ""
+            saved_url = ""
             try:
                 saved_path = _save_uploaded_image(data, content_type)
+                saved_url = _agent_upload_http_url(Path(saved_path).name)
             except OSError as exc:
                 # 落盘失败不影响图片进入上下文，只是不提供编辑路径
                 logger.warning("[Agent] 保存上传图片失败: %s", exc)
             text = f"用户上传了图片文件：{filename}"
-            if saved_path:
+            if saved_url:
                 text += (
-                    f"\n图片已保存至：{saved_path}，如需编辑该图片，"
+                    f"\n图片已保存至：{saved_url}，如需编辑该图片，"
+                    f"可调用 akm_edit_image 工具并传入 image_path={saved_url}。"
+                )
+            elif saved_path:
+                text += (
+                    f"\n图片已保存至（仅本地可见）：{saved_path}，如需编辑该图片，"
                     f"可调用 akm_edit_image 工具并传入 image_path={saved_path}。"
                 )
             new_messages.append({

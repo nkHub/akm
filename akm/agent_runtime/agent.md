@@ -86,7 +86,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_native_tools_enabled` | `true` | 是否启用 Agent 原生系统工具（`akm_clipboard_get` / `akm_clipboard_set` / `akm_system_info` / `akm_open` / `akm_frontmost_app`），默认开启；直接调用本机剪贴板、系统信息与前台应用（pyobjc，不受 akm_run_shell 沙箱约束） |
 | `agent_read_image_enabled` | `true` | 是否启用 Agent 读图工具（`akm_read_image`：调用视觉模型描述图片），默认开启；关闭后不注册该工具 |
 | `agent_vision_model` | `gpt-5.6-luna` | `akm_read_image` 使用的视觉模型（与图片生成的 `image_supported_models` 相互独立） |
-| `agent_no_vision_models` | `deepseek-v4-flash,deepseek-v4-pro` | 不支持直接视觉输入、需降级走 `akm_read_image` 读图的模型列表（逗号分隔）。默认所有模型都把上传图片直接塞入对话（原生 image_url 最优）；仅命中该列表的模型不再接收图片，改为文本提示（图片落盘路径 + 引导调用 `akm_read_image`），避免上游对 `image_url` 返回 400 |
+| `agent_no_vision_models` | `deepseek-v4-flash,deepseek-v4-pro` | 不支持直接视觉输入、需降级走 `akm_read_image` 读图的模型列表（逗号分隔）。默认所有模型都把上传图片直接塞入对话（原生 image_url 最优）；仅命中该列表的模型不再接收图片，改为文本提示（图片 HTTP 地址 + 引导调用 `akm_read_image`），避免上游对 `image_url` 返回 400 |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
 | `agent_email_smtp_port` | `465` | SMTP 端口：465 走 SSL，587 走 STARTTLS（由 `agent_email_smtp_ssl` 决定是否用 SSL） |
 | `agent_email_smtp_user` | `""` | SMTP 登录账号；`agent_email_from` 留空时默认作为发件人 |
@@ -184,7 +184,7 @@ curl -s http://127.0.0.1:8788/v1/agent \
 
 `/v1/agent` 支持 `multipart/form-data` 上传文件。`messages` 改为 JSON 字符串表单字段，`tools` 等其余字段同纯 JSON 方式；`files` 字段可携带多个文件，但单次最多 8 个、总大小最多 20MB。上传的文件会被读取并作为独立的 user 消息追加到对话末尾：图片（`image/*`）转成 base64 的 `image_url` 内容块，其他文件按 UTF-8 读取为文本内容，无法解码的二进制文件会返回 400。纯 JSON 请求方式保持不变。
 
-上传的图片还会同时落盘到 `agent_upload_dir` 配置的目录（默认 `~/.akm/cache`，可通过 `~/.akm/config.json` 修改，支持 `~` 展开；文件名为随机 UUID），并在追加的 user 消息文本中给出绝对路径提示。模型可据此调用 `akm_edit_image` 传入 `image_path` 编辑该图片。该目录不会自动清理，请根据运行环境定期清理。
+上传的图片还会同时落盘到 `agent_upload_dir` 配置的目录（默认 `~/.akm/cache`，可通过 `~/.akm/config.json` 修改，支持 `~` 展开；文件名为随机 UUID），并在追加的 user 消息文本中给出可通过 `GET /agent-uploads/{filename}` 访问的 HTTP 地址（`http://127.0.0.1:{port}/agent-uploads/...`）而非本机绝对路径，方便前端直接展示且不向模型暴露本地磁盘路径。模型可据此调用 `akm_edit_image` / `akm_read_image` 传入 `image_path` 访问该图片（按文件名回退命中落盘文件）。该目录不会自动清理，请根据运行环境定期清理。`akm_read_image` 的视觉请求是工具内部独立的上游调用，与主对话请求一样会写入审计日志（来源标记为 `chat`），落库的请求体中的图片 base64 会被脱敏为占位文本，避免大体积图片内容入库。
 
 ```bash
 curl -X POST http://127.0.0.1:8788/v1/agent \

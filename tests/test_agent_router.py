@@ -82,9 +82,13 @@ async def test_multipart_image_appended_as_image_url(monkeypatch, tmp_path):
     assert isinstance(content, list)
     expected_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
     assert content[1] == {"type": "image_url", "image_url": {"url": expected_url}}
-    # 文本提示应包含临时落盘路径，供 akm_edit_image 使用
+    # 文本提示应包含可访问的 HTTP 地址（/agent-uploads/...），供 akm_edit_image 使用，
+    # 而不是暴露本机绝对路径
     assert "图片已保存至：" in content[0]["text"]
+    assert "/agent-uploads/" in content[0]["text"]
+    assert "image_path=http://" in content[0]["text"]
     assert "akm_edit_image" in content[0]["text"]
+    assert "cache" not in content[0]["text"]
 
 
 def test_supports_vision_defaults_true(monkeypatch):
@@ -138,7 +142,9 @@ async def test_multipart_image_degraded_for_no_vision_model(monkeypatch, tmp_pat
     assert isinstance(content, str)
     assert "不支持直接视觉输入" in content
     assert "akm_read_image" in content
-    assert "image_path=" in content
+    assert "image_path=http://" in content
+    assert "/agent-uploads/" in content
+    assert "cache" not in content
     # 图片仍落盘，供 akm_read_image 读取
     import pathlib
     saved = [p for p in (tmp_path / "cache").iterdir() if p.suffix == ".png"]
@@ -164,6 +170,27 @@ async def test_uploaded_image_saved_to_akm_cache(monkeypatch, tmp_path):
     assert str(path).startswith(str(tmp_path / "cache"))
     assert path.suffix == ".png"
     assert path.read_bytes() == png_bytes
+
+
+@pytest.mark.asyncio
+async def test_agent_upload_http_url_builds_localhost_url(monkeypatch):
+    """_agent_upload_http_url 应拼出 http://127.0.0.1:{port}/agent-uploads/{filename}。"""
+    from akm.agent_runtime import router as router_module
+    from akm.agent_runtime.router import _agent_upload_http_url
+
+    monkeypatch.setattr(router_module, "load_config", lambda: {"server_port": 9911})
+    url = _agent_upload_http_url("abc123.png")
+    assert url == "http://127.0.0.1:9911/agent-uploads/abc123.png"
+
+
+@pytest.mark.asyncio
+async def test_agent_upload_http_url_default_port(monkeypatch):
+    """未配置 server_port 时应回落到默认端口 8800。"""
+    from akm.agent_runtime import router as router_module
+    from akm.agent_runtime.router import _agent_upload_http_url
+
+    monkeypatch.setattr(router_module, "load_config", lambda: {})
+    assert _agent_upload_http_url("x.png") == "http://127.0.0.1:8800/agent-uploads/x.png"
 
 
 @pytest.mark.asyncio
