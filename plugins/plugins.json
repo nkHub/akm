@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-21T11:30:49+0800",
+  "generated_at": "2026-08-24T17:32:54+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -11,13 +11,13 @@
       "size": 257276
     },
     "agent_chat": {
-      "version": "0.1.7",
+      "version": "0.1.8",
       "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
       "category": "app",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.7.zip",
-      "sha256": "4876e911884fa33249ed639a9034c6507b990722422d299b17ac5185aaf33059",
-      "size": 1236299
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.8.zip",
+      "sha256": "97ea97f611dfa42a8a59119df2be270d6ff9d007635ab027c841811b1ef92e37",
+      "size": 1240310
     },
     "budget_gate": {
       "version": "0.1.0",
@@ -74,13 +74,13 @@
       "size": 2878
     },
     "markdown_kb": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
       "category": "app",
       "has_menu": true,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.0.zip",
-      "sha256": "97baaf5aecfc75c7578f13e8b6b35ebfd682a3deccd112ac7e1be0f917df26b2",
-      "size": 1121084
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.1.zip",
+      "sha256": "35930bc6b1a2f895b3d2994fe9e06d11e7be9f021902889f4acec80b3bc95aa6",
+      "size": 1122388
     },
     "mcp_tool_gateway": {
       "version": "0.1.0",
