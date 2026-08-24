@@ -1262,10 +1262,28 @@ async def upload_markdown(
 
 
 @router.get("/files")
-async def list_markdown_files():
-    """列出当前知识库中的 Markdown 文件。"""
+async def list_markdown_files(workspace_root: str = ""):
+    """列出当前知识库中的 Markdown 文件；传入 workspace_root 时仅返回绑定到该目录的文件。"""
     plugin = _get_plugin()
-    return plugin.list_files()
+    return plugin.list_files(workspace_root=workspace_root)
+
+
+@router.get("/files/{name}")
+async def read_markdown_file(name: str):
+    """读取单个 Markdown 文件的全文内容（需先有该文件的清单条目）。"""
+    plugin = _get_plugin()
+    return plugin.read_file_content(name)
+
+
+@router.post("/files/write")
+async def write_markdown_file(payload: dict = Body(...)):
+    """按文本内容写入（新建或覆盖）单个 Markdown 文件，并同步重建其索引。"""
+    plugin = _get_plugin()
+    return await plugin.write_markdown_content(
+        str((payload or {}).get("file_name", "") or ""),
+        str((payload or {}).get("content", "") or ""),
+        str((payload or {}).get("workspace_root", "") or ""),
+    )
 
 
 @router.post("/files/bind-workspace")
@@ -1669,10 +1687,11 @@ class Plugin(PluginBase):
             "ready": True,
         }
 
-    def list_files(self) -> dict:
+    def list_files(self, workspace_root: str = "") -> dict:
         """返回当前知识库中的 Markdown 文件列表。
 
         这里同时附带是否已进入索引的标记，方便前端后续区分“已上传但未重建”与“已入库”。
+        workspace_root 传入时仅返回绑定到该工作目录的文件（空串返回全部）。
         """
         self._ensure_runtime_ready()
         indexed_documents = self._store.list_documents()
@@ -1683,10 +1702,16 @@ class Plugin(PluginBase):
                 continue
             chunk_counts_by_doc[doc_id] = chunk_counts_by_doc.get(doc_id, 0) + 1
 
+        # 预先归一化过滤条件，与下方逐条比较时使用的归一化结果保持一致。
+        filter_root = self._normalize_workspace_root(str(workspace_root or ""))
+
         files = []
         for entry in self._load_doc_manifest():
             path = self._doc_storage_path(entry)
             if not path.exists():
+                continue
+            # 指定了工作目录时，跳过不属于该目录的条目。
+            if filter_root and self._normalize_workspace_root(entry.get("workspace_root") or "") != filter_root:
                 continue
             stat = path.stat()
             payload = path.read_bytes()
@@ -2148,6 +2173,39 @@ class Plugin(PluginBase):
         latest["applied"] = True
         latest["applied_changes"] = applied
         return latest
+
+    def read_file_content(self, file_name: str, workspace_root: str = "", doc_id: str = "") -> dict:
+        """读取单个 Markdown 文件的全文内容。
+
+        与 list_files（只返回元数据）互补，供客户端读全文后编辑或用作文档内容查看。
+        按 doc_id 或 (file_name, workspace_root) 定位清单条目，再读物理存储文件。
+        """
+        self._ensure_runtime_ready()
+        entry = self._find_doc_entry(doc_id=doc_id, file_name=file_name, workspace_root=workspace_root)
+        target = self._doc_storage_path(entry)
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="文档存储文件不存在")
+        return {
+            "ok": True,
+            "doc_id": entry.get("doc_id") or "",
+            "file_name": entry.get("file_name") or "",
+            "workspace_root": self._normalize_workspace_root(entry.get("workspace_root") or ""),
+            "content": target.read_text("utf-8"),
+            "size_bytes": target.stat().st_size,
+        }
+
+    async def write_markdown_content(self, file_name: str, content: str, workspace_root: str = "") -> dict:
+        """按文本内容写入（新建或覆盖）单个 Markdown 文件。
+
+        落盘语义与 /files/upload 完全一致（复用 _save_markdown_payload）：
+        - 只校验 .md 扩展名、文件名安全与非空内容，不做切片建索引；
+        - 写入后如需检索需另行调用 /rebuild 或 /rebuild-file 重建索引。
+        """
+        self._ensure_runtime_ready()
+        if not content:
+            raise HTTPException(status_code=400, detail="写入内容不能为空")
+        payload = content.encode("utf-8")
+        return self._save_markdown_payload(str(file_name or "").strip(), payload, workspace_root)
 
     async def save_markdown_file(self, file: UploadFile, workspace_root: str = "") -> dict:
         """保存单个上传的 Markdown 文件并返回最小元信息。"""
@@ -4683,25 +4741,33 @@ class Plugin(PluginBase):
         return reranked
 
     async def _embed_texts(self, texts: list[str], model: str) -> list[list[float]]:
-        """通过本地 AKM `/v1/embeddings` 生成向量。"""
+        """通过本地 AKM `/v1/embeddings` 生成向量。
+
+        为保证兼容性，按每批 10 条拆分请求（超过 10 条一次 POST 会被上游网关
+        以 502 拒绝），并把各批结果按输入顺序合并返回。
+        """
         if not texts:
             return []
 
-        payload = {"model": model, "input": texts}
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(f"{self._akm_base_url()}/embeddings", json=payload)
+        # 单批最大条数：超过该值会被 AKM embedding 网关以 502 拒绝。
+        batch_size = 10
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), batch_size):
+            batch_texts = texts[start:start + batch_size]
+            payload = {"model": model, "input": batch_texts}
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(f"{self._akm_base_url()}/embeddings", json=payload)
 
-        try:
-            data = response.json()
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=502, detail="embedding 接口返回了非法 JSON") from exc
+            try:
+                data = response.json()
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=502, detail="embedding 接口返回了非法 JSON") from exc
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=502, detail=data.get("detail") or data.get("error") or "embedding 请求失败")
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail=data.get("detail") or data.get("error") or "embedding 请求失败")
 
-        vectors = []
-        for item in data.get("data", []):
-            vectors.append([_safe_float(v, 0.0) for v in item.get("embedding", [])])
+            for item in data.get("data", []):
+                vectors.append([_safe_float(v, 0.0) for v in item.get("embedding", [])])
         return vectors
 
     async def _generate_answer(self, question: str, hits: list[dict], model: str) -> str:

@@ -506,3 +506,124 @@ async def test_stream_passes_cancel_check_to_run_stream():
     assert cancel_check() is False
     # 收到了流式内容
     assert chunks
+
+
+# ── /v1/agent/compact 手动压缩 ──
+
+
+class _FakeCompactingLoop(_FakeAgentLoop):
+    """支持 compact_messages 的假 Agent Loop，记录调用参数并返回固定结果。"""
+
+    def __init__(self):
+        super().__init__()
+        self.compact_calls = []
+
+    async def compact_messages(self, messages, *, model="", api_path="chat/completions"):
+        self.compact_calls.append({"messages": messages, "model": model, "api_path": api_path})
+        return {
+            "ok": True,
+            "messages": [{"role": "system", "content": "以下是对较早对话历史的摘要：\n摘要内容"}, {"role": "user", "content": "最近一条"}],
+            "summary": "摘要内容",
+            "removed_count": len(messages) - 1,
+            "before_count": len(messages),
+            "after_count": 2,
+            "estimated_tokens": 100,
+        }
+
+
+@pytest.mark.asyncio
+async def test_compact_endpoint_proxies_to_loop():
+    """POST /v1/agent/compact 应把 messages/model 交给 AgentLoop.compact_messages，并原样返回结果。"""
+    # 覆盖 autouse fixture 安装的普通 FakeLoop，换成支持压缩的版本
+    app.state.agent_loop = _FakeCompactingLoop()
+    loop = app.state.agent_loop
+    messages = [
+        {"role": "user", "content": "较早的问题"},
+        {"role": "assistant", "content": "较早的回答"},
+        {"role": "user", "content": "最近的问题"},
+    ]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent/compact",
+            json={"model": "gpt-4o", "messages": messages},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["summary"] == "摘要内容"
+    assert data["removed_count"] == len(messages) - 1
+    assert len(loop.compact_calls) == 1
+    assert loop.compact_calls[0]["model"] == "gpt-4o"
+    assert loop.compact_calls[0]["api_path"] == "chat/completions"
+    assert loop.compact_calls[0]["messages"] == messages
+
+
+@pytest.mark.asyncio
+async def test_compact_endpoint_requires_messages():
+    """缺少 messages 字段应返回 400。"""
+    app.state.agent_loop = _FakeCompactingLoop()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/v1/agent/compact", json={"model": "gpt-4o"})
+    assert resp.status_code == 400
+    assert "messages" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_compact_endpoint_rejects_invalid_json():
+    """非 JSON 请求体应返回 400。"""
+    app.state.agent_loop = _FakeCompactingLoop()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent/compact",
+            content="not-json",
+            headers={"Content-Type": "application/json"},
+        )
+    assert resp.status_code == 400
+    assert "JSON" in resp.json()["detail"] or "JSON" in json.dumps(resp.json())
+
+
+@pytest.mark.asyncio
+async def test_compact_endpoint_respects_auth(monkeypatch):
+    """配置 token 后无 token 请求应返回 401。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config", lambda: {"agent_api_token": "secret123"}
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent/compact",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 401
+    assert "未授权" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_compact_endpoint_503_when_loop_missing():
+    """Agent Loop 未初始化时应返回 503。"""
+    app.state.agent_loop = None
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent/compact",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 503
+    assert "未初始化" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_compact_endpoint_501_when_loop_unsupported():
+    """Agent Loop 不支持 compact_messages 时应返回 501。"""
+    # autouse fixture 的 _FakeAgentLoop 没有 compact_messages
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent/compact",
+            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+    assert resp.status_code == 501
+    assert "不支持手动压缩" in resp.json()["detail"]

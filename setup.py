@@ -40,6 +40,7 @@ DATA_FILES = [
         "akm/static/chat-viewer.js",
         "akm/static/json-viewer.js",
         "akm/static/json-worker.js",
+        "akm/static/index.html",
     )),
 ]
 

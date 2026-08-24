@@ -306,6 +306,53 @@ async def agent(request: Request):
         reset_request_subagent_depth(depth_token)
     return JSONResponse(content=result.to_dict())
 
+
+@router.post("/v1/agent/compact")
+async def compact_agent_context(request: Request):
+    """手动压缩当前会话上下文，返回压缩后的消息列表。
+
+    与 /v1/agent 自动压缩不同，这里由客户端显式触发：保留最近的
+    agent_keep_recent_messages 条消息，更早的历史交给 LLM 生成摘要替换。
+    仅返回压缩结果（不会自动回写任何会话文件），回写由前端决定。
+
+    Body（JSON）:
+        messages: 当前对话历史（Chat 格式 messages 数组）
+        model（可选）: 用于生成摘要的模型，留空由服务端自动选 Key
+        api_path（可选）: 上游协议格式，默认 chat/completions
+
+    Returns:
+        与 AgentLoop.compact_messages 相同结构的 JSON。
+    """
+    auth_error = await _check_agent_auth(request)
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "请求体不是合法的 JSON"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"detail": "请求体必须是 JSON 对象"})
+
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return JSONResponse(status_code=400, content={"detail": "缺少 messages 参数"})
+    model = str(body.get("model", "") or "")
+    try:
+        api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
+    except (TypeError, ValueError):
+        api_path = "chat/completions"
+
+    agent_loop = getattr(request.app.state, "agent_loop", None)
+    if agent_loop is None:
+        return JSONResponse(status_code=503, content={"detail": "Agent Loop 尚未初始化"})
+    if not hasattr(agent_loop, "compact_messages"):
+        return JSONResponse(status_code=501, content={"detail": "Agent Loop 不支持手动压缩"})
+
+    result = await agent_loop.compact_messages(messages, model=model, api_path=api_path)
+    return JSONResponse(content=result)
+
+
 def _agent_stream(
     agent_loop,
     request: Request,

@@ -62,6 +62,29 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
 
 
 @pytest.mark.asyncio
+async def test_run_stream_does_not_leak_upstream_json_when_content_null(monkeypatch):
+    """模型仅输出思考（content 为 null、无 tool_calls）时，final 的 content 应为空串，
+    而非把上游原始 JSON 响应体兜到底层当正文下发。"""
+    response = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"reasoning_content": "深度思考"}}]}),
+        _sse({"choices": [{"delta": {"reasoning_content": "继续推演"}}]}) + _sse({"usage": {"total_tokens": 5}}),
+        "data: [DONE]\n\n",
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200, "provider": "test", "key_alias": "key"}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
+
+    final = events[-1]["data"]["final_message"]
+    # 正文保持空串，不允许回落为 response_body 这样的上游 JSON。
+    assert final["content"] == ""
+    assert final["reasoning_content"] == "深度思考继续推演"
+
+
+@pytest.mark.asyncio
 async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
     """分片 tool_calls 要在首轮结束后执行，并作为下一轮的上下文回传。"""
     ToolRegistry.reset()
@@ -1175,8 +1198,8 @@ async def test_run_stream_ask_user_emits_event(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    # turn_start → tool_call → tool_result → ask_user，随后结束（无 final）
     assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "ask_user"]
+    # turn_start → tool_call → tool_result → ask_user，随后结束（无 final）
     ask = events[-1]["data"]
     assert ask["question"] == "需要确认仓库名"
     assert ask["options"] == []
@@ -1185,6 +1208,58 @@ async def test_run_stream_ask_user_emits_event(monkeypatch):
     # ask_user 事件携带完整 messages，供客户端在用户回答后续跑
     assert any(m.get("role") == "tool" for m in ask["messages"])
     assert response.closed is True
+
+
+@pytest.mark.asyncio
+async def test_compact_messages_public_method(monkeypatch):
+    """compact_messages 应强制压缩早期历史，返回摘要、移除数与估算 token。
+
+    通过极大的 max_context_tokens 关闭自动压缩兜底，验证手动接口
+    以 force=True 触发压缩时不依赖 token 阈值。
+    """
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", _big_config)
+    summary_calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        if body["messages"][0].get("content") == "你是一个对话摘要助手。":
+            summary_calls.append(body)
+            return {"status_code": 200, "body": '{"choices":[{"message":{"content":"早前对话要点"}}]}'}
+        raise AssertionError("手动压缩不应触发非摘要的 LLM 调用")
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    messages = [
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": "问题一"},
+        {"role": "assistant", "content": "回答一"},
+        {"role": "user", "content": "问题二"},
+        {"role": "assistant", "content": "回答二"},
+        {"role": "user", "content": "当前问题"},
+    ]
+    result = await loop.compact_messages(messages, model="gpt-4o")
+
+    assert result["ok"] is True
+    assert result["before_count"] == len(messages)
+    assert result["removed_count"] == len(messages) - 2, "保留最近 keep_recent=2 条，其余全部移除"
+    assert result["after_count"] == 3
+    assert result["summary"] == "早前对话要点"
+    # 摘要消息应替换早期历史，保留尾部
+    assert result["messages"][0]["role"] == "system"
+    assert "摘要" in result["messages"][0]["content"]
+    assert result["messages"][1:] == messages[-2:]
+    assert result["estimated_tokens"] >= 0
+    assert len(summary_calls) == 1
+    assert summary_calls[0]["model"] == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_compact_messages_rejects_empty_input(monkeypatch):
+    """空 messages 应返回 ok=False 而不抛异常。"""
+    monkeypatch.setattr("akm.agent_runtime.loop.load_config", _big_config)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.compact_messages([])
+    assert result["ok"] is False
+    assert "不能为空" in result["detail"]
 
 
 @pytest.mark.asyncio

@@ -1422,6 +1422,81 @@ class _IncrementalSSEUsageTracker:
         _update_sse_usage_state(self._state, payload)
 
 
+class _SSENullEventFilter:
+    """过滤上游 SSE 流中的裸 `data: null` 事件，避免透传后导致客户端解析失败。
+
+    背景：agentrouter.org 等部分中转上游会在正常 chunk 之间插入一行
+    `data: null`（SSE data 字段值为 JSON null）。OpenAI SSE 约定 data 应为
+    JSON 对象或 `[DONE]`，裸 `null` 会让 opencode/@ai-sdk 在顶层 zod 校验失败，
+    表现为 `Type validation failed: Value: null` / `invalid_union expected object
+    received null path=[]`。
+
+    实现按 SSE 事件维度处理：把事件内的连续 field 行先缓冲进 `_event_lines`，
+    遇到空行（事件结束）时才决定整段输出或丢弃——只要该事件含 `data: null`
+    就整事件丢弃（含其分隔空行），否则原样输出。这样即使事件带 `event:` 前缀
+    也能被正确整段丢弃。事件通常只有一行 data，缓冲开销可忽略，仍近似实时透传。
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""  # 未闭合行缓冲，处理跨 chunk 边界的 SSE 行
+        self._event_lines: list[str] = []  # 当前事件内已收到、尚未输出的 field 行
+        self._event_bad = False  # 当前事件是否含 data 值为 null 的字段
+
+    def feed(self, chunk: bytes | str) -> list[bytes]:
+        """喂入一块字节，返回应透传的过滤后字节列表（空事件已剔除）。"""
+        text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+        if not text:
+            return []
+        self._buffer += text
+        out: list[bytes] = []
+        start = 0
+        while True:
+            idx = self._buffer.find("\n", start)
+            if idx == -1:
+                break
+            self._handle_line(self._buffer[start:idx], out)
+            start = idx + 1
+        self._buffer = self._buffer[start:]
+        return out
+
+    def flush(self) -> list[bytes]:
+        """处理流结束时缓冲区残留的最后一个未闭合行。"""
+        if not self._buffer:
+            return []
+        out: list[bytes] = []
+        self._handle_line(self._buffer, out, final=True)
+        self._buffer = ""
+        return out
+
+    def _handle_line(self, line: str, out: list[bytes], final: bool = False) -> None:
+        # 空行 = SSE 事件分隔符（一个事件以空行结束）。
+        if line in ("", "\r"):
+            if self._finish_event(out):
+                # 事件被判定丢弃（含 data:null），其分隔空行一并吞掉。
+                return
+            out.append(b"\n")
+            return
+        stripped = line.strip()
+        if stripped.startswith("data:"):
+            payload = stripped[len("data:"):].strip()
+            # 上游发的裸 `data: null`（JSON null），标记当前事件待丢弃。
+            if payload == "null":
+                self._event_bad = True
+        self._event_lines.append(line)
+        if final:
+            self._finish_event(out)
+
+    def _finish_event(self, out: list[bytes]) -> bool:
+        """结束当前事件：若事件含 data:null 则整段丢弃并返回 True，否则原样输出。"""
+        bad = self._event_bad
+        if not bad:
+            for ev_line in self._event_lines:
+                out.append(ev_line.encode("utf-8") + b"\n")
+        self._event_lines = []
+        self._event_bad = False
+        return bad
+
+
 def _estimate_tokens_light(request_body: dict, response_body: str = "") -> dict:
     """轻量 token 估算兜底（仅在真实 usage 缺失时使用）。
 
@@ -2247,6 +2322,19 @@ async def settings_page(request: Request):
     return HTMLResponse(_render_template("settings.html", title="设置", active="settings"))
 
 
+@app.get("/")
+async def landing_page(request: Request):
+    """根路径启动页：返回 akm/static/index.html（Ecology 启动页）。
+
+    静态目录已在 app.mount("/static") 挂载，这里仅让 127.0.0.1:{port}/ 
+    直接指向该文件，避免浏览器访问根路径得到 404。
+    """
+    index_path = os.path.join(_static_dir, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return JSONResponse({"error": "启动页文件缺失"}, status_code=404)
+
+
 @app.get("/about")
 async def about_page(request: Request):
     """关于页面"""
@@ -2701,23 +2789,37 @@ async def _handle_ai_request(request: Request, api_path: str):
                             if stop_stream:
                                 break
                     else:
-                        async for chunk in _iter_upstream():
-                            raw_capture.append(chunk)
-                            if _rev_state is not None and _dfg is not None:
-                                text = chunk.decode("utf-8", errors="replace")
-                                processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
-                                if not processed:
-                                    continue
-                                chunk = processed.encode("utf-8")
-                            guarded_chunks, stop_stream = _guard_stream_chunk(chunk)
-                            for guarded_chunk in guarded_chunks:
-                                if _first_byte_at is None:
-                                    _first_byte_at = time.time()
-                                capture.append(guarded_chunk)
-                                usage_tracker.append(guarded_chunk)
-                                yield guarded_chunk
-                            if stop_stream:
-                                break
+                        # 纯字节透传路径：过滤上游偶发的裸 `data: null` 事件，
+                        # 避免透传后 opencode/@ai-sdk 解析顶层 null 报
+                        # `invalid_union expected object received null path=[]`。
+                        sse_null_filter = _SSENullEventFilter()
+
+                        async def _pump_sse(streamer):
+                            """对过滤后的每个通透 chunk 执行 reverse→guard→yield。"""
+                            nonlocal _first_byte_at
+                            for _chunk in streamer:
+                                if _rev_state is not None and _dfg is not None:
+                                    text = _chunk.decode("utf-8", errors="replace")
+                                    processed = _dfg.reverse_stream_chunk(text, _rev_state, reverse_map=_rev_map)
+                                    if not processed:
+                                        continue
+                                    _chunk = processed.encode("utf-8")
+                                guarded_chunks, stop_stream = _guard_stream_chunk(_chunk)
+                                for guarded_chunk in guarded_chunks:
+                                    if _first_byte_at is None:
+                                        _first_byte_at = time.time()
+                                    capture.append(guarded_chunk)
+                                    usage_tracker.append(guarded_chunk)
+                                    yield guarded_chunk
+                                if stop_stream:
+                                    return
+
+                        async for raw_chunk in _iter_upstream():
+                            raw_capture.append(raw_chunk)
+                            async for out_chunk in _pump_sse(sse_null_filter.feed(raw_chunk)):
+                                yield out_chunk
+                        async for out_chunk in _pump_sse(sse_null_filter.flush()):
+                            yield out_chunk
                     # ── 刷新反向还原缓冲（流结束时） ──
                     if _rev_state is not None and _dfg is not None and not _stream_guard_blocked:
                         pending = _dfg.reverse_stream_flush(_rev_state, reverse_map=_rev_map)

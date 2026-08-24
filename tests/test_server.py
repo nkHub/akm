@@ -3955,3 +3955,96 @@ async def test_agent_uploads_missing_file_404(monkeypatch, tmp_path):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/agent-uploads/nope.png")
     assert resp.status_code == 404
+
+
+class TestSSENullEventFilter:
+    """_SSENullEventFilter 对裸 `data: null` 事件的过滤行为。"""
+
+    def test_filters_bare_null_event(self):
+        from akm.server import _SSENullEventFilter
+
+        raw = (
+            'data: {"choices":[{"delta":{"content":"你"}}]}\n\n'
+            "data: null\n\n"
+            'data: {"choices":[{"delta":{"content":"好"}}]}\n\n'
+        )
+        f = _SSENullEventFilter()
+        out = b"".join(f.feed(raw.encode("utf-8"))) + b"".join(f.flush())
+        text = out.decode("utf-8")
+        assert "data: null" not in text
+        assert 'data: {"choices":[{"delta":{"content":"你"}}]}' in text
+        assert 'data: {"choices":[{"delta":{"content":"好"}}]}' in text
+
+    def test_filters_null_across_chunk_boundary(self):
+        from akm.server import _SSENullEventFilter
+
+        # `data: null` 被拆到两个 chunk 中，仍应整体被丢弃
+        raw = (
+            'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+            'da'
+            'ta: null\n\n'
+            'data: {"choices":[{"delta":{"content":"b"}}]}\n\n'
+        )
+        f = _SSENullEventFilter()
+        out = b"".join(f.feed(raw.encode("utf-8"))) + b"".join(f.flush())
+        text = out.decode("utf-8")
+        assert "data: null" not in text
+        assert 'data: {"choices":[{"delta":{"content":"a"}}]}' in text
+        assert 'data: {"choices":[{"delta":{"content":"b"}}]}' in text
+
+    def test_preserves_normal_chunks_and_done(self):
+        from akm.server import _SSENullEventFilter
+
+        raw = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
+        f = _SSENullEventFilter()
+        out = b"".join(f.feed(raw.encode("utf-8"))) + b"".join(f.flush())
+        assert out.decode("utf-8") == raw
+
+    def test_streams_incremental_chunks(self):
+        from akm.server import _SSENullEventFilter
+
+        f = _SSENullEventFilter()
+        # 逐字节喂入，仍能正确过滤 null 事件
+        raw = (
+            'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+            "data: null\n\n"
+            'data: {"choices":[{"delta":{"content":"y"}}]}\n\n'
+        )
+        emitted = []
+        for i in range(len(raw)):
+            emitted.extend(f.feed(raw[i:i + 1].encode("utf-8")))
+        emitted.extend(f.flush())
+        text = b"".join(emitted).decode("utf-8")
+        assert "data: null" not in text
+        assert 'data: {"choices":[{"delta":{"content":"x"}}]}' in text
+        assert 'data: {"choices":[{"delta":{"content":"y"}}]}' in text
+
+    def test_null_with_leading_event_field(self):
+        from akm.server import _SSENullEventFilter
+
+        raw = (
+            "event: ping\n"
+            "data: null\n\n"
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+        )
+        f = _SSENullEventFilter()
+        out = b"".join(f.feed(raw.encode("utf-8"))) + b"".join(f.flush())
+        text = out.decode("utf-8")
+        # 整个事件（event 行 + data:null + 空行）被一并丢弃
+        assert "event: ping" not in text
+        assert "data: null" not in text
+        assert 'data: {"choices":[{"delta":{"content":"ok"}}]}' in text
+
+
+@pytest.mark.asyncio
+async def test_landing_page_serves_launch_html():
+    """根路径 / 应返回 akm/static/index.html 启动页（AKM 启动页），而非 404。"""
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers.get("content-type", "")
+    # 启动页特征内容（title 与背景层）
+    assert "AKM 启动页" in resp.text
+    assert resp.text.count("AKM 启动页") == 2

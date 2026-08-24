@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AKM 启动页</title>
+<style>
+/* ============================================================
+ * 全局样式：背景层 / 遮罩 / 布局
+ * ============================================================ */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.10);
+  --glass-border: rgba(255, 255, 255, 0.16);
+  --text: #f2f4f8;
+  --text-dim: rgba(242, 244, 248, 0.62);
+  --accent: #7aa2ff;
+  --danger: #ff8f8f;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background: #1a1a2e;                 /* 兜底背景色，图片加载失败仍可读 */
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 背景层：固定全屏，图片由 JS 通过 --bg-url 注入 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: var(--bg-url, none);
+  background-size: cover;
+  background-position: center;
+  z-index: -2;
+}
+
+/* 半透明遮罩：保证文字可读 */
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* 主布局：flex 垂直居中 */
+#app {
+  position: relative;
+  z-index: 2;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 36px;
+  padding: 40px 16px;
+  animation: fadeIn 0.5s ease;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+kbd {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+/* ============================================================
+ * 搜索区
+ * ============================================================ */
+#search-area { width: 100%; display: flex; flex-direction: column; align-items: center; }
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  width: min(560px, 92vw);
+  padding: 6px 6px 6px 16px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.search-bar:focus-within {
+  border-color: rgba(122, 162, 255, 0.6);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 0 0 3px rgba(122, 162, 255, 0.18);
+}
+
+/* 引擎下拉包裹层：分割线从 select 移到此处，箭头与分割线之间留出间隔 */
+.engine-wrap {
+  display: flex;
+  align-items: center;
+  margin-right: 12px;
+  padding-right: 14px;
+  border-right: 1px solid var(--glass-border);
+}
+
+#engine-select {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  outline: none;
+  font-size: 14px;
+  padding: 8px 12px 8px 0;
+  max-width: 116px;
+  cursor: pointer;
+}
+#engine-select option { color: #1a1a2e; background: #fff; }
+
+#search-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 16px;
+  padding: 10px 8px;
+}
+#search-input::placeholder { color: var(--text-dim); }
+
+.search-go {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #7aa2ff, #5b7cfa);
+  color: #fff;
+  transition: transform 0.15s, filter 0.15s;
+}
+.search-go:hover { filter: brightness(1.1); transform: scale(1.05); }
+
+.search-hint {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.search-empty {
+  padding: 16px 22px;
+  border-radius: 14px;
+  background: var(--glass-bg);
+  border: 1px dashed var(--glass-border);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+/* ============================================================
+ * 书签网格
+ * ============================================================ */
+#bookmarks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 16px;
+  width: min(880px, 92vw);
+}
+
+.bookmark-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 8px 12px;
+  border-radius: 16px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  text-decoration: none;
+  color: var(--text);
+  transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+}
+.bookmark-card:hover {
+  transform: translateY(-4px);
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.bookmark-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.bookmark-name {
+  font-size: 13px;
+  line-height: 1.2;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* ============================================================
+ * 编辑按钮（右上角）
+ * ============================================================ */
+#edit-btn {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 5;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--glass-bg);
+  color: var(--text);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.18s;
+}
+#edit-btn:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* ============================================================
+ * 编辑面板（覆盖层 + 居中卡片）
+ * ============================================================ */
+#editor-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+#editor-panel[hidden] { display: none; }
+
+.editor-card {
+  width: min(760px, 94vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(28, 30, 48, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 22px 0;
+}
+.editor-header h2 { font-size: 18px; font-weight: 600; }
+
+.editor-tabs {
+  display: flex;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 4px;
+  border-radius: 12px;
+}
+.tab-btn {
+  padding: 7px 16px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+.tab-btn.active { background: var(--accent); color: #fff; }
+
+.editor-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 22px;
+}
+
+.tab-pane { display: flex; flex-direction: column; gap: 12px; }
+.tab-pane[hidden] { display: none; }
+.tab-tip { font-size: 12px; color: var(--text-dim); }
+
+.tab-list { display: flex; flex-direction: column; gap: 10px; }
+
+.editor-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 0.9fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  transition: border-color 0.2s;
+}
+.editor-row.invalid { border-color: var(--danger); }
+
+.f-name, .f-url, .f-icon {
+  min-width: 0;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.f-name:focus, .f-url:focus, .f-icon:focus { border-color: var(--accent); }
+.f-url, .f-icon { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+.row-badge {
+  font-size: 12px;            /* 与 .btn 字号一致 */
+  color: var(--accent);
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 8px 12px;          /* 与 .btn 完全一致（按钮同样带 1px 边框），行高对齐 */
+  white-space: nowrap;
+  text-align: center;
+}
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: filter 0.15s;
+}
+.btn:hover { filter: brightness(1.15); }
+.btn-set-default { background: transparent; color: var(--text-dim); border: 1px solid rgba(255, 255, 255, 0.2); }
+.btn-del { background: rgba(255, 90, 90, 0.16); color: var(--danger); border: 1px solid rgba(255, 90, 90, 0.30); }
+
+.add-btn {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.add-btn:hover { background: rgba(255, 255, 255, 0.14); }
+
+.empty-tip { font-size: 12px; color: var(--text-dim); padding: 6px 2px; }
+
+.editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.hint { font-size: 12px; color: var(--text-dim); }
+.btn-close {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 8px 18px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-close:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* 轻提示 Toast */
+#toast {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 10px 18px;
+  border-radius: 12px;
+  background: rgba(20, 22, 36, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+#toast.show { opacity: 1; }
+
+/* ============================================================
+ * 响应式断点
+ * ============================================================ */
+@media (max-width: 600px) {
+  #app { gap: 28px; }
+  #bookmarks-grid {
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 12px;
+  }
+  .search-bar { width: 100%; }
+  .editor-header { flex-direction: column; align-items: flex-start; }
+  .editor-row { grid-template-columns: 1fr; }
+  .hint { display: none; }
+}
+</style>
+</head>
+<body>
+
+  <!-- 半透明遮罩（背景图暗化层） -->
+  <div id="overlay"></div>
+
+  <main id="app">
+    <section id="search-area" aria-label="搜索"></section>
+    <section id="bookmarks-grid" aria-label="书签"></section>
+  </main>
+
+  <button id="edit-btn" type="button">✎ 编辑</button>
+
+  <!-- 编辑面板 -->
+  <div id="editor-panel" hidden>
+    <div class="editor-card" role="dialog" aria-label="编辑页面">
+      <header class="editor-header">
+        <h2>编辑页面</h2>
+        <div class="editor-tabs">
+          <button class="tab-btn active" type="button" data-tab="engines">搜索引擎</button>
+          <button class="tab-btn" type="button" data-tab="bookmarks">书签</button>
+        </div>
+      </header>
+
+      <div class="editor-body">
+        <div id="tab-engines" class="tab-pane">
+          <p class="tab-tip">名称 + 搜索 URL（须以 http:// 或 https:// 开头，关键词拼接处用 ?q= 等）。</p>
+          <div class="tab-list" id="engines-list"></div>
+          <button class="add-btn" type="button" data-add="engine">+ 新增搜索引擎</button>
+        </div>
+        <div id="tab-bookmarks" class="tab-pane" hidden>
+          <p class="tab-tip">名称 + 网址 + 图标地址（留空自动取网址域名）。</p>
+          <div class="tab-list" id="bookmarks-list"></div>
+          <button class="add-btn" type="button" data-add="bookmark">+ 新增书签</button>
+        </div>
+      </div>
+
+      <footer class="editor-footer">
+        <span class="hint">输入自动保存 · 点「删除」移除 · 按 Esc 或点击外部关闭</span>
+        <button class="btn-close" type="button" id="editor-close">关闭</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" role="status"></div>
+
+<script>
+'use strict';
+
+/* ============================================================
+ * M2 Config — 常量与默认配置
+ * ============================================================ */
+const STORAGE_KEY = 'ecology.start.v1';
+
+/** 通用地球占位图标（favicon 加载失败时的回退，data URI 内联 SVG） */
+const FALLBACK_ICON = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' " +
+  "stroke='#b8c0d8' stroke-width='1.6'>" +
+  "<circle cx='12' cy='12' r='9.5'/>" +
+  "<ellipse cx='12' cy='12' rx='4.3' ry='9.5'/>" +
+  "<path d='M2.5 12h19'/>" +
+  "<path d='M12 2.5c2.7 2.3 4.1 6 4.1 9.5s-1.4 7.2-4.1 9.5c-2.7-2.3-4.1-6-4.1-9.5s1.4-7.2 4.1-9.5z'/></svg>"
+);
+
+/** 生成唯一 id，如 bm_ + 时间戳36进制 + 随机后缀 */
+function genId(prefix) {
+  return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+/** 默认配置：3 个搜索引擎 + 9 个书签（知乎去重） */
+const DEFAULT_CONFIG = {
+  version: 1,
+  engines: [
+    { id: 'bing',   name: 'Bing',   url: 'https://www.bing.com/search?q=' },
+    { id: 'google', name: 'Google', url: 'https://www.google.com/search?q=' },
+    { id: 'baidu',  name: 'Baidu',  url: 'https://www.baidu.com/s?wd=' }
+  ],
+  activeEngineId: 'bing',
+  bookmarks: [
+    { id: 'bm_github', name: 'GitHub',    url: 'https://github.com',        icon: 'github.com' },
+    { id: 'bm_bili',   name: 'B站',       url: 'https://www.bilibili.com',  icon: 'www.bilibili.com' },
+    { id: 'bm_zhihu',  name: '知乎',      url: 'https://www.zhihu.com',     icon: 'www.zhihu.com' },
+    { id: 'bm_yt',     name: 'YouTube',   url: 'https://www.youtube.com',   icon: 'www.youtube.com' },
+    { id: 'bm_weibo',  name: '微博',      url: 'https://weibo.com',         icon: 'weibo.com' },
+    { id: 'bm_baidu',  name: '百度',      url: 'https://www.baidu.com',     icon: 'www.baidu.com' },
+    { id: 'bm_taobao', name: '淘宝',      url: 'https://www.taobao.com',    icon: 'www.taobao.com' },
+    { id: 'bm_jd',     name: '京东',      url: 'https://www.jd.com',        icon: 'www.jd.com' },
+    { id: 'bm_wiki',   name: '维基百科',  url: 'https://www.wikipedia.org', icon: 'www.wikipedia.org' }
+  ]
+};
+
+/** 深拷贝（避免多处引用同一对象） */
+function clone(obj) { return JSON.parse(JSON.stringify(obj)); }
+
+/* ============================================================
+ * M1 Storage — localStorage 读写 / 异常兜底 / 版本迁移
+ * ============================================================ */
+const Storage = {
+  /** 读取并 JSON.parse；失败或不存在返回 null（由 init 回退默认配置） */
+  load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (err) {
+      console.warn('[Storage] 读取失败，回退默认配置：', err);
+      return null;
+    }
+  },
+
+  /** 序列化写入；file:// 下受限时仅提示，不中断功能 */
+  save(cfg) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    } catch (err) {
+      console.warn('[Storage] 写入失败（file:// 下 localStorage 可能受限），仅本次会话生效：', err);
+    }
+  },
+
+  /** 重置为默认配置并写入 */
+  reset() {
+    const cfg = clone(DEFAULT_CONFIG);
+    this.save(cfg);
+    return cfg;
+  }
+};
+
+/* ============================================================
+ * 全局状态与数据规整
+ * ============================================================ */
+let state = null;           // 当前生效配置（渲染与编辑共用）
+
+/** 校验 / 规整配置：过滤非法项、修复 activeEngineId、补齐缺省字段 */
+function normalize(cfg) {
+  const engines = Array.isArray(cfg.engines)
+    ? cfg.engines
+        .filter(e => e && typeof e.name === 'string' && e.name.trim() &&
+                     typeof e.url === 'string' && isValidHttpUrl(e.url))
+        .map(e => ({ id: e.id || genId('eng_'), name: e.name, url: e.url }))
+    : [];
+  const bookmarks = Array.isArray(cfg.bookmarks)
+    ? cfg.bookmarks
+        .filter(b => b && typeof b.name === 'string' && b.name.trim() &&
+                     typeof b.url === 'string' && isValidHttpUrl(b.url))
+        .map(b => ({
+          id: b.id || genId('bm_'),
+          name: b.name,
+          url: b.url,
+          icon: typeof b.icon === 'string' ? b.icon : ''
+        }))
+    : [];
+  let activeEngineId = cfg.activeEngineId;
+  if (!engines.some(e => e.id === activeEngineId)) {
+    activeEngineId = engines.length ? engines[0].id : '';
+  }
+  return { version: 1, engines, bookmarks, activeEngineId };
+}
+
+/** 从 URL 提取 hostname（用于 favicon / 图标字段自动补全） */
+function hostFromUrl(url) {
+  try { return new URL(url).hostname; } catch { return ''; }
+}
+
+/** URL 协议校验：必须是 http:// 或 https:// */
+function isValidHttpUrl(s) {
+  try {
+    const u = new URL(s);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch { return false; }
+}
+
+/** 图标地址清洗：保留完整地址（域名或完整 URL，含子路径）；无协议但带路径时补全协议 */
+function cleanDomain(s) {
+  s = String(s || '').trim();
+  if (!/^https?:\/\//i.test(s) && s.includes('/')) {
+    s = 'https://' + s;
+  }
+  return s;
+}
+
+/** XSS 转义 */
+function escapeHtml(str) {
+  return String(str == null ? '' : str).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+/* ============================================================
+ * M3 Render — DOM 渲染
+ * ============================================================ */
+/** 渲染搜索区：引擎下拉 + 输入框 + 提交按钮 + 快捷键提示 */
+function renderSearch(cfg) {
+  const area = document.getElementById('search-area');
+  if (!cfg.engines.length) {
+    area.innerHTML =
+      '<div class="search-empty">暂无搜索引擎，按 <kbd>E</kbd> 或点击右上角「编辑」添加</div>';
+    return;
+  }
+  const active = cfg.engines.find(e => e.id === cfg.activeEngineId) || cfg.engines[0];
+  area.innerHTML =
+    '<form id="search-form" autocomplete="off">' +
+      '<div class="search-bar">' +
+        '<span class="engine-wrap">' +
+        '<select id="engine-select" aria-label="搜索引擎">' +
+          cfg.engines.map(e =>
+            '<option value="' + escapeHtml(e.id) + '"' +
+            (e.id === active.id ? ' selected' : '') + '>' + escapeHtml(e.name) + '</option>'
+          ).join('') +
+        '</select>' +
+        '</span>' +
+        '<input id="search-input" type="text" placeholder="输入关键词，回车搜索" aria-label="搜索关键词" spellcheck="false">' +
+        '<button class="search-go" type="submit" aria-label="搜索">' +
+          '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>' +
+        '</button>' +
+      '</div>' +
+    '</form>' +
+    '<p class="search-hint">回车搜索 · 按 <kbd>E</kbd> 编辑页面</p>';
+}
+
+/** 渲染书签网格：favicon + 名称，点击新标签页打开 */
+function renderBookmarks(cfg) {
+  const grid = document.getElementById('bookmarks-grid');
+  if (!cfg.bookmarks.length) {
+    grid.innerHTML =
+      '<div class="search-empty">暂无书签，按 <kbd>E</kbd> 或点击右上角「编辑」添加</div>';
+    return;
+  }
+  grid.innerHTML = cfg.bookmarks.map(b => {
+    const icon = b.icon || hostFromUrl(b.url);
+    const src = /^https?:\/\//i.test(icon)
+      ? icon   // 完整地址（含路径）直接作为图片地址
+      : 'https://www.google.com/s2/favicons?domain=' +
+        encodeURIComponent(icon) + '&sz=64';
+    return '<a class="bookmark-card" href="' + escapeHtml(b.url) +
+      '" target="_blank" rel="noopener noreferrer">' +
+      '<img class="bookmark-icon" src="' + escapeHtml(src) + '" alt="" loading="lazy" ' +
+      'onerror="this.onerror=null;this.src=FALLBACK_ICON">' +
+      '<span class="bookmark-name">' + escapeHtml(b.name) + '</span>' +
+      '</a>';
+  }).join('');
+}
+
+/* ============================================================
+ * M4 Editor — 编辑模式（草稿 + 输入即自动保存）
+ * ============================================================ */
+let draft = null;    // 编辑中的草稿；输入即自动提交到 state 与 localStorage
+let editorOpen = false;
+
+function openEditor() {
+  if (editorOpen) return;
+  draft = clone(state);
+  editorOpen = true;
+  document.getElementById('editor-panel').hidden = false;
+  renderEditor();
+  document.getElementById('engines-list').querySelector('.f-name')?.focus();
+}
+
+/** 关闭面板，丢弃未保存改动 */
+function closeEditor() {
+  editorOpen = false;
+  draft = null;
+  document.getElementById('editor-panel').hidden = true;
+}
+
+/** 提交草稿：规整 → 写 localStorage → 重渲染主视图与编辑面板 */
+function commitDraft() {
+  state = normalize(draft);
+  Storage.save(state);
+  renderSearch(state);
+  renderBookmarks(state);
+  renderEditor();
+}
+
+/** 渲染编辑面板（引擎行 / 书签行） */
+function renderEditor() {
+  const engineList = document.getElementById('engines-list');
+  if (!draft.engines.length) {
+    engineList.innerHTML = '<p class="empty-tip">暂无搜索引擎，点击下方「新增搜索引擎」添加。</p>';
+  } else {
+    engineList.innerHTML = draft.engines.map(e => {
+      const isActive = e.id === draft.activeEngineId;
+      return '<div class="editor-row" data-kind="engine" data-id="' + escapeHtml(e.id) + '">' +
+        '<input class="f-name" type="text" placeholder="名称，如 Bing" value="' + escapeHtml(e.name) + '">' +
+        '<input class="f-url" type="text" placeholder="https://…search?q=" value="' + escapeHtml(e.url) + '">' +
+        (isActive
+          ? '<span class="row-badge">默认</span>'
+          : '<button class="btn btn-set-default" type="button" data-action="set-default">设为默认</button>') +
+        '<button class="btn btn-del" type="button" data-action="delete-engine">删除</button>' +
+        '</div>';
+    }).join('');
+  }
+
+  const bmList = document.getElementById('bookmarks-list');
+  if (!draft.bookmarks.length) {
+    bmList.innerHTML = '<p class="empty-tip">暂无书签，点击下方「新增书签」添加。</p>';
+  } else {
+    bmList.innerHTML = draft.bookmarks.map(b => {
+      return '<div class="editor-row" data-kind="bookmark" data-id="' + escapeHtml(b.id) + '">' +
+        '<input class="f-name" type="text" placeholder="名称，如 GitHub" value="' + escapeHtml(b.name) + '">' +
+        '<input class="f-url" type="text" placeholder="https://…" value="' + escapeHtml(b.url) + '">' +
+        '<input class="f-icon" type="text" placeholder="图标地址（留空自动）" value="' + escapeHtml(b.icon) + '">' +
+        '<button class="btn btn-del" type="button" data-action="delete-bookmark">删除</button>' +
+        '</div>';
+    }).join('');
+  }
+}
+
+/** 输入自动保存：编辑行内任一输入框变化时，更新草稿并即时写入 localStorage（不重绘编辑面板，避免打断输入） */
+function autoSaveField(row, field, value) {
+  const id = row.dataset.id;
+  const kind = row.dataset.kind;
+  const items = kind === 'engine' ? draft.engines : draft.bookmarks;
+  const item = items.find(x => x.id === id);
+  if (!item) return;
+  const name = row.querySelector('.f-name').value.trim();
+  const url = row.querySelector('.f-url').value.trim();
+  if (kind === 'bookmark' && field === 'icon') {
+    item.icon = value.trim() ? cleanDomain(value) : hostFromUrl(url);
+  } else {
+    item[field] = value.trim();
+  }
+  // 行内校验：名称非空且 URL 合法才写入（无效行保留旧数据，仅标红提示）
+  const valid = name !== '' && isValidHttpUrl(url);
+  row.classList.toggle('invalid', !valid);
+  if (!valid) return;
+  state = normalize(draft);
+  Storage.save(state);
+  renderSearch(state);
+  renderBookmarks(state);
+}
+
+/** 新增引擎（写入草稿，输入内容后自动保存生效） */
+function addEngine() {
+  draft.engines.push({ id: genId('eng_'), name: '', url: '' });
+  renderEditor();
+  const rows = document.querySelectorAll('#engines-list .editor-row');
+  rows[rows.length - 1]?.querySelector('.f-name')?.focus();
+}
+
+/** 新增书签 */
+function addBookmark() {
+  draft.bookmarks.push({ id: genId('bm_'), name: '', url: '', icon: '' });
+  renderEditor();
+  const rows = document.querySelectorAll('#bookmarks-list .editor-row');
+  rows[rows.length - 1]?.querySelector('.f-name')?.focus();
+}
+
+/** 删除引擎；若删除的是默认引擎则切换为第一个 */
+function deleteEngine(id) {
+  const eng = draft.engines.find(e => e.id === id);
+  draft.engines = draft.engines.filter(e => e.id !== id);
+  if (draft.activeEngineId === id) {
+    draft.activeEngineId = draft.engines.length ? draft.engines[0].id : '';
+  }
+  commitDraft();
+  showToast('已删除' + (eng ? '：' + eng.name : ''));
+}
+
+/** 删除书签 */
+function deleteBookmark(id) {
+  const bm = draft.bookmarks.find(b => b.id === id);
+  draft.bookmarks = draft.bookmarks.filter(b => b.id !== id);
+  commitDraft();
+  showToast('已删除' + (bm ? '：' + bm.name : ''));
+}
+
+/** 设为默认搜索引擎 */
+function setDefaultEngine(id) {
+  const eng = draft.engines.find(e => e.id === id);
+  if (!eng) return;
+  draft.activeEngineId = id;
+  commitDraft();
+  showToast('已将默认搜索引擎设为：' + eng.name);
+}
+
+/** 切换编辑面板 Tab */
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.tab === tab));
+  document.getElementById('tab-engines').hidden = tab !== 'engines';
+  document.getElementById('tab-bookmarks').hidden = tab !== 'bookmarks';
+}
+
+/* ============================================================
+ * M5 Bootstrap — 背景 / 快捷键 / 事件绑定 / 初始化
+ * ============================================================ */
+let toastTimer = null;
+
+/** 轻提示 Toast（成功 / 校验失败统一入口） */
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2000);
+}
+
+/** 背景图缓存键与有效期（4 小时 = 14400 秒） */
+const BG_CACHE_KEY = 'ecology.bg.v1';
+const BG_TTL = 4 * 60 * 60 * 1000;
+
+/** 设置背景 CSS 变量 */
+function setBackground(url) {
+  document.documentElement.style.setProperty('--bg-url', 'url("' + url + '")');
+}
+
+/** 背景：首次加载后将图片本身（data URL）写入 localStorage，4 小时内直接用缓存（零网络请求，避免黑屏），过期后拉新图 */
+function loadBackground() {
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(BG_CACHE_KEY) || 'null'); } catch (e) { /* 忽略 */ }
+  const now = Date.now();
+  if (cached && cached.data && now - cached.t < BG_TTL) {
+    setBackground(cached.data);   // 4 小时内：直接用本地缓存图片，不请求网络
+    return;
+  }
+  // 过期 / 无缓存：先显示旧缓存避免黑屏，再拉取新图
+  if (cached && cached.data) setBackground(cached.data);
+  fetch('https://picsum.photos/1920/1080')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(blob => new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(blob);
+    }))
+    .then(dataUrl => {
+      setBackground(dataUrl);
+      try { localStorage.setItem(BG_CACHE_KEY, JSON.stringify({ data: dataUrl, t: now })); }
+      catch (e) { console.warn('[Bg] 缓存写入失败（配额不足），本次仅会话生效：', e); }
+    })
+    .catch(err => console.warn('[Bg] 背景图加载失败，保留兜底色：', err));
+}
+
+/** 焦点是否在输入类元素上（用于 E 键误触判断） */
+function isInputFocused() {
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || el.isContentEditable;
+}
+
+/** 提交搜索：新标签页打开 当前引擎 + 关键词 */
+function onSubmitSearch(e) {
+  e.preventDefault();
+  const input = document.getElementById('search-input');
+  if (!input) return;
+  const q = input.value.trim();
+  if (!q) return;
+  const active = state.engines.find(x => x.id === state.activeEngineId) || state.engines[0];
+  if (!active) { showToast('请先添加搜索引擎'); return; }
+  window.open(active.url + encodeURIComponent(q), '_blank');
+}
+
+/** 事件绑定（使用事件委托，渲染重建 DOM 后依然有效） */
+function bindEvents() {
+  // 搜索提交
+  document.addEventListener('submit', e => {
+    if (e.target && e.target.id === 'search-form') onSubmitSearch(e);
+  });
+
+  // 下拉框切换 → 持久化默认引擎
+  document.addEventListener('change', e => {
+    if (e.target && e.target.id === 'engine-select' && state) {
+      state.activeEngineId = e.target.value;
+      Storage.save(state);
+    }
+  });
+
+  // 编辑按钮
+  document.getElementById('edit-btn').addEventListener('click', openEditor);
+
+  // 编辑面板：Tab 切换 / 新增 / 行内操作 / 点击外部关闭
+  const panel = document.getElementById('editor-panel');
+  panel.addEventListener('click', e => {
+    if (e.target === panel) { closeEditor(); return; }
+
+    const tabBtn = e.target.closest('.tab-btn');
+    if (tabBtn) { switchTab(tabBtn.dataset.tab); return; }
+
+    const addBtn = e.target.closest('[data-add]');
+    if (addBtn) {
+      if (addBtn.dataset.add === 'engine') addEngine();
+      else addBookmark();
+      return;
+    }
+
+    const actionBtn = e.target.closest('[data-action]');
+    if (!actionBtn) return;
+    const row = actionBtn.closest('.editor-row');
+    const id = row ? row.dataset.id : null;
+    switch (actionBtn.dataset.action) {
+      case 'delete-engine':  deleteEngine(id); break;
+      case 'delete-bookmark': deleteBookmark(id); break;
+      case 'set-default':    setDefaultEngine(id); break;
+    }
+  });
+
+  // 编辑面板：输入框变化即自动保存到 localStorage
+  panel.addEventListener('input', e => {
+    const input = e.target.closest('.f-name, .f-url, .f-icon');
+    if (!input || !editorOpen) return;
+    const row = input.closest('.editor-row');
+    if (!row) return;
+    const field = input.classList.contains('f-name') ? 'name'
+      : input.classList.contains('f-url') ? 'url' : 'icon';
+    autoSaveField(row, field, input.value);
+  });
+
+  // 关闭按钮
+  document.getElementById('editor-close').addEventListener('click', closeEditor);
+
+  // 快捷键：E 进入编辑（输入框聚焦 / 面板打开时不触发）；Esc 退出编辑
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && editorOpen) { closeEditor(); return; }
+    if ((e.key === 'e' || e.key === 'E') && !editorOpen && !isInputFocused()) {
+      e.preventDefault();
+      openEditor();
+    }
+  });
+}
+
+/** 初始化：加载配置 → 渲染 → 绑定事件 → 加载背景 */
+function init() {
+  const loaded = Storage.load();
+  if (loaded && loaded.version === 1) {
+    state = normalize(loaded);           // 版本相符：规整后使用
+  } else {
+    state = Storage.reset();             // 无数据 / 版本不符：回退并写入默认配置
+  }
+  document.title = 'AKM 启动页';
+  renderSearch(state);
+  renderBookmarks(state);
+  bindEvents();
+  loadBackground();
+}
+
+init();
+</script>
+</body>
+</html>

@@ -144,6 +144,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 
 1. **自动压缩兜底**：每轮开始前估算上下文 token（CJK 字符按 1 token/字符，其余按 4 字符≈1 token，图片块固定估算），超过 `agent_max_context_tokens` 时把早期历史交给 LLM 总结为摘要并替换（保留最近 `agent_keep_recent_messages` 条消息与工具调用配对组），保证上下文不爆掉；摘要生成失败时降级为直接丢弃早期历史。
 2. **AI 主动压缩**：模型可调用 `akm_context_status` 查询当前 token 占用、`akm_compact_context` 主动压缩早期历史。`akm_compact_context` 优先采用摘要替换，不丢失关键信息。`agent_context_warning_ratio` 触发的 `context_warning` SSE 事件即用于提示客户端 / 模型接近上限。
+3. **客户端手动压缩**：`POST /v1/agent/compact` 由客户端主动触发同款压缩（等价于 `akm_compact_context` 的 `force` 模式）。请求体为 JSON 对象，需携带 `messages`（当前对话工作消息列表，格式同 `/v1/agent`），可选 `model`（摘要用模型）与 `api_path`（默认 `chat/completions`）。鉴权规则与 `/v1/agent` 一致。响应：`{"ok":true,"messages":[<摘要 system 消息 + 保留的最近消息>],"summary":"<摘要文本>","removed_count":N,"before_count":N,"after_count":N,"estimated_tokens":N}`；`messages[0]` 为「以下是对较早对话历史的摘要：…」形式的 system 消息，客户端可将摘要渲染成提示卡片并把早期消息替换掉；参数不合法返回 400，Agent Loop 未初始化返回 503，版本不支持返回 501。
 
 压缩只作用于早期历史，最近消息与所有工具调用配对始终完整保留；`final` / `error` / `context_warning` 事件的 `compacted` 字段表示本次运行累计压缩次数。
 
