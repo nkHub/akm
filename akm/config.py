@@ -58,6 +58,7 @@ DEFAULTS = {
     "agent_native_tools_enabled": True, # 是否启用 Agent 原生系统工具（akm_clipboard_get/akm_clipboard_set/akm_system_info/akm_open/akm_frontmost_app：剪贴板读写、系统信息、打开 URL/文件/应用、查询前台应用）
     "agent_read_image_enabled": True,   # 是否启用 Agent 读图工具（akm_read_image：调用视觉模型描述图片）
     "agent_vision_model": "gpt-5.6-luna",  # Agent 读图使用的视觉模型（akm_read_image）；与 image_supported_models（图片生成模型）相互独立
+    "agent_no_vision_models": "deepseek-v4-flash,deepseek-v4-pro",  # 不支持直接视觉输入、需降级走 akm_read_image 读图的模型列表（逗号分隔）；默认所有模型都直接接收上传图片，加入该列表的模型不再接收图片（改为文本提示调 akm_read_image）。默认含 deepseek-v4-flash/deepseek-v4-pro（上游仅支持文本输入）
     "flow_human_auto_approve": True,    # 是否自动放行工作流（/v1/flow）的 human 人工审批节点（默认 true 保持模板可直接跑通；设为 false 时 human 节点挂起等待 /runs/{id}/resume 审批）
     "agent_email_smtp_host": "",        # SMTP 服务器地址（如 smtp.qq.com）；留空表示未配置，工具不可用
     "agent_email_smtp_port": 465,       # SMTP 端口：465 走 SSL，587 走 STARTTLS（由 agent_email_smtp_ssl 决定是否启用 SSL）
@@ -103,6 +104,7 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_native_tools_enabled",
     "agent_read_image_enabled",
     "agent_vision_model",
+    "agent_no_vision_models",
     "agent_email_smtp_host",
     "agent_email_smtp_port",
     "agent_email_smtp_user",

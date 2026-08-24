@@ -87,6 +87,65 @@ async def test_multipart_image_appended_as_image_url(monkeypatch, tmp_path):
     assert "akm_edit_image" in content[0]["text"]
 
 
+def test_supports_vision_defaults_true(monkeypatch):
+    """默认情况下模型应视为支持直接视觉（原生上传最优），不降级。"""
+    from akm.agent_runtime.router import _supports_vision
+
+    monkeypatch.setattr("akm.agent_runtime.router.load_config", lambda: {})
+    assert _supports_vision("") is True
+    assert _supports_vision("deepseek-v4-flash") is True
+    assert _supports_vision("gpt-5.6-luna") is True
+
+
+def test_supports_vision_no_vision_list_hit(monkeypatch):
+    """命中 agent_no_vision_models 名单的模型应判定为不支持直接视觉。"""
+    from akm.agent_runtime.router import _supports_vision
+
+    monkeypatch.setattr(
+        "akm.agent_runtime.router.load_config",
+        lambda: {"agent_no_vision_models": "deepseek-v4-flash, deepseek-v4-pro"},
+    )
+    assert _supports_vision("deepseek-v4-flash") is False
+    assert _supports_vision("deepseek-v4-pro") is False
+    assert _supports_vision("gpt-5.6-luna") is True
+    assert _supports_vision("") is True
+
+
+@pytest.mark.asyncio
+async def test_multipart_image_degraded_for_no_vision_model(monkeypatch, tmp_path):
+    """命中 agent_no_vision_models 的模型：上传图片不塞入上下文，改为文本提示走 akm_read_image。"""
+    from akm.agent_runtime import router as router_module
+
+    monkeypatch.setattr(
+        router_module, "load_config",
+        lambda: {"agent_upload_dir": str(tmp_path / "cache"), "agent_no_vision_models": "deepseek-v4-flash"},
+    )
+    loop = app.state.agent_loop
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"fakedata"
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            data={"messages": json.dumps([{"role": "user", "content": "看图"}]),
+                  "model": "deepseek-v4-flash"},
+            files=[("files", ("pic.png", png_bytes, "image/png"))],
+        )
+    assert resp.status_code == 200
+    messages = loop.calls[0]["messages"]
+    assert len(messages) == 2
+    content = messages[1]["content"]
+    # 降级：纯文本消息，不含 image_url 内容块
+    assert isinstance(content, str)
+    assert "不支持直接视觉输入" in content
+    assert "akm_read_image" in content
+    assert "image_path=" in content
+    # 图片仍落盘，供 akm_read_image 读取
+    import pathlib
+    saved = [p for p in (tmp_path / "cache").iterdir() if p.suffix == ".png"]
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == png_bytes
+
+
 @pytest.mark.asyncio
 async def test_uploaded_image_saved_to_akm_cache(monkeypatch, tmp_path):
     """上传的图片应真实落盘到默认的 ~/.akm/cache，且内容与扩展名正确。"""

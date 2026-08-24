@@ -86,6 +86,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_native_tools_enabled` | `true` | 是否启用 Agent 原生系统工具（`akm_clipboard_get` / `akm_clipboard_set` / `akm_system_info` / `akm_open` / `akm_frontmost_app`），默认开启；直接调用本机剪贴板、系统信息与前台应用（pyobjc，不受 akm_run_shell 沙箱约束） |
 | `agent_read_image_enabled` | `true` | 是否启用 Agent 读图工具（`akm_read_image`：调用视觉模型描述图片），默认开启；关闭后不注册该工具 |
 | `agent_vision_model` | `gpt-5.6-luna` | `akm_read_image` 使用的视觉模型（与图片生成的 `image_supported_models` 相互独立） |
+| `agent_no_vision_models` | `deepseek-v4-flash,deepseek-v4-pro` | 不支持直接视觉输入、需降级走 `akm_read_image` 读图的模型列表（逗号分隔）。默认所有模型都把上传图片直接塞入对话（原生 image_url 最优）；仅命中该列表的模型不再接收图片，改为文本提示（图片落盘路径 + 引导调用 `akm_read_image`），避免上游对 `image_url` 返回 400 |
 | `agent_email_smtp_host` | `""` | SMTP 服务器地址（如 smtp.qq.com）；留空则 `akm_send_email` 不可用 |
 | `agent_email_smtp_port` | `465` | SMTP 端口：465 走 SSL，587 走 STARTTLS（由 `agent_email_smtp_ssl` 决定是否用 SSL） |
 | `agent_email_smtp_user` | `""` | SMTP 登录账号；`agent_email_from` 留空时默认作为发件人 |
