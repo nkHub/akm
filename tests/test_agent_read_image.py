@@ -366,3 +366,85 @@ async def test_read_image_without_pool(monkeypatch, tmp_path):
     tool = _read_tool(app)
     text = await tool.handler(image_path=str(img))
     assert "连接池未就绪" in json.loads(text)["error"]
+
+
+# ── 审计日志 ──
+
+
+@pytest.mark.asyncio
+async def test_read_image_submits_audit_record(monkeypatch, tmp_path):
+    """akm_read_image 的上游请求应写入审计日志，来源标记为 chat。"""
+    audits = []
+
+    async def fake_submit_audit_log(app, data):
+        audits.append(data)
+
+    async def fake_forward(body, client, **kwargs):
+        return {
+            "status_code": 200,
+            "body": json.dumps({"choices": [{"message": {"content": "一只猫"}}]}),
+            "error": "",
+            "provider": "opencode",
+            "key_alias": "opencode",
+            "latency_ms": 123,
+        }
+
+    app = FastAPI()
+    app.state.http_client = FakePool()
+    img = tmp_path / "cat.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nauds")
+    monkeypatch.setattr(
+        tools_module, "load_config",
+        lambda: {"image_supported_models": "gpt-4o", "agent_vision_model": "gpt-4o",
+                 "log_request_body": True, "log_response_body": True},
+    )
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+    monkeypatch.setattr("akm.server._submit_audit_log", fake_submit_audit_log)
+
+    tool = _read_tool(app)
+    text = await tool.handler(image_path=str(img))
+
+    assert json.loads(text)["description"] == "一只猫"
+    assert len(audits) == 1
+    record = audits[0]
+    assert record["model"] == "gpt-4o"
+    assert record["status_code"] == 200
+    assert record["provider"] == "opencode"
+    assert record["key_alias"] == "opencode"
+    assert record["latency_ms"] == 123
+    assert "x-akm-source\": \"chat" in record["request_headers"]
+    assert record["request_body"]  # log_request_body 开启时应有请求体
+    assert "<图片 base64 内容已省略>" in record["request_body"]
+    assert record["response_body"]
+
+
+@pytest.mark.asyncio
+async def test_read_image_audit_without_body_logging(monkeypatch, tmp_path):
+    """log_request_body / log_response_body 关闭时审计不落请求/响应体。"""
+    audits = []
+
+    async def fake_submit_audit_log(app, data):
+        audits.append(data)
+
+    async def fake_forward(body, client, **kwargs):
+        return {"status_code": 200, "body": json.dumps({"choices": [{"message": {"content": "x"}}]}), "error": ""}
+
+    app = FastAPI()
+    app.state.http_client = FakePool()
+    img = tmp_path / "n.png"
+    img.write_bytes(b"png")
+    monkeypatch.setattr(
+        tools_module, "load_config",
+        lambda: {"image_supported_models": "gpt-4o", "agent_vision_model": "gpt-4o"},
+    )
+    monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
+    monkeypatch.setattr("akm.server._submit_audit_log", fake_submit_audit_log)
+
+    tool = _read_tool(app)
+    await tool.handler(image_path=str(img))
+
+    assert len(auds := audits) == 1
+    record = audits[0]
+    assert record["request_body"] == ""
+    assert record["response_body"] == ""
+    assert record["status_code"] == 200

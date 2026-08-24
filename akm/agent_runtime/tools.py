@@ -171,6 +171,89 @@ async def _check_tool_enabled(flag: str, tool_name: str) -> None:
         )
 
 
+async def _submit_agent_tool_audit(
+    app,
+    *,
+    model: str,
+    request_body: dict,
+    result: dict,
+) -> None:
+    """把 Agent 工具内部的上游请求写入审计日志。
+
+    工具（如 akm_read_image）内部会直接调用代理发起上游 LLM 请求，这些子请求
+    不会经过 AgentLoop 主循环的 `_try_audit`，因此这里复用服务端的审计提交链路
+    （`akm.server._submit_audit_log`）补齐记录，并把来源标记为 chat，便于在
+    日志抽屉中与主对话请求统一过滤。request_body 中图片的 data URL 会被脱敏
+    （仅保留 mime 前缀），避免把大体积 base64 图片内容落库。
+    """
+
+    def _sanitize_body(body: dict) -> dict:
+        """把 messages 内容块里的 image_url data URL 脱敏为占位文本。"""
+        out = dict(body)
+        msgs = out.get("messages")
+        if not isinstance(msgs, list):
+            return out
+        out["messages"] = []
+        for msg in msgs:
+            copied = dict(msg)
+            content = msg.get("content")
+            if isinstance(content, list):
+                sanitized = []
+                for part in content:
+                    part_copy = dict(part) if isinstance(part, dict) else part
+                    if isinstance(part_copy, dict) and part_copy.get("type") == "image_url":
+                        item = dict(part_copy)
+                        image_url = item.get("image_url")
+                        if isinstance(image_url, dict) and str(image_url.get("url") or "").startswith("data:"):
+                            url = str(image_url["url"])
+                            mime = url.split(",", 1)[0]
+                            item["image_url"] = {**image_url, "url": f"{mime},<图片 base64 内容已省略>"}
+                        sanitized.append(item)
+                    else:
+                        sanitized.append(part_copy)
+                copied["content"] = sanitized
+            out["messages"].append(copied)
+        return out
+
+    cfg = load_config()
+    save_request_body = bool(cfg.get("log_request_body", False))
+    save_response_body = bool(cfg.get("log_response_body", False))
+    request_body_for_log = ""
+    if save_request_body:
+        request_body_for_log = json.dumps(_sanitize_body(request_body), ensure_ascii=False)
+        if len(request_body_for_log) > 64000:
+            request_body_for_log = request_body_for_log[:32000] + f"\n...(截断，共 {len(request_body_for_log)} 字符)" + request_body_for_log[-32000:]
+    response_body_for_log = ""
+    if save_response_body:
+        response_body_for_log = str(result.get("body") or "")
+        if len(response_body_for_log) > 64000:
+            response_body_for_log = response_body_for_log[:32000] + f"\n...(截断，共 {len(response_body_for_log)} 字符)" + response_body_for_log[-32000:]
+
+    from akm.server import _submit_audit_log
+
+    await _submit_audit_log(app, {
+        "provider": str(result.get("provider", "") or ""),
+        "key_alias": str(result.get("key_alias", "") or ""),
+        "model": model,
+        "request_body": request_body_for_log,
+        "response_body": response_body_for_log,
+        "status_code": int(result.get("status_code", 0) or 0),
+        "latency_ms": int(result.get("latency_ms", 0) or 0),
+        "error": str(result.get("error", "") or ""),
+        "request_headers": json.dumps({"user-agent": "agent/1.0", "x-akm-source": "chat"}),
+        "prompt_tokens": int(result.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(result.get("completion_tokens", 0) or 0),
+        "total_tokens": int(result.get("total_tokens", 0) or 0),
+        "cached_tokens": int(result.get("cached_tokens", 0) or 0),
+        "cache_creation_tokens": int(result.get("cache_creation_tokens", 0) or 0),
+        "client_request_headers": "",
+        "client_request_body": request_body_for_log,
+        "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
+        "upstream_response_body": str(result.get("upstream_response_body_for_log", "") or "") if save_response_body else "",
+        "attempts": "",
+    })
+
+
 def _akm_api_base_url() -> str:
     """返回本机 AKM 服务地址，供工具以 HTTP 调用内部接口（如 markdown-kb）。
 
@@ -2552,6 +2635,17 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         except Exception as exc:
             logger.warning("[AgentTool] akm_read_image 失败: %s", exc)
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        # 记录审计日志：读图是一次独立的上游多模态请求（虽然由 /v1/agent 触发），
+        # 应像主对话请求一样进入审计，且来源标记为 chat 便于过滤。
+        try:
+            await _submit_agent_tool_audit(
+                app,
+                model=model,
+                request_body=body,
+                result=result,
+            )
+        except Exception:
+            logger.warning("[AgentTool] akm_read_image 审计写入失败", exc_info=True)
         if result.get("error") or int(result.get("status_code", 0) or 0) >= 400:
             err = result.get("error") or f"HTTP {result.get('status_code')}"
             return json.dumps({"error": err}, ensure_ascii=False)
