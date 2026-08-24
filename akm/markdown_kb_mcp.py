@@ -12,6 +12,11 @@
 - search_kb：POST /api/markdown-kb/query 的语义检索；
 - ask_kb：POST /api/markdown-kb/ask 的基于知识库问答。
 
+另有文档维护类工具（list_kb_files / read_kb_file / write_kb_file / delete_kb_file /
+rebuild_kb / rebuild_kb_file / bind_kb_workspace / sync_kb / clear_kb / learn_kb /
+scan_kb_sessions / kb_status），其中 read_kb_file 读取单个知识条目的全文，
+write_kb_file 按文本写入/覆盖文档（写入后需重建索引）。
+
 实现采用无状态会话（每次请求独立处理，不依赖 Mcp-Session-Id），MCP 客户端
 在 protocolVersion 2025-06-18 下可正常使用。工具内部通过 AKM 自身的 HTTP
 接口调用插件，因此不依赖插件实例是否被加载；插件未启用时接口返回 404，
@@ -23,6 +28,7 @@
 import json
 import logging
 from typing import Any, AsyncIterator
+from urllib.parse import quote as _urlencode
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -111,8 +117,14 @@ async def _call_kb(
 _MAINT_SPECS: list[dict[str, Any]] = [
     {
         "name": "list_kb_files",
-        "description": "列出当前知识库中的 Markdown 文件",
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "description": "列出当前知识库中的 Markdown 文件；传入 workspace_root 时仅返回绑定到该工作目录的文件",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；传入时只返回绑定到该目录的文件）"},
+            },
+            "required": [],
+        },
         "endpoint": "files",
         "method": "GET",
     },
@@ -242,6 +254,36 @@ _MAINT_SPECS: list[dict[str, Any]] = [
         },
         "endpoint": "scan-sessions",
     },
+    {
+        "name": "read_kb_file",
+        "description": "读取单个 Markdown 知识条目的全文内容（区别于 list_kb_files 只返回元数据）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_name": {"type": "string", "description": "文件名（如 notes.md）"},
+                "workspace_root": {"type": "string", "description": "工作目录（可选，同名文档需提供）"},
+                "doc_id": {"type": "string", "description": "文档 ID（可选，比 file_name 更精确）"},
+            },
+            "required": ["file_name"],
+        },
+        "endpoint": "files/{file_name}",
+        "method": "GET",
+        "url_params": ["file_name"],
+    },
+    {
+        "name": "write_kb_file",
+        "description": "按文本内容写入（新建或覆盖）单个 Markdown 知识条目；写入后需调用 rebuild_kb_file 或 rebuild_kb 重建索引才会被检索到",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_name": {"type": "string", "description": "目标文件名（如 notes.md，仅支持 .md）"},
+                "content": {"type": "string", "description": "Markdown 全文内容"},
+                "workspace_root": {"type": "string", "description": "工作目录（可选）"},
+            },
+            "required": ["file_name", "content"],
+        },
+        "endpoint": "files/write",
+    },
 ]
 
 
@@ -293,7 +335,26 @@ async def _call_maintenance(name: str, args: dict[str, Any]) -> str:
     payload: dict[str, Any] | None = None
     if method != "GET":
         payload = _build_payload(spec, args)
-    data = await _call_kb(str(spec["endpoint"]), payload=payload, method=method)
+    endpoint = str(spec["endpoint"])
+    # 需要把参数内插进 URL 路径的工具（如 read_kb_file 的文件 {file_name}）：必要参数
+    # 从 args 取值，可选参数（doc_id / workspace_root 等）拼进 GET query string。
+    url_params = [str(p) for p in (spec.get("url_params") or [])]
+    if url_params:
+        for key in url_params:
+            value = str(args.get(key) or "").strip()
+            if not value:
+                raise ValueError(f"{key} 不能为空")
+            endpoint = endpoint.replace("{" + key + "}", _urlencode(value))
+    # GET 请求的过滤参数（如 list_kb_files 的 workspace_root）拼成 query string；
+    # url_params 是路径内插参数，不重复进 query。
+    query_parts = {
+        str(k): str(v).strip()
+        for k, v in args.items()
+        if str(k) not in url_params and str(v or "").strip()
+    }
+    if method == "GET" and query_parts:
+        endpoint += "?" + "&".join(f"{_urlencode(k)}={_urlencode(v)}" for k, v in query_parts.items())
+    data = await _call_kb(endpoint, payload=payload, method=method)
     if isinstance(data, dict) and data.get("ok") is False:
         raise RuntimeError(str(data.get("error") or f"{name} 执行失败"))
     return json.dumps(data, ensure_ascii=False)

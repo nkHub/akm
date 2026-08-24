@@ -105,6 +105,12 @@ flowchart LR
 
 `POST /api/markdown-kb/files/bind-workspace`：按 `file_name` 为单个 Markdown 文档绑定 `workspace_root`，接口成功返回 `needs_rebuild=true`；绑定关系持久化后需再执行一次 `rebuild-file`、`sync` 或 `rebuild` 才进入索引。
 
+### 全文读取与文本写入
+
+`GET /api/markdown-kb/files/{name}`：按文件名读取单个文档全文，返回 `ok / doc_id / file_name / workspace_root / content / size_bytes`（`content` 为 UTF-8 全文）。供「读→改→重建」闭环的读取端使用：先取全文编辑，再写回重建。
+
+`POST /api/markdown-kb/files/write`：按 JSON 文本写入 / 覆盖文档，请求体为 `{"file_name": "...", "content": "...", "workspace_root": "..."}`。复用 `files/upload` 的落盘语义（路径安全校验 + manifest 维护，同名覆盖）。**只落盘、不建索引**，写入后需另行 `POST /api/markdown-kb/rebuild-file` 或 `/rebuild` 重建索引。
+
 ### Hook 学习入库
 
 `POST /api/markdown-kb/learn`：接收 `Codex` 或 `Claude Code` 在 `Stop / PreCompact` 阶段整理出的候选材料，服务端校验 `source / trigger_phase / session_id / dedupe_key`，调用本地 `/v1/chat/completions` 归纳成结构化结果，包装为 `.learn.md` 写入 `docs_dir`。同一个 `dedupe_key` 通过 `~/.akm/markdown_kb/learn_records.json` 幂等判重；若模型判断无稳定知识可沉淀则返回 `ignored=true` 且不写文档。
@@ -133,7 +139,9 @@ flowchart LR
 
 | 工具 | 参数 | 说明 |
 |------|------|------|
-| `list_kb_files` | — | 调用 `GET /api/markdown-kb/files`，列出已入库文档 |
+| `list_kb_files` | `workspace_root`（可选） | 调用 `GET /api/markdown-kb/files`，列出已入库文档。传 `workspace_root` 时只返回绑定到该目录的文档 |
+| `read_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `GET /api/markdown-kb/files/{name}`，读取单个文档全文，便于「读→改→重建」闭环的读取端 |
+| `write_kb_file` | `file_name`（必填）、`content`（必填）、`workspace_root` | 调用 `POST /api/markdown-kb/files/write`，按 JSON 文本写入 / 覆盖文档（复用 upload 落盘语义，写入后需 `rebuild_kb` / `rebuild_kb_file` 重建索引才可被检索） |
 | `kb_status` | — | 调用 `GET /api/markdown-kb/status`，查看索引与 vec 状态 |
 | `bind_kb_workspace` | `file_name`（必填）、`workspace_root`（必填）、`doc_id` | 调用 `POST /api/markdown-kb/files/bind-workspace`，为文档绑定工作目录 |
 | `delete_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `POST /api/markdown-kb/files/delete`，删除文档 |

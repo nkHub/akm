@@ -172,6 +172,20 @@ Markdown 知识库则更适合作为附加能力挂在插件层，原因如下�
 
 建议优先使用第一种，降低用户理解成本。
 
+### `GET /api/markdown-kb/files/{name}`
+
+读取指定文档的全文内容，返回 `content`（UTF-8 全文）与 `doc_id` / `workspace_root` / `size_bytes`。用于「读→改→重建」闭环的读取端：客户端（如 MCP）先取全文，编辑后再写回。
+
+### `POST /api/markdown-kb/files/write`
+
+按 JSON 文本写入 / 覆盖文档：
+
+```json
+{ "file_name": "guide.md", "content": "文档正文…", "workspace_root": "" }
+```
+
+复用 `files/upload` 的落盘语义（路径安全校验 + manifest 维护，同名覆盖）。**只落盘、不建索引**，写入后需另行 `POST /rebuild` 或 `POST /rebuild-file` 重建索引才可被检索到。
+
 ### `POST /api/markdown-kb/files/import`
 
 从本地目录批量导入 `.md` 文件。第一版可只支持一个目录路径，不必做复杂过滤规则。
@@ -895,6 +909,8 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - `GET /api/markdown-kb/status`
 - `GET /api/markdown-kb/files`
 - `POST /api/markdown-kb/files/upload`
+- `GET /api/markdown-kb/files/{name}`（读取单个文档全文）
+- `POST /api/markdown-kb/files/write`（按 JSON 文本写入 / 覆盖文档，复用 upload 落盘语义，写入后需另行 `rebuild` / `rebuild-file` 建索引）
 - `DELETE /api/markdown-kb/files/{name}`
 - `POST /api/markdown-kb/rebuild`
 - `POST /api/markdown-kb/rebuild-file`

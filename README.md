@@ -146,6 +146,8 @@ akm-menubar
 
 `akm serve` 启动后访问 `http://127.0.0.1:8800/admin`
 
+根路径 `http://127.0.0.1:8800/` 指向随包分发的 **Ecology 启动页**（`akm/static/index.html`），提供常用搜索与书签入口；管理台各功能页入口不变。
+
 <table>
   <thead>
     <tr>
@@ -299,6 +301,8 @@ akm-menubar
 | `proxy_default_timeout_sec` | `120` | 聊天等非图片请求的默认上游超时秒数；图片接口另有独立的 `image_request_timeout_sec` |
 | `proxy_first_byte_timeout_sec` | `12` | 流式首字节超时秒数：上游返回 2xx 后迟迟不产出第一个响应体字节时视为“假成功”，关闭该 Key 并自动切换下一个重试；`0` 关闭该保护 |
 
+流式转发时会额外做一层 SSE 兼容性保护：个别中转上游（如 agentrouter.org）会在正常的 `data: {…}` 分片之间插入一行裸 `data: null`（data 值为 JSON null），这不符合 OpenAI SSE 约定（data 应为对象或 `[DONE]`），会直接导致 opencode/@ai-sdk 等在解析时抛 `Type validation failed: Value: null` / `invalid_union expected object received null path=[]`。网关在纯字节透传路径上会按 SSE 事件维度识别并丢弃这类异常事件（含其事件分隔空行），其余内容原样透传，不影响正常流式返回。
+
 ### Key 管理、审计与用量
 
 | 配置项 | 默认值 | 说明 |
@@ -349,6 +353,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/images/generations` | Images Generations 转发接口（仅透传，不做协议转换；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)） |
+| POST | `/v1/agent/compact` | 手动压缩 Agent 上下文：传入当前对话 `messages`，把早期历史归纳为摘要并替换（等价于 `akm_compact_context` 的 force 模式），响应含摘要文本与保留后的消息列表（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)「上下文压缩」） |
 | GET/POST | `/v1/tasks` | 定时任务接口：列表 / 创建（`agent_call`、`usage_query` 类型）；配套 `GET/PUT/DELETE /v1/tasks/{id}` 与 `POST /v1/tasks/{id}/run` 立即执行 |
 | GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见 [`akm/flow/flow.md`](akm/flow/flow.md)） |
 | GET | `/v1/models` | 模型列表 |

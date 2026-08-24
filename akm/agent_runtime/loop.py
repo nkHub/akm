@@ -918,6 +918,62 @@ class AgentLoop:
         new_messages = summary_msg + kept_tail
         return new_messages, len(old_head)
 
+    async def compact_messages(
+        self,
+        messages: list[dict],
+        *,
+        model: str = "",
+        api_path: str = "chat/completions",
+    ) -> dict:
+        """手动压缩一段对话历史，供 HTTP 接口 /v1/agent/compact 调用。
+
+        与自动压缩（run 循环内的阈值触发）不同，这里强制压缩：保留最近的
+        agent_keep_recent_messages 条消息，更早的历史交给 LLM 生成摘要替换。
+        这是对外公开的只读改造，不修改任何已保存的会话文件（是否回写由
+        调用方决定，前端拿到结果后自行替换会话内的历史消息）。
+
+        Args:
+            messages: 需要被压缩的对话历史（Chat 格式）
+            model: 用于生成摘要的模型；为空时由 forward_request 自动选 Key
+            api_path: 上游协议格式（与主循环一致）
+
+        Returns:
+            字典：
+            - ok: 是否处理成功
+            - messages: 压缩后的消息列表（不可压缩时与入参相同）
+            - summary: 摘要消息的内容（含 system system 前缀）或 ""
+            - removed_count: 被移除的旧消息条数（0 表示未压缩）
+            - before_count / after_count: 压缩前后消息条数
+            - estimated_tokens: 压缩后上下文的 token 估算值
+        """
+        if not isinstance(messages, list) or not messages:
+            return {"ok": False, "detail": "messages 不能为空"}
+
+        try:
+            new_messages, removed = await self._compact_context(
+                messages, model, api_path, force=True
+            )
+        except Exception as exc:
+            logger.warning("[AgentLoop] 手动压缩上下文失败", exc_info=True)
+            return {"ok": False, "detail": f"压缩上下文失败: {exc}"}
+
+        summary = ""
+        if new_messages and new_messages[0].get("role") == "system":
+            head_content = str(new_messages[0].get("content", "") or "")
+            prefix = "以下是对较早对话历史的摘要："
+            if head_content.startswith(prefix):
+                summary = head_content[len(prefix):].strip()
+
+        return {
+            "ok": True,
+            "messages": new_messages,
+            "summary": summary,
+            "removed_count": removed,
+            "before_count": len(messages),
+            "after_count": len(new_messages),
+            "estimated_tokens": _estimate_messages_tokens(new_messages),
+        }
+
     async def _execute_context_tool(
         self,
         tc_name: str,
@@ -1192,7 +1248,7 @@ class AgentLoop:
                 text_content = _extract_text_content(response_body)
                 final_message = {
                     "role": "assistant",
-                    "content": text_content or response_body,
+                    "content": text_content or "",
                 }
                 reasoning_content = _extract_reasoning_content(response_body)
                 if reasoning_content:
@@ -1648,7 +1704,7 @@ class AgentLoop:
                 text_content = _extract_text_content(response_body)
                 final_message = {
                     "role": "assistant",
-                    "content": text_content or response_body,
+                    "content": text_content or "",
                 }
                 reasoning_content = _extract_reasoning_content(response_body)
                 if reasoning_content:
