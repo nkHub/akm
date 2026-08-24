@@ -25,6 +25,25 @@ _AGENT_UPLOAD_MAX_FILES = 8
 _AGENT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 
 
+def _supports_vision(model: str) -> bool:
+    """判断请求模型是否支持直接视觉输入，决定上传图片是否直接塞入对话。
+
+    默认视为支持直接视觉（原生上传最优），仅当模型命中 agent_config 中
+    ``agent_no_vision_models``（不支持直接视觉、需降级走 akm_read_image
+    读图的模型，逗号分隔）时才降级为文本提示，避免上游对 image_url 报错。
+    """
+    model = str(model or "").strip()
+    if not model:
+        return True
+    config = load_config()
+    no_vision = str(config.get("agent_no_vision_models") or "").strip()
+    if no_vision:
+        names = {m.strip() for m in no_vision.split(",") if m.strip()}
+        if names and model in names:
+            return False
+    return True
+
+
 def _render_default_instructions(text: str, workspace_root: str = "") -> str:
     """替换默认系统指令中的占位符（{...}）为运行时实际路径。
 
@@ -109,12 +128,16 @@ def _save_uploaded_image(data: bytes, content_type: str) -> str:
     return str(path)
 
 
-async def _append_file_messages(messages: list[dict], files: list) -> tuple[list[dict] | None, str]:
+async def _append_file_messages(messages: list[dict], files: list, model: str = "") -> tuple[list[dict] | None, str]:
     """读取上传文件，并作为独立的 user 消息追加到对话末尾。
 
-    图片（image/*）→ 转为 base64 data URL 的 image_url 内容块，并把图片
-    落盘到临时目录，在文本提示中给出绝对路径，方便模型调用 akm_edit_image
-    编辑该图片；其他文件 → 尝试以 UTF-8 读取为文本内容；解码失败则拒绝。
+    图片（image/*）：
+    - 模型支持视觉输入（命中 agent_vision_models / agent_vision_model 白名单）
+      → 转为 base64 data URL 的 image_url 内容块，并把图片落盘到临时目录，
+      在文本提示中给出绝对路径，方便模型调用 akm_edit_image 编辑该图片；
+    - 否则 → 降级为纯文本提示：图片已落盘，模型看不到图，可调用
+      akm_read_image（image_path 参数）读图，避免不支持视觉的上游返回 400。
+    其他文件 → 尝试以 UTF-8 读取为文本内容；解码失败则拒绝。
 
     Returns:
         (新 messages, "") 或 (None, 错误信息)
@@ -123,6 +146,7 @@ async def _append_file_messages(messages: list[dict], files: list) -> tuple[list
     if len(files) > _AGENT_UPLOAD_MAX_FILES:
         return None, f"一次最多上传 {_AGENT_UPLOAD_MAX_FILES} 个文件"
     total_size = 0
+    vision_ok = _supports_vision(model)
     for f in files:
         filename = f.filename or "上传文件"
         content_type = f.content_type or ""
@@ -133,6 +157,23 @@ async def _append_file_messages(messages: list[dict], files: list) -> tuple[list
             return None, f"上传文件总大小不能超过 {_AGENT_UPLOAD_MAX_BYTES // (1024 * 1024)}MB"
         total_size += len(data)
         if content_type.startswith("image/"):
+            if not vision_ok:
+                # 模型不支持视觉：图片不进入上下文，仅提示模型用 akm_read_image 读图
+                saved_path = ""
+                try:
+                    saved_path = _save_uploaded_image(data, content_type)
+                except OSError as exc:
+                    logger.warning("[Agent] 保存上传图片失败: %s", exc)
+                text = f"用户上传了图片文件：{filename}。当前模型不支持直接视觉输入，无法直接查看该图片。"
+                if saved_path:
+                    text += (
+                        f"\n图片已保存至：{saved_path}。如需了解图片内容，"
+                        f"请调用 akm_read_image 工具并传入 image_path={saved_path}。"
+                    )
+                else:
+                    text += "\n图片未能落盘，本次无法读取其内容。"
+                new_messages.append({"role": "user", "content": text})
+                continue
             b64 = base64.b64encode(data).decode("ascii")
             saved_path = ""
             try:
@@ -194,7 +235,8 @@ async def _parse_agent_body(request: Request) -> tuple[dict[str, Any], JSONRespo
 
     files = form.getlist("files")
     if files:
-        new_messages, err = await _append_file_messages(messages, files)
+        model_for_files = str(form.get("model", "") or "").strip()
+        new_messages, err = await _append_file_messages(messages, files, model=model_for_files)
         if err:
             return {}, JSONResponse(status_code=400, content={"detail": err})
         messages = new_messages
