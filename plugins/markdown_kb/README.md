@@ -173,7 +173,7 @@ flowchart LR
 
 ## 测试页 Workspace 范围
 
-测试页会基于当前文件列表渲染去重后的 "Workspace 范围" 下拉。默认不选时继续按请求 `workspace_root / working_directory` 检索"公共文档 + 当前工作域文档"；显式选中某个 workspace 时只保留"公共文档 + 该 workspace 文档"。`POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 也支持从请求体显式接收 `workspace_root / working_directory`。
+测试页会基于当前文件列表渲染去重后的 "Workspace 范围" 下拉。默认不选时继续按请求 `workspace_root / working_directory` 检索"公共文档 + 当前工作域文档"；显式选中某个 workspace 时只保留"公共文档 + 该 workspace 文档"。`POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 也支持从请求体显式接收 `workspace_root / working_directory`。知识库本身已有文档、但当前工作区范围没有任何文档时，`query` 返回 HTTP 200 与空 `hits`，表示查询有效但没有可用资料；只有知识库整体为空或请求参数无效时才返回错误。
 
 ## 配套 Skill
 

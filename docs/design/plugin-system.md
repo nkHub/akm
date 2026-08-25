@@ -58,12 +58,21 @@
 
 > `has_menu` 默认为 `false`，不填即视为无需菜单入口。`default_enabled` 默认为 `true`，仅在首次加载且没有保存过启停状态时生效；`error_handler` 显式设为默认开启，用户已保存的关闭状态仍然优先。部分关键内置插件（如 model_matcher）标记为 `required: true`，不可禁用，保证核心链路至少有一个生效。
 
-当前实现里，有菜单插件的访问路径建议区分两层：
+ 当前实现里，有菜单插件的访问路径建议区分两层：
 
 - `/plugins/<name>`：AKM 后台宿主页，保留左侧菜单、顶部栏和统一外壳
-- `/plugins/<name>/raw`：插件原始 `views/index.html`，通常由宿主页内的 iframe 加载
+- `/plugins/<name>/raw`：插件原始 `views/index.html`，由宿主页的完整视图 iframe 加载
 
 这样做的目的是在不强迫每个插件都重写为 AKM 模板语法的前提下，仍然保留统一后台导航与页面结构。
+
+宿主页 `/plugins/<name>` 的内容区由 iframe 加载插件自己的 `views/index.html`（完整功能界面，如 markdown_kb 的检索测试/记忆查看、prompt_booster 的配置），插件前端不必重写为 AKM 模板语法，即可在统一外壳内呈现。插件的 `settings` 配置项通过插件管理列表页（`/plugins`）的「配置」弹窗编辑，不在宿主页重复渲染。
+
+除了 iframe 宿主页，管理台还提供两处**原生（无 iframe）注入点**，都建立在 `plugin.json` 既有 `menu` 元数据之上，由服务端在渲染模板时拼好 HTML 片段注入：
+
+- **侧边栏动态菜单**：服务端调用 `PluginManager.get_menu()`，把所有「已启用 + runtime 就绪 + `has_menu`」的插件按 `menu.order` 排序，拼成 `<a>` 条目注入到 `_sidebar.html` 的「插件」与「关于」菜单项之间（`_build_sidebar_plugin_menu`，server.py）。`menu.icon` 字符串名经 `_plugin_svg_icon` 映射为内联 SVG，未知名称回退到默认 `plugin` 图标。宿主页传入 `active="plugin:<name>"`，只高亮当前插件的动态菜单项；静态「插件」入口仅在 `/plugins` 管理页高亮。这样有菜单插件会出现在统一的左侧边栏，而不再只藏于「插件」列表页。实现上 `_build_sidebar_plugin_menu` 依赖**模块级全局 `plugin_manager`**（server.py 顶部声明，`lifespan` 启动时用 `global plugin_manager` 赋值为已加载实例），因此菜单仅在应用启动后可用。
+- **首页知识库记忆卡片**：`dashboard.html` 仅保留 `mk_memory_html` 卡片区，由 `_build_markdown_kb_memory_card` 读取 `markdown_kb.get_memory_stats()` 的四项指标（记忆条目 / 平均记忆值 / 累计命中 / 高值(>0.5)）。插件未启用或异常时该卡片不展示；插件入口统一由侧边栏动态菜单提供，避免首页重复展示插件简介。
+
+知识库记忆卡片由 `akm-plugin-card` Web Component（akm-ui.js，与 `akm-settings-card` 同范式）渲染，通过 `slot` 承载 `icon`（左侧图标）、`desc`（中部指标区）、`actions`（右侧跳转链接）。侧边栏菜单与该卡片是**宿主统一外壳内**的原生渲染；`/plugins/<name>` 页面内容区仍走 iframe 加载插件自带 `views/`（插件前端不必重写为 AKM 模板语法）。
 
 对于插件配置交互，当前实现也已经统一成一条默认规则：只要插件声明了 `settings`，插件列表页就默认通过“配置”按钮打开弹窗编辑，不再在列表卡片里额外展开内联表单。这样可以避免同一个插件同时出现“弹窗配置”和“展开配置”两套入口。各插件 `settings` 的配置项速查（类型、默认值、说明）见 `plugins/<插件名>/README.md`（索引见 `plugins/README.md`「各插件独立文档」章节）。部分插件在弹窗内使用结构化编辑器：`model_matcher`、`error_handler`，以及 `data_filter_guard`（关键词/正则行编辑 + 响应风险规则行；保存时从行控件同步到 `keyword_rules` / `regex_rules` / `response_block_patterns`，避免误清空）。
 
