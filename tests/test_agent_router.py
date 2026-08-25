@@ -60,6 +60,36 @@ async def test_multipart_text_file_appended_as_user_message():
 
 
 @pytest.mark.asyncio
+async def test_agent_passes_tool_options_for_json_and_multipart_requests():
+    """轻量工具开关应原样转交 Loop，JSON 和附件请求均使用同一协议。"""
+    loop = app.state.agent_loop
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_resp = await client.post(
+            "/v1/agent",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tool_options": {"search": True, "image": False},
+            },
+        )
+        multipart_resp = await client.post(
+            "/v1/agent",
+            data={
+                "model": "gpt-4o",
+                "messages": json.dumps([{"role": "user", "content": "hi"}]),
+                "tool_options": json.dumps({"search": False, "image": True}),
+            },
+            files=[("files", ("note.txt", "hello", "text/plain"))],
+        )
+
+    assert json_resp.status_code == 200
+    assert multipart_resp.status_code == 200
+    assert loop.calls[0]["options"]["tool_options"] == {"search": True, "image": False}
+    assert loop.calls[1]["options"]["tool_options"] == {"search": False, "image": True}
+
+
+@pytest.mark.asyncio
 async def test_multipart_image_appended_as_image_url(monkeypatch, tmp_path):
     """multipart 上传图片应转为 base64 data URL 的 image_url 内容块，并提示保存路径。"""
     # 隔离上传目录到临时目录，避免测试写入真实 ~/.akm/cache

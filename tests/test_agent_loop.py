@@ -606,6 +606,60 @@ async def test_run_stream_default_excludes_tavily_and_image(monkeypatch):
     assert "akm_generate_image" not in names
 
 
+@pytest.mark.asyncio
+async def test_run_tool_options_uses_registered_tools_and_enabled_optional_tools(monkeypatch):
+    """Chat 轻量开关只控制搜索/图片，普通工具按服务端注册状态自动下发。"""
+    registry = ToolRegistry()
+    for name in (
+        "akm_get_status", "akm_new_server_tool", "tavily_search",
+        "akm_generate_image", "akm_edit_image", "akm_read_image",
+    ):
+        registry.register(ToolDef(name, f"{name} 描述", {"type": "object", "properties": {}}, lambda: {}))
+    requests = []
+
+    async def forward(body, *_args, **_kwargs):
+        requests.append(body)
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"ok"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    result = await AgentLoop(http_client=None, tool_registry=registry).run(
+        [{"role": "user", "content": "hi"}],
+        tool_options={"search": True, "image": True},
+    )
+
+    assert result.ok is True
+    names = [t["function"]["name"] for t in requests[0]["tools"]]
+    assert {"akm_get_status", "akm_new_server_tool", "tavily_search", "akm_generate_image", "akm_edit_image", "akm_read_image"} <= set(names)
+
+
+@pytest.mark.asyncio
+async def test_run_stream_tool_options_excludes_disabled_optional_tools(monkeypatch):
+    """流式 Chat 开关关闭时只排除搜索和图片生成/编辑，读图和普通工具仍可使用。"""
+    registry = ToolRegistry()
+    for name in ("akm_get_time", "tavily_search", "akm_generate_image", "akm_edit_image", "akm_read_image"):
+        registry.register(ToolDef(name, f"{name} 描述", {"type": "object", "properties": {}}, lambda: {}))
+    requests = []
+
+    async def forward(body, *_args, **_kwargs):
+        requests.append(body)
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"ok"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    stream = AgentLoop(http_client=None, tool_registry=registry).run_stream(
+        [{"role": "user", "content": "hi"}],
+        tool_options={"search": False, "image": False},
+    )
+    async for _ in stream:
+        break
+
+    names = [t["function"]["name"] for t in requests[0]["tools"]]
+    assert "akm_get_time" in names
+    assert "tavily_search" not in names
+    assert "akm_generate_image" not in names
+    assert "akm_edit_image" not in names
+    assert "akm_read_image" in names
+
+
 def test_sse_accumulator_supports_responses_and_messages_events():
     """原生 Responses/Messages 流也应能还原可见文本和工具调用。"""
     responses = _SSEStreamAccumulator()

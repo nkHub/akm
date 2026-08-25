@@ -276,11 +276,20 @@ async def _parse_agent_body(request: Request) -> tuple[dict[str, Any], JSONRespo
         except (TypeError, json.JSONDecodeError):
             return {}, JSONResponse(status_code=400, content={"detail": "tools 必须是合法的 JSON 字符串"})
 
+    tool_options = None
+    tool_options_raw = form.get("tool_options")
+    if tool_options_raw:
+        try:
+            tool_options = json.loads(str(tool_options_raw))
+        except (TypeError, json.JSONDecodeError):
+            return {}, JSONResponse(status_code=400, content={"detail": "tool_options 必须是合法的 JSON 字符串"})
+
     stream_raw = str(form.get("stream", "false") or "false").lower()
     body = {
         "model": str(form.get("model", "") or ""),
         "messages": messages,
         "tools": tools if isinstance(tools, list) else None,
+        "tool_options": tool_options if isinstance(tool_options, dict) else None,
         "instructions": str(form.get("instructions", "") or ""),
         "api_path": str(form.get("api_path", "chat/completions") or "chat/completions"),
         "stream": stream_raw in ("1", "true", "yes", "on"),
@@ -313,6 +322,7 @@ async def agent(request: Request):
     messages = body["messages"]
     model = str(body.get("model", "") or "")
     tools = body.get("tools")
+    tool_options = body.get("tool_options")
     instructions = str(body.get("instructions", "") or "")
     if not instructions:
         # 客户端未提供指令时回填 config.json 的默认系统指令（agent_default_instructions）
@@ -351,6 +361,7 @@ async def agent(request: Request):
     options = {
         "model": model,
         "tools": tools if isinstance(tools, list) else None,
+        "tool_options": tool_options if isinstance(tool_options, dict) else None,
         "instructions": instructions,
         "max_turns": max_turns,
         "api_path": api_path,

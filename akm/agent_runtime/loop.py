@@ -28,6 +28,19 @@ _DEFAULT_EXCLUDED_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# Chat 客户端的轻量开关协议：普通工具完全由服务端当前注册状态决定，只有联网
+# 搜索和图片生成/编辑工具可由界面显式启用。读图不受 chat 图片开关控制：只有
+# agent_read_image_enabled 开启、工具已在服务启动时注册后，才会随普通工具自动注入，
+# 这样非视觉模型上传图片时仍可获取描述。与 _DEFAULT_EXCLUDED_TOOLS 分开，避免改变
+# 未升级客户端未传 tool_options 时的既有默认行为。
+_CHAT_OPTIONAL_TOOLS: frozenset[str] = frozenset(
+    {
+        "tavily_search",
+        "akm_generate_image",
+        "akm_edit_image",
+    }
+)
+
 # 框架工具：除上下文管理外，还包括「向用户澄清提问」的交互工具。
 # 与业务工具不同，这些工具不注册到 ToolRegistry（其 handler 需要访问当前
 # 运行的 AgentLoop 上下文），而是由 AgentLoop 在 run/run_stream 内部内联
@@ -1101,6 +1114,7 @@ class AgentLoop:
         *,
         model: str = "",
         tools: list[dict] | None = None,
+        tool_options: dict | None = None,
         instructions: str = "",
         max_turns: int = 0,
         api_path: str = "chat/completions",
@@ -1137,10 +1151,12 @@ class AgentLoop:
             else:
                 working_messages.insert(0, {"role": "system", "content": instructions})
 
-        # 工具注入策略（白名单）：调用方显式传 tools 时只注入调用方声明的工具
+        # 工具注入策略：调用方显式传 tools 时只注入调用方声明的工具
         # （未声明的内置工具如 tavily_search / akm_search_kb 不注入，LLM 不会自主调用）；
         # 显式传空数组 [] 表示不注入任何工具；未传 tools（None）时注入除
         # _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）外的全部内置工具。
+        # Chat 可传 tool_options（search/image）切换搜索和图片生成/编辑；读图与
+        # 普通工具始终以服务端当前注册状态为准，前端无需维护工具 schema。
         # 上下文管理框架工具（akm_context_status / akm_compact_context）始终注入，
         # 除非显式传空数组 []；非空白名单时也追加，保证 AI 主动压缩能力可用。
         registered_tools = self._tool_registry.list_tools()
@@ -1156,6 +1172,19 @@ class AgentLoop:
                 all_tools.append(registered.to_openai() if registered is not None else declared)
             if all_tools:
                 all_tools.extend(_AGENT_CONTEXT_TOOLS)
+        elif isinstance(tool_options, dict):
+            search_enabled = bool(tool_options.get("search", False))
+            image_enabled = bool(tool_options.get("image", False))
+            all_tools = []
+            for tool in registered_tools:
+                name = (tool.get("function", {}) or {}).get("name", "")
+                if name in _CHAT_OPTIONAL_TOOLS:
+                    if name == "tavily_search" and not search_enabled:
+                        continue
+                    if name != "tavily_search" and not image_enabled:
+                        continue
+                all_tools.append(tool)
+            all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
                 t
@@ -1451,6 +1480,7 @@ class AgentLoop:
         *,
         model: str = "",
         tools: list[dict] | None = None,
+        tool_options: dict | None = None,
         instructions: str = "",
         max_turns: int = 0,
         api_path: str = "chat/completions",
@@ -1519,9 +1549,10 @@ class AgentLoop:
             else:
                 working_messages.insert(0, {"role": "system", "content": instructions})
 
-        # 工具注入策略（白名单）：调用方显式传 tools 时只注入调用方声明的工具
+        # 工具注入策略：调用方显式传 tools 时只注入调用方声明的工具
         # （未声明的内置工具不注入）；显式传空数组 [] 表示不注入任何工具；
-        # 未传 tools（None）时注入除 _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）
+        # Chat 可传 tool_options（search/image）切换搜索和图片生成/编辑；读图与
+        # 普通工具始终以服务端当前注册状态为准。未传 tools（None）时注入除 _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）
         # 外的全部内置工具。上下文管理框架工具始终注入，除非显式传空数组 []。
         registered_tools = self._tool_registry.list_tools()
         if tools is not None:
@@ -1534,6 +1565,19 @@ class AgentLoop:
                 all_tools.append(registered.to_openai() if registered is not None else declared)
             if all_tools:
                 all_tools.extend(_AGENT_CONTEXT_TOOLS)
+        elif isinstance(tool_options, dict):
+            search_enabled = bool(tool_options.get("search", False))
+            image_enabled = bool(tool_options.get("image", False))
+            all_tools = []
+            for tool in registered_tools:
+                name = (tool.get("function", {}) or {}).get("name", "")
+                if name in _CHAT_OPTIONAL_TOOLS:
+                    if name == "tavily_search" and not search_enabled:
+                        continue
+                    if name != "tavily_search" and not image_enabled:
+                        continue
+                all_tools.append(tool)
+            all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
                 t

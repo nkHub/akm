@@ -90,4 +90,25 @@ def test_load_defaults_when_file_missing(isolated_config):
     """配置文件不存在时返回默认值，且不出现嵌套键。"""
     cfg_loaded = cfg.load_config()
     assert cfg_loaded["agent_max_turns"] == 100
+    assert cfg_loaded["agent_subagent_enabled"] is True
+    assert cfg_loaded["agent_subagent_max_depth"] == 1
     assert "agent_config" not in cfg_loaded
+
+
+def test_subagent_config_loads_from_nested_agent_config(isolated_config):
+    """子 Agent 开关和最大嵌套层数应从 agent_config 展开并规范化。"""
+    (isolated_config / "config.json").write_text(
+        json.dumps({"agent_config": {"agent_subagent_enabled": False, "agent_subagent_max_depth": "3"}}),
+        encoding="utf-8",
+    )
+    cfg_loaded = cfg.load_config()
+    assert cfg_loaded["agent_subagent_enabled"] is False
+    assert cfg_loaded["agent_subagent_max_depth"] == 3
+
+
+def test_subagent_config_saves_into_nested_agent_config(isolated_config):
+    """子 Agent 配置保存后应归组到 agent_config，供服务重启后读取。"""
+    cfg.save_config({"agent_subagent_enabled": False, "agent_subagent_max_depth": -2})
+    raw = _read_raw(isolated_config)
+    assert raw["agent_config"]["agent_subagent_enabled"] is False
+    assert raw["agent_config"]["agent_subagent_max_depth"] == 0
