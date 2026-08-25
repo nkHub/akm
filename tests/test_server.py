@@ -3,6 +3,7 @@ import tempfile
 import json
 import io
 import logging
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock
 from collections import OrderedDict
@@ -3004,6 +3005,7 @@ async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
 
     transport = ASGITransport(app=app)
     app.state.plugin_manager = pm
+    monkeypatch.setattr("akm.server.plugin_manager", pm)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         host_resp = await client.get("/plugins/markdown_kb")
         raw_resp = await client.get("/plugins/markdown_kb/raw")
@@ -3012,6 +3014,16 @@ async def test_plugin_host_page_keeps_admin_layout(monkeypatch):
     assert "AKM 后台" in host_resp.text
     assert 'iframe' in host_resp.text
     assert '/plugins/markdown_kb/raw' in host_resp.text
+    knowledge_match = re.search(r'<a href="/plugins/markdown_kb"([^>]*)>', host_resp.text)
+    assert knowledge_match is not None
+    knowledge_link = knowledge_match.group(1)
+    assert "text-indigo-400" in knowledge_link
+    assert "bg-indigo-400/10" in knowledge_link
+
+    plugin_match = re.search(r'<a href="/plugins"([^>]*)>', host_resp.text)
+    assert plugin_match is not None
+    plugin_entry = plugin_match.group(1)
+    assert "text-indigo-400" not in plugin_entry
 
     assert raw_resp.status_code == 200
     assert "Markdown 知识库" in raw_resp.text
@@ -3174,6 +3186,17 @@ async def test_markdown_kb_rebuild_query_ask_and_delete(monkeypatch):
     assert workspace_scoped_ask_result["workspace_root"] == "/Users/nk/Desktop/ccs"
     assert any(item["file_name"] == "guide.md" for item in workspace_scoped_ask_result["citations"])
     assert all(item["file_name"] in {"guide.md", "release.md"} for item in workspace_scoped_ask_result["citations"])
+
+    plugin.bind_file_workspace("release.md", "/Users/nk/Desktop/other-project")
+    await plugin.rebuild_index()
+    empty_workspace_query_result = await plugin.query({
+        "question": "How does Markdown plugin query work?",
+        "top_k": 5,
+        "workspace_root": "/Users/nk/Desktop/no-documents",
+    })
+    assert empty_workspace_query_result["ok"] is True
+    assert empty_workspace_query_result["workspace_root"] == "/Users/nk/Desktop/no-documents"
+    assert empty_workspace_query_result["hits"] == []
 
     (docs_dir / "guide.md").write_text(
         "# Markdown Guide\n\nMarkdown plugin keeps docs local.\n\n## Query\n\nUse query to inspect chunks.\n\n## Ask\n\nUse ask to answer with citations.\n\n## Sync\n\nSync only changed files.\n",
@@ -4048,3 +4071,98 @@ async def test_landing_page_serves_launch_html():
     # 启动页特征内容（title 与背景层）
     assert "AKM 启动页" in resp.text
     assert resp.text.count("AKM 启动页") == 2
+
+
+@pytest.mark.asyncio
+async def test_admin_injects_memory_section(monkeypatch):
+    """首页应保留知识库记忆卡片，并移除与侧边栏重复的插件卡片入口。"""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/admin")
+    assert resp.status_code == 200
+    text = resp.text
+    # 仅保留知识库记忆区
+    assert "mk-memory-section" in text
+    assert "plugin-cards-section" not in text
+    # 侧边栏菜单占位被渲染（空菜单时注入空字符串，占位符应被替换掉）
+    assert "{{ plugin_menu_html }}" not in text
+    assert "{{ mk_memory_html }}" not in text
+
+
+@pytest.mark.asyncio
+async def test_build_markdown_kb_memory_card(monkeypatch):
+    """markdown-kb 插件启用时，首页记忆卡片应含 4 项指标。"""
+    from akm.server import _build_markdown_kb_memory_card
+
+    class FakePlugin:
+        enabled = True
+        def get_memory_stats(self):
+            return {
+                "summary": {
+                    "memory_chunk_count": 12,
+                    "memory_avg_value": 0.66,
+                    "memory_total_hits": 99,
+                    "memory_high_value_count": 5,
+                }
+            }
+
+    class FakePM:
+        plugins = {"markdown_kb": FakePlugin()}
+
+    html = _build_markdown_kb_memory_card(FakePM())
+    assert html
+    assert "akm-plugin-card" in html
+    assert "12" in html and "0.66" in html and "99" in html and "5" in html
+    assert "记忆条目" in html and "平均记忆值" in html
+
+
+@pytest.mark.asyncio
+async def test_build_markdown_kb_memory_card_disabled(monkeypatch):
+    """插件未启用时返回空串，首页不展示记忆卡片。"""
+    from akm.server import _build_markdown_kb_memory_card
+
+    class FakePlugin:
+        enabled = False
+
+    class FakePM:
+        plugins = {"markdown_kb": FakePlugin()}
+
+    assert _build_markdown_kb_memory_card(FakePM()) == ""
+
+    class NoPluginPM:
+        plugins = {}
+    assert _build_markdown_kb_memory_card(NoPluginPM()) == ""
+
+
+def test_build_sidebar_plugin_menu_uses_global_plugin_manager(monkeypatch):
+    """侧边栏菜单应读取模块级全局 plugin_manager（lifespan 填充），而非不存在的局部变量。
+
+    回归防护：此前 _build_sidebar_plugin_menu 引用未定义的模块级 plugin_manager，
+    触发 NameError 被 except 吞掉而恒返回空串，导致侧边栏插件菜单永不显示。
+    """
+    import akm.server as srv
+
+    class FakeMenuPM:
+        def get_menu(self):
+            return [
+                {"name": "prompt_booster", "title": "提示词增强", "icon": "prompt", "order": 50, "route": "/plugins/prompt_booster"},
+                {"name": "markdown_kb", "title": "知识库", "icon": "book", "order": 60, "route": "/plugins/markdown_kb"},
+            ]
+
+    monkeypatch.setattr(srv, "plugin_manager", FakeMenuPM())
+    html = srv._build_sidebar_plugin_menu()
+    assert "知识库" in html
+    assert "提示词增强" in html
+    assert "/plugins/markdown_kb" in html
+    assert "/plugins/prompt_booster" in html
+
+    active_html = srv._build_sidebar_plugin_menu("plugin:markdown_kb")
+    knowledge_link = active_html.split('href="/plugins/markdown_kb"', 1)[1].split("</a>", 1)[0]
+    prompt_link = active_html.split('href="/plugins/prompt_booster"', 1)[1].split("</a>", 1)[0]
+    assert "text-indigo-400" in knowledge_link
+    assert "bg-indigo-400/10" in knowledge_link
+    assert "text-indigo-400" not in prompt_link
+
+    # 未初始化（None）时优雅返回空串，不抛错
+    monkeypatch.setattr(srv, "plugin_manager", None)
+    assert srv._build_sidebar_plugin_menu() == ""

@@ -232,6 +232,55 @@ if (!customElements.get('akm-settings-card')) {
   });
 }
 
+/** akm-plugin-card：插件卡片（首页插件/知识库记忆卡片共用）。
+ *  支持 slot：icon（左侧图标）、desc（中部描述/指标区）、actions（右侧操作）。
+ *  通过 title 属性设标题。图标与操作均为服务端拼好的子节点内联进来，
+ *  组件只做骨架布局，不修改子节点内容，故长 SVG / 表格可安全透传。
+ */
+if (!customElements.get('akm-plugin-card')) {
+  customElements.define('akm-plugin-card', class extends HTMLElement {
+    connectedCallback() {
+      if (this.__mounted) return;
+      this.__mounted = true;
+      var self = this;
+      initializeComponentWhenParsed(this, function() { self.render(); });
+    }
+
+    render() {
+      var iconNodes = [], descNodes = [], actionNodes = [], otherNodes = [];
+      Array.from(this.childNodes).forEach(function(node) {
+        if (node.nodeType !== 1) return;
+        var slot = node.getAttribute && node.getAttribute('slot');
+        if (slot === 'icon') iconNodes.push(node);
+        else if (slot === 'desc') descNodes.push(node);
+        else if (slot === 'actions') actionNodes.push(node);
+        else otherNodes.push(node);
+      });
+      var title = this.getAttribute('title') || '';
+      var titleHtml = title
+        ? '<div class="text-sm font-medium text-gray-200 mb-2 truncate">' + title + '</div>'
+        : '';
+      this.innerHTML =
+        '<div class="bg-surface-light border border-border rounded-lg p-4 flex flex-col h-full">' +
+          titleHtml +
+          '<div class="flex items-start gap-3 flex-1">' +
+            '<div data-icon class="shrink-0 mt-0.5 w-8 h-8 flex items-center justify-center">' + '</div>' +
+            '<div data-desc class="flex-1 min-w-0"></div>' +
+            '<div data-actions class="shrink-0"></div>' +
+          '</div>' +
+        '</div>';
+      var iconEl = this.querySelector('[data-icon]');
+      var descEl = this.querySelector('[data-desc]');
+      var actionsEl = this.querySelector('[data-actions]');
+      iconNodes.forEach(function(n) { iconEl.appendChild(n); });
+      descNodes.forEach(function(n) { descEl.appendChild(n); });
+      actionNodes.forEach(function(n) { actionsEl.appendChild(n); });
+      otherNodes.forEach(function(n) { descEl.appendChild(n); });
+      this.style.display = 'block';
+    }
+  });
+}
+
 if (!customElements.get('akm-modal')) {
   customElements.define('akm-modal', class extends AkmOverlayPanelElement {
     connectedCallback() {

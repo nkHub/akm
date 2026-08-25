@@ -41,6 +41,10 @@ from akm.agent import register_agent, unregister_agent, list_agents, load_custom
 from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
 from akm.db import get_keys_log_path
+
+# 模块级插件管理器引用：在 lifespan 启动时指向已加载实例，
+# 供服务端模板渲染函数读取插件菜单，避免依赖不存在的局部变量。
+plugin_manager: "PluginManager | None" = None
 from akm.error_log import write_error_log
 from akm.health import HealthMonitor
 from akm.usage_flags import (
@@ -126,6 +130,7 @@ async def lifespan(app: FastAPI):
     # 加载配置（后续连接池、队列等参数均从此读取）
     cfg = load_config()
     # 初始化插件管理器
+    global plugin_manager
     plugin_manager = PluginManager()
     # 初始化连接已关闭，不能把它注入插件上下文；插件需自行获取短生命周期连接。
     await plugin_manager.load_all(app)
@@ -465,12 +470,97 @@ async def _resolve_key_save_payload(body: dict, existing: dict | None = None) ->
         "provider_models": provider_models,
     }
 
+_PLUGIN_ICON_SVGS = {
+    "book": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>',
+    "prompt": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6.5 12h11M12 6.5v11M4 12a8 8 0 1016 0 8 8 0 00-16 0z"/></svg>',
+    "plugin": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 14v6m-3-3h6M6 10h2a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v2a2 2 0 002 2zm10 0h2a2 2 0 002-2V6a2 2 0 00-2-2h-2a2 2 0 00-2 2v2a2 2 0 002 2zM6 20h2a2 2 0 002-2v-2a2 2 0 00-2-2H6a2 2 0 00-2 2v2a2 2 0 002 2z"/></svg>',
+    "cube": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>',
+    "chart": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-6m-3 6V9m12 8v-9m-3 9v-4M4 21h16a1 1 0 001-1V4a1 1 0 00-1-1H4a1 1 0 00-1 1v16a1 1 0 001 1z"/></svg>',
+    "database": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3m18 7c0 1.66-4 3-9 3s-9-1.34-9-3m18-7c0 1.66-4 3-9 3s-9-1.34-9-3"/></svg>',
+    "shield": '<svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.618 5.984A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>',
+}
+
+
+def _plugin_svg_icon(name: str) -> str:
+    """把插件 menu.icon 字符串名映射为内联 SVG，未知名称回退到默认 plugin 图标。"""
+    return _PLUGIN_ICON_SVGS.get(str(name or "").strip(), _PLUGIN_ICON_SVGS["plugin"])
+
+
+def _build_sidebar_plugin_menu(active: str = "") -> str:
+    """服务端拼接已启用且有菜单��件的侧边栏条目 HTML（自研模板引擎无循环，故此在服务端拼好）。
+
+    条目插在「插件」菜单项与「关于」之间。active 为 ``plugin:<name>`` 时，
+    对应动态菜单项高亮，避免插件宿主页错误高亮静态「插件」管理入口。
+    返回空串表示没有可展示的插件菜单。
+    """
+    try:
+        items = plugin_manager.get_menu()
+    except Exception:
+        return ""
+    if not items:
+        return ""
+    parts = []
+    for it in items:
+        name = str(it.get("name") or "")
+        route = it.get("route") or f"/plugins/{it.get('name', '')}"
+        title = it.get("title") or it.get("name", "")
+        icon = _plugin_svg_icon(it.get("icon"))
+        is_active = active == f"plugin:{name}"
+        class_name = (
+            "flex items-center gap-3 px-3 py-2 rounded text-sm text-indigo-400 "
+            "bg-indigo-400/10 transition-colors cursor-pointer whitespace-nowrap overflow-hidden"
+            if is_active
+            else "flex items-center gap-3 px-3 py-2 rounded text-sm text-gray-400 "
+            "hover:bg-surface-hover hover:text-white transition-colors cursor-pointer whitespace-nowrap overflow-hidden"
+        )
+        parts.append(
+            f'<a href="{route}" class="{class_name}">'
+            f"{icon}<span class=\"sidebar-label\">{title}</span></a>"
+        )
+    return "\n".join(parts)
+
+
+def _build_markdown_kb_memory_card(pm) -> str:
+    """服务端生成首页「知识库记忆」卡片 HTML。
+
+    读取已加载的 markdown_kb 插件实例记忆统计（get_memory_stats）。
+    插件未加载/未启用/异常时返回空串（首页不展示该卡片）。
+    """
+    try:
+        plugin = (pm.plugins or {}).get("markdown_kb")
+        if plugin is None or not getattr(plugin, "enabled", False):
+            return ""
+        stats = plugin.get_memory_stats()
+    except Exception:
+        return ""
+    summary = stats.get("summary") or {}
+    chunk_count = summary.get("memory_chunk_count") or 0
+    avg = round(float(summary.get("memory_avg_value") or 0.0), 2)
+    total_hits = summary.get("memory_total_hits") or 0
+    high = summary.get("memory_high_value_count") or 0
+    icon = _plugin_svg_icon("book")
+    return (
+        f'<akm-plugin-card title="知识库记忆" class="mk-memory-card">'
+        f'<span slot="icon">{icon}</span>'
+        f'<span slot="desc" class="mk-memory-grid">'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{chunk_count}</div><div class="mk-mem-label">记忆条目</div></div>'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{avg}</div><div class="mk-mem-label">平均记忆值</div></div>'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{total_hits}</div><div class="mk-mem-label">累计命中</div></div>'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{high}</div><div class="mk-mem-label">高值(>0.5)</div></div>'
+        f'</span>'
+        f'<a slot="actions" href="/plugins/markdown_kb" class="text-xs text-indigo-400 hover:text-indigo-300">查看 ›</a>'
+        f'</akm-plugin-card>'
+    )
+
+
 def _render_template(name: str, **kwargs) -> str:
     """读取模板文件，替换 {{ var }} 占位符，支持 {% extends %}, {% include %}, {% block %}"""
     # 为静态资源提供默认版本参数，前端可用于 querystring 破缓存，避免替换 logo 后仍命中旧缓存。
     kwargs.setdefault("asset_version", __version__)
     # 为所有页面统一注入当前应用版本，供 header/about 等模板直接展示。
     kwargs.setdefault("version", __version__)
+    # 为所有页面统一注入侧边栏插件菜单片段（has_menu 插件，插在「插件」之后「关于」之前）。
+    kwargs.setdefault("plugin_menu_html", _build_sidebar_plugin_menu(str(kwargs.get("active") or "")))
     _file_cache: dict[str, str] = {}
 
     def _load(path: str) -> str:
@@ -2362,7 +2452,12 @@ async def about_page(request: Request):
 @app.get("/admin")
 async def admin_page(request: Request):
     """统计页面"""
-    return HTMLResponse(_render_template("dashboard.html", title="统计", active="admin"))
+    # 侧边栏插件菜单统一由 _render_template 注入。
+    mk_html = _build_markdown_kb_memory_card(request.app.state.plugin_manager)
+    return HTMLResponse(_render_template(
+        "dashboard.html", title="统计", active="admin",
+        mk_memory_html=mk_html,
+    ))
 
 
 @app.get("/plugins")
@@ -2389,7 +2484,7 @@ async def plugin_view(name: str, request: Request):
     return HTMLResponse(_render_template(
         "plugin_host.html",
         title=plugin.meta.menu.get("title", plugin.meta.name),
-        active="plugins",
+        active=f"plugin:{name}",
         plugin_title=plugin.meta.menu.get("title", plugin.meta.name),
         plugin_description=plugin.meta.description or "",
         plugin_iframe_src=f"/plugins/{name}/raw",

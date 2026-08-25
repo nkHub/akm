@@ -331,9 +331,9 @@ class AKMApp(rumps.App):
         self.menu = [
             self.status_item,
             rumps.MenuItem(title="应用管理", callback=self.open_admin),
+            rumps.MenuItem(title="关于 AKM", callback=self.show_about_dialog),
             None,  # 分隔线
             rumps.MenuItem(title="检查更新", callback=self.check_update_now),
-            rumps.MenuItem(title="关于 AKM", callback=self.show_about_dialog),
             rumps.MenuItem(title="重启服务", callback=self.restart_server),
             rumps.MenuItem(title="退出", callback=self.quit_app),
         ]
@@ -1033,8 +1033,8 @@ class AKMApp(rumps.App):
         if self.update_item is None:
             self.update_item = rumps.MenuItem(title=title, callback=self._on_update_menu_click)
             self._update_url = release_url
-            # 插在“应用管理”后面，保证更新入口显眼但不干扰状态项。
-            self.menu.insert_after("应用管理", self.update_item)
+            # 保持“关于 AKM”紧随“应用管理”，更新入口放在其后。
+            self.menu.insert_after("关于 AKM", self.update_item)
             return
 
         self.update_item.title = title

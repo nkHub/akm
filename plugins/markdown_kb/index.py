@@ -3433,7 +3433,9 @@ class Plugin(PluginBase):
             if ignore_workspace:
                 scoped_documents = all_documents
             if not scoped_documents:
-                raise HTTPException(status_code=400, detail="当前工作目录下没有匹配的知识文档，请先为该工作目录配置并重建索引")
+                # 工作区范围为空属于有效查询的空结果，而非请求参数错误。
+                # 调用方可据此提示用户切换工作区或改查全局知识库。
+                return []
             scoped_documents = self._filter_documents_by_selected_doc(scoped_documents, selected_doc)
             if not scoped_documents:
                 raise HTTPException(status_code=400, detail="当前所选文档不在本次检索范围内，请检查 workspace 或改为不指定文档")
