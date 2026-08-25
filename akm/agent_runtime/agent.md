@@ -1,6 +1,6 @@
 # Agent Loop
 
-`POST /v1/agent` 提供多轮 LLM 工具调用编排能力。请求传入对话历史和工具定义，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。
+`POST /v1/agent` 提供多轮 LLM 工具调用编排能力。请求传入对话历史，以及可选的工具白名单或轻量开关，Agent Loop 内部循环调用 LLM → 解析 `tool_calls` → 执行工具 → 回传结果，直到 LLM 返回最终文本回复或达到最大轮次。
 
 每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
@@ -123,6 +123,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
     }
   ],
   "instructions": "你是 AKM 内置助手，请用中文回复",
+  "tool_options": {"search": true, "image": false},
   "api_path": "chat/completions",
   "max_turns": 20
 }
@@ -134,7 +135,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 |------|------|------|------|
 | `messages` | list | 是 | 对话历史（Chat 格式的 messages 数组） |
 | `model` | string | 否 | 指定模型，为空时自动选择第一个可用 Key 的模型 |
-| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**（内置工具如 `tavily_search`、`akm_search_kb` 不再自动注入，避免模型未经声明自主调用）；若名称与服务端已注册工具相同，服务端会覆盖客户端给出的 description 和 parameters；显式传空数组 `[]` 表示**不注入任何工具**；不传时注入除 `tavily_search` / `akm_generate_image` / `akm_edit_image` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_run_shell` / `akm_run_git` 外的全部内置工具（联网搜索、图片生成涉及外部服务调用，文件写操作、shell 执行与 git 操作涉及本机写入，需在 tools 中显式声明才能启用） |
+| `tools` | list | 否 | 工具定义列表（OpenAI function calling 格式）。传入时**只注入本列表声明的工具**；同名已注册工具会由服务端覆盖 description 和 parameters；显式传空数组 `[]` 表示**不注入任何工具**。该兼容模式适合外部调用方或需要自定义白名单的任务。 |
+| `tool_options` | object | 否 | Chat 轻量工具开关，仅在未传 `tools` 时生效：`search` 控制 `tavily_search`，`image` 控制 `akm_generate_image`、`akm_edit_image`。`akm_read_image` 不受这两个 UI 开关控制，但仅当 `agent_read_image_enabled=true`、服务启动时已注册该工具后才自动注入，确保上传图片时非视觉模型仍可读图。普通工具完全按服务端当前注册状态（由 `agent_*` 配置开关决定）自动注入，客户端无需维护工具 schema。未传时保持原默认：搜索和图片生成/编辑工具不注入。 |
 | `instructions` | string | 否 | 系统级指令，注入到 messages 首条 system 消息；未传时使用 config.json 的 `agent_default_instructions`（默认要求数学公式以 KaTeX 语法返回）。其中 `{AKM_SOURCE_DIR}`、`{CURRENT_WORKING_DIRECTORY}`、`{USER_AGENTS_MD_PATH}`、`{USER_AGENTS_SKILLS_DIR}`、`{USER_PI_NPM_DIR}` 占位符在注入前自动替换为运行时实际路径（源码根目录、请求工作区、用户环境路径；用户路径不存在时替换为空字符串） |
 | `api_path` | string | 否 | LLM 调用协议格式（默认 `chat/completions`，也支持 `responses` / `messages`） |
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |

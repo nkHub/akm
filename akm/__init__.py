@@ -1,6 +1,6 @@
 """AKM 包级元信息。"""
 
-__version__ = "0.1.33"
+__version__ = "0.1.34"
 
 # 供 server.py API 触发的待执行操作（由 menubar native timer 在主线程安全执行）
 # 放在 akm/__init__.py 而非 menubar.py，避免 py2app 打包后 __main__ 与 akm.menubar 双加载

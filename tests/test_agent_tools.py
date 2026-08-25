@@ -1381,7 +1381,7 @@ class _FakeSubProc:
 
 @pytest.mark.asyncio
 async def test_subagent_tools_registered_and_gated(monkeypatch, tmp_path):
-    """agent_subagent_enabled 默认开启时注册三个工具；显式关闭则不注册。"""
+    """agent_subagent_enabled 默认开启时注册五个工具；显式关闭则全部不注册。"""
     import akm.agent_runtime.tools as tools_mod
 
     monkeypatch.setattr(tools_mod, "_SUBAGENT_RUN_ROOT", str(tmp_path))
@@ -1389,13 +1389,20 @@ async def test_subagent_tools_registered_and_gated(monkeypatch, tmp_path):
         tools_mod, "load_config", lambda: {"agent_subagent_enabled": True}
     )
     names = {tool.name for tool in build_builtin_tools(SimpleNamespace())}
-    assert {"akm_subagent_spawn", "akm_subagent_wait", "akm_subagent_kill"} <= names
+    subagent_names = {
+        "akm_subagent_spawn",
+        "akm_subagent_wait",
+        "akm_subagent_kill",
+        "akm_subagent_list",
+        "akm_subagent_status",
+    }
+    assert subagent_names <= names
 
     monkeypatch.setattr(
         tools_mod, "load_config", lambda: {"agent_subagent_enabled": False}
     )
     names2 = {tool.name for tool in build_builtin_tools(SimpleNamespace())}
-    assert "akm_subagent_spawn" not in names2
+    assert not subagent_names & names2
 
 
 @pytest.mark.asyncio
@@ -1671,4 +1678,3 @@ def test_subagent_status_returns_detail_and_log_tail(monkeypatch, tmp_path):
         assert "未找到" in out3["error"]
     finally:
         tools_mod._SUBAGENT_TASKS.pop("sub_det", None)
-
