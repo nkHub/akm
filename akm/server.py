@@ -129,6 +129,11 @@ async def lifespan(app: FastAPI):
     auto_cleanup_logs()
     # 加载配置（后续连接池、队列等参数均从此读取）
     cfg = load_config()
+    # 菜单栏唤醒恢复会复用同一个 FastAPI 实例；先清理上一轮插件注册的
+    # API 路由和静态挂载，避免旧依赖闭包在新插件实例之前抢先匹配请求。
+    previous_plugin_manager = getattr(app.state, "plugin_manager", None)
+    if previous_plugin_manager is not None:
+        previous_plugin_manager.remove_registered_routes(app)
     # 初始化插件管理器
     global plugin_manager
     plugin_manager = PluginManager()

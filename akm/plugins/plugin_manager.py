@@ -410,6 +410,47 @@ class PluginManager:
 
         logger.info(f"[PluginManager] 共加载 {len(self.plugins)} 个插件")
 
+    def remove_registered_routes(self, app: FastAPI | None = None) -> int:
+        """移除本管理器向 FastAPI 注册的插件 API 路由和静态挂载。
+
+        菜单栏从休眠唤醒后可能在同一个 FastAPI 实例内重新运行 lifespan。
+        旧路由依赖旧的插件对象；如果不先移除，旧对象在 shutdown 时会变为
+        未就绪状态，后续请求可能先命中旧路由并返回 503。这里只按本管理器
+        已加载插件记录的 API 前缀和静态挂载名清理，不能按路径模糊删除，
+        以免误删宿主的插件主页及其 raw 路由。
+        """
+        target_app = app or self.app
+        if target_app is None:
+            return 0
+
+        prefixes = {
+            (meta.routes_prefix or f"/{name}").rstrip("/") or "/"
+            for name, meta in self._plugin_metas.items()
+        }
+        mount_names = {f"plugin_static_{name}" for name in self._plugin_metas}
+        if not prefixes and not mount_names:
+            return 0
+
+        old_routes = target_app.router.routes
+        kept_routes = []
+        removed = 0
+        for route in old_routes:
+            route_path = getattr(route, "path", "")
+            route_name = getattr(route, "name", "")
+            is_plugin_api = any(
+                route_path == prefix or route_path.startswith(f"{prefix}/")
+                for prefix in prefixes
+            )
+            if is_plugin_api or route_name in mount_names:
+                removed += 1
+                continue
+            kept_routes.append(route)
+
+        target_app.router.routes = kept_routes
+        if removed:
+            logger.info(f"[PluginManager] 清理旧插件路由与静态挂载: {removed} 条")
+        return removed
+
     async def unload_all(self) -> None:
         """关闭服务前依次卸载已初始化的插件，单个异常不影响其余清理。"""
         for plugin in reversed(list(self.plugins.values())):

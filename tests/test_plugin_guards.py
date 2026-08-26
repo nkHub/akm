@@ -12,6 +12,7 @@ import zipfile
 import httpx
 import pytest
 from fastapi import FastAPI, UploadFile
+from fastapi import APIRouter
 from unittest.mock import AsyncMock, MagicMock
 
 from akm.plugins import PluginBase
@@ -28,6 +29,40 @@ from plugins.prompt_profiles.index import Plugin as PromptProfiles
 from plugins.tool_policy_guard.index import Plugin as ToolPolicyGuard
 from plugins.response_schema_guard.index import Plugin as ResponseSchemaGuard
 from plugins.provider_health_probe.index import Plugin as ProviderHealthProbe
+
+
+def test_remove_registered_routes_only_removes_plugin_owned_routes():
+    """重复 lifespan 时只清理旧插件路由，不影响宿主插件主页路由。"""
+    app = FastAPI()
+    api_router = APIRouter()
+
+    @api_router.get("/ping")
+    async def ping():
+        return {"ok": True}
+
+    app.include_router(api_router, prefix="/markdown-kb")
+    app.mount("/plugins/markdown_kb/static", FastAPI(), name="plugin_static_markdown_kb")
+    host_router = APIRouter()
+
+    @host_router.get("/plugins/markdown_kb")
+    async def plugin_host():
+        return {"ok": True}
+
+    app.include_router(host_router)
+
+    manager = PluginManager()
+    manager._plugin_metas = {
+        "markdown_kb": SimpleNamespace(routes_prefix="/markdown-kb")
+    }
+
+    removed = manager.remove_registered_routes(app)
+    paths = {getattr(route, "path", "") for route in app.router.routes}
+    names = {getattr(route, "name", "") for route in app.router.routes}
+
+    assert removed == 2
+    assert "/markdown-kb/ping" not in paths
+    assert "plugin_static_markdown_kb" not in names
+    assert "/plugins/markdown_kb" in paths
 
 
 def _ctx(request: dict | None = None, **kwargs) -> RequestContext:

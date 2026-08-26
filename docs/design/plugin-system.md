@@ -456,6 +456,7 @@ PluginManager.load_all(app)
 
 - **API 路由**：插件的 `self.router`（在 `__init__` 中定义的 APIRouter）挂载到 `{routes_prefix}` 下；插件禁用或 `runtime_ready=false` 时返回 HTTP 503
 - **前端路由**（仅 has_menu 插件）：`/plugins/{name}` 和 `/plugins/{name}/{rest:path}` → `views/index.html`（SPA 支持）
+- **生命周期重建**：菜单栏从休眠唤醒后可能在同一个 FastAPI 实例内重新运行 `lifespan`。创建新 `PluginManager` 前必须调用旧管理器的 `remove_registered_routes`，按旧插件记录的 `routes_prefix` 清理 API 路由，并按 `plugin_static_{name}` 清理静态挂载；不得删除宿主的 `/plugins/{name}` 或 `/raw` 路由。否则旧路由依赖的插件实例在关闭时变为未就绪，可能导致新实例已就绪但请求仍返回 503。
 - **静态文件**（仅 has_menu 插件）：`/plugins/{name}/static` → `views/` 目录（CSS/JS/图片等）；插件禁用或未就绪时返回 HTTP 503
 
 ## 八、Hook 机制
