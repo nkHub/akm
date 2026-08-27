@@ -319,14 +319,16 @@ async def clean_logs_async(before: str) -> int:
 
 
 def clean_log_bodies() -> int:
-    """清空所有审计日志的请求体/响应体内容，返回影响条数"""
+    """清空所有审计日志的请求体/响应体内容及请求头快照，返回影响条数"""
     conn = get_connection()
     cursor = conn.execute(
         """UPDATE audit_logs
            SET request_body = '', response_body = '',
-               client_request_body = '', upstream_response_body = ''
+               client_request_body = '', upstream_response_body = '',
+               request_headers = '', client_request_headers = '', upstream_request_headers = ''
            WHERE request_body != '' OR response_body != ''
-              OR client_request_body != '' OR upstream_response_body != ''"""
+              OR client_request_body != '' OR upstream_response_body != ''
+              OR request_headers != '' OR client_request_headers != '' OR upstream_request_headers != ''"""
     )
     conn.commit()
     count = cursor.rowcount

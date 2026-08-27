@@ -143,12 +143,6 @@ function costTipIcon(log) {
     + '</akm-tooltip>';
 }
 function formatJson(s) { if(!s)return''; try{return JSON.stringify(JSON.parse(s),null,2);}catch{return s;} }
-function jsonTextEqual(a, b) {
-  // 忽略 JSON 键顺序差异后比较两段文本是否等价；任一段不是合法 JSON 时退化为原字符串比较。
-  if (!a || !b) return String(a) === String(b);
-  try { return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b)); }
-  catch(e) { return String(a) === String(b); }
-}
 function renderMarkdownSafe(text) {
   if (!text) return '<span class="text-gray-500">(空)</span>';
   // 先转义原始 HTML，再交给 marked 做 Markdown 解析。
@@ -637,16 +631,11 @@ function openDrawer(idx) {
   currentLog.__reqRendered = false;
   currentLog.__respRendered = false;
   currentLog.__errorRendered = false;
-  // 未发生协议转换时隐藏「转换请求体」「转换响应体」两个 tab：
-  // 客户端原始请求体与上游请求体、上游原始响应体与发给客户端的响应体 JSON 内容一致即视为无转换。
-  // 任一侧数据缺失（未开启对应保存开关）时无法比较，保守保留 tab 显示。
+  // 仅当发生协议转换（converter 类型插件启用并被触发）时，后端才会落库「转换后请求体/响应体」；
+  // 因此按是否存有转换后内容判定是否显示对应 tab，未存储（无转换）即隐藏。
   // 「对话视图」「客户端请求体」「上游响应」三个 tab 始终显示。
-  var clientReqRaw = currentLog.client_request_body || '';
-  var upReqRaw = currentLog.request_body || '';
-  var upRespRaw = currentLog.upstream_response_body || '';
-  var clientRespRaw = currentLog.response_body || '';
-  var hasReqTransform = !(clientReqRaw && upReqRaw) || !jsonTextEqual(clientReqRaw, upReqRaw);
-  var hasRespTransform = !(upRespRaw && clientRespRaw) || !jsonTextEqual(upRespRaw, clientRespRaw);
+  var hasReqTransform = !!(currentLog.request_body || '');
+  var hasRespTransform = !!(currentLog.response_body || '');
   var dtabReq = document.getElementById('dtab-request');
   var dtabResp = document.getElementById('dtab-response');
   if (dtabReq) dtabReq.classList.toggle('hidden', !hasReqTransform);

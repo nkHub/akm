@@ -443,7 +443,7 @@ class WorkflowEngine:
                 "status_code": status_code,
                 "latency_ms": int(result.get("latency_ms", 0) or 0),
                 "error": error,
-                "request_headers": json.dumps({"user-agent": "akm-flow/1.0", "x-akm-source": "flow"}),
+                "request_headers": json.dumps({"user-agent": "akm-flow/1.0", "x-akm-source": "flow"}) if save_request_body else "",
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,

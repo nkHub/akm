@@ -239,8 +239,8 @@ akm-menubar
 | `server_port` | `8800` | 服务端口 |
 | `auto_open_admin` | `true` | 启动时自动打开管理台 |
 | `log_retention_days` | `30` | 日志保留天数 |
-| `log_request_body` | `false` | 是否记录请求体（含完整对话内容，占用空间大） |
-| `log_response_body` | `false` | 是否记录响应体（占用空间大，关闭不影响统计） |
+| `log_request_body` | `false` | 是否记录请求体与请求头快照（含完整对话内容，占用空间大；转换后请求体仅在发生协议转换时记录） |
+| `log_response_body` | `false` | 是否记录响应体（占用空间大，关闭不影响统计；转换后响应体仅在发生协议转换时记录） |
 | `stream_capture_max_bytes` | `262144` | 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB） |
 | `json_viewer_max_text_length` | `600000` | JSON 查看器超长文本阈值（超过后仅允许下载原文） |
 
@@ -378,7 +378,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细） |
 | GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
-| POST | `/api/logs/clean-bodies` | 清空请求体/响应体（含客户端原始请求体与上游原始响应体，保留元数据与统计列） |
+| POST | `/api/logs/clean-bodies` | 清空请求体/响应体（含客户端原始请求体、上游原始响应体与三列请求头快照，保留元数据与统计列） |
 | GET | `/api/stats` | Token 统计（支持 days 自然日范围：1=今天，7=近7天，30=近30天） |
 | GET/POST | `/api/config` | 配置读写 |
 | GET | `/api/agents` | 供应商代理列表（内置 + 自定义） |
@@ -433,7 +433,7 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
 
 请求转发跟随客户端的流式意图：`stream=true` 逐块透传 SSE，`stream=false` 直接请求上游普通 JSON 并原样或按协议转换后返回；流式结束后异步写入审计日志（完整响应体用于统计和对话回放）。流式响应的内存捕获有界（默认 `stream_capture_max_bytes` 256KB，超出保留头尾并记录 `stream_capture_truncated` flag）。
 
-审计日志支持完整链路追溯（四段式）：`client_request_headers` / `client_request_body`（客户端原始内容，敏感头掩码，body 受 `log_request_body` 控制）/ `upstream_request_headers`（上游请求头）/ `upstream_response_body`（上游原始响应体，受 `log_response_body` 控制）；与既有 `request_body`（实际转发给上游的请求体）、`response_body`（发给客户端、转换后的响应）共同组成「客户端原始内容 → 上游实际内容」的完整链路。日志页详情抽屉提供「对话视图 / 客户端请求体 / 上游响应」三个常驻标签页，发生协议转换时追加「转换请求体 / 转换响应体」标签页。
+审计日志支持完整链路追溯（四段式）：`client_request_headers` / `client_request_body`（客户端原始内容，敏感头掩码，body 受 `log_request_body` 控制）/ `upstream_request_headers`（上游请求头）/ `upstream_response_body`（上游原始响应体，受 `log_response_body` 控制）；与既有 `request_body`（实际转发给上游的请求体，即转换后请求体）、`response_body`（发给客户端、转换后的响应）共同组成「客户端原始内容 → 上游实际内容」的完整链路。其中 `request_body` / `response_body` 两列仅在发生协议转换（启用并触发了 converter 类型插件）时落库，未转换时为空，避免与原始内容重复存储；请求头快照（`request_headers` / `client_request_headers` / `upstream_request_headers`）受 `log_request_body` 控制，关闭时同样不落库。日志页详情抽屉提供「对话视图 / 客户端请求体 / 上游响应」三个常驻标签页，仅在存有转换后内容时追加显示「转换请求体 / 转换响应体」标签页。
 
 `request_headers` 会额外写入 `x-akm-source` 字段标记内部请求来源，便于在审计页区分三类自发调用：`chat`（`/v1/agent` 直接对话）、`task`（定时任务触发）、`flow`（工作流引擎 LLM 节点）；外部客户端发起的转发请求不含该字段。
 

@@ -12,7 +12,7 @@ DEFAULTS = {
     "auto_open_admin": True,  # 启动时自动打开管理台
     "log_retention_days": 30,  # 日志保留天数
     "server_port": 8800,       # 默认服务端口
-    "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）
+    "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）；关闭时请求头快照（request_headers / client_request_headers / upstream_request_headers 三列）同样不落库
     "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
     "stream_capture_max_bytes": 262144,  # 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB）
     "stats_include_estimated_usage": False,  # 首页统计是否计入 estimated token，默认关闭更保守
