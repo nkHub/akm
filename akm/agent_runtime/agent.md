@@ -69,6 +69,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
+| `agent_enabled` | `true` | Agent 总开关：设为 `false` 后服务启动时不初始化 Agent Loop、不注册 `/v1/agent` 与 `/agent` 路由、不注入任何 Agent 内置工具；`/v1/tasks` 的 `agent_call` 任务会因此跳过执行（默认开启，仅显式设 `false` 关闭） |
+| `flow_enabled` | `true` | Flow 工作流总开关：设为 `false` 后服务启动时不初始化 WorkflowEngine、不注册 `/v1/flow` 路由、不注入 `akm_flow_*` 工具（默认开启，仅显式设 `false` 关闭） |
 | `agent_max_turns` | `100` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
 | `agent_max_context_tokens` | `272000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
 | `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |

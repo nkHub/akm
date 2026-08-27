@@ -1678,3 +1678,31 @@ def test_subagent_status_returns_detail_and_log_tail(monkeypatch, tmp_path):
         assert "未找到" in out3["error"]
     finally:
         tools_mod._SUBAGENT_TASKS.pop("sub_det", None)
+
+
+@pytest.mark.asyncio
+async def test_flow_tools_registered_and_gated(monkeypatch):
+    """flow_enabled 默认开启时注册 akm_flow_* 八个工具；显式关闭则全部不注册。"""
+    import akm.agent_runtime.tools as tools_mod
+
+    flow_names = {
+        "akm_flow_list",
+        "akm_flow_get",
+        "akm_flow_save",
+        "akm_flow_delete",
+        "akm_flow_run",
+        "akm_flow_runs",
+        "akm_flow_run_get",
+        "akm_flow_cancel",
+    }
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"flow_enabled": True, "agent_subagent_enabled": True}
+    )
+    names = {tool.name for tool in build_builtin_tools(SimpleNamespace())}
+    assert flow_names <= names
+
+    monkeypatch.setattr(
+        tools_mod, "load_config", lambda: {"flow_enabled": False, "agent_subagent_enabled": True}
+    )
+    names2 = {tool.name for tool in build_builtin_tools(SimpleNamespace())}
+    assert not flow_names & names2

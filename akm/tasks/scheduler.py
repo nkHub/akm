@@ -129,7 +129,10 @@ class TaskScheduler:
         """执行 agent_call 任务：调用 Agent Loop 跑一轮对话。"""
         agent_loop = getattr(self.app.state, "agent_loop", None)
         if agent_loop is None:
-            logger.warning("[TaskScheduler] agent_loop 未就绪，任务 %s 跳过", task.get("id"))
+            if not load_config().get("agent_enabled", True):
+                logger.warning("[TaskScheduler] agent_call 任务 %s 跳过：agent_enabled=false 关闭了 Agent Loop", task.get("id"))
+            else:
+                logger.warning("[TaskScheduler] agent_loop 未就绪，任务 %s 跳过", task.get("id"))
             return
         messages = payload.get("messages") or []
         if not messages:

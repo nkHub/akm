@@ -150,7 +150,8 @@ async def lifespan(app: FastAPI):
     app.state.http_client_lock = asyncio.Lock()
     http_client = _build_http_client_pool_manager()
     app.state.http_client = http_client
-    # 初始化 Agent Loop（依赖 plugin_manager 已就绪）
+    # 初始化 Agent Loop（依赖 plugin_manager 已就绪）；agent_enabled=false 时整体跳过，
+    # 保持主进程干净：不建 AgentLoop、不注入 Agent 内置工具（/v1/agent 路由也一并取消注册）
     from akm.audit import write_log_async
 
     async def _agent_audit(data: dict) -> None:
@@ -160,13 +161,14 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning("[Server] 审计日志写入失败", exc_info=True)
 
-    await initialize_agent_runtime(
-        app,
-        http_client,
-        plugin_manager,
-        _agent_audit,
-        logger,
-    )
+    if load_config().get("agent_enabled", True):
+        await initialize_agent_runtime(
+            app,
+            http_client,
+            plugin_manager,
+            _agent_audit,
+            logger,
+        )
     # 用量查询自动调度器
     usage_query_scheduler = _UsageQueryScheduler(app)
     usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
@@ -176,12 +178,13 @@ async def lifespan(app: FastAPI):
     task_scheduler = TaskScheduler(app)
     await task_scheduler.start()
     app.state.task_scheduler = task_scheduler
-    # 工作流引擎（/v1/flow）：建表 + 单例注入
-    from akm.flow.db import init_flow_db
-    from akm.flow.engine import WorkflowEngine
+    # 工作流引擎（/v1/flow）：建表 + 单例注入；flow_enabled=false 时整体跳过
+    if load_config().get("flow_enabled", True):
+        from akm.flow.db import init_flow_db
+        from akm.flow.engine import WorkflowEngine
 
-    init_flow_db()
-    app.state.flow_engine = WorkflowEngine(app)
+        init_flow_db()
+        app.state.flow_engine = WorkflowEngine(app)
     try:
         yield
     finally:
@@ -209,9 +212,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Key Manager", version=__version__, lifespan=lifespan)
-app.include_router(agent_router)
+# Agent 总开关（agent_config.agent_enabled，默认开）：关闭时不注册 /v1/agent 与 /agent 路由
+if load_config().get("agent_enabled", True):
+    app.include_router(agent_router)
 app.include_router(tasks_router)
-app.include_router(flow_router)
+# Flow 总开关（agent_config.flow_enabled，默认开）：关闭时不注册 /v1/flow 路由
+if load_config().get("flow_enabled", True):
+    app.include_router(flow_router)
 app.include_router(markdown_kb_mcp_router, prefix="/api/markdown-kb/mcp")
 
 

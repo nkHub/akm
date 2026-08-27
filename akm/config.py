@@ -43,6 +43,8 @@ DEFAULTS = {
     "proxy_default_timeout_sec": 120.0,  # 默认转发超时（秒），图片接口另有独立超时
     "proxy_first_byte_timeout_sec": 12.0,  # 流式首字节超时（秒）：上游 2xx 后迟迟不产出第一个响应体字节时判定“假成功”并切换 Key；0 表示关闭
     # Agent Loop
+    "agent_enabled": True,               # Agent 总开关：关闭后不初始化 Agent Loop、不注册 /v1/agent 与 /agent 路由、不注入 Agent 内置工具（默认开启，仅显式设 false 关闭）
+    "flow_enabled": True,                # Flow 工作流总开关：关闭后不初始化 WorkflowEngine、不注册 /v1/flow 路由、不注入 akm_flow_* 工具（默认开启，仅显式设 false 关闭）
     "agent_max_turns": 100,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
     "agent_max_context_tokens": 272000, # Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史（0 表示不压缩）
     "agent_keep_recent_messages": 10,   # Agent Loop 压缩上下文时保留的最近消息条数（工具调用配对消息会自动完整保留）
@@ -91,6 +93,8 @@ DEFAULTS = {
 # config.json 中这些键归组在嵌套的 "agent_config" 对象下；内存层（load_config）
 # 仍保持扁平展开，业务代码无感。归组仅影响磁盘文件布局。
 AGENT_GROUP_KEYS: list[str] = [
+    "agent_enabled",
+    "flow_enabled",
     "agent_max_turns",
     "agent_max_context_tokens",
     "agent_keep_recent_messages",
@@ -233,6 +237,9 @@ def load_config() -> dict:
     merged["proxy_default_timeout_sec"] = max(30.0, float(merged.get("proxy_default_timeout_sec", 120.0) or 120.0))
     merged["proxy_first_byte_timeout_sec"] = max(0.0, _safe_float(merged.get("proxy_first_byte_timeout_sec"), 12.0))
     # Agent Loop
+    # 总开关：默认开启，仅显式设 false 才关闭（布尔归一化，防止配置为字符串/数字时误判）
+    merged["agent_enabled"] = merged.get("agent_enabled") is not False
+    merged["flow_enabled"] = merged.get("flow_enabled") is not False
     merged["agent_max_turns"] = max(1, _safe_int(merged.get("agent_max_turns"), 100))
     merged["agent_max_context_tokens"] = max(0, _safe_int(merged.get("agent_max_context_tokens"), 272000))
     merged["agent_keep_recent_messages"] = max(2, _safe_int(merged.get("agent_keep_recent_messages"), 10))
@@ -294,6 +301,8 @@ def save_config(data: dict) -> None:
     current["proxy_default_timeout_sec"] = max(30.0, float(current.get("proxy_default_timeout_sec", 120.0) or 120.0))
     current["proxy_first_byte_timeout_sec"] = max(0.0, _safe_float(current.get("proxy_first_byte_timeout_sec"), 12.0))
     # Agent Loop
+    current["agent_enabled"] = current.get("agent_enabled") is not False
+    current["flow_enabled"] = current.get("flow_enabled") is not False
     current["agent_max_turns"] = max(1, _safe_int(current.get("agent_max_turns"), 100))
     current["agent_max_context_tokens"] = max(0, _safe_int(current.get("agent_max_context_tokens"), 272000))
     current["agent_keep_recent_messages"] = max(2, _safe_int(current.get("agent_keep_recent_messages"), 10))

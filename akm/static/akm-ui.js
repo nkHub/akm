@@ -493,3 +493,177 @@ if (!customElements.get('akm-tooltip')) {
     }
   });
 }
+
+// ── akm-notification：右上角通知组件（支持进度条） ──
+// 用法：
+//   akmNotify({ id: 'x', type: 'loading', title: '安装插件', message: '下载中...', progress: 40 })
+//   akmNotify.update('x', { progress: 80, message: '解压中...' })
+//   akmNotify.update('x', { type: 'success', title: '完成', message: '已生效' })  // 非 loading 自动消失
+//   akmNotify.close('x')
+// type: info | loading | success | error；progress 传 0-100，null/缺省则隐藏进度条；
+// 同 id 重复 push 视为更新；loading 不自动关闭，其余默认 5s 关闭。
+(function() {
+  // 注入一次全局 keyframes（页面可能被多个模板共享）
+  if (!document.getElementById('akm-notif-keyframes')) {
+    var notifStyle = document.createElement('style');
+    notifStyle.id = 'akm-notif-keyframes';
+    notifStyle.textContent =
+      '@keyframes akmNotifIn{from{opacity:0;transform:translateX(16px)}' +
+      'to{opacity:1;transform:none}}';
+    (document.head || document.documentElement).appendChild(notifStyle);
+  }
+
+  if (!customElements.get('akm-notification')) {
+    customElements.define('akm-notification', class extends HTMLElement {
+      connectedCallback() {
+        if (this.__mounted) return;
+        this.__mounted = true;
+        this._cards = {};
+        this._seq = 0;
+        // 固定右上角通知堆栈；容器本身不拦截事件，卡片各自可点
+        this.style.cssText =
+          'position:fixed;top:16px;right:16px;z-index:999999;' +
+          'display:flex;flex-direction:column;gap:8px;' +
+          'max-width:340px;width:calc(100vw - 32px);' +
+          'pointer-events:none;';
+      }
+
+      // 新增通知；id 已存在时改为更新该卡片
+      push(cfg) {
+        cfg = cfg || {};
+        var id = cfg.id || 'akm-notif-' + (++this._seq);
+        if (this._cards[id]) {
+          this.update(id, cfg);
+          return id;
+        }
+        var card = this._createCard(cfg);
+        card.dataset.notifId = id;
+        this._cards[id] = card;
+        this.appendChild(card);
+        this._scheduleClose(card);
+        return id;
+      }
+
+      // 局部更新：type / title / message / progress
+      update(id, patch) {
+        var card = this._cards[id];
+        if (!card) return;
+        patch = patch || {};
+        if (patch.type) card.dataset.type = patch.type;
+        if (patch.title != null) card.querySelector('[data-notif-title]').textContent = patch.title;
+        if (patch.message != null) card.querySelector('[data-notif-message]').textContent = patch.message;
+        if (patch.progress != null) this._setProgress(card, patch.progress);
+        this._scheduleClose(card);
+      }
+
+      // 立即关闭并移除指定通知
+      close(id) {
+        var card = this._cards[id];
+        if (card) this._removeCard(card);
+      }
+
+      _createCard(cfg) {
+        var card = document.createElement('div');
+        card.className = 'akm-notif-card';
+        card.style.cssText =
+          'pointer-events:auto;display:flex;flex-direction:column;gap:6px;' +
+          'background:#111827;border:1px solid #374151;border-radius:8px;' +
+          'padding:10px 12px 11px;font-size:12px;line-height:1.6;color:#e5e7eb;' +
+          'box-shadow:0 8px 24px rgba(0,0,0,.45);animation:akmNotifIn .18s ease;';
+        card.dataset.type = cfg.type || 'info';
+
+        var head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
+        var title = document.createElement('div');
+        title.setAttribute('data-notif-title', '');
+        title.style.cssText = 'font-weight:600;font-size:12px;color:#f9fafb;word-break:break-all;';
+        title.textContent = cfg.title || '';
+        var closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.textContent = '×';
+        closeBtn.style.cssText =
+          'flex:none;width:18px;height:18px;display:flex;align-items:center;justify-content:center;' +
+          'color:#9ca3af;background:transparent;border:none;cursor:pointer;' +
+          'font-size:14px;line-height:1;padding:0;border-radius:4px;';
+        closeBtn.addEventListener('click', function() { this._removeCard(card); }.bind(this));
+        head.appendChild(title);
+        head.appendChild(closeBtn);
+
+        var msg = document.createElement('div');
+        msg.setAttribute('data-notif-message', '');
+        msg.style.cssText = 'color:#9ca3af;white-space:pre-line;word-break:break-word;';
+        msg.textContent = cfg.message || '';
+
+        // 进度条：progress 缺省时隐藏
+        var bar = document.createElement('div');
+        bar.setAttribute('data-notif-bar', '');
+        bar.style.cssText =
+          'height:3px;border-radius:9999px;background:#374151;overflow:hidden;' +
+          (cfg.progress == null ? 'display:none;' : '');
+        var fill = document.createElement('div');
+        fill.style.cssText = 'height:100%;width:0%;transition:width .2s ease;background:#6366f1;';
+        bar.appendChild(fill);
+
+        card.appendChild(head);
+        card.appendChild(msg);
+        card.appendChild(bar);
+        this._setProgress(card, cfg.progress);
+        return card;
+      }
+
+      _setProgress(card, progress) {
+        var bar = card.querySelector('[data-notif-bar]');
+        if (!bar) return;
+        if (progress == null) {
+          bar.style.display = 'none';
+          return;
+        }
+        bar.style.display = '';
+        var pct = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+        var fill = bar.firstChild;
+        if (fill) fill.style.width = pct + '%';
+        // 进度条颜色随类型切换：success 绿 / error 红 / 其余 indigo
+        var color = '#6366f1';
+        if (card.dataset.type === 'success') color = '#34d399';
+        if (card.dataset.type === 'error') color = '#f87171';
+        fill.style.background = color;
+      }
+
+      // loading 类型不自动关闭；其他类型 duration（默认 5000ms）后自动收起
+      _scheduleClose(card) {
+        clearTimeout(card._closeTimer);
+        if (card.dataset.type === 'loading') return;
+        var dur = parseInt(card.getAttribute('duration') || card.dataset.duration || '5000', 10);
+        var self = this;
+        card._closeTimer = setTimeout(function() { self._removeCard(card); }, dur);
+      }
+
+      _removeCard(card) {
+        if (!card.isConnected) return;
+        delete this._cards[card.dataset.notifId];
+        card.style.transition = 'opacity .25s ease, transform .25s ease';
+        card.style.opacity = '0';
+        card.style.transform = 'translateX(12px)';
+        setTimeout(function() { if (card.isConnected) card.remove(); }, 260);
+      }
+    });
+  }
+
+  // 全局便捷入口（惰性创建单例容器并挂到 body）
+  if (!window.akmNotify) {
+    var notifyHost = null;
+    function ensureNotifyHost() {
+      if (!notifyHost || !notifyHost.isConnected) {
+        notifyHost = document.querySelector('akm-notification');
+        if (!notifyHost) {
+          notifyHost = document.createElement('akm-notification');
+          document.body.appendChild(notifyHost);
+        }
+      }
+      return notifyHost;
+    }
+    window.akmNotify = function(cfg) { return ensureNotifyHost().push(cfg); };
+    window.akmNotify.update = function(id, patch) { ensureNotifyHost().update(id, patch); };
+    window.akmNotify.close = function(id) { ensureNotifyHost().close(id); };
+  }
+})();
