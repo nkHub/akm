@@ -121,7 +121,7 @@ akm/
 
 当前实现中，`PluginManager` 的实际加载顺序是：`akm/plugins/` 内置插件 -> 项目根目录 `plugins/` -> `~/.akm/plugins/` 第三方插件。三者仍共享同一套“插件名全局唯一”约束，后加载来源遇到重名时会被跳过。
 
-**插件市场**：第三方插件还可从 GitHub 仓库的 `plugins/` 目录直接安装/更新。市场发布走「索引 + zip」方案：`scripts/publish_plugins.sh` 把每个插件打包为 `{name}-{version}.zip` 上传到 GitHub Release 固定 tag（默认 `plugin-market`），再生成并提交 `plugins/plugins.json` 索引（含 `version / description / category / has_menu / zip_url / sha256 / size`）。运行时拉取该索引（`raw.githubusercontent.com` 直连，不消耗 `api.github.com` 匿名配额，因此不再触发 60 次/小时的 API 限流 403），带约 5 分钟内存缓存。前端插件页「选择 .zip 文件」按钮旁的「插件市场」按钮弹出列表（弹窗分页展示且高度固定，宽度较宽便于显示插件描述），拉取中与安装中均以居中 spinner 提示；对已安装的第三方插件比对版本，低于市场版本时在列表卡片与已加载插件卡片上显示「更新」。点击安装/更新后后端从 `zip_url` 流式下载（`releases/download` 会 302 重定向到对象存储，下载需显式跟随重定向），校验 `sha256` 后安全解压并覆盖 `~/.akm/plugins/{name}/`（内置插件跟随 App 版本、项目本地插件开发源码均不通过市场更新）。下载过程中后端按字节记录进度（`GET /api/plugin-market/progress`），前端轮询该接口在弹窗中央以圆环进度（SVG ring + 百分比）实时展示，不再占用列表区域；安装/更新成功后重新拉取市场刷新各插件 installed 状态，删除插件同样会失效后端市场缓存并刷新前端列表，避免「已删除仍显示已安装」。
+**插件市场**：第三方插件还可从 GitHub 仓库的 `plugins/` 目录直接安装/更新。市场发布走「索引 + zip」方案：`scripts/publish_plugins.sh` 把每个插件打包为 `{name}-{version}.zip` 上传到 GitHub Release 固定 tag（默认 `plugin-market`），再生成并提交 `plugins/plugins.json` 索引（含 `version / description / category / has_menu / zip_url / sha256 / size`）。运行时拉取该索引（`raw.githubusercontent.com` 直连，不消耗 `api.github.com` 匿名配额，因此不再触发 60 次/小时的 API 限流 403），带约 5 分钟内存缓存。前端插件页「选择 .zip 文件」按钮旁的「插件市场」按钮弹出列表（弹窗分页展示且高度固定，宽度较宽便于显示插件描述），拉取中与安装中均以居中 spinner 提示；对已安装的第三方插件比对版本，低于市场版本时在列表卡片与已加载插件卡片上显示「更新」。点击安装/更新后后端从 `zip_url` 流式下载（`releases/download` 会 302 重定向到对象存储，下载需显式跟随重定向），校验 `sha256` 后安全解压并覆盖 `~/.akm/plugins/{name}/`（内置插件跟随 App 版本、项目本地插件开发源码均不通过市场更新）。下载过程中后端按字节记录进度（`GET /api/plugin-market/progress`），前端轮询该接口并通过右侧通知组件（`akm-ui` 的 `akm-notification`，全局 `akmNotify` API）以进度条实时展示，不再占用弹窗列表区域；点击安装/更新后按钮置灰并显示「安装中…/更新中…」防止重复提交。全新插件安装后即时加载生效；**已加载的第三方插件被覆盖后执行热重载**：先 `on_unload` 卸载旧实例并拆除其注册的 API 路由/静态挂载，再从磁盘新代码重新动态导入并 `on_load`，返回 `restart: false` 即时生效、无需重启；若热重载阶段（重新加载或 `on_load`）失败则回退返回 `restart: true` 提示重启兜底。项目本地插件与内置插件不通过市场热重载（前者需删除项目源码副本后重启，后者跟随 App 版本）。安装/更新成功后重新拉取市场刷新各插件 installed 状态，删除插件同样会失效后端市场缓存并刷新前端列表，避免「已删除仍显示已安装」。
 
 
 ## 五、plugin.json 定义
@@ -893,7 +893,7 @@ class Plugin(PluginBase):
 
 ### 12.1 通用行为
 
-- 启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；修改已加载的插件源码仍需重启服务。
+- 启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；第三方插件从市场更新时同样热重载即时生效（先卸载旧实例并拆除旧路由，再加载磁盘新代码并 `on_load`）；手工修改已加载的插件源码仍需重启服务。
 - 每个插件实例拥有独立的 `config`；`on_load` 返回 `False` 或抛出异常时，插件保持未就绪，不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。残留的 API、插件页面和静态资源会按未就绪状态返回 503。
 - 管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
 - `error_handler`、`model_matcher` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。两者已从内置改为项目本地插件（`builtin: false`），`required` 亦改为 `false`，用户可自由禁用，key 选择由内核 `key_pool` 完成不受影响。

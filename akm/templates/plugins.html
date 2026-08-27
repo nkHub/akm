@@ -171,6 +171,13 @@ function renderErrorHandlerStructuredEditor(p) {
   content += '<input data-plugin="' + name + '" data-key="max_key_tries" data-type="number" type="number" value="' + esc(cfg.max_key_tries != null ? cfg.max_key_tries : 5) + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
   content += '<div class="text-[11px] text-gray-500 mt-1">所有 key 轮换失败前，最多尝试多少个候选 key。</div>';
   content += '</label>';
+  content += '<label class="block">';
+  content += '<div class="flex items-center justify-between gap-3 pt-1">';
+  content += '<span class="text-xs text-gray-300 leading-5">自动禁用/限流 key</span>';
+  content += '<input data-plugin="' + name + '" data-key="auto_disable" data-type="boolean" type="checkbox"' + ((cfg.auto_disable != null ? cfg.auto_disable : true) ? ' checked' : '') + ' class="shrink-0">';
+  content += '</div>';
+  content += '<div class="text-[11px] text-gray-500 mt-1 leading-4">遇到 429 限流或 401/402/403 认证失败时自动把 key 标记为限流/禁用；关闭后仅切换 key，不改变 key 状态。</div>';
+  content += '</label>';
   content += '</div>';
   return renderDataFilterSection('错误重试策略', '统一控制上游失败时的重试与 key 切换上限。', content);
 }
@@ -643,11 +650,11 @@ function renderMarket() {
     var cat = CATEGORY_LABELS[p.category] || p.category || '未分类';
     var state;
     if (p.installed && p.has_update) {
-      state = '<button type="button" onclick="installMarketPlugin(\'' + esc(p.name) + '\')" class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">更新</button>';
+      state = '<button type="button" data-market-name="' + esc(p.name) + '" onclick="installMarketPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">更新</button>';
     } else if (p.installed) {
       state = '<span class="text-xs text-gray-500">已安装 v' + esc(p.installed_version || p.version) + '</span>';
     } else {
-      state = '<button type="button" onclick="installMarketPlugin(\'' + esc(p.name) + '\')" class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">安装</button>';
+      state = '<button type="button" data-market-name="' + esc(p.name) + '" onclick="installMarketPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">安装</button>';
     }
     html += '<div class="bg-surface-light border border-border rounded-lg p-4">';
     html += '<div class="flex items-start justify-between gap-3">';
@@ -700,10 +707,34 @@ function marketGo(target) {
   renderMarket();
 }
 
-function installMarketPlugin(name) {
-  if (!confirm('确认从 GitHub 市场拉取并覆盖插件 "' + name + '"？')) return;
-  var body = document.getElementById('plugin-market-modal-body');
-  if (body) body.innerHTML = '<div class="flex flex-col items-center justify-center h-full gap-5"><div class="relative h-28 w-28"><svg class="h-28 w-28 -rotate-90" viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="rgba(148,163,184,0.2)" stroke-width="7"></circle><circle id="mkt-ring-bar" cx="50" cy="50" r="42" fill="none" stroke="#6366f1" stroke-width="7" stroke-linecap="round" stroke-dasharray="263.9" stroke-dashoffset="263.9" style="transition: stroke-dashoffset 0.2s"></circle></svg><div id="mkt-progress-text" class="absolute inset-0 flex items-center justify-center text-sm font-semibold text-gray-200">0%</div></div><div id="mkt-progress-status" class="text-xs text-gray-500">正在安装 ' + esc(name) + ' ...</div></div>';
+// 安装/更新防重复：同一插件在同一时刻只允许一个进行中的请求；进行中按钮置灰并显示"安装中.../更新中..."
+var _marketInstalling = {};
+
+function setMarketInstalling(name, intro, on) {
+  document.querySelectorAll('[data-market-name="' + name + '"]').forEach(function(btn) {
+    if (on) {
+      btn.dataset.origText = btn.textContent;
+      btn.textContent = intro === '更新' ? '更新中...' : '安装中...';
+      btn.disabled = true;
+      btn.classList.add('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
+    } else {
+      btn.textContent = btn.dataset.origText || btn.textContent;
+      btn.disabled = false;
+      btn.classList.remove('opacity-50', 'cursor-not-allowed', 'pointer-events-none');
+    }
+  });
+}
+
+function installMarketPlugin(name, btn) {
+  var intro = (_marketByName[name] && _marketByName[name].has_update) ? '更新' : '安装';
+  if (!confirm('确认从 GitHub 市场' + intro + '插件 "' + name + '"？')) return;
+  if (_marketInstalling[name]) return;
+  _marketInstalling[name] = true;
+  setMarketInstalling(name, intro, true);
+
+  // 右上角通知：loading 态 + 进度条（下载 → 解压 → 写入）
+  var notifId = 'market-' + name;
+  window.akmNotify({ id: notifId, type: 'loading', title: intro + '插件 ' + name, message: '准备中...', progress: 0 });
 
   // 轮询安装进度：后端每次安装只保留该插件的进度记录，active=false 表示已完成或未开始
   var pollTimer = setInterval(function(){
@@ -711,32 +742,29 @@ function installMarketPlugin(name) {
       .then(function(r){return r.json()})
       .then(function(p){
         if (!p.ok || !p.active) return;
-        var ring = document.getElementById('mkt-ring-bar');
-        var txt = document.getElementById('mkt-progress-text');
-        var status = document.getElementById('mkt-progress-status');
-        if (p.total > 0) {
-          var pct = Math.max(0, Math.min(100, Math.round(p.done * 100 / p.total)));
-          if (ring) ring.style.strokeDashoffset = (263.9 * (1 - pct / 100)).toFixed(1);
-          if (txt) txt.textContent = pct + '%';
-        }
-        if (status && p.message) status.textContent = p.message;
+        var pct = (p.total > 0) ? Math.round(p.done * 100 / p.total) : null;
+        window.akmNotify.update(notifId, { progress: pct, message: p.message || '' });
       })
       .catch(function(){});
   }, 400);
 
   fetch('/api/plugin-market/' + encodeURIComponent(name) + '/install', {method: 'POST'}).then(function(r){return r.json()}).then(function(data){
     clearInterval(pollTimer);
+    delete _marketInstalling[name];
+    setMarketInstalling(name, intro, false);
     if (data.ok) {
-      alert(data.message || '操作完成');
+      window.akmNotify.update(notifId, { type: 'success', title: intro + '插件 ' + name + ' 成功', message: data.message || '操作完成' });
       loadMarket();
       loadPlugins();
     } else {
-      alert(data.error || '拉取失败');
+      window.akmNotify.update(notifId, { type: 'error', title: intro + '插件 ' + name + ' 失败', message: data.error || '拉取失败' });
       loadMarket();
     }
   }).catch(function(e){
     clearInterval(pollTimer);
-    alert('网络错误: ' + e.message);
+    delete _marketInstalling[name];
+    setMarketInstalling(name, intro, false);
+    window.akmNotify.update(notifId, { type: 'error', title: '网络错误', message: e.message });
     loadMarket();
   });
 }
@@ -877,7 +905,7 @@ function renderPluginList(plugins) {
       // 市场版本高于本地第三方插件版本时，在版本号旁显示"更新"按钮
       var mkt = _marketByName[p.name];
       if (mkt && mkt.has_update) {
-        html += '<button type="button" onclick="installMarketPlugin(\'' + esc(p.name) + '\')" class="text-xs px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer" title="GitHub 市场 v' + esc(mkt.version) + '">更新</button>';
+        html += '<button type="button" data-market-name="' + esc(p.name) + '" onclick="installMarketPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer" title="GitHub 市场 v' + esc(mkt.version) + '">更新</button>';
       }
       html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
       if (p.settings && p.settings.length) {

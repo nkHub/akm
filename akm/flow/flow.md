@@ -79,6 +79,8 @@
 
 `~/.akm/config.json` 中集中管理工作流引擎行为，未配置时全部使用默认值：
 
+> **总开关**：`agent_config.flow_enabled`（默认 `true`）控制工作流引擎是否启用。设为 `false` 后服务启动时不初始化 WorkflowEngine、不注册 `/v1/flow` 全部路由（含 `/v1/flow/health`）、`/v1/agent` 也不再注入 `akm_flow_*` 工具。该键同样归组于 `agent_config` 下，与 `agent_enabled` 并列。
+
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `pi_path` | - | pi 可执行文件路径 |

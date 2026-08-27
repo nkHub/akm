@@ -410,7 +410,9 @@ class PluginManager:
 
         logger.info(f"[PluginManager] 共加载 {len(self.plugins)} 个插件")
 
-    def remove_registered_routes(self, app: FastAPI | None = None) -> int:
+    def remove_registered_routes(
+        self, app: FastAPI | None = None, names: set | list | None = None
+    ) -> int:
         """移除本管理器向 FastAPI 注册的插件 API 路由和静态挂载。
 
         菜单栏从休眠唤醒后可能在同一个 FastAPI 实例内重新运行 lifespan。
@@ -418,16 +420,32 @@ class PluginManager:
         未就绪状态，后续请求可能先命中旧路由并返回 503。这里只按本管理器
         已加载插件记录的 API 前缀和静态挂载名清理，不能按路径模糊删除，
         以免误删宿主的插件主页及其 raw 路由。
+
+        Args:
+            app: 目标 FastAPI 实例；缺省用 self.app。
+            names: 仅清理指定插件名的路由与静态挂载；None 表示清理全部
+                （保留原行为，供菜单栏睡眠唤醒等全量场景使用）。
         """
         target_app = app or self.app
         if target_app is None:
             return 0
 
+        if names is None:
+            targets = self._plugin_metas
+        else:
+            targets = {
+                name: meta
+                for name, meta in self._plugin_metas.items()
+                if name in names
+            }
+        if not targets:
+            return 0
+
         prefixes = {
             (meta.routes_prefix or f"/{name}").rstrip("/") or "/"
-            for name, meta in self._plugin_metas.items()
+            for name, meta in targets.items()
         }
-        mount_names = {f"plugin_static_{name}" for name in self._plugin_metas}
+        mount_names = {f"plugin_static_{name}" for name in targets}
         if not prefixes and not mount_names:
             return 0
 
@@ -870,9 +888,10 @@ class PluginManager:
 
         数据源：插件市场索引（plugins/plugins.json）中的 zip_url + sha256。
         zip 经 releases/download 下载（不消耗 api.github.com 配额），
-        校验 sha256 后安全解压，再覆盖本地目录。按用户决策不热重载：
-        已加载的第三方插件覆盖后提示重启服务生效；全新插件则沿用 zip
-        安装的即时加载逻辑。
+        校验 sha256 后安全解压，再覆盖本地目录。覆盖后对已加载的第三方
+        插件执行热重载（卸载旧实例 → 拆除旧路由 → 重新加载新代码并
+        on_load，即时生效）；全新插件沿用 zip 安装的即时加载逻辑。
+        项目源码插件与内置插件不通过市场热重载。
         """
         if not _is_valid_plugin_name(name):
             return {"ok": False, "error": "非法插件名"}
@@ -999,16 +1018,10 @@ class PluginManager:
         # 6) 使市场缓存失效，下次拉取为最新
         self._market_cache = None
 
-        # 7) 已加载的第三方插件：覆盖 + 提示重启（不热重载）
+        # 7) 已加载的第三方插件：覆盖目录后热重载（真正即时生效，无需重启）
         local_source = self._plugin_sources.get(name)
         if local_source == "third_party":
-            return {
-                "ok": True,
-                "name": name,
-                "version": meta.version,
-                "restart": True,
-                "message": f"已更新 ~/.akm/plugins/{name}/，重启服务后生效",
-            }
+            return await self._hot_reload_plugin(name, dest, meta.version or "")
         if local_source == "project":
             return {
                 "ok": True,
@@ -1060,6 +1073,108 @@ class PluginManager:
             "version": meta.version,
             "restart": True,
             "message": f"已安装到 ~/.akm/plugins/{name}/，下次启动服务后生效",
+        }
+
+    async def _hot_reload_plugin(self, name: str, dest: Path, fallback_version: str = "") -> dict:
+        """热重载一个已加载的第三方插件。
+
+        市场更新覆盖磁盘目录后调用本方法：先卸载旧实例并拆除其注册的
+        API 路由/静态挂载，再从新的磁盘代码动态导入并执行 on_load，
+        使更新真正即时生效，无需重启服务。
+
+        Args:
+            name: 插件名
+            dest: 覆盖后的插件目录（~/.akm/plugins/{name}/）
+            fallback_version: 市场索引版本号，加载失败时回退展示
+
+        Returns:
+            与 install_market_plugin 一致的返回结构（含 restart/hot 标记）。
+        """
+        plugin = self.plugins.get(name)
+        if plugin is None:
+            # 磁盘有目录但内存未加载（异常状态）：直接沿全新安装路径加载
+            if self.app is not None:
+                new_plugin = self._load_plugin(dest, "third_party")
+                if new_plugin is not None and new_plugin.enabled:
+                    new_plugin.config = self.get_config(name) or {}
+                    try:
+                        new_plugin.runtime_ready = await new_plugin.on_load() is not False
+                    except Exception as e:
+                        new_plugin.runtime_ready = False
+                        logger.error(f"[PluginManager] 市场更新后 on_load 失败 {name}: {e}")
+            return {
+                "ok": True,
+                "name": name,
+                "version": fallback_version,
+                "restart": False,
+                "message": f"已更新 ~/.akm/plugins/{name}/（即时生效）",
+            }
+
+        was_ready = bool(plugin.runtime_ready)
+        # 1) 先阻断旧插件接入请求链路：此后请求不会再命中旧 hook/菜单
+        plugin.enabled = False
+        plugin.runtime_ready = False
+        # 2) 卸载旧实例，让插件释放持有的资源（db 连接、后台任务等）
+        if was_ready:
+            try:
+                await plugin.on_unload()
+            except Exception as e:
+                logger.error(f"[PluginManager] 更新前 on_unload 失败 {name}: {e}")
+        # 3) 拆除旧插件注册的 API 路由与静态挂载，避免与新版路由冲突
+        try:
+            self.remove_registered_routes(self.app, names={name})
+        except Exception as e:
+            logger.warning(f"[PluginManager] 移除旧路由失败 {name}: {e}")
+        # 4) 移除旧插件元数据与来源记录，释放重名占用
+        self.plugins.pop(name, None)
+        self._plugin_metas.pop(name, None)
+        self._plugin_sources.pop(name, None)
+
+        # 5) 从覆盖后的磁盘代码动态加载新版本
+        new_plugin = self._load_plugin(dest, "third_party")
+        if new_plugin is None:
+            return {
+                "ok": True,
+                "name": name,
+                "version": fallback_version,
+                "restart": True,
+                "message": f"已更新 ~/.akm/plugins/{name}/，但热重载失败，请重启服务",
+            }
+        new_version = (
+            fallback_version
+            if fallback_version
+            else (new_plugin.meta.version if new_plugin.meta is not None else "")
+        )
+        if not new_plugin.enabled:
+            return {
+                "ok": True,
+                "name": name,
+                "version": new_version,
+                "restart": False,
+                "hot": True,
+                "message": f"已更新并热重载 {name}（插件为禁用状态，不加载 on_load）",
+            }
+        # 6) 按最新配置执行新实例 on_load（失败则标记未就绪并提示重启兜底）
+        new_plugin.config = self.get_config(name) or {}
+        try:
+            new_plugin.runtime_ready = await new_plugin.on_load() is not False
+        except Exception as e:
+            new_plugin.runtime_ready = False
+            logger.error(f"[PluginManager] 市场更新后 on_load 失败 {name}: {e}")
+            return {
+                "ok": True,
+                "name": name,
+                "version": new_version,
+                "restart": True,
+                "message": f"已更新并注册 {name}，但 on_load 失败: {e}，请重启服务",
+            }
+        return {
+            "ok": True,
+            "name": name,
+            "version": new_version,
+            "restart": False,
+            "hot": True,
+            "message": f"已更新并热重载 {name}（即时生效）",
         }
 
     def get_market_install_progress(self, name: str) -> dict:

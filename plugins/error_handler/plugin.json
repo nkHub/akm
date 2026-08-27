@@ -1,6 +1,6 @@
 {
   "name": "error_handler",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "has_menu": false,
   "category": "handler",
   "description": "上游错误处理：429 切换 key、402/401/403 禁用 key、5xx 指数退避重试",

@@ -170,7 +170,7 @@ akm-menubar
     </tr>
     <tr>
       <td style="white-space: nowrap;">插件</td>
-      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（plugins/plugins.json 索引 + GitHub Release zip 一键安装/更新第三方插件，弹窗分页展示，下载/更新以圆环进度实时展示，删除插件后市场状态自动刷新，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
+      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（plugins/plugins.json 索引 + GitHub Release zip 一键安装/更新第三方插件，弹窗分页展示，下载/更新以右上角通知进度条实时展示（安装/更新中按钮防重复），删除插件后市场状态自动刷新，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">设置</td>
@@ -262,7 +262,7 @@ akm-menubar
 
 ### Agent
 
-`/v1/agent` 多轮智能体（Agent Loop）的 `agent_*` 配置项（在 `~/.akm/config.json` 中归组于嵌套的 `agent_config` 对象下，内存加载与前端展示仍以扁平键名呈现）及完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)。
+`/v1/agent` 多轮智能体（Agent Loop）的 `agent_*` 配置项（在 `~/.akm/config.json` 中归组于嵌套的 `agent_config` 对象下，内存加载与前端展示仍以扁平键名呈现）及完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)。`agent_config.agent_enabled` 与 `agent_config.flow_enabled` 是总开关（均默认 `true`）：设 `false` 后服务启动时不初始化 Agent Loop / WorkflowEngine、不注册对应路由（`/v1/agent`、`/v1/flow`）、不注入对应内置工具。
 
 ### 出站代理
 
@@ -352,10 +352,10 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/rerank` | Rerank 转发接口（按 `model` 选 key 后纯透传，不做协议转换） |
 | POST | `/v1/images/generations` | Images Generations 转发接口（仅透传，不做协议转换；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
 | POST | `/v1/images/edits` | Images Edits 转发接口（接收 `multipart/form-data` 纯透传；未传 model 时仅在存在支持该模型的 active key 时默认补 `gpt-image-2`，否则直接报错） |
-| POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)） |
-| POST | `/v1/agent/compact` | 手动压缩 Agent 上下文：传入当前对话 `messages`，把早期历史归纳为摘要并替换（等价于 `akm_compact_context` 的 force 模式），响应含摘要文本与保留后的消息列表（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)「上下文压缩」） |
+| POST | `/v1/agent` | Agent 端点：接收多轮对话请求，编排 LLM 工具调用循环（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)）。受 `agent_config.agent_enabled` 总开关控制，关闭后路由不注册 |
+| POST | `/v1/agent/compact` | 手动压缩 Agent 上下文：传入当前对话 `messages`，把早期历史归纳为摘要并替换（等价于 `akm_compact_context` 的 force 模式），响应含摘要文本与保留后的消息列表（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)「上下文压缩」）。同样受 `agent_config.agent_enabled` 控制 |
 | GET/POST | `/v1/tasks` | 定时任务接口：列表 / 创建（`agent_call`、`usage_query` 类型）；配套 `GET/PUT/DELETE /v1/tasks/{id}` 与 `POST /v1/tasks/{id}/run` 立即执行 |
-| GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见 [`akm/flow/flow.md`](akm/flow/flow.md)） |
+| GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见 [`akm/flow/flow.md`](akm/flow/flow.md)）。全部路由受 `agent_config.flow_enabled` 总开关控制，关闭后不注册 |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
@@ -521,7 +521,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊 |
 | `agent-tools` | app | | 可选离线工具箱：内置纯前端工具产物（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 `/tools` 即用 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即拉取 Git 最新文件覆盖 `~/.akm/plugins/{name}/`，下载过程以进度条实时展示，已加载插件覆盖后提示重启服务生效）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即从市场拉取最新 zip 覆盖 `~/.akm/plugins/{name}/`，下载过程以右侧通知组件进度条实时展示，已加载第三方插件覆盖后执行**热重载**即时生效、无需重启）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装、删除与第三方插件市场更新默认**热生效**；手工修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
 
 每个插件实例拥有独立 `config`；`on_load` 返回 `False` 或抛异常时插件保持未就绪，残留的 API、插件页面和静态资源返回 503；管理台保存配置后调用 `on_config_changed` 刷新缓存状态。
 

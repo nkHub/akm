@@ -112,3 +112,31 @@ def test_subagent_config_saves_into_nested_agent_config(isolated_config):
     raw = _read_raw(isolated_config)
     assert raw["agent_config"]["agent_subagent_enabled"] is False
     assert raw["agent_config"]["agent_subagent_max_depth"] == 0
+
+
+def test_agent_flow_master_switches_default_on(isolated_config):
+    """agent/flow 总开关默认开启，仅显式设 false 才关闭。"""
+    cfg_loaded = cfg.load_config()
+    assert cfg_loaded["agent_enabled"] is True
+    assert cfg_loaded["flow_enabled"] is True
+
+
+def test_agent_flow_master_switches_load_from_nested(isolated_config):
+    """总开关从 agent_config 嵌套读取并布尔归一化（显式 false 生效）。"""
+    (isolated_config / "config.json").write_text(
+        json.dumps({"agent_config": {"agent_enabled": False, "flow_enabled": False}}),
+        encoding="utf-8",
+    )
+    cfg_loaded = cfg.load_config()
+    assert cfg_loaded["agent_enabled"] is False
+    assert cfg_loaded["flow_enabled"] is False
+
+
+def test_agent_flow_master_switches_save_into_nested(isolated_config):
+    """总开关保存后归组到 agent_config，磁盘顶层不再保留。"""
+    cfg.save_config({"agent_enabled": False, "flow_enabled": False})
+    raw = _read_raw(isolated_config)
+    assert raw["agent_config"]["agent_enabled"] is False
+    assert raw["agent_config"]["flow_enabled"] is False
+    assert "agent_enabled" not in raw
+    assert "flow_enabled" not in raw

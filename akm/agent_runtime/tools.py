@@ -3209,125 +3209,127 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             delete_task_tool,
         )
     )
-    tools.append(
-        ToolDef(
-            "akm_flow_list",
-            "列出已配置的工作流（akm flow 工作流引擎）：返回工作流的 id、名称、描述、节点数与更新时间，不含完整定义",
-            {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
-            list_flow_workflows_tool,
-        )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_get",
-            "按 id 读取一条工作流的完整定义（nodes / edges / variables），供检查流程结构或复制修改",
-            {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+    # akm_flow_* 工具组受 flow_enabled 总开关控制：关闭工作流引擎时不注册这些工具
+    if load_config().get("flow_enabled", True):
+        tools.append(
+            ToolDef(
+                "akm_flow_list",
+                "列出已配置的工作流（akm flow 工作流引擎）：返回工作流的 id、名称、描述、节点数与更新时间，不含完整定义",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
                 },
-                "required": ["workflow_id"],
-            },
-            get_flow_workflow_tool,
+                list_flow_workflows_tool,
+            )
         )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_save",
-            "创建或更新一条工作流定义：workflow_id 留空则新建，传 id 则更新已有工作流。nodes 为节点数组（含 type / label / data）、edges 为连线数组（含 source / target / condition / loop）、variables 为运行变量（如 projectPath / maxNodeVisits）",
-            {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "工作流名称"},
-                    "nodes": {"type": "array", "description": "节点数组，每项含 type（intake/plan/code/review/test/fix/human/router/merge/output）与 data（label/modelId/systemPrompt/userPromptTemplate 等）"},
-                    "edges": {"type": "array", "description": "连线数组，每项含 source / target（节点 id），可选 condition（pass/fail/子串）与 loop"},
-                    "variables": {"type": "object", "description": "运行变量，如 projectPath / maxNodeVisits / useWorktree"},
-                    "description": {"type": "string", "description": "工作流描述，可选"},
-                    "workflow_id": {"type": "string", "description": "留空创建新工作流；传已有 id 则更新该工作流"},
+        tools.append(
+            ToolDef(
+                "akm_flow_get",
+                "按 id 读取一条工作流的完整定义（nodes / edges / variables），供检查流程结构或复制修改",
+                {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+                    },
+                    "required": ["workflow_id"],
                 },
-                "required": ["name"],
-            },
-            save_flow_workflow_tool,
+                get_flow_workflow_tool,
+            )
         )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_delete",
-            "删除一条工作流及其全部运行记录，返回是否删除成功",
-            {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+        tools.append(
+            ToolDef(
+                "akm_flow_save",
+                "创建或更新一条工作流定义：workflow_id 留空则新建，传 id 则更新已有工作流。nodes 为节点数组（含 type / label / data）、edges 为连线数组（含 source / target / condition / loop）、variables 为运行变量（如 projectPath / maxNodeVisits）",
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "工作流名称"},
+                        "nodes": {"type": "array", "description": "节点数组，每项含 type（intake/plan/code/review/test/fix/human/router/merge/output）与 data（label/modelId/systemPrompt/userPromptTemplate 等）"},
+                        "edges": {"type": "array", "description": "连线数组，每项含 source / target（节点 id），可选 condition（pass/fail/子串）与 loop"},
+                        "variables": {"type": "object", "description": "运行变量，如 projectPath / maxNodeVisits / useWorktree"},
+                        "description": {"type": "string", "description": "工作流描述，可选"},
+                        "workflow_id": {"type": "string", "description": "留空创建新工作流；传已有 id 则更新该工作流"},
+                    },
+                    "required": ["name"],
                 },
-                "required": ["workflow_id"],
-            },
-            delete_flow_workflow_tool,
+                save_flow_workflow_tool,
+            )
         )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_run",
-            "启动一次工作流运行：传入工作流 id 与用户提示词 prompt，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态；可用 akm_flow_runs 查询进度",
-            {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
-                    "prompt": {"type": "string", "description": "用户提示词，作为工作流输入注入 {{input.prompt}}"},
-                    "variables": {"type": "object", "description": "本次运行的临时变量（如 projectPath / language），覆盖工作流默认 variables，仅本次生效，不修改工作流定义"},
+        tools.append(
+            ToolDef(
+                "akm_flow_delete",
+                "删除一条工作流及其全部运行记录，返回是否删除成功",
+                {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+                    },
+                    "required": ["workflow_id"],
                 },
-                "required": ["workflow_id", "prompt"],
-            },
-            run_flow_workflow_tool,
+                delete_flow_workflow_tool,
+            )
         )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_runs",
-            "列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 workflow_id 过滤",
-            {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {"type": "string", "description": "按工作流 id 过滤，留空返回全部"},
-                    "limit": {"type": "integer", "description": "返回条数，默认 20，最大 100"},
-                    "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+        tools.append(
+            ToolDef(
+                "akm_flow_run",
+                "启动一次工作流运行：传入工作流 id 与用户提示词 prompt，后台执行 DAG（LLM 节点 / 条件分支 / 循环重入 / 并行），返回运行 id 与初始状态；可用 akm_flow_runs 查询进度",
+                {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "工作流 id（来自 akm_flow_list）"},
+                        "prompt": {"type": "string", "description": "用户提示词，作为工作流输入注入 {{input.prompt}}"},
+                        "variables": {"type": "object", "description": "本次运行的临时变量（如 projectPath / language），覆盖工作流默认 variables，仅本次生效，不修改工作流定义"},
+                    },
+                    "required": ["workflow_id", "prompt"],
                 },
-                "required": [],
-            },
-            list_flow_runs_tool,
+                run_flow_workflow_tool,
+            )
         )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_run_get",
-            "按 id 查询一次工作流运行的节点级详情：返回各节点状态、错误、token 用量与最近日志，用于定位运行卡住或失败的节点",
-            {
-                "type": "object",
-                "properties": {
-                    "run_id": {"type": "string", "description": "运行 id（来自 akm_flow_runs / akm_flow_run）"},
+        tools.append(
+            ToolDef(
+                "akm_flow_runs",
+                "列出工作流运行记录（按创建时间倒序）：返回运行 id、状态、输入摘要、token 用量与起止时间；可按 workflow_id 过滤",
+                {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {"type": "string", "description": "按工作流 id 过滤，留空返回全部"},
+                        "limit": {"type": "integer", "description": "返回条数，默认 20，最大 100"},
+                        "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+                    },
+                    "required": [],
                 },
-                "required": ["run_id"],
-            },
-            get_flow_run_tool,
+                list_flow_runs_tool,
+            )
         )
-    )
-    tools.append(
-        ToolDef(
-            "akm_flow_cancel",
-            "中止一次工作流运行（取消）：正在执行的节点中断、待执行的节点跳过，运行置为 cancelled；对卡住或不想再等的运行使用",
-            {
-                "type": "object",
-                "properties": {
-                    "run_id": {"type": "string", "description": "运行 id（来自 akm_flow_runs / akm_flow_run）"},
+        tools.append(
+            ToolDef(
+                "akm_flow_run_get",
+                "按 id 查询一次工作流运行的节点级详情：返回各节点状态、错误、token 用量与最近日志，用于定位运行卡住或失败的节点",
+                {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string", "description": "运行 id（来自 akm_flow_runs / akm_flow_run）"},
+                    },
+                    "required": ["run_id"],
                 },
-                "required": ["run_id"],
-            },
-            cancel_flow_run_tool,
+                get_flow_run_tool,
+            )
         )
-    )
+        tools.append(
+            ToolDef(
+                "akm_flow_cancel",
+                "中止一次工作流运行（取消）：正在执行的节点中断、待执行的节点跳过，运行置为 cancelled；对卡住或不想再等的运行使用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "run_id": {"type": "string", "description": "运行 id（来自 akm_flow_runs / akm_flow_run）"},
+                    },
+                    "required": ["run_id"],
+                },
+                cancel_flow_run_tool,
+            )
+        )
     if load_config().get("agent_email_enabled"):
         tools.append(
             ToolDef(
