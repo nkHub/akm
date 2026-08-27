@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-key-manager"
-version = "0.1.37"
+version = "0.1.36"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110.0",
