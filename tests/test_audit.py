@@ -106,13 +106,14 @@ def test_write_log_three_stage_trace_fields(setup):
 
 
 def test_clean_log_bodies_clears_client_request_body(setup):
-    """清理请求/响应体时应同步清空 client_request_body 与 upstream_response_body。"""
+    """清理请求/响应体时应同步清空 client_request_body、upstream_response_body 与三列请求头。"""
     write_log({
         "provider": "o", "key_alias": "k", "model": "m",
         "request_body": '{"a":1}', "response_body": '{"b":2}',
         "status_code": 200, "latency_ms": 0, "error": "",
         "client_request_body": '{"orig":true}',
         "upstream_response_body": '{"raw":true}',
+        "request_headers": '{"user-agent":"x"}',
         "client_request_headers": '{"host":"x"}',
         "upstream_request_headers": '{"authorization":"Bearer ***"}',
     })
@@ -123,9 +124,10 @@ def test_clean_log_bodies_clears_client_request_body(setup):
     assert logs[0]["response_body"] == ""
     assert logs[0]["client_request_body"] == ""
     assert logs[0]["upstream_response_body"] == ""
-    # 头信息不属于请求/响应体内容，不应被清空
-    assert logs[0]["client_request_headers"] == '{"host":"x"}'
-    assert logs[0]["upstream_request_headers"] == '{"authorization":"Bearer ***"}'
+    # 请求头快照与请求体开关关联记录，清空时应一并清空
+    assert logs[0]["request_headers"] == ""
+    assert logs[0]["client_request_headers"] == ""
+    assert logs[0]["upstream_request_headers"] == ""
 
 
 def test_clean_log_bodies_noop_when_nothing_to_clean(setup):

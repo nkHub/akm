@@ -240,7 +240,7 @@ async def _submit_agent_tool_audit(
         "status_code": int(result.get("status_code", 0) or 0),
         "latency_ms": int(result.get("latency_ms", 0) or 0),
         "error": str(result.get("error", "") or ""),
-        "request_headers": json.dumps({"user-agent": "agent/1.0", "x-akm-source": "chat"}),
+        "request_headers": json.dumps({"user-agent": "agent/1.0", "x-akm-source": "chat"}) if save_request_body else "",
         "prompt_tokens": int(result.get("prompt_tokens", 0) or 0),
         "completion_tokens": int(result.get("completion_tokens", 0) or 0),
         "total_tokens": int(result.get("total_tokens", 0) or 0),
@@ -248,7 +248,7 @@ async def _submit_agent_tool_audit(
         "cache_creation_tokens": int(result.get("cache_creation_tokens", 0) or 0),
         "client_request_headers": "",
         "client_request_body": request_body_for_log,
-        "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or ""),
+        "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or "") if save_request_body else "",
         "upstream_response_body": str(result.get("upstream_response_body_for_log", "") or "") if save_response_body else "",
         "attempts": "",
     })

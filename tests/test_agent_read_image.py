@@ -448,3 +448,6 @@ async def test_read_image_audit_without_body_logging(monkeypatch, tmp_path):
     assert record["request_body"] == ""
     assert record["response_body"] == ""
     assert record["status_code"] == 200
+    assert record["request_headers"] == ""
+    assert record["client_request_headers"] == ""
+    assert record["upstream_request_headers"] == ""

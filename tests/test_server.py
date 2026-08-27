@@ -1114,12 +1114,16 @@ def test_default_image_generation_model_uses_first_configured_value():
 async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
     """审计日志应优先记录 proxy 返回的实际转发请求体，而不是入口原始 body。"""
 
+    class _FakeAdapter:
+        pass
+
     captured = {}
 
     async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"ok"}}]}',
+            "adapter": _FakeAdapter(),
             "request_body_for_log": '{"messages":[{"content":"__AKM_EMAIL_deadbeefcafe__"}]}',
             "key_alias": "test-key",
             "provider": "openai",
@@ -1161,12 +1165,15 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
         async def aclose(self):
             return None
 
+    class _FakeAdapter:
+        pass
+
     async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
         return {
             "stream": True,
             "status_code": 200,
             "response": DummyResp(),
-            "adapter": None,
+            "adapter": _FakeAdapter(),
             "request_body_for_log": '{"messages":[{"content":"__AKM_PHONE_deadbeefcafe__"}],"stream":true}',
             "key_alias": "stream-key",
             "provider": "openai",
@@ -1193,6 +1200,54 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
 
     assert captured["request_body"] == '{"messages":[{"content":"__AKM_PHONE_deadbeefcafe__"}],"stream":true}'
     assert "13800138000" not in captured["request_body"]
+
+
+@pytest.mark.asyncio
+async def test_audit_skips_transformed_bodies_without_conversion(monkeypatch):
+    """未发生协议转换（converter 插件未触发）时，「转换后请求体/响应体」两列不落库。"""
+
+    captured = {}
+
+    class DummyResp:
+        async def aiter_bytes(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            return None
+
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+        return {
+            "status_code": 200,
+            "body": '{"choices":[{"message":{"content":"ok"}}]}',
+            "request_body_for_log": '{"messages":[{"content":"__AKM_PHONE_deadbeefcafe__"}]}',
+            "key_alias": "plain-key",
+            "provider": "openai",
+            "model": "gpt-4",
+            "error": "",
+            "latency_ms": 30,
+            "adapter": None,
+        }
+
+    async def fake_submit(app_obj, data):
+        captured.update(data)
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server._submit_audit_log", fake_submit)
+    monkeypatch.setattr("akm.server.load_config", lambda: {"log_request_body": True, "log_response_body": True, "stream_capture_max_bytes": 262144})
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "13800138000"}]},
+        )
+
+    assert resp.status_code == 200
+    assert captured["request_body"] == ""
+    assert captured["response_body"] == ""
+    # 原始请求体归属 client_request_body 列，未被丢弃
+    assert "13800138000" in (captured["client_request_body"] or "")
 
 
 @pytest.mark.asyncio
