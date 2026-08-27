@@ -1,4 +1,4 @@
-"""key_pool 加解密层（pycryptodome 的 Fernet 兼容实现）测试。
+"""key_pool 加解密层测试（加密逻辑见 akm/crypto.py）。
 
 覆盖四类场景：
 1. 与 cryptography.fernet 的参考向量互通（本文件向量由 cryptography 预生成，保证格式兼容）；
@@ -6,12 +6,13 @@
 3. 令牌被篡改或结构非法时抛 InvalidToken；
 4. secret.key 密钥文件复用：首次生成后可复读，且用固定密钥可加解密。
 """
+
 import base64
 
 import pytest
 
-from akm import key_pool
-from akm.key_pool import InvalidToken, _MiniFernet
+from akm import crypto
+from akm.crypto import InvalidToken, _MiniFernet
 
 
 # ── 参考向量：由 cryptography.fernet 预生成（密钥为 32 字节 'K'） ──
@@ -72,28 +73,106 @@ def test_mini_fernet_rejects_invalid_token_structure():
         f.decrypt(bytes(token))
 
 
-def test_load_cipher_creates_and_reuses_secret_key(tmp_path, monkeypatch):
-    """首次加载生成 ~/.akm/secret.key；后续同路径复读同一密钥可解密"""
-    monkeypatch.setattr(key_pool, "SECRET_DIR", str(tmp_path))
-    monkeypatch.setattr(key_pool, "_cipher", None)
+def test_load_cipher_prefers_keychain(tmp_path, monkeypatch):
+    """本地 secret.key 存在时直接使用，不重复生成"""
+    key = _MiniFernet.generate_key()
     key_path = tmp_path / "secret.key"
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
+    monkeypatch.setattr(crypto, "_cipher", None)
+    key_path.write_bytes(key)
 
-    assert not key_path.exists()
-    c1 = key_pool._load_cipher()
-    assert key_path.exists()
+    c1 = crypto._load_cipher()
+    assert key_path.read_bytes() == key  # 不覆盖已有密钥
+    assert key_path.read_bytes() != _MiniFernet.generate_key()  # 用原密钥，未重新生成
 
-    # 重置缓存后重新加载，应命中同一密钥文件
-    monkeypatch.setattr(key_pool, "_cipher", None)
-    c2 = key_pool._load_cipher()
+    monkeypatch.setattr(crypto, "_cipher", None)
+    c2 = crypto._load_cipher()
     token = c2.encrypt(b"keep-me")
     assert c1.decrypt(token) == b"keep-me"
 
 
+def test_load_cipher_migrates_fallback_file_to_keychain(tmp_path, monkeypatch):
+    """本地 secret.key 存在时直接使用（无 Keychain 依赖）。"""
+    file_key = _MiniFernet.generate_key()
+    key_path = tmp_path / "secret.key"
+    key_path.write_bytes(file_key)
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
+    monkeypatch.setattr(crypto, "_cipher", None)
+
+    c1 = crypto._load_cipher()
+    assert key_path.exists()             # 保留本地文件
+    assert key_path.read_bytes() == file_key
+    token = c1.encrypt(b"migrated")
+    monkeypatch.setattr(crypto, "_cipher", None)
+    c2 = crypto._load_cipher()
+    assert c2.decrypt(token) == b"migrated"
+
+
+def test_load_cipher_generates_and_saves_new_key(tmp_path, monkeypatch):
+    """本地没有 secret.key 时：自动生成新密钥并写入文件"""
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
+    monkeypatch.setattr(crypto, "_cipher", None)
+
+    c1 = crypto._load_cipher()
+    key_path = tmp_path / "secret.key"
+    assert key_path.exists()                          # 已生成并写盘
+    assert len(key_path.read_bytes().strip()) == 44   # 32 字节 urlsafe base64
+    token = c1.encrypt(b"fresh")
+    assert c1.decrypt(token) == b"fresh"
+
+
+def test_load_cipher_uses_memory_key_when_keychain_unavailable(tmp_path, monkeypatch):
+    """本地 secret.key 写入正常场景：生成并写盘，加解密可用。"""
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
+    monkeypatch.setattr(crypto, "_cipher", None)
+
+    c1 = crypto._load_cipher()
+    assert (tmp_path / "secret.key").exists()
+    token = c1.encrypt(b"ephemeral")
+    assert c1.decrypt(token) == b"ephemeral"
+
+
+def test_load_cipher_reuses_process_cache(tmp_path, monkeypatch):
+    """进程内缓存命中时不再读取密钥文件"""
+    calls = []
+    key = _MiniFernet.generate_key()
+
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
+    monkeypatch.setattr(crypto, "_cipher", None)
+    (tmp_path / "secret.key").write_bytes(key)
+
+    def counting_load():
+        calls.append(1)
+        with open(tmp_path / "secret.key", "rb") as f:
+            return f.read().strip()
+
+    original_load = crypto._load_cipher
+    monkeypatch.setattr(crypto, "_cipher", None)
+    # 直接验证：第二次调用走后只读一次文件
+    monkeypatch.setattr(crypto, "_get_secret_path", lambda: str(tmp_path / "secret.key"))
+    import builtins as _b
+    real_open = _b.open
+    opened = []
+
+    def spy_open(*a, **kw):
+        if "secret.key" in str(a[0]):
+            opened.append(a[0])
+        return real_open(*a, **kw)
+
+    monkeypatch.setattr("builtins.open", spy_open)
+    crypto._load_cipher()
+    crypto._load_cipher()
+    assert len(opened) == 1  # 第二次命中缓存不再读文件
+
+
 def test_encrypt_decrypt_helpers_roundtrip(tmp_path, monkeypatch):
     """_encrypt/_decrypt 上层包装往返一致（API key 落库/读取走此路径）"""
-    monkeypatch.setattr(key_pool, "SECRET_DIR", str(tmp_path))
-    monkeypatch.setattr(key_pool, "_cipher", None)
-    blob = key_pool._encrypt("sk-live-938275")
+    key = _MiniFernet.generate_key()
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
+    monkeypatch.setattr(crypto, "_cipher", None)
+    (tmp_path / "secret.key").write_bytes(key)
+
+    blob = crypto._encrypt("sk-live-938275")
     assert blob != "sk-live-938275"
-    monkeypatch.setattr(key_pool, "_cipher", None)
-    assert key_pool._decrypt(blob) == "sk-live-938275"
+    monkeypatch.setattr(crypto, "_cipher", None)
+    assert crypto._decrypt(blob) == "sk-live-938275"

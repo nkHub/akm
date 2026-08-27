@@ -9,8 +9,15 @@ import requests
 
 
 def _test_env(home: str) -> dict[str, str]:
-    """为子进程提供独立配置目录，避免修改 pytest 进程的全局环境。"""
-    return {**os.environ, "HOME": home}
+    """为子进程提供独立配置目录，避免修改 pytest 进程的全局环境。
+
+    必须移除 AKM_DB_DIR：conftest 会把它设为会话级共享临时库，若保留，
+    子进程将写入/读取同一共享库，导致测试之间（如 serve 产生日志、log list
+    断言无日志）互相污染；移除后可回退到 HOME/.akm 实现每用例隔离。
+    """
+    env = {**os.environ, "HOME": home}
+    env.pop("AKM_DB_DIR", None)
+    return env
 
 
 def _run_cli(home: str, *args: str, **kwargs):

@@ -679,6 +679,8 @@ def setup(monkeypatch):
     conn = get_connection()
     init_db(conn)
     conn.close()
+    # 测试环境不读真实 ~/.akm/secret.key
+    monkeypatch.setattr("akm.crypto._cipher", None)
     monkeypatch.setattr("akm.server._stats_cache", {})
     # 为 lifespan 未生效的测试环境提供模拟 http_client 和 plugin_manager
     app.state.http_client = AsyncMock()
@@ -1784,6 +1786,7 @@ async def test_api_refresh_key_provider_models(monkeypatch):
     conn.commit()
     conn.close()
 
+    # key_pool 从 akm.crypto 一次性绑定 _decrypt，patch 其命名空间内绑定才能生效
     monkeypatch.setattr("akm.key_pool._decrypt", lambda value: "sk-test")
 
     async def fake_fetch(provider, api_key, base_url, auth_header):

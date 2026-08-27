@@ -3,7 +3,6 @@ import tempfile
 import pytest
 from akm.db import get_connection, init_db
 from akm.key_pool import (
-    _load_cipher,
     add_key,
     get_key,
     list_keys,
@@ -21,9 +20,9 @@ def setup(monkeypatch):
     """每个测试使用独立数据库和密钥目录"""
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr("akm.db.DB_DIR", tmpdir)
-    monkeypatch.setattr("akm.key_pool.SECRET_DIR", tmpdir)
+    monkeypatch.setattr("akm.crypto.SECRET_DIR", tmpdir)
     # 强制重新生成 cipher，确保使用新的 secret key
-    monkeypatch.setattr("akm.key_pool._cipher", None)
+    monkeypatch.setattr("akm.crypto._cipher", None)
     conn = get_connection()
     init_db(conn)
     yield conn

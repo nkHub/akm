@@ -9,8 +9,8 @@ from pathlib import Path
 
 from croniter import croniter, CroniterBadCronError
 
-# 数据目录：~/.akm/
-DB_DIR = os.path.expanduser("~/.akm")
+# 数据目录：默认 ~/.akm/；可被环境变量 AKM_DB_DIR 覆盖（测试隔离用）。
+DB_DIR = os.environ.get("AKM_DB_DIR") or os.path.expanduser("~/.akm")
 
 
 def get_keys_log_path() -> str:
