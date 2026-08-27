@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-25T18:47:39+0800",
+  "generated_at": "2026-08-27T11:32:51+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -46,6 +46,15 @@
       "sha256": "b67d1c19411dca68e3bc2b9325697d7796ed7fd618ed3bbbb5aa51a2d5f7e713",
       "size": 25437
     },
+    "error_handler": {
+      "version": "0.1.0",
+      "description": "上游错误处理：429 切换 key、402/401/403 禁用 key、5xx 指数退避重试",
+      "category": "handler",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/error_handler-0.1.0.zip",
+      "sha256": "82666ef16cdeb9faa38ee204d8096fc1e5185f17b548ea6fd70a0ad21a375018",
+      "size": 2613
+    },
     "fallback_router": {
       "version": "0.1.0",
       "description": "模型失败降级：命中指定状态码或网络错误后改用备用模型并重新选 Key",
@@ -90,6 +99,15 @@
       "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/mcp_tool_gateway-0.1.0.zip",
       "sha256": "5e5a52426915fa8dbeae21219dec85d9958e239922487d8158b373221c2a76eb",
       "size": 7429
+    },
+    "model_matcher": {
+      "version": "0.1.0",
+      "description": "模型别名映射与健康旁路：将请求模型按别名表替换，并在 key 拥塞或慢请求时旁路到更优候选（model→key 的匹配由内核 key_pool 完成，本插件做可选增强）",
+      "category": "matcher",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/model_matcher-0.1.0.zip",
+      "sha256": "0cee64b11f1fefb937b7e3dd0d4ea9a5d977e80230cded1be476179e4354c683",
+      "size": 7470
     },
     "prompt_booster": {
       "version": "0.1.0",
