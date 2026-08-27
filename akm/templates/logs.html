@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block content %}
-<script src="/static/json-viewer.js"></script>
-<script src="/static/chat-viewer.js"></script>
+<script src="/static/json-viewer.js?v={{ asset_version }}"></script>
+<script src="/static/chat-viewer.js?v={{ asset_version }}"></script>
 <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
   <div class="flex items-center gap-3">
     <!-- 自定义供应商下拉 -->
