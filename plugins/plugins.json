@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-27T11:32:51+0800",
+  "generated_at": "2026-08-27T16:16:07+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -47,12 +47,12 @@
       "size": 25437
     },
     "error_handler": {
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "上游错误处理：429 切换 key、402/401/403 禁用 key、5xx 指数退避重试",
       "category": "handler",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/error_handler-0.1.0.zip",
-      "sha256": "82666ef16cdeb9faa38ee204d8096fc1e5185f17b548ea6fd70a0ad21a375018",
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/error_handler-0.1.1.zip",
+      "sha256": "cacf10ab62ce762df946c8ffc923a441c29a3b31ff533b0ee5acf8964b973ff1",
       "size": 2613
     },
     "fallback_router": {
