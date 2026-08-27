@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/png" href="/logo.png?v={{ asset_version }}">
 <title>AKM - {{ title }}</title>
-<script src="/static/tailwindcss.js"></script>
-<script src="/static/marked.min.js"></script>
-<script src="/static/akm-ui.js"></script>
+<script src="/static/tailwindcss.js?v={{ asset_version }}"></script>
+<script src="/static/marked.min.js?v={{ asset_version }}"></script>
+<script src="/static/akm-ui.js?v={{ asset_version }}"></script>
 <script>
 try {
   if (localStorage.getItem('akm.sidebar.collapsed') === '1') {
