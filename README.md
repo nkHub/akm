@@ -410,7 +410,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 ## 故障切换策略
 
-> `error_handler` 插件接管错误处理策略，可在管理台「插件」页面配置最大重试次数和 Key 切换上限。
+> `error_handler` 插件接管错误处理策略，可在管理台「插件」页面配置最大重试次数、Key 切换上限，以及是否自动禁用/限流 Key（`auto_disable`，默认开启；关闭后遇到限流或认证失败仅切换 Key，不改变 Key 状态）。
 
 | 状态码 | 行为 |
 |--------|------|
@@ -504,7 +504,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | 插件 | 类型 | 必需 | 职责 |
 |------|------|:---:|------|
 | `protocol_converter` | converter | | Responses/Messages/Chat 三格式双向转换 |
-| `model_matcher` | matcher | ✓ | 模型别名映射与 Key 模型匹配 |
+| `model_matcher` | matcher | | 模型别名映射 + 拥塞/慢 Key 健康旁路（Key 匹配在内核 key_pool） |
 | `error_handler` | handler | 默认开启 | 429 限流换 Key、5xx 指数退避重试 |
 | `usage_quota_guard` | matcher | | 可选本地窗口配额：按 Key/模型限制请求次数和已观测 Token，超额时跳过 Key |
 | `key_source_guard` | matcher | | 可选 Key 来源绑定：按客户端 `User-Agent` glob 限制指定上游 Key，未匹配时跳过该 Key |
@@ -521,7 +521,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊 |
 | `agent-tools` | app | | 可选离线工具箱：内置纯前端工具产物（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 `/tools` 即用 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即拉取 Git 最新文件覆盖 `~/.akm/plugins/{name}/`，下载过程以进度条实时展示，已加载插件覆盖后提示重启服务生效）。`error_handler` 首次加载默认开启；`model_matcher` 标记为必需（`required: true`），不可禁用。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即拉取 Git 最新文件覆盖 `~/.akm/plugins/{name}/`，下载过程以进度条实时展示，已加载插件覆盖后提示重启服务生效）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装与删除默认**热生效**；修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
 
 每个插件实例拥有独立 `config`；`on_load` 返回 `False` 或抛异常时插件保持未就绪，残留的 API、插件页面和静态资源返回 503；管理台保存配置后调用 `on_config_changed` 刷新缓存状态。
 

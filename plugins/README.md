@@ -1,6 +1,6 @@
 # 项目本地插件说明
 
-本目录存放 AKM / ccs 的**项目本地插件**（非内置核心）。它们默认大多关闭，在管理台「插件」页启用并配置后生效。
+本目录存放 AKM / ccs 的**项目本地插件**（非内置核心）。它们默认大多关闭（`model_matcher`、`error_handler` 默认开启），在管理台「插件」页启用并配置后生效。
 
 数据与状态默认只在**当前进程内存**中，服务重启会清空（除非插件另行说明）。跨 hook 状态写在请求级 `RequestContext.bag`（约定键 `{plugin}.{field}`），业务 request 与 bag 分离；multipart 等传输字段若仍用 `__akm_*` 前缀，转发层会在发往上游前剥离。
 ## 一览
@@ -25,8 +25,10 @@
 | `provider_health_probe` | app | 关 | Key 连通性探测与状态快照 API |
 | `mcp_tool_gateway` | app | 关 | 本地 HTTP 工具注册、可选注入 tools、受控调用 API |
 | `markdown_kb` | app | 关 | 本地 Markdown 知识库（上传/状态） |
+| `model_matcher` | matcher | 开 | 模型别名映射 + 拥塞/慢 Key 健康旁路 |
+| `error_handler` | handler | 开 | 429 限流换 Key、5xx 指数退避重试 |
 
-内置核心（通常在 `akm/plugins/`，不在本目录）：`model_matcher`、`error_handler` 等，负责选 Key、重试，不在此表展开。
+选 Key 的核心匹配（model→key，含 `models='*'` 通配 + `provider_models` 命中）位于内核 `akm/key_pool.py`，故障切换主循环在内核 `akm/proxy.py`；`model_matcher`、`error_handler` 是与本目录同级的项目本地增强插件，见下「按职责说明」，不再随 app 内置。
 
 ---
 
