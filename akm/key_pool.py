@@ -4,7 +4,11 @@ import os
 import time
 import asyncio
 import json
-from cryptography.fernet import Fernet
+import base64
+import hmac
+import hashlib
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
 from akm.config import load_config
@@ -94,7 +98,75 @@ def get_default_usage_script(provider: str = "") -> str:
     return _PROVIDER_SCRIPTS.get(provider_lower, DEFAULT_USAGE_QUERY_SCRIPT)
 
 SECRET_DIR = os.path.expanduser("~/.akm")
-_cipher: Fernet | None = None
+_cipher = None  # _MiniFernet | None：进程级缓存
+
+
+class InvalidToken(Exception):
+    """Fernet 令牌校验失败（与 cryptography.fernet.InvalidToken 行为对齐）"""
+
+
+def _pkcs7_pad(data: bytes) -> bytes:
+    """PKCS7 填充到 16 字节块边界"""
+    pad_len = 16 - (len(data) % 16)
+    return data + bytes([pad_len]) * pad_len
+
+
+def _pkcs7_unpad(data: bytes) -> bytes:
+    """去除 PKCS7 填充；填充非法时抛 InvalidToken"""
+    if not data:
+        raise InvalidToken
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 16 or data[-pad_len:] != bytes([pad_len]) * pad_len:
+        raise InvalidToken
+    return data[:-pad_len]
+
+
+class _MiniFernet:
+    """Fernet 兼容加解密器（基于 pycryptodome，替代 cryptography.fernet.Fernet）
+
+    令牌格式与 cryptography.fernet 完全互通：
+        urlsafe_base64( 0x80 || 8字节时间戳 || 16字节IV || AES-128-CBC 密文 || 32字节HMAC-SHA256 )
+    cryptography.fernet 的 MAC 是完整 SHA-256 digest（32 字节），不是旧规范中的 16 字节截断，
+    所以这里签名也取完整 32 字节，保证与存量加密数据无缝互通。
+    - 写出的令牌 cryptography.fernet 可直接解密（升级回退场景）；
+    - 现存 ~/.akm/secret.key 加密的存量数据可无缝读取。
+    """
+
+    def __init__(self, key):
+        if isinstance(key, str):
+            key = key.encode("utf-8")
+        raw = base64.urlsafe_b64decode(key + b"=" * (-len(key) % 4))
+        if len(raw) != 32:
+            raise ValueError("Fernet 密钥必须是 32 字节")
+        self._signing_key = raw[:16]
+        self._encryption_key = raw[16:]
+
+    @classmethod
+    def generate_key(cls) -> bytes:
+        """生成与 Fernet.generate_key() 等价的 urlsafe base64 密钥"""
+        return base64.urlsafe_b64encode(os.urandom(32))
+
+    def encrypt(self, data: bytes) -> bytes:
+        """加密并返回 urlsafe base64 令牌（bytes），格式与 Fernet 相同"""
+        iv = get_random_bytes(16)
+        ts = int(time.time()).to_bytes(8, "big")
+        ct = AES.new(self._encryption_key, AES.MODE_CBC, iv).encrypt(_pkcs7_pad(data))
+        mac = hmac.new(self._signing_key, b"\x80" + ts + iv + ct, hashlib.sha256).digest()[:32]
+        return base64.urlsafe_b64encode(b"\x80" + ts + iv + ct + mac)
+
+    def decrypt(self, token: bytes) -> bytes:
+        """解密 Fernet 令牌；令牌非法（含被篡改）抛 InvalidToken"""
+        try:
+            raw = base64.urlsafe_b64decode(token + b"=" * (-len(token) % 4))
+        except Exception:
+            raise InvalidToken
+        if len(raw) < 73 or raw[0] != 0x80:
+            raise InvalidToken
+        iv, ct, mac = raw[9:25], raw[25:-32], raw[-32:]
+        calc = hmac.new(self._signing_key, raw[:-32], hashlib.sha256).digest()[:32]
+        if not hmac.compare_digest(calc, mac):
+            raise InvalidToken
+        return _pkcs7_unpad(AES.new(self._encryption_key, AES.MODE_CBC, iv).decrypt(ct))
 
 
 def _get_secret_path() -> str:
@@ -103,19 +175,19 @@ def _get_secret_path() -> str:
     return os.path.join(SECRET_DIR, "secret.key")
 
 
-def _load_cipher() -> Fernet:
-    """加载 Fernet 加密器，首次使用时自动生成密钥"""
+def _load_cipher() -> "_MiniFernet":
+    """加载 Fernet 兼容加密器，首次使用时自动生成密钥"""
     global _cipher
     if _cipher is not None:
         return _cipher
     key_path = _get_secret_path()
     if not os.path.exists(key_path):
-        key = Fernet.generate_key()
+        key = _MiniFernet.generate_key()
         with open(key_path, "wb") as f:
             f.write(key)
     with open(key_path, "rb") as f:
         key = f.read()
-    _cipher = Fernet(key)
+    _cipher = _MiniFernet(key)
     return _cipher
 
 
