@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from akm.plugins.context import RequestContext
-from akm.plugins.model_matcher.index import Plugin
+from plugins.model_matcher.index import Plugin
 
 
 def _ctx(request: dict | None = None, *, key: dict | None = None, **kwargs) -> RequestContext:
@@ -134,7 +134,7 @@ async def test_model_matcher_bypass_switches_to_alternate_key(monkeypatch):
     plugin._inflight_counts["k1"] = 2
 
     monkeypatch.setattr(
-        "akm.plugins.model_matcher.index.pick_key_async",
+        "plugins.model_matcher.index.pick_key_async",
         AsyncMock(return_value={"alias": "k2", "provider": "openai"}),
     )
 
@@ -161,7 +161,7 @@ async def test_model_matcher_bypass_falls_back_when_no_alternate(monkeypatch):
     plugin._inflight_counts["k1"] = 1
 
     monkeypatch.setattr(
-        "akm.plugins.model_matcher.index.pick_key_async",
+        "plugins.model_matcher.index.pick_key_async",
         AsyncMock(return_value=None),
     )
 
@@ -232,7 +232,7 @@ async def test_model_matcher_smart_bypass_picks_best_scored_candidate(monkeypatc
     async def _pick(model, exclude_aliases=None):
         return seq.pop(0)
 
-    monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
+    monkeypatch.setattr("plugins.model_matcher.index.pick_key_async", _pick)
 
     ctx = _ctx(
         {"model": "gpt-5"},
@@ -269,7 +269,7 @@ async def test_model_matcher_smart_bypass_keeps_current_when_improve_not_enough(
     async def _pick(model, exclude_aliases=None):
         return seq.pop(0)
 
-    monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
+    monkeypatch.setattr("plugins.model_matcher.index.pick_key_async", _pick)
 
     ctx = _ctx(
         {"model": "gpt-5"},
@@ -302,7 +302,7 @@ async def test_model_matcher_bypass_excludes_proxy_tried_aliases(monkeypatch):
         # 模拟：候选 k2 已被 proxy 试过失败，因此不返回 k2，只返回全新的 k3
         return {"alias": "k3", "provider": "openai"}
 
-    monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
+    monkeypatch.setattr("plugins.model_matcher.index.pick_key_async", _pick)
 
     ctx = _ctx(
         {"model": "gpt-5"},
@@ -332,7 +332,7 @@ async def test_model_matcher_bypass_keeps_current_when_only_tried_candidates(mon
 
     # 候选 k2 已在 tried_aliases，pick_key_async 因 exclude 命中返回 None
     monkeypatch.setattr(
-        "akm.plugins.model_matcher.index.pick_key_async",
+        "plugins.model_matcher.index.pick_key_async",
         AsyncMock(return_value=None),
     )
 
@@ -378,7 +378,7 @@ async def test_model_matcher_smart_bypass_excludes_proxy_tried_aliases(monkeypat
         # 只返回 k3（k2 已在 exclude 中不会返回）
         return {"alias": "k3", "provider": "openai"}
 
-    monkeypatch.setattr("akm.plugins.model_matcher.index.pick_key_async", _pick)
+    monkeypatch.setattr("plugins.model_matcher.index.pick_key_async", _pick)
 
     ctx = _ctx(
         {"model": "gpt-5"},

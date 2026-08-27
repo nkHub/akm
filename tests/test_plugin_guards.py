@@ -21,7 +21,7 @@ from akm.plugins.models import PluginMeta
 from akm.plugins.plugin_manager import PluginManager
 from akm.proxy import forward_request
 from plugins.data_filter_guard.index import Plugin as DataFilterGuard
-from akm.plugins.error_handler.index import Plugin as ErrorHandler
+from plugins.error_handler.index import Plugin as ErrorHandler
 from plugins.fallback_router.index import Plugin as FallbackRouter
 from plugins.usage_quota_guard.index import Plugin as UsageQuotaGuard
 from plugins.webhook_notifier.index import Plugin as WebhookNotifier
@@ -601,6 +601,65 @@ async def test_error_handler_refreshes_cached_limits_after_config_save(monkeypat
     assert result == {"ok": True}
     assert plugin.max_retries == 7
     assert plugin.max_key_tries == 11
+    assert plugin.auto_disable is True
+
+
+def _error_handler_with_config(config: dict | None = None) -> ErrorHandler:
+    """构造 error_handler 插件实例，应用指定配置。"""
+    plugin = ErrorHandler()
+    plugin.config = config or {}
+    plugin._apply_config()
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_error_handler_auto_disable_default_blocks_and_marks_key():
+    """默认 auto_disable=true：限流与认证失败仍返回 block（自动禁用）。"""
+    plugin = _error_handler_with_config()
+    assert plugin.auto_disable is True
+
+    key = {"alias": "default-key"}
+    for status in (429, 402, 401, 403):
+        action = await plugin.on_upstream_error(None, status_code=status, key=key)
+        assert action == "block"
+
+
+@pytest.mark.asyncio
+async def test_error_handler_auto_disable_false_switches_only():
+    """auto_disable=false：限流与认证失败只切换 key，不自动标记。"""
+    plugin = _error_handler_with_config({"auto_disable": False})
+    assert plugin.auto_disable is False
+
+    key = {"alias": "switch-key"}
+    for status in (429, 402, 401, 403):
+        action = await plugin.on_upstream_error(None, status_code=status, key=key)
+        assert action == "switch"
+
+    # 5xx 与连接错误的既有重试策略不受开关影响
+    action = await plugin.on_upstream_error(None, status_code=503, attempt=0, key=key)
+    assert action == "retry"
+    action = await plugin.on_upstream_error(
+        None, status_code=0, error_type="timeout", attempt=0, key=key
+    )
+    assert action == "retry"
+
+
+@pytest.mark.asyncio
+async def test_error_handler_refreshes_auto_disable_after_config_save(monkeypatch, tmp_path):
+    """保存设置后 auto_disable 开关同步刷新，不再沿用启动时缓存的旧值。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    config_path = tmp_path / ".akm" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('{"plugin_configs": {"error_handler": {"auto_disable": false}}}', "utf-8")
+
+    manager = PluginManager()
+    await manager.load_all(FastAPI())
+    plugin = cast(ErrorHandler, manager.plugins["error_handler"])
+    assert plugin.auto_disable is False
+
+    result = manager.set_config("error_handler", {"auto_disable": True})
+    assert result == {"ok": True}
+    assert plugin.auto_disable is True
 
 
 @pytest.mark.asyncio

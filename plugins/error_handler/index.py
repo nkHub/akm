@@ -15,6 +15,9 @@
 配置项：
 - max_retries_per_key: 单 key 最大重试次数（默认 3）
 - max_key_tries: 所有 key 总尝试次数上限（默认 5）
+- auto_disable: 遇到限流（429）或认证/付费失败（401/402/403）时，
+  是否自动把该 key 标记为限流/禁用（默认 true）。关闭后只切换 key，
+  不改变 key 状态，由用户自行决定是否手工禁用。
 
 接入方式：proxy.py 在遇到每个错误状态后调用 on_upstream_error hook，
 将请求上下文和错误信息传入，根据返回值决定下一步动作。
@@ -40,6 +43,7 @@ class Plugin(PluginBase):
         """集中读取当前配置，保证加载和热更新采用相同的默认值。"""
         self.max_retries = self.config.get("max_retries_per_key", 3)
         self.max_key_tries = self.config.get("max_key_tries", 5)
+        self.auto_disable = self.config.get("auto_disable", True) is not False
 
     async def on_upstream_error(
         self,
@@ -59,18 +63,26 @@ class Plugin(PluginBase):
             key: 当前使用的 key 信息字典
 
         Returns:
-            "block"  — 禁用/限流该 key，然后切换下一个
+            "block"  — 禁用/限流该 key，然后切换下一个（auto_disable 关闭时改由调用方决定）
             "switch" — 直接切换下一个 key
             "retry"  — 同一个 key 再次重试（需要 attempt < max_retries_per_key）
             None     — 不做处理
         """
         # 429 限流 → 标记限流，切换 key
         if status_code == 429:
+            if not self.auto_disable:
+                self.logger.info(f"429 限流 (key: {key.get('alias') if key else '?'})，自动禁用已关闭，仅切换 key")
+                return "switch"
             self.logger.warning(f"429 限流 (key: {key.get('alias') if key else '?'})，切换 key")
             return "block"
 
         # 402 欠费 / 401 403 认证失败 → 禁用 key，切换
         if status_code in (402, 401, 403):
+            if not self.auto_disable:
+                self.logger.info(
+                    f"{status_code} 认证/付费失败 (key: {key.get('alias') if key else '?'})，自动禁用已关闭，仅切换 key"
+                )
+                return "switch"
             self.logger.warning(
                 f"{status_code} 认证/付费失败 (key: {key.get('alias') if key else '?'})，禁用并切换 key"
             )

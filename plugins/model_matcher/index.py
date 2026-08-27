@@ -13,10 +13,11 @@ import time
 
 
 class Plugin(PluginBase):
-    """模型匹配插件
+    """模型匹配插件（可选增强）
 
-    required: true — 不可禁用，保证至少一个模型匹配插件始终生效。
-    用户可安装第三方模型匹配插件替代内置逻辑，但不可完全禁用匹配。
+    model→key 的核心匹配由内核 key_pool（pick_key / pick_wildcard_key）完成，
+    本插件只做增强：请求模型别名映射、key 拥塞/慢请求旁路与健康打分、可选的
+    GPT/Codex tool_choice 强制策略。默认启用但允许用户禁用，禁用后不影响选 key。
     """
 
     async def on_load(self):

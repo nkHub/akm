@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "has_menu": false,
   "category": "matcher",
-  "description": "模型匹配路由：根据请求模型名匹配可用的 API key，支持模型别名映射和通配符兜底",
-  "builtin": true,
-  "required": true,
+  "description": "模型别名映射与健康旁路：将请求模型按别名表替换，并在 key 拥塞或慢请求时旁路到更优候选（model→key 的匹配由内核 key_pool 完成，本插件做可选增强）",
+  "builtin": false,
+  "required": false,
   "hooks": {
     "on_request": true,
     "on_key_selected": true,

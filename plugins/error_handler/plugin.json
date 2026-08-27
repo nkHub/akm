@@ -4,7 +4,7 @@
   "has_menu": false,
   "category": "handler",
   "description": "上游错误处理：429 切换 key、402/401/403 禁用 key、5xx 指数退避重试",
-  "builtin": true,
+  "builtin": false,
   "default_enabled": true,
   "required": false,
   "hooks": {
@@ -24,6 +24,13 @@
       "type": "number",
       "default": 5,
       "description": "所有 key 全部失败前最多尝试几个 key"
+    },
+    {
+      "key": "auto_disable",
+      "label": "自动禁用/限流 key",
+      "type": "boolean",
+      "default": true,
+      "description": "遇到 429 限流或 401/402/403 认证失败时自动把 key 标记为限流/禁用；关闭后仅切换 key，不改变 key 状态"
     }
   ]
 }
