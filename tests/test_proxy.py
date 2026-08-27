@@ -16,8 +16,8 @@ def setup_db(monkeypatch):
     """每个测试使用独立数据库，避免诊断类测试互相污染。"""
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr("akm.db.DB_DIR", tmpdir)
-    monkeypatch.setattr("akm.key_pool.SECRET_DIR", tmpdir)
-    monkeypatch.setattr("akm.key_pool._cipher", None)
+    monkeypatch.setattr("akm.crypto.SECRET_DIR", tmpdir)
+    monkeypatch.setattr("akm.crypto._cipher", None)
     conn = get_connection()
     init_db(conn)
     conn.close()
@@ -887,6 +887,7 @@ async def test_forward_passthrough_disabled_when_native_off(monkeypatch):
         "base_url": "https://api.openai.com",
     }))
     monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": False})
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: default)
 
     mock_client = AsyncMock()
     send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"object":"chat.completion","model":"m","choices":[]}')])
@@ -1207,6 +1208,8 @@ async def test_test_key_connectivity_openai_uses_chat_only(monkeypatch):
     called_urls = []
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 
@@ -1243,6 +1246,8 @@ async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch)
     ]
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 
@@ -1275,6 +1280,8 @@ async def test_test_key_connectivity_deepseek_prefers_chat(monkeypatch):
     called_urls = []
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 
@@ -1308,6 +1315,8 @@ async def test_test_key_connectivity_anthropic_uses_messages(monkeypatch):
     called = []
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 
@@ -1341,6 +1350,8 @@ async def test_test_key_connectivity_custom_agent_uses_first_supported_format(mo
     called = []
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 
@@ -1386,6 +1397,8 @@ async def test_test_key_connectivity_messages_provider_without_anthropic_switch(
     called = []
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 
@@ -1431,6 +1444,8 @@ async def test_test_key_connectivity_wildcard_uses_first_provider_model(monkeypa
     called = []
 
     class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
         async def __aenter__(self):
             return self
 

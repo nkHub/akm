@@ -17,8 +17,8 @@ def _setup_tmp_env(monkeypatch):
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setenv("HOME", tmpdir)
     monkeypatch.setattr("akm.db.DB_DIR", tmpdir)
-    monkeypatch.setattr("akm.key_pool.SECRET_DIR", tmpdir)
-    monkeypatch.setattr("akm.key_pool._cipher", None)
+    monkeypatch.setattr("akm.crypto.SECRET_DIR", tmpdir)
+    monkeypatch.setattr("akm.crypto._cipher", None)
     monkeypatch.setattr("akm.config.CONFIG_DIR", tmpdir)
     monkeypatch.setattr("akm.config.CONFIG_PATH", str(Path(tmpdir) / "config.json"))
     return tmpdir
