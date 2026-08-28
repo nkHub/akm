@@ -448,6 +448,8 @@ async def test_read_image_audit_without_body_logging(monkeypatch, tmp_path):
     assert record["request_body"] == ""
     assert record["response_body"] == ""
     assert record["status_code"] == 200
-    assert record["request_headers"] == ""
+    # request_headers 始终记录（轻量来源信息，来源/徽章展示用，不随 log_request_body 开关）
+    assert '"x-akm-source": "chat"' in record["request_headers"]
+    # 客户端请求头与上游请求头快照仍随 log_request_body 关闭而不落库
     assert record["client_request_headers"] == ""
     assert record["upstream_request_headers"] == ""

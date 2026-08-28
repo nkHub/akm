@@ -240,7 +240,7 @@ async def _submit_agent_tool_audit(
         "status_code": int(result.get("status_code", 0) or 0),
         "latency_ms": int(result.get("latency_ms", 0) or 0),
         "error": str(result.get("error", "") or ""),
-        "request_headers": json.dumps({"user-agent": "agent/1.0", "x-akm-source": "chat"}) if save_request_body else "",
+        "request_headers": json.dumps({"user-agent": "agent/1.0", "x-akm-source": "chat"}),
         "prompt_tokens": int(result.get("prompt_tokens", 0) or 0),
         "completion_tokens": int(result.get("completion_tokens", 0) or 0),
         "total_tokens": int(result.get("total_tokens", 0) or 0),
