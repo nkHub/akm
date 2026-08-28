@@ -2126,7 +2126,7 @@ async def api_clean_logs(request: Request):
 
 @app.post("/api/logs/clean-bodies")
 async def api_clean_log_bodies():
-    """清空审计日志请求体/响应体内容，保留统计字段与元数据"""
+    """清空审计日志正文和大体积请求头快照，保留来源头、统计字段与元数据"""
     count = await clean_log_bodies_async()
     return {"ok": True, "updated": count}
 

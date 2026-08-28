@@ -378,7 +378,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细） |
 | GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
-| POST | `/api/logs/clean-bodies` | 清空请求体/响应体（含客户端原始请求体、上游原始响应体与三列请求头快照，保留元数据与统计列） |
+| POST | `/api/logs/clean-bodies` | 清空请求体/响应体及客户端、上游请求头快照，保留轻量来源头、元数据与统计列 |
 | GET | `/api/stats` | Token 统计（支持 days 自然日范围：1=今天，7=近7天，30=近30天） |
 | GET/POST | `/api/config` | 配置读写 |
 | GET | `/api/agents` | 供应商代理列表（内置 + 自定义） |

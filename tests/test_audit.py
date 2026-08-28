@@ -106,7 +106,7 @@ def test_write_log_three_stage_trace_fields(setup):
 
 
 def test_clean_log_bodies_clears_client_request_body(setup):
-    """清理请求/响应体时应同步清空 client_request_body、upstream_response_body 与三列请求头。"""
+    """清理请求/响应体时清空大体积请求头快照，但保留来源头。"""
     write_log({
         "provider": "o", "key_alias": "k", "model": "m",
         "request_body": '{"a":1}', "response_body": '{"b":2}',
@@ -124,8 +124,8 @@ def test_clean_log_bodies_clears_client_request_body(setup):
     assert logs[0]["response_body"] == ""
     assert logs[0]["client_request_body"] == ""
     assert logs[0]["upstream_response_body"] == ""
-    # 请求头快照与请求体开关关联记录，清空时应一并清空
-    assert logs[0]["request_headers"] == ""
+    # request_headers 是轻量来源头，供审计列表显示来源和徽章，清理正文时必须保留。
+    assert logs[0]["request_headers"] == '{"user-agent":"x"}'
     assert logs[0]["client_request_headers"] == ""
     assert logs[0]["upstream_request_headers"] == ""
 
