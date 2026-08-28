@@ -3050,6 +3050,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or "") if save_request_body else "",
                         "upstream_response_body": raw_body_str if save_response_body else "",
                         "attempts": _attempts_to_log(result),
+                        "converted": 1 if adapter else 0,
                     })
                     logger.info(f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)")
 
@@ -3128,6 +3129,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             "upstream_request_headers": str(result.get("upstream_headers_for_log", "") or "") if save_request_body else "",
             "upstream_response_body": str(result.get("upstream_response_body_for_log", "") or "") if save_response_body else "",
             "attempts": _attempts_to_log(result),
+            "converted": 1 if result.get("adapter") else 0,
         })
 
         if result["key_alias"]:
