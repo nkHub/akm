@@ -560,12 +560,12 @@ function cleanLogs() {
 }
 
 function cleanLogBodies() {
-  if (!confirm('确认清空所有日志的请求体、响应体与请求头？\n\n将保留时间、状态码、token 统计等元数据。')) return;
+      if (!confirm('确认清空所有日志的请求体、响应体及客户端/上游请求头快照？\n\n将保留来源信息、时间、状态码、token 统计等元数据。')) return;
   fetch('/api/logs/clean-bodies', {
     method: 'POST'
   }).then(function(r){ return r.json(); }).then(function(data){
     var msg = document.getElementById('clean-msg');
-    msg.textContent = '已清空 ' + (data.updated || 0) + ' 条日志的请求/响应体及请求头';
+          msg.textContent = '已清空 ' + (data.updated || 0) + ' 条日志的请求/响应体及请求头快照';
     msg.className = 'text-xs text-emerald-400 mt-2';
     msg.classList.remove('hidden');
     loadLogStats();
