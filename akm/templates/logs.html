@@ -631,11 +631,19 @@ function openDrawer(idx) {
   currentLog.__reqRendered = false;
   currentLog.__respRendered = false;
   currentLog.__errorRendered = false;
-  // 仅当发生协议转换（converter 类型插件启用并被触发）时，后端才会落库「转换后请求体/响应体」；
-  // 因此按是否存有转换后内容判定是否显示对应 tab，未存储（无转换）即隐藏。
+  // 「转换后请求体/响应体」tab 判断规则：
+  // 新版本写入时带 converted 标记（1=发生协议转换，0=明确未转换）：
+  //   带标记的行 -> converted===1 且该字段确有内容才显示。
+  //   旧版本历史数据 converted 为 null -> 保留自动识别作兼容（后端仅在发生协议
+  //   （converter 插件启用并被触发）时才落库这两列，因此非空即代表有转换迹象；
+  //   旧版在未转换时也会写入转发体，近似判断，可接受。）
   // 「对话视图」「客户端请求体」「上游响应」三个 tab 始终显示。
-  var hasReqTransform = !!(currentLog.request_body || '');
-  var hasRespTransform = !!(currentLog.response_body || '');
+  var hasReqTransform = currentLog.converted == null
+      ? !!(currentLog.request_body || '')
+      : (currentLog.converted === 1 && !!(currentLog.request_body || ''));
+  var hasRespTransform = currentLog.converted == null
+      ? !!(currentLog.response_body || '')
+      : (currentLog.converted === 1 && !!(currentLog.response_body || ''));
   var dtabReq = document.getElementById('dtab-request');
   var dtabResp = document.getElementById('dtab-response');
   if (dtabReq) dtabReq.classList.toggle('hidden', !hasReqTransform);

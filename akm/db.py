@@ -71,7 +71,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             client_request_body TEXT DEFAULT '',
             upstream_request_headers TEXT DEFAULT '',
             upstream_response_body TEXT DEFAULT '',
-            attempts TEXT DEFAULT ''
+            attempts TEXT DEFAULT '',
+            converted INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp
@@ -122,6 +123,11 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
     # audit_logs 表 — 逐次 key 尝试记录（attempts，JSON 数组）
     try:
         conn.execute("ALTER TABLE audit_logs ADD COLUMN attempts TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    # audit_logs 表 — 协议转换标记列（converted：1=发生转换，0=明确未转换，NULL=旧数据未打标）
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN converted INTEGER")
     except sqlite3.OperationalError:
         pass
     # audit_logs 表 — token 列
