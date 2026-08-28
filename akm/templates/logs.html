@@ -638,12 +638,15 @@ function openDrawer(idx) {
   //   （converter 插件启用并被触发）时才落库这两列，因此非空即代表有转换迹象；
   //   旧版在未转换时也会写入转发体，近似判断，可接受。）
   // 「对话视图」「客户端请求体」「上游响应」三个 tab 始终显示。
-  var hasReqTransform = currentLog.converted == null
+  // 转换 tab 仅在请求成功（状态码 2xx/3xx）且确有不失败的转换后内容时显示：
+  // 失败请求即使发生过转换（converted=1），转换结果也没有意义，统一不展示。
+  var okCode = currentLog.status_code >= 200 && currentLog.status_code < 400;
+  var hasReqTransform = okCode && (currentLog.converted == null
       ? !!(currentLog.request_body || '')
-      : (currentLog.converted === 1 && !!(currentLog.request_body || ''));
-  var hasRespTransform = currentLog.converted == null
+      : (currentLog.converted === 1 && !!(currentLog.request_body || '')));
+  var hasRespTransform = okCode && (currentLog.converted == null
       ? !!(currentLog.response_body || '')
-      : (currentLog.converted === 1 && !!(currentLog.response_body || ''));
+      : (currentLog.converted === 1 && !!(currentLog.response_body || '')));
   var dtabReq = document.getElementById('dtab-request');
   var dtabResp = document.getElementById('dtab-response');
   if (dtabReq) dtabReq.classList.toggle('hidden', !hasReqTransform);
@@ -712,9 +715,12 @@ function switchDrawerTab(tab) {
   for (var k in tabs) {
     var tb = document.getElementById(tabs[k]);
     if (!tb) continue;
-    tb.className = (k === tab)
+    // 切换激活样式时保留 hidden 状态，否则 openDrawer 刚隐藏的转换 tab 会被重新显示。
+    var hidden = tb.classList.contains('hidden');
+    tb.className = ((k === tab)
       ? 'flex-1 px-4 py-2 text-xs text-indigo-400 border-b-2 border-indigo-400 transition-colors cursor-pointer bg-surface/50'
-      : 'flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer';
+      : 'flex-1 px-4 py-2 text-xs text-gray-400 border-b-2 border-transparent transition-colors cursor-pointer')
+      + (hidden ? ' hidden' : '');
   }
   for (var v in views) {
     var el = document.getElementById(views[v]);
