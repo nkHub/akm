@@ -314,6 +314,18 @@ kbd {
   transition: border-color 0.2s;
 }
 .editor-row.invalid { border-color: var(--danger); }
+.editor-row[data-kind="bookmark"] { grid-template-columns: 20px minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 0.9fr) auto; }
+.editor-row[data-kind="bookmark"][draggable="true"] { cursor: grab; }
+.editor-row[data-kind="bookmark"][draggable="true"]:active { cursor: grabbing; }
+.editor-row.dragging { opacity: 0.45; }
+.drag-handle {
+  color: var(--text-dim);
+  cursor: grab;
+  font-size: 16px;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+}
 
 .f-name, .f-url, .f-icon {
   min-width: 0;
@@ -417,6 +429,7 @@ kbd {
   .search-bar { width: 100%; }
   .editor-header { flex-direction: column; align-items: flex-start; }
   .editor-row { grid-template-columns: 1fr; }
+  .editor-row[data-kind="bookmark"] { grid-template-columns: 1fr; }
   .hint { display: none; }
 }
 </style>
@@ -568,7 +581,7 @@ function normalize(cfg) {
           id: b.id || genId('bm_'),
           name: b.name,
           url: b.url,
-          icon: typeof b.icon === 'string' ? b.icon : ''
+          icon: normalizeIcon(b.icon)
         }))
     : [];
   let activeEngineId = cfg.activeEngineId;
@@ -594,10 +607,28 @@ function isValidHttpUrl(s) {
 /** 图标地址清洗：保留完整地址（域名或完整 URL，含子路径）；无协议但带路径时补全协议 */
 function cleanDomain(s) {
   s = String(s || '').trim();
+  if (isBase64Icon(s)) return s;
+  if (/^data:image\//i.test(s)) return '';
   if (!/^https?:\/\//i.test(s) && s.includes('/')) {
     s = 'https://' + s;
   }
   return s;
+}
+
+/** 只接受 PNG、JPEG、WebP 的 Base64 图片，避免把任意 data URL 当成图片源。 */
+function isBase64Icon(s) {
+  s = String(s || '').trim();
+  return s.length <= 512 * 1024 &&
+    /^data:image\/(?:png|jpe?g|webp);base64,[A-Za-z0-9+/]+=*$/i.test(s);
+}
+
+/** 规整书签图标字段，兼容历史网址图标并丢弃不受支持的图片 data URL。 */
+function normalizeIcon(icon) {
+  const value = String(icon || '').trim();
+  if (!value) return '';
+  if (isBase64Icon(value)) return value;
+  if (/^data:image\//i.test(value)) return '';
+  return value;
 }
 
 /** XSS 转义 */
@@ -649,7 +680,7 @@ function renderBookmarks(cfg) {
   }
   grid.innerHTML = cfg.bookmarks.map(b => {
     const icon = b.icon || hostFromUrl(b.url);
-    const src = /^https?:\/\//i.test(icon)
+    const src = isBase64Icon(icon) || /^https?:\/\//i.test(icon)
       ? icon   // 完整地址（含路径）直接作为图片地址
       : 'https://www.google.com/s2/favicons?domain=' +
         encodeURIComponent(icon) + '&sz=64';
@@ -717,7 +748,8 @@ function renderEditor() {
     bmList.innerHTML = '<p class="empty-tip">暂无书签，点击下方「新增书签」添加。</p>';
   } else {
     bmList.innerHTML = draft.bookmarks.map(b => {
-      return '<div class="editor-row" data-kind="bookmark" data-id="' + escapeHtml(b.id) + '">' +
+      return '<div class="editor-row" draggable="true" data-kind="bookmark" data-id="' + escapeHtml(b.id) + '">' +
+        '<span class="drag-handle" title="拖拽排序" aria-label="拖拽排序">⋮⋮</span>' +
         '<input class="f-name" type="text" placeholder="名称，如 GitHub" value="' + escapeHtml(b.name) + '">' +
         '<input class="f-url" type="text" placeholder="https://…" value="' + escapeHtml(b.url) + '">' +
         '<input class="f-icon" type="text" placeholder="图标地址（留空自动）" value="' + escapeHtml(b.icon) + '">' +
@@ -749,6 +781,55 @@ function autoSaveField(row, field, value) {
   Storage.save(state);
   renderSearch(state);
   renderBookmarks(state);
+}
+
+/** 根据编辑面板中书签行的 DOM 顺序保存书签排序。 */
+function reorderBookmarks() {
+  if (!draft) return;
+  const ids = Array.from(document.querySelectorAll('#bookmarks-list .editor-row'))
+    .map(row => row.dataset.id);
+  const byId = new Map(draft.bookmarks.map(bookmark => [bookmark.id, bookmark]));
+  draft.bookmarks = ids.map(id => byId.get(id)).filter(Boolean);
+  state = normalize(draft);
+  Storage.save(state);
+  renderBookmarks(state);
+}
+
+/** 绑定编辑面板内的拖拽排序事件，渲染重建书签行后仍由事件委托处理。 */
+function bindBookmarkDragSort(panel) {
+  let draggingRow = null;
+  panel.addEventListener('dragstart', e => {
+    const row = e.target.closest('#bookmarks-list .editor-row[draggable="true"]');
+    if (!row || !e.target.closest('.drag-handle')) {
+      e.preventDefault();
+      return;
+    }
+    draggingRow = row;
+    row.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', row.dataset.id);
+    }
+  });
+  panel.addEventListener('dragover', e => {
+    if (!draggingRow) return;
+    const list = document.getElementById('bookmarks-list');
+    if (!list || !list.contains(e.target)) return;
+    e.preventDefault();
+    const target = e.target.closest('.editor-row[draggable="true"]');
+    if (!target || target === draggingRow) return;
+    const rect = target.getBoundingClientRect();
+    target.parentNode.insertBefore(
+      draggingRow,
+      e.clientY < rect.top + rect.height / 2 ? target : target.nextSibling
+    );
+  });
+  panel.addEventListener('dragend', () => {
+    if (!draggingRow) return;
+    draggingRow.classList.remove('dragging');
+    draggingRow = null;
+    reorderBookmarks();
+  });
 }
 
 /** 新增引擎（写入草稿，输入内容后自动保存生效） */
@@ -893,6 +974,7 @@ function bindEvents() {
 
   // 编辑面板：Tab 切换 / 新增 / 行内操作 / 点击外部关闭
   const panel = document.getElementById('editor-panel');
+  bindBookmarkDragSort(panel);
   panel.addEventListener('click', e => {
     if (e.target === panel) { closeEditor(); return; }
 
