@@ -146,7 +146,7 @@ akm-menubar
 
 `akm serve` 启动后访问 `http://127.0.0.1:8800/admin`
 
-根路径 `http://127.0.0.1:8800/` 指向随包分发的 **Ecology 启动页**（`akm/static/index.html`），提供常用搜索与书签入口；书签可在编辑面板内拖拽排序，图标支持 HTTP(S) 地址、域名和受限的 PNG/JPEG/WebP Base64 图片；管理台各功能页入口不变。
+根路径 `http://127.0.0.1:8800/` 指向随包分发的 **Ecology 启动页**（`akm/static/index.html`），提供常用搜索与书签入口；书签可直接在启动页主界面拖拽排序，图标支持 HTTP(S) 地址、域名和受限的 PNG/JPEG/WebP Base64 图片；管理台各功能页入口不变。
 
 <table>
   <thead>
