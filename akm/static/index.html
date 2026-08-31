@@ -187,8 +187,11 @@ kbd {
   -webkit-backdrop-filter: blur(10px);
   text-decoration: none;
   color: var(--text);
+  cursor: grab;
   transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
 }
+.bookmark-card:active { cursor: grabbing; }
+.bookmark-card.dragging { opacity: 0.45; }
 .bookmark-card:hover {
   transform: translateY(-4px);
   background: rgba(255, 255, 255, 0.16);
@@ -314,18 +317,6 @@ kbd {
   transition: border-color 0.2s;
 }
 .editor-row.invalid { border-color: var(--danger); }
-.editor-row[data-kind="bookmark"] { grid-template-columns: 20px minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 0.9fr) auto; }
-.editor-row[data-kind="bookmark"][draggable="true"] { cursor: grab; }
-.editor-row[data-kind="bookmark"][draggable="true"]:active { cursor: grabbing; }
-.editor-row.dragging { opacity: 0.45; }
-.drag-handle {
-  color: var(--text-dim);
-  cursor: grab;
-  font-size: 16px;
-  line-height: 1;
-  text-align: center;
-  user-select: none;
-}
 
 .f-name, .f-url, .f-icon {
   min-width: 0;
@@ -684,7 +675,8 @@ function renderBookmarks(cfg) {
       ? icon   // 完整地址（含路径）直接作为图片地址
       : 'https://www.google.com/s2/favicons?domain=' +
         encodeURIComponent(icon) + '&sz=64';
-    return '<a class="bookmark-card" href="' + escapeHtml(b.url) +
+    return '<a class="bookmark-card" draggable="true" data-id="' + escapeHtml(b.id) +
+      '" href="' + escapeHtml(b.url) +
       '" target="_blank" rel="noopener noreferrer">' +
       '<img class="bookmark-icon" src="' + escapeHtml(src) + '" alt="" loading="lazy" ' +
       'onerror="this.onerror=null;this.src=FALLBACK_ICON">' +
@@ -748,8 +740,7 @@ function renderEditor() {
     bmList.innerHTML = '<p class="empty-tip">暂无书签，点击下方「新增书签」添加。</p>';
   } else {
     bmList.innerHTML = draft.bookmarks.map(b => {
-      return '<div class="editor-row" draggable="true" data-kind="bookmark" data-id="' + escapeHtml(b.id) + '">' +
-        '<span class="drag-handle" title="拖拽排序" aria-label="拖拽排序">⋮⋮</span>' +
+      return '<div class="editor-row" data-kind="bookmark" data-id="' + escapeHtml(b.id) + '">' +
         '<input class="f-name" type="text" placeholder="名称，如 GitHub" value="' + escapeHtml(b.name) + '">' +
         '<input class="f-url" type="text" placeholder="https://…" value="' + escapeHtml(b.url) + '">' +
         '<input class="f-icon" type="text" placeholder="图标地址（留空自动）" value="' + escapeHtml(b.icon) + '">' +
@@ -783,40 +774,42 @@ function autoSaveField(row, field, value) {
   renderBookmarks(state);
 }
 
-/** 根据编辑面板中书签行的 DOM 顺序保存书签排序。 */
+/** 根据主界面书签卡片的 DOM 顺序保存书签排序。 */
 function reorderBookmarks() {
-  if (!draft) return;
-  const ids = Array.from(document.querySelectorAll('#bookmarks-list .editor-row'))
+  if (!state) return;
+  const ids = Array.from(document.querySelectorAll('#bookmarks-grid .bookmark-card'))
     .map(row => row.dataset.id);
-  const byId = new Map(draft.bookmarks.map(bookmark => [bookmark.id, bookmark]));
-  draft.bookmarks = ids.map(id => byId.get(id)).filter(Boolean);
-  state = normalize(draft);
+  const byId = new Map(state.bookmarks.map(bookmark => [bookmark.id, bookmark]));
+  state.bookmarks = ids.map(id => byId.get(id)).filter(Boolean);
+  state = normalize(state);
   Storage.save(state);
   renderBookmarks(state);
 }
 
-/** 绑定编辑面板内的拖拽排序事件，渲染重建书签行后仍由事件委托处理。 */
-function bindBookmarkDragSort(panel) {
+/** 绑定主界面书签卡片的拖拽排序事件，渲染重建卡片后仍由事件委托处理。 */
+function bindBookmarkDragSort(grid) {
   let draggingRow = null;
-  panel.addEventListener('dragstart', e => {
-    const row = e.target.closest('#bookmarks-list .editor-row[draggable="true"]');
-    if (!row || !e.target.closest('.drag-handle')) {
+  let suppressClick = false;
+  grid.addEventListener('dragstart', e => {
+    const row = e.target.closest('#bookmarks-grid .bookmark-card[draggable="true"]');
+    if (!row) {
       e.preventDefault();
       return;
     }
     draggingRow = row;
+    suppressClick = false;
     row.classList.add('dragging');
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', row.dataset.id);
     }
   });
-  panel.addEventListener('dragover', e => {
+  grid.addEventListener('dragover', e => {
     if (!draggingRow) return;
-    const list = document.getElementById('bookmarks-list');
+    const list = document.getElementById('bookmarks-grid');
     if (!list || !list.contains(e.target)) return;
     e.preventDefault();
-    const target = e.target.closest('.editor-row[draggable="true"]');
+    const target = e.target.closest('.bookmark-card[draggable="true"]');
     if (!target || target === draggingRow) return;
     const rect = target.getBoundingClientRect();
     target.parentNode.insertBefore(
@@ -824,12 +817,19 @@ function bindBookmarkDragSort(panel) {
       e.clientY < rect.top + rect.height / 2 ? target : target.nextSibling
     );
   });
-  panel.addEventListener('dragend', () => {
+  grid.addEventListener('dragend', () => {
     if (!draggingRow) return;
     draggingRow.classList.remove('dragging');
     draggingRow = null;
+    suppressClick = true;
     reorderBookmarks();
+    setTimeout(() => { suppressClick = false; }, 0);
   });
+  grid.addEventListener('click', e => {
+    if (!suppressClick) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 }
 
 /** 新增引擎（写入草稿，输入内容后自动保存生效） */
@@ -974,7 +974,7 @@ function bindEvents() {
 
   // 编辑面板：Tab 切换 / 新增 / 行内操作 / 点击外部关闭
   const panel = document.getElementById('editor-panel');
-  bindBookmarkDragSort(panel);
+  bindBookmarkDragSort(document.getElementById('bookmarks-grid'));
   panel.addEventListener('click', e => {
     if (e.target === panel) { closeEditor(); return; }
 
