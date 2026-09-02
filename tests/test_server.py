@@ -1610,6 +1610,57 @@ async def test_lifespan_shutdown_only_stops_its_own_audit_queue(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lifespan_shutdown_only_unloads_its_own_plugin_manager(monkeypatch):
+    """旧 lifespan 退出时不应卸载新 lifespan 已创建的插件实例。"""
+    from fastapi import FastAPI
+
+    managers = []
+
+    class FakePluginManager:
+        def __init__(self):
+            self.unload_count = 0
+            managers.append(self)
+
+        def remove_registered_routes(self, app):
+            return 0
+
+        async def load_all(self, fastapi_app, db=None):
+            return None
+
+        async def unload_all(self):
+            self.unload_count += 1
+
+    class FakeHttpClientPoolManager:
+        is_route_pool = False
+
+        def __init__(self, **kwargs):
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+        def stats(self):
+            return {}
+
+    monkeypatch.setattr("akm.server.load_custom_agents", lambda: None)
+    monkeypatch.setattr("akm.server.PluginManager", FakePluginManager)
+    monkeypatch.setattr("akm.server.HttpClientPoolManager", FakeHttpClientPoolManager)
+
+    fastapi_app = FastAPI()
+    old_cm = lifespan(fastapi_app)
+    await old_cm.__aenter__()
+    new_cm = lifespan(fastapi_app)
+    await new_cm.__aenter__()
+
+    await old_cm.__aexit__(None, None, None)
+    assert managers[0].unload_count == 1
+    assert managers[1].unload_count == 0
+
+    await new_cm.__aexit__(None, None, None)
+    assert managers[1].unload_count == 1
+
+
+@pytest.mark.asyncio
 async def test_health_ready_returns_503_when_db_probe_is_critical():
     """当 DB 探针连续失败过多时，就绪探针应返回 503。"""
     monitor = HealthMonitor()

@@ -136,10 +136,11 @@ async def lifespan(app: FastAPI):
         previous_plugin_manager.remove_registered_routes(app)
     # 初始化插件管理器
     global plugin_manager
-    plugin_manager = PluginManager()
+    lifespan_plugin_manager = PluginManager()
+    plugin_manager = lifespan_plugin_manager
     # 初始化连接已关闭，不能把它注入插件上下文；插件需自行获取短生命周期连接。
-    await plugin_manager.load_all(app)
-    app.state.plugin_manager = plugin_manager
+    await lifespan_plugin_manager.load_all(app)
+    app.state.plugin_manager = lifespan_plugin_manager
     health_monitor = HealthMonitor()
     app.state.health_monitor = health_monitor
     health_task = asyncio.create_task(health_monitor.run_heartbeat())
@@ -165,7 +166,7 @@ async def lifespan(app: FastAPI):
         await initialize_agent_runtime(
             app,
             http_client,
-            plugin_manager,
+            lifespan_plugin_manager,
             _agent_audit,
             logger,
         )
@@ -190,7 +191,9 @@ async def lifespan(app: FastAPI):
     finally:
         # 只清理当前这轮 lifespan 自己创建出来的对象，避免菜单栏重启时
         # 旧实例 shutdown 晚到，把新实例刚挂到 app.state 上的资源误停掉。
-        await plugin_manager.unload_all()
+        # 必须卸载本轮 lifespan 自己创建的管理器，不能读取已被下一轮
+        # lifespan 替换的模块级全局变量，否则旧线程退出时会误卸载新插件。
+        await lifespan_plugin_manager.unload_all()
 
         await task_scheduler.stop()
 

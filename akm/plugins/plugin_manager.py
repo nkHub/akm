@@ -22,6 +22,34 @@ from akm.version import version_greater
 
 logger = logging.getLogger("akm.plugin_manager")
 
+
+def _plugin_launch_log_path() -> str:
+    """返回插件启动/生命周期日志路径，并确保目录存在。
+
+    收集插件 on_load 的就绪结果，便于在服务重启后排查
+    “插件 503/不可用”类问题（进程内重复跑 lifespan 时插件是否真正就绪）。
+    """
+    log_dir = Path.home() / ".akm"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir / "plugin.launch.log")
+
+
+def _append_plugin_launch_log(event: str, **details) -> None:
+    """将插件启动/生命周期关键节点追加写入独立 JSONL 日志。"""
+    try:
+        import datetime as _dt
+
+        record = {
+            "timestamp": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "event": str(event or "unknown"),
+            "details": details,
+        }
+        with open(_plugin_launch_log_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.warning("[PluginManager] 写入插件启动日志失败: %s", exc)
+
+
 # 插件会在 AKM 进程内执行，安装包仅接受扁平的、安全名称；同时限制压缩包，
 # 避免管理接口被异常归档占满内存、临时目录或磁盘。
 _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -407,8 +435,33 @@ class PluginManager:
                         f"[PluginManager] {plugin.name} on_load 异常: {e}"
                     )
                 # ── on_load 成功后插件就绪 ──
+                plugin.logger.info(
+                    "插件启动结束: %s runtime_ready=%s (enabled=%s)",
+                    plugin.name,
+                    plugin.runtime_ready,
+                    plugin.enabled,
+                )
+                _append_plugin_launch_log(
+                    "plugin.on_load",
+                    name=plugin.name,
+                    runtime_ready=plugin.runtime_ready,
+                    enabled=plugin.enabled,
+                )
 
-        logger.info(f"[PluginManager] 共加载 {len(self.plugins)} 个插件")
+        ready_count = sum(
+            1 for p in self.plugins.values() if p.enabled and p.runtime_ready
+        )
+        enabled_count = sum(1 for p in self.plugins.values() if p.enabled)
+        logger.info(
+            f"[PluginManager] 共加载 {len(self.plugins)} 个插件"
+            f"（启用 {enabled_count}，就绪 {ready_count}）"
+        )
+        _append_plugin_launch_log(
+            "plugin.launch.summary",
+            total=len(self.plugins),
+            enabled=enabled_count,
+            ready=ready_count,
+        )
 
     def remove_registered_routes(
         self, app: FastAPI | None = None, names: set | list | None = None
@@ -1391,6 +1444,7 @@ class PluginManager:
                 "required": meta.required,
                 "priority": meta.priority,
                 "enabled": plugin.enabled,
+                "runtime_ready": plugin.runtime_ready,
                 "source": self._plugin_sources.get(name, "unknown"),
                 "hooks": meta.hooks,
                 "settings": [s.model_dump() for s in meta.settings],

@@ -1243,10 +1243,24 @@ class AKMApp(rumps.App):
     def _schedule_wake_recovery(self):
         """对唤醒恢复做并发保护和去抖，避免短时间重复触发多次恢复。"""
         now = time.time()
+        # 记录每次 OS 唤醒通知到达（即使随后被去抖跳过也留痕），
+        # 便于排查“用户并未主动休眠，却触发了唤醒恢复”之类的误触发。
+        self._append_wake_recovery_log(
+            "wake.notification.received",
+            last_recover_ago_sec=round(now - self._last_wake_recover_at, 1),
+        )
         if self._wake_recovering:
+            self._append_wake_recovery_log("wake.recovery.skipped", reason="already_recovering")
             logger.info("唤醒恢复已在进行中，跳过重复触发")
             return
         if now - self._last_wake_recover_at < self._wake_recover_min_interval_sec:
+            interval_sec = self._wake_recover_min_interval_sec
+            self._append_wake_recovery_log(
+                "wake.recovery.skipped",
+                reason="too_frequent",
+                min_interval_sec=interval_sec,
+                last_recover_ago_sec=round(now - self._last_wake_recover_at, 1),
+            )
             logger.info("唤醒恢复触发过于频繁，本次跳过")
             return
         threading.Thread(target=self._recover_after_wake, daemon=True).start()
@@ -1393,7 +1407,11 @@ class AKMApp(rumps.App):
         return False, "upstream_probe_failed"
 
     def _recover_after_wake(self):
-        """系统唤醒后执行分级自愈：先保本地服务 ready，再用真实上游探活决定是否重启。"""
+        """系统唤醒后执行分级自愈。
+
+        只有本地服务探针（/health/ready）失败才重启本地服务；上游探活失败仅记录告警，
+        因为上游不通属于外部链路问题，重启本地代理无法修复，反而会打断服务。
+        """
         self._wake_recovering = True
         self._last_wake_recover_at = time.time()
         self._wake_recover_delay_sec = self._read_wake_recover_delay_seconds()
@@ -1425,13 +1443,19 @@ class AKMApp(rumps.App):
                 self._append_wake_recovery_log("wake.recovery.ok", reason=upstream_reason, action="none")
                 self._update_status_for_recovery("🟢 运行中")
                 return
-            logger.warning("唤醒后真实上游探活失败，准备通过重启本地服务做进一步自愈: %s", upstream_reason)
-            if self._restart_server_internal(f"wake_recovery:{upstream_reason}"):
-                self._append_wake_recovery_log("wake.recovery.ok", reason=upstream_reason, action="restart_local_server")
-                self._update_status_for_recovery("🟢 运行中")
-                return
-            self._append_wake_recovery_log("wake.recovery.failed", reason=upstream_reason, action="restart_local_server")
-            self._update_status_for_recovery("🔴 唤醒恢复失败")
+            # 上游探活失败只代表外部链路（网络、VPN、对端服务）暂时不通，本地服务此时已经
+            # ready，重启本地服务既修不好上游，又会打断进行中的请求并重跑插件生命周期，
+            # 因此这里只记录告警，把本地服务保持在运行状态。
+            logger.warning(
+                "唤醒后真实上游探活失败，判定为上游链路问题，保持本地服务不重启: %s",
+                upstream_reason,
+            )
+            self._append_wake_recovery_log(
+                "wake.recovery.upstream_degraded",
+                reason=upstream_reason,
+                action="none",
+            )
+            self._update_status_for_recovery("🟢 运行中")
         finally:
             if self.status_item.title == previous_title and previous_title:
                 self._update_status_for_recovery(previous_title)
