@@ -68,15 +68,11 @@ img.save("/tmp/akm-dmg-background.png", "PNG")
 PY
 
 echo "[5/7] 生成 DMG: $DMG_PATH"
-# create-dmg 第 487 行只执行 SetFile -c icnC，缺少 SetFile -a V 隐藏位，
-# 导致 .VolumeIcon.icns 和 .background 在 DMG 中可见。此处临时修补。
-CREATE_DMG=$(readlink -f /opt/homebrew/bin/create-dmg 2>/dev/null || echo "/opt/homebrew/bin/create-dmg")
-if [[ -f "$CREATE_DMG" ]]; then
-  # 先还原该行为原始状态（无论此前被修补过多少次，都统一还原），保证修补幂等。
-  sed -i '' 's#^SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns".*#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#' "$CREATE_DMG"
-  # 在 SetFile -c icnC 后追加 SetFile -a V 隐藏 .VolumeIcon.icns 和 .background
-  sed -i '' 's#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#&; SetFile -a V "$MOUNT_DIR/.VolumeIcon.icns"; SetFile -a V "$MOUNT_DIR/.background"#' "$CREATE_DMG"
-fi
+# create-dmg 1.3.0 起已修复 .VolumeIcon.icns / .background 的隐藏处理，
+# 不再需要针对旧版（1.2.3）的 sed 修补。
+# 历史教训：旧修补用行首锚点 ^SetFile 还原，但目标行以 Tab 缩进导致还原永不匹配，
+# 每次构建都会向 create-dmg 累积追加 SetFile -a V（曾累积到 61 处、2536 字符），
+# 被污染的 create-dmg 生成 DMG 时背景图失效。此处保持直接调用，不做任何修补。
 create-dmg \
   --volname "$APP_NAME" \
   --volicon "logo.icns" \
@@ -88,10 +84,6 @@ create-dmg \
   --app-drop-link 459 199 \
   "$DMG_PATH" \
   "$APP_PATH"
-# 还原 create-dmg（无论修补了多少次，统一还原为原始单行）
-if [[ -f "$CREATE_DMG" ]]; then
-  sed -i '' 's#^SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns".*#SetFile -c icnC "$MOUNT_DIR/.VolumeIcon.icns"#' "$CREATE_DMG"
-fi
 
 echo "[6/7] 生成 zip 更新包"
 # 更新程序通过 ditto -x -k 解压，zip 根目录需直接包含 .app；
