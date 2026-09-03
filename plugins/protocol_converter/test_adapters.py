@@ -211,6 +211,39 @@ class TestResponsesAdapterRequest:
         result = adapter.convert_request(body)
         assert result["messages"][0] == {"role": "user", "content": "hello"}
 
+    def test_convert_tool_ending_appends_nonempty_user_continue(self):
+        """验证 tool 结尾续推占位不再是空串 content。
+
+        修复前追加 {"role": "user", "content": ""}，OpenAI 兼容上游会报
+        user message must have content；修复后应为非空占位，既触发续推
+        又不触发上游非空校验。
+        """
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "ok",
+            }],
+        }
+        result = adapter.convert_request(body)
+        # 首条是 tool，其后应追加一条 user 续推消息
+        assert result["messages"][0]["role"] == "tool"
+        assert result["messages"][1]["role"] == "user"
+        assert result["messages"][1]["content"].strip() != ""
+
+    def test_convert_empty_input_text_falls_back_to_nonempty_placeholder(self):
+        """验证空 input_text 不再产生空串 content 的 user 消息。"""
+        adapter = ResponsesAdapter()
+        body = {
+            "model": "test",
+            "input": [{"type": "input_text", "text": ""}],
+        }
+        result = adapter.convert_request(body)
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][0]["content"].strip() != ""
+
     def test_convert_max_output_tokens_mapping(self):
         adapter = ResponsesAdapter()
         body = {"model": "test", "input": "hi", "max_output_tokens": 4096}
@@ -955,6 +988,24 @@ class TestMessagesAdapterRequest:
         assert result["stream"] is True
         assert result["messages"][0] == {"role": "system", "content": "You are helpful"}
         assert result["messages"][1] == {"role": "user", "content": "Hi"}
+
+    def test_convert_empty_user_content_falls_back_to_nonempty_placeholder(self):
+        """验证 user 消息无任何有效内容块时兜底为带占位的消息。
+
+        修复前兜底为 {"role": "user", "content": ""}，OpenAI 兼容上游会拒绝
+        must have content；修复后应为非空占位。
+        """
+        adapter = MessagesAdapter()
+        body = {
+            "model": "claude",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "unknown_block", "value": 1}],
+            }],
+        }
+        result = adapter.convert_request(body)
+        assert result["messages"][0]["role"] == "user"
+        assert result["messages"][0]["content"].strip() != ""
 
     def test_convert_system_as_content_blocks(self):
         adapter = MessagesAdapter()
