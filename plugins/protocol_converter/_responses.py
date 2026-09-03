@@ -487,9 +487,25 @@ class ResponsesAdapter(BaseAdapter):
         2. {"type": "namespace", "name": "...", "tools": [...]}  → 递归展开子工具，
            子工具名加命名空间前缀（如 mcp__translate__ + translate → mcp__translate__translate）
         3. {"name": "...", "parameters": {...}}  → 包装为 function 格式
+
+        custom/freeform 工具（如 Codex 的 apply_patch）：
+        {"type": "custom", "name": "...", "format": {"type": "grammar", ...}}。
+        这类工具没有 JSON parameters，模型期望直接输出自由文本（patch）。
+        OpenAI Chat 兼容上游只接受 type=function 工具（传 custom 会报
+        "tools.N.type: expected function"），且 function_call 的 arguments
+        恒为 JSON 字符串，模型无法为 function 工具输出裸文本 —— 即 custom 工具
+        无法在 Chat 通道上以原生语义工作。若强行转成空 schema 的 function，
+        模型会把 patch 包成 {"patch": ...} JSON，Codex 本地调度时报
+        "incompatible payload"。
+
+        因此这里直接过滤 custom 工具：不把它们暴露给上游模型，避免模型调用
+        注定失败的 apply_patch，转用 exec_command 等 function 工具完成编辑。
         """
         result = []
         for t in tools:
+            # ── custom/freeform 工具：直接过滤（见 docstring 原因）──
+            if t.get("type") == "custom":
+                continue
             # ── 命名空间工具：递归展开子工具 ──
             if t.get("type") == "namespace" and isinstance(t.get("tools"), list):
                 ns_prefix = t.get("name", "")
@@ -512,6 +528,10 @@ class ResponsesAdapter(BaseAdapter):
                                 expanded["function"]["parameters"]
                             )
                         result.append(expanded)
+                    elif sub_tool.get("type") == "custom":
+                        # 命名空间下嵌套的 custom 子工具同样无法在 Chat 通道表达，
+                        # 过滤掉（见 docstring）
+                        continue
                     else:
                         # 子工具是简洁格式，包装为 function
                         sub_params = sub_tool.get("parameters") or {}
