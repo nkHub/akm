@@ -55,9 +55,14 @@ class ResponsesAdapter(BaseAdapter):
         chat_body["messages"] = messages
 
         # DeepSeek v4-pro 在消息列表以 tool 结尾时不继续生成，
-        # 追加空 user 消息作为模型继续触发的 workaround
+        # 追加一条 user 消息作为模型继续触发的 workaround。
+        # 注意 content 不能用空串：OpenAI 兼容上游会校验 user 消息必须有内容
+        # （报错 user message must have content / messages.N.content），
+        # 故用无实义占位文本触发续推，既不触发上游校验也不会污染对话语义。
         if messages and messages[-1].get("role") == "tool":
-            chat_body["messages"] = messages + [{"role": "user", "content": ""}]
+            chat_body["messages"] = messages + [
+                {"role": "user", "content": "[tool output processed]"}
+            ]
 
         if "stream" in body:
             chat_body["stream"] = body["stream"]
@@ -234,7 +239,9 @@ class ResponsesAdapter(BaseAdapter):
 
             elif item_type == "input_text":
                 _flush_tool_calls()
-                messages.append({"role": "user", "content": item.get("text", "")})
+                # 空文本同样不能以空串落盘，避免上游 must have content 校验拒绝
+                text = item.get("text", "") or "[tool output processed]"
+                messages.append({"role": "user", "content": text})
 
             elif item_type == "input_image":
                 _flush_tool_calls()

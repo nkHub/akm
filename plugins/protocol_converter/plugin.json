@@ -1,6 +1,6 @@
 {
   "name": "protocol_converter",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "has_menu": false,
   "category": "converter",
   "description": "协议格式转换：Responses↔Chat、Messages↔Chat、Chat↔Responses/Messages",

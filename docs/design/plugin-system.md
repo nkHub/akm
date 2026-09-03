@@ -191,6 +191,7 @@ akm/
 - structured output 的 `response_format.json_schema.schema` 与 `text.format.json_schema.schema` 会复用 schema 清洗逻辑，移除 `strict` / `additionalProperties`。
 - 流式工具调用同时发 legacy 事件（`response.output_item.*`、`response.function_call_arguments.*`）和现代事件（`response.output_tool_call.begin/delta/end`、`response.done`），兼容不同 Codex 版本。
 - 现代 continuation 形态（`role="tool"`、`tool_call_id`、typed output content）会转换为 Chat `tool` 消息。
+- 当转换结果以 `tool` 消息结尾（工具循环需继续触发模型）时，追加一条 `role="user"` 消息驱动续推；该消息内容使用非空占位文本而非空串，避免 OpenAI 兼容上游的 `must have content` 校验拒绝请求。其余会生成空 `content` 的边界（空 `input_text`、无任何有效内容块的 user 消息）同样回落为非空占位。
 
 ### 5.3 字段说明
 

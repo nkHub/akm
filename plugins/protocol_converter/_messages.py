@@ -413,7 +413,9 @@ class MessagesAdapter(BaseAdapter):
         elif texts:
             result.append({"role": "user", "content": "\n".join(texts) if len(texts) > 1 else texts[0]})
 
-        return result if result else [{"role": "user", "content": ""}]
+        # 兜底：user 消息没有任何有效内容（无文本/图片/tool_result）时，
+        # 也不能产出空串 content，否则 OpenAI 兼容上游会报 must have content。
+        return result if result else [{"role": "user", "content": "[tool output processed]"}]
 
     def _convert_image_block(self, block: dict) -> dict:
         """Anthropic image content block → OpenAI image_url content block"""
