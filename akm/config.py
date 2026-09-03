@@ -41,6 +41,7 @@ DEFAULTS = {
     "proxy_max_retries_per_key": 2,     # 单个 Key 在 5xx/连接失败时的最大重试次数
     "proxy_retry_backoff_base_sec": 0.5,  # 重试退避基础等待秒数
     "proxy_default_timeout_sec": 120.0,  # 默认转发超时（秒），图片接口另有独立超时
+    "proxy_request_deadline_sec": 120.0,  # 单次上游连接硬性死限（秒）：覆盖 httpx 各阶段超时管不到的 DNS 解析/网络栈黑洞（如休眠唤醒后单次阻塞可达数小时）；0 表示关闭
     "proxy_first_byte_timeout_sec": 12.0,  # 流式首字节超时（秒）：上游 2xx 后迟迟不产出第一个响应体字节时判定“假成功”并切换 Key；0 表示关闭
     # Agent Loop
     "agent_enabled": True,               # Agent 总开关：关闭后不初始化 Agent Loop、不注册 /v1/agent 与 /agent 路由、不注入 Agent 内置工具（默认开启，仅显式设 false 关闭）
@@ -235,6 +236,8 @@ def load_config() -> dict:
     merged["proxy_max_retries_per_key"] = max(0, int(merged.get("proxy_max_retries_per_key", 2) or 2))
     merged["proxy_retry_backoff_base_sec"] = max(0.1, float(merged.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
     merged["proxy_default_timeout_sec"] = max(30.0, float(merged.get("proxy_default_timeout_sec", 120.0) or 120.0))
+    # 单次请求死限：为兜底 httpx 阶段超时管不到的 DNS/网络栈黑洞而设，0 表示关闭
+    merged["proxy_request_deadline_sec"] = max(0.0, _safe_float(merged.get("proxy_request_deadline_sec"), 120.0))
     merged["proxy_first_byte_timeout_sec"] = max(0.0, _safe_float(merged.get("proxy_first_byte_timeout_sec"), 12.0))
     # Agent Loop
     # 总开关：默认开启，仅显式设 false 才关闭（布尔归一化，防止配置为字符串/数字时误判）
@@ -299,6 +302,7 @@ def save_config(data: dict) -> None:
     current["proxy_max_retries_per_key"] = max(0, int(current.get("proxy_max_retries_per_key", 2) or 2))
     current["proxy_retry_backoff_base_sec"] = max(0.1, float(current.get("proxy_retry_backoff_base_sec", 0.5) or 0.5))
     current["proxy_default_timeout_sec"] = max(30.0, float(current.get("proxy_default_timeout_sec", 120.0) or 120.0))
+    current["proxy_request_deadline_sec"] = max(0.0, _safe_float(current.get("proxy_request_deadline_sec"), 120.0))
     current["proxy_first_byte_timeout_sec"] = max(0.0, _safe_float(current.get("proxy_first_byte_timeout_sec"), 12.0))
     # Agent Loop
     current["agent_enabled"] = current.get("agent_enabled") is not False

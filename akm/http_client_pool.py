@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from akm.error_log import write_error_log
+
 
 @dataclass
 class _PoolEntry:
@@ -62,13 +64,16 @@ class HttpClientPoolManager:
         if self.proxy_url:
             # httpx 0.28+ 使用 proxy=；SOCKS 需安装 httpx[socks] / socksio
             kwargs["proxy"] = self.proxy_url
-        else:
-            # 未配置 AKM 出站代理时屏蔽系统代理环境变量（如 Clash 全局代理），
-            # 防止 httpx 默认跟随 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY 走代理转发。
-            kwargs["trust_env"] = False
+        # 统一关闭 trust_env：无论是否配置出站代理，都不读取系统环境变量里的
+        # HTTP(S)_PROXY / ALL_PROXY 代理，也不读取 SSL_CERT_FILE / SSL_CERT_DIR
+        # 指定的证书文件。代理由 AKM 配置显式控制；证书走 httpx 默认信任库。
+        # 否则当环境变量指向不存在的证书文件时，httpx 会在 AsyncClient 构造期
+        # （create_default_context）抛 FileNotFoundError，让本应在网络期的错误
+        # 变成 500（实测：代理节点 + 失效 SSL_CERT_FILE 即可复现）。
+        kwargs["trust_env"] = False
         return httpx.AsyncClient(**kwargs)
 
-    async def get_client(self, *, provider: str, key_alias: str, model: str, api_path: str) -> httpx.AsyncClient:
+    async def get_client(self, *, provider: str, key_alias: str, model: str, api_path: str) -> httpx.AsyncClient | None:
         pool_key = self._pool_key(provider, key_alias, model, api_path)
         now = time.time()
         entry = self._entries.get(pool_key)
@@ -82,7 +87,19 @@ class HttpClientPoolManager:
                 entry.last_used_at = now
                 return entry.client
             await self._cleanup_locked(now)
-            client = self._build_client()
+            try:
+                client = self._build_client()
+            except Exception as exc:
+                # AsyncClient 构造失败（如环境残留失效 SSL_CERT_FILE 指向的文件缺失、
+                # 无效代理 URL 等）不能让异常击穿整个转发链路变成 500：记入 error.log
+                # 后返回 None，由调用方按“该 Key 上游不可用”降级处理（记录尝试并切换
+                # 下一个 Key / 走通配符兜底），与网络层失败同等对待。
+                write_error_log(
+                    source="http_client_pool.get_client",
+                    error=f"创建上游 HTTP client 失败: {exc}",
+                    extra={"provider": provider, "key_alias": key_alias, "model": model, "api_path": api_path},
+                )
+                return None
             self._entries[pool_key] = _PoolEntry(client=client, last_used_at=now)
             return client
 
