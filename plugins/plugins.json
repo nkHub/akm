@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-27T16:16:07+0800",
+  "generated_at": "2026-09-03T15:26:21+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -11,13 +11,13 @@
       "size": 257276
     },
     "agent_chat": {
-      "version": "0.1.12",
+      "version": "0.1.13",
       "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
       "category": "app",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.12.zip",
-      "sha256": "b68212067dfed71dcb87165a275755258ebfd2bfbf4914342c3ffbfa7693efa0",
-      "size": 1241307
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/agent_chat-0.1.13.zip",
+      "sha256": "98de26ef511e003714eba7dd9010f4d4db5fb92c28d7673b5f081d638ab7a85e",
+      "size": 1241872
     },
     "budget_gate": {
       "version": "0.1.0",
@@ -128,13 +128,13 @@
       "size": 3585
     },
     "protocol_converter": {
-      "version": "0.1.0",
+      "version": "0.1.2",
       "description": "协议格式转换：Responses↔Chat、Messages↔Chat、Chat↔Responses/Messages",
       "category": "converter",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/protocol_converter-0.1.0.zip",
-      "sha256": "c76c25fb5a20de821aa12fb012b655731e2e249846ad59678612730b5c05b9e4",
-      "size": 49557
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/protocol_converter-0.1.2.zip",
+      "sha256": "94c57ad5440a5105bff03cab56a45ef3b0d1b38f221b8577612dbb3e59c224ac",
+      "size": 50382
     },
     "provider_health_probe": {
       "version": "0.1.0",
