@@ -130,6 +130,39 @@ def test_clean_log_bodies_clears_client_request_body(setup):
     assert logs[0]["upstream_request_headers"] == ""
 
 
+def test_list_logs_hide_empty_matches_any_body_column(setup):
+    """“仅对话”(hide_empty) 应命中任一请求/响应体列，而非只看转换后列。
+
+    schema 演进后客户端原始请求体/上游响应体分别落在
+    client_request_body / upstream_response_body，request_body / response_body
+    仅在发生协议转换时落库；普通透传（无转换）的对话行只有新列有内容，
+    因此过滤必须多列 OR，否则“仅对话”会漏掉无转换的普通对话。
+    """
+    write_log({
+        "provider": "deepseek", "key_alias": "k1", "model": "deepseek-v4",
+        "request_body": "", "response_body": "",
+        "status_code": 200, "latency_ms": 500, "error": "",
+        "client_request_body": '{"model":"deepseek-v4","messages":[]}',
+        "upstream_response_body": '{"choices":[]}',
+    })
+    write_log({
+        "provider": "openai", "key_alias": "k2", "model": "gpt-4",
+        "request_body": '{"model":"gpt-4"}', "response_body": '{"choices":[]}',
+        "status_code": 200, "latency_ms": 500, "error": "",
+    })
+    write_log({
+        "provider": "openai", "key_alias": "k3", "model": "gpt-4",
+        "request_body": "", "response_body": "",
+        "status_code": 502, "latency_ms": 0, "error": "timeout",
+    })
+
+    shown = list_logs(limit=10, hide_empty=True)
+    assert len(shown) == 2
+    assert {r["key_alias"] for r in shown} == {"k1", "k2"}
+    assert count_logs(hide_empty=True) == 2
+    assert count_logs() == 3
+
+
 def test_clean_log_bodies_noop_when_nothing_to_clean(setup):
     """所有 body 均为空时，clean_log_bodies 不应影响行数。"""
     write_log({

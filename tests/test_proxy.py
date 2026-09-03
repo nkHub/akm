@@ -1698,3 +1698,100 @@ async def test_forward_attempts_excludes_exhausted_local_record(monkeypatch):
     assert not any(a.get("phase") == "exhausted" for a in attempts)
     assert attempts[-1]["key_alias"] == "k2"
     assert attempts[-1]["status_code"] == 429
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_get_client_returns_none_on_build_failure(monkeypatch):
+    """AsyncClient 构造失败时 get_client 应返回 None 而非抛异常击穿转发链路。
+
+    复现：宿主机残留失效 SSL_CERT_FILE/DIR 环境变量时，httpx 在 AsyncClient
+    构造期（create_default_context）抛 FileNotFoundError。池必须吞掉并返回 None，
+    由调用方按网络级失败降级处理（切下一个 Key），避免请求变成 500。
+    """
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("[Errno 2] No such file or directory")
+
+    monkeypatch.setattr("akm.http_client_pool.httpx.AsyncClient", boom)
+    pool = HttpClientPoolManager()
+    client = await pool.get_client(provider="openai", key_alias="k1", model="gpt-4", api_path="chat/completions")
+    assert client is None
+    await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_builds_with_trust_env_disabled(monkeypatch):
+    """无论是否配置代理，构建的 AsyncClient 都应 trust_env=False。
+
+    防止 httpx 读取系统 SSL_CERT_FILE/SSL_CERT_DIR 指向的不存在证书，导致
+    AsyncClient 构造期抛 FileNotFoundError（见 b4 根因）。断言传递到构造器的
+    kwargs 中始终含 trust_env=False。
+    """
+    captured = {}
+
+    class RecordingClient:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("akm.http_client_pool.httpx.AsyncClient", RecordingClient)
+
+    pool = HttpClientPoolManager()
+    await pool.get_client(provider="openai", key_alias="k1", model="gpt-4", api_path="chat/completions")
+    assert captured["kwargs"].get("trust_env") is False
+    assert "proxy" not in captured["kwargs"]
+    await pool.aclose()
+
+    pool_proxy = HttpClientPoolManager(proxy_url="http://127.0.0.1:1080")
+    await pool_proxy.get_client(provider="openai", key_alias="k2", model="gpt-4", api_path="chat/completions")
+    assert captured["kwargs"].get("trust_env") is False
+    assert captured["kwargs"].get("proxy") == "http://127.0.0.1:1080"
+    await pool_proxy.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_route_client_none_is_network_failure_and_switches_key(monkeypatch):
+    """get_client 返回 None（构造失败已内部记录）时，forward_request 应降级切换 Key。
+
+    每个候选 Key 应只产生一条 error_type=connect 的失败尝试，全部失败后返回 502
+    exhausted 兜底，绝不向上冒泡成 500。
+    """
+    picked = []
+
+    async def pick_key_multi(model, exclude_aliases=None):
+        exclude = set(exclude_aliases or [])
+        picked.append({"model": model, "exclude": list(exclude)})
+        if "k1" not in exclude:
+            return {"alias": "k1", "provider": "openai", "api_key": "sk-a", "base_url": "https://api.openai.com"}
+        if "k2" not in exclude:
+            return {"alias": "k2", "provider": "openai", "api_key": "sk-b", "base_url": "https://api.openai.com"}
+        return None
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", pick_key_multi)
+    monkeypatch.setattr("akm.proxy.pick_wildcard_key_async", AsyncMock(return_value=None))
+    monkeypatch.setattr("akm.proxy.load_config", lambda: {
+        "proxy_max_key_tries": 4,
+        "proxy_max_retries_per_key": 0,
+        "proxy_retry_backoff_base_sec": 0.1,
+        "proxy_request_deadline_sec": 120.0,
+    })
+
+    class NonePool:
+        is_route_pool = True
+
+        async def get_client(self, **kwargs):
+            return None
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "x"}]},
+        client=NonePool(),
+    )
+    # 两个候选 Key 都因路由 client 构造失败而放弃后，精确/通配兜底都无可用 Key，
+    # 命中 select_key 本地合成的 502 诊断（非 exhausted 兜底文案）。
+    assert result["status_code"] == 502
+    assert "没有可用的 API key" in result["error"]
+    attempts = result.get("attempts") or []
+    failed_aliases = [a["key_alias"] for a in attempts if a["status_code"] == 0]
+    assert failed_aliases == ["k1", "k2"]
+    assert all(a["error_type"] == "connect" for a in attempts if a["status_code"] == 0)

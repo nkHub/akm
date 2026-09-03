@@ -203,7 +203,9 @@ def list_logs(
     """查询日志，支持分页、供应商筛选、排序、过滤空记录、状态筛选和时间范围
 
     order: "ASC" 按时间正序（旧→新），"DESC" 倒序（新→旧），默认 DESC
-    hide_empty: True 时过滤掉没有 request_body 的记录（纯错误/空记录）
+    hide_empty: True 时仅保留含请求/响应体内容的可回放记录（纯错误/空记录被过滤）
+    body 相关列（request_body / response_body / client_request_body /
+    upstream_response_body）任一非空即保留，见下方过滤条件。
     status: "all" 全部, "success" 仅成功(2xx), "failed" 仅失败(非2xx)
     key_alias: 按 Key 别名筛选
     days: 时间范围（天），0 表示不限制
@@ -218,7 +220,11 @@ def list_logs(
         filters += " AND timestamp >= datetime(date('now', 'localtime', ? || ' days'))"
         params.append(str(day_offset))
     if hide_empty:
-        filters += " AND request_body != ''"
+        # “仅对话”判定：任一请求体/响应体列有内容即视为可回放的对话。
+        # schema 演进后，客户端原始请求体与上游响应体分别落在
+        # client_request_body / upstream_response_body，request_body / response_body
+        # 仅在有协议转换(adapter)时记录转换后格式，因此不能用单列判断。
+        filters += " AND (request_body != '' OR response_body != '' OR client_request_body != '' OR upstream_response_body != '')"
     if hide_est:
         # 默认隐藏 Codex Desktop 一类“est + 元数据特征”请求：
         # 只有同时满足 estimated 标记、极低延迟、极小 completion 才过滤，
@@ -267,7 +273,7 @@ def count_logs(
         filters += " AND timestamp >= datetime(date('now', 'localtime', ? || ' days'))"
         params.append(str(day_offset))
     if hide_empty:
-        filters += " AND request_body != ''"
+        filters += " AND (request_body != '' OR response_body != '' OR client_request_body != '' OR upstream_response_body != '')"
     if hide_est:
         filters += " AND NOT (request_headers LIKE '%usage_estimated_light%' AND latency_ms <= 5 AND completion_tokens <= 200)"
     if status == "success":

@@ -327,9 +327,12 @@ function renderErrorDetail(log) {
     if (upRaw) {
       html += '<div class="mb-3"><div class="text-xs text-gray-500 mb-1 font-medium">上游原始响应（upstream_response_body）</div><pre class="text-xs text-gray-300 break-all whitespace-pre-wrap bg-surface border border-border rounded-lg px-3 py-2 max-h-64 overflow-auto">'+esc(upRaw)+'</pre></div>';
     }
-    var reqRaw = log.request_body || '';
+    // request_body 列存“转换后”上游请求体（有协议转换时）；无转换时（普通透传）
+    // 它为空，客户端原始请求体落在 client_request_body。此处展示实际发出的请求负载，
+    // 因此 request_body 优先、client_request_body 兜底。
+    var reqRaw = log.request_body || log.client_request_body || '';
     if (reqRaw) {
-      html += '<div class="mb-3"><div class="text-xs text-gray-500 mb-1 font-medium">上游请求体（request_body）</div><pre class="text-xs text-gray-300 break-all whitespace-pre-wrap bg-surface border border-border rounded-lg px-3 py-2 max-h-64 overflow-auto">'+esc(reqRaw)+'</pre></div>';
+      html += '<div class="mb-3"><div class="text-xs text-gray-500 mb-1 font-medium">上游请求体</div><pre class="text-xs text-gray-300 break-all whitespace-pre-wrap bg-surface border border-border rounded-lg px-3 py-2 max-h-64 overflow-auto">'+esc(reqRaw)+'</pre></div>';
     }
   }
   if (!log.error && !(attempts && attempts.length)) {
@@ -344,7 +347,7 @@ function renderChatAsync(logRef, force) {
   if (!chatEl) return;
   if (_drawerLog !== logRef) return;
   if (logRef.__chatRendered) return;
-  var reqLen = (logRef.request_body || '').length;
+  var reqLen = Math.max((logRef.client_request_body || logRef.request_body || '').length, (logRef.upstream_response_body || logRef.response_body || '').length);
   // 超大请求体默认不自动渲染对话视图，避免主线程长时间阻塞，导致 tab 切换状态无法及时刷新。
   if (!force && reqLen > _chatLazyThreshold) {
     if (typeof chatEl.setLoading === 'function') {
@@ -372,6 +375,12 @@ function renderChatAsync(logRef, force) {
 function buildChatItems(log) {
   var items = [];
   var headerLines = [];
+  // schema 演进后客户端原始请求体/上游响应体落在 client_request_body /
+  // upstream_response_body；request_body / response_body 仅存“转换后”内容
+  // （无协议转换时不落库）。对话视图要还原的是原始对话，因此优先读新列，
+  // 回退旧列以兼容历史数据。
+  var rawReqBody = log.client_request_body || log.request_body || '';
+  var rawRespBody = log.upstream_response_body || log.response_body || '';
   try {
     var reqHeaders = JSON.parse(log.request_headers || '{}');
     for (var hk in reqHeaders) headerLines.push(hk + ': ' + reqHeaders[hk]);
@@ -384,7 +393,7 @@ function buildChatItems(log) {
     items.push({ role:'meta', html: '<span class="text-gray-500">' + esc(headerLines.join(' | ')) + '</span>' });
   }
   var reqBody = null;
-  try { reqBody = JSON.parse(log.request_body || '{}'); } catch(e) {}
+  try { reqBody = JSON.parse(rawReqBody || '{}'); } catch(e) {}
   var msgs = [];
   if (reqBody) {
     if (reqBody.messages && reqBody.messages.length) {
@@ -410,7 +419,7 @@ function buildChatItems(log) {
   });
 
   var respBody = null;
-  try { respBody = JSON.parse(log.response_body || '{}'); } catch(e) {}
+  try { respBody = JSON.parse(rawRespBody || '{}'); } catch(e) {}
   var reasoning = '';
   var reply = '';
   var toolSummary = '';
@@ -440,10 +449,10 @@ function buildChatItems(log) {
       reply = out.join('\n');
     }
   }
-  if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
+  if (!reply && !reasoning && rawRespBody && rawRespBody.indexOf('data:') >= 0) {
     var sseContent = '';
     var sseReason = '';
-    (log.response_body.split('\n') || []).forEach(function(line){
+    (rawRespBody.split('\n') || []).forEach(function(line){
       line = line.trim();
       if (!line.startsWith('data: ') || line.startsWith('data: [DONE]')) return;
       try {
@@ -581,7 +590,7 @@ function renderLogTable() {
     var lat = log.latency_ms||0;
     var ds = lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms';
     var dc = lat>5000?'text-red-400':lat>2000?'text-yellow-400':'text-gray-400';
-    var hasBody = log.request_body || log.response_body || log.error;
+    var detailCol = '<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>';  // 详情眼睛始终显示：即使 request/response_body 未落库，抽屉内仍可查看客户端请求头等字段。
     var pt = Number(log.prompt_tokens != null ? log.prompt_tokens : 0);
     var ct = Number(log.completion_tokens != null ? log.completion_tokens : 0);
     var cached = Number(log.cached_tokens != null ? log.cached_tokens : 0);
@@ -592,7 +601,7 @@ function renderLogTable() {
     var completionHtml = hasCompletionValue ? '<span class="text-gray-300">'+ct.toLocaleString()+'</span>' : '<span class="text-gray-600">-</span>';
     var costCell = _costStatsEnabled ? '<td class="px-4 py-2.5 text-right text-xs text-rose-300">$'+Number(log.estimated_cost || 0).toFixed(4)+costTipIcon(log)+'</td>' : '';
 
-    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 whitespace-nowrap text-xs">'+esc(log.timestamp||'-')+'</td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs"><span class="inline-block max-w-[80px] truncate align-bottom">'+esc(log.key_alias||'-')+'</span></td><td class="px-4 py-2.5 text-gray-300 text-xs"><span class="inline-block max-w-[80px] truncate align-bottom">'+esc(log.provider||'-')+'</span></td><td class="px-4 py-2.5 text-gray-400 text-xs"><span class="inline-block max-w-[224px] truncate align-bottom">'+esc(log.model||'-')+'</span>'+convWarnBadge+securityWarnBadge+countTokensBadge+adapterFallbackBadge+estimateFallbackBadge+'</td><td class="px-4 py-2.5 text-xs '+sourceClass+'">'+esc(sourceLabel)+'</td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td>'+costCell+'<td class="px-2 py-2.5 text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-4 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-4 py-2.5 text-center">'+(hasBody?'<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>':'<span class="text-gray-600">-</span>')+'</td></tr>';
+    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 whitespace-nowrap text-xs">'+esc(log.timestamp||'-')+'</td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs"><span class="inline-block max-w-[80px] truncate align-bottom">'+esc(log.key_alias||'-')+'</span></td><td class="px-4 py-2.5 text-gray-300 text-xs"><span class="inline-block max-w-[80px] truncate align-bottom">'+esc(log.provider||'-')+'</span></td><td class="px-4 py-2.5 text-gray-400 text-xs"><span class="inline-block max-w-[224px] truncate align-bottom">'+esc(log.model||'-')+'</span>'+convWarnBadge+securityWarnBadge+countTokensBadge+adapterFallbackBadge+estimateFallbackBadge+'</td><td class="px-4 py-2.5 text-xs '+sourceClass+'">'+esc(sourceLabel)+'</td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td>'+costCell+'<td class="px-2 py-2.5 text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-4 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-4 py-2.5 text-center">'+detailCol+'</td></tr>';
     if (log.error) html += '<tr class="border-t border-border bg-red-950/20"><td colspan="'+(_costStatsEnabled ? 11 : 10)+'" class="px-4 py-1.5 text-xs text-red-400">'+esc(log.error)+'</td></tr>';
   });
   html += '</tbody></table>';
@@ -651,7 +660,7 @@ function openDrawer(idx) {
   var dtabResp = document.getElementById('dtab-response');
   if (dtabReq) dtabReq.classList.toggle('hidden', !hasReqTransform);
   if (dtabResp) dtabResp.classList.toggle('hidden', !hasRespTransform);
-  var reqLen = (currentLog.request_body || '').length;
+  var reqLen = Math.max((currentLog.client_request_body || currentLog.request_body || '').length, (currentLog.upstream_response_body || currentLog.response_body || '').length);
   if (reqLen > _chatLazyThreshold) {
     chatEl.innerHTML = '<div class="text-gray-500 text-xs py-4 text-center">数据较大，切换到“对话视图”时再渲染</div>';
   } else {
@@ -785,6 +794,9 @@ function renderChatView(log) {
   /* 将请求/响应解析为聊天气泡 HTML，兼容 chat/completions 和 responses 格式 */
   var html = '';
   var headerLines = [];
+  // 同 buildChatItems：优先读 schema 演进后的客户端请求体/上游响应体列
+  var rawReqBody = log.client_request_body || log.request_body || '';
+  var rawRespBody = log.upstream_response_body || log.response_body || '';
   try {
     var reqHeaders = JSON.parse(log.request_headers || '{}');
     for (var hk in reqHeaders) headerLines.push(hk + ': ' + reqHeaders[hk]);
@@ -797,7 +809,7 @@ function renderChatView(log) {
   var reqBody = null;
 
   // 1. 解析请求体
-  try { reqBody = JSON.parse(log.request_body||'{}'); } catch(e) {}
+  try { reqBody = JSON.parse(rawReqBody||'{}'); } catch(e) {}
   var msgs = [];
 
   if (reqBody) {
@@ -844,7 +856,7 @@ function renderChatView(log) {
 
   // 2. 解析响应体
   var respBody = null;
-  try { respBody = JSON.parse(log.response_body||'{}'); } catch(e) {}
+  try { respBody = JSON.parse(rawRespBody||'{}'); } catch(e) {}
   var reasoning = '';
   var reply = '';
   var toolSummary = '';
@@ -888,10 +900,10 @@ function renderChatView(log) {
   }
 
   // SSE 流式响应解析
-  if (!reply && !reasoning && log.response_body && log.response_body.indexOf('data:') >= 0) {
+  if (!reply && !reasoning && rawRespBody && rawRespBody.indexOf('data:') >= 0) {
     var sseContent = '';
     var sseReasoning = '';
-    var lines = log.response_body.split('\n');
+    var lines = rawRespBody.split('\n');
     lines.forEach(function(line){
       line = line.trim();
       if (!line.startsWith('data: ') || line.startsWith('data: [DONE]')) return;
@@ -929,7 +941,7 @@ function renderChatView(log) {
   // 渲染回复（含纯工具调用轮次摘要）
   if (reply || toolSummary) {
     html += '<div class="flex justify-start"><div class="bg-surface border border-indigo-500/30 rounded-2xl rounded-bl-md px-4 py-2.5 text-sm text-gray-200 max-w-[80%] chat-md">'+renderMarkdownSafe(reply || toolSummary)+'</div></div>';
-  } else if (!reasoning && (respBody || log.response_body || log.error)) {
+  } else if (!reasoning && (respBody || rawRespBody || log.error)) {
     var errCode = log.status_code || 0;
     var errMsg = esc(log.error||'');
     html += '<div class="flex justify-center"><div class="bg-red-950/40 border border-red-800/40 rounded-lg px-3 py-2 text-xs text-red-400">'+(errCode?'HTTP '+errCode+' ':'')+errMsg+'</div></div>';

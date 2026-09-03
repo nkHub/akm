@@ -156,6 +156,14 @@ def _proxy_retry_backoff_base() -> float:
 def _proxy_default_timeout() -> float:
     return max(30.0, float(load_config().get("proxy_default_timeout_sec", 120.0) or 120.0))
 
+# 单次上游连接硬性死限（秒）：httpx 的 read/write/connect/pool 各阶段超时都不覆盖
+# DNS 解析（getaddrinfo 跑在 anyio 线程池，无超时保护）。macOS 休眠唤醒后网络栈
+# 可黑洞式卡住解析数分钟乃至数小时，导致单次尝试阻塞远超 proxy_default_timeout_sec
+# （实测出现过单次 7301s）。0 表示关闭该硬死限（恢复旧行为，不推荐）。
+def _proxy_request_deadline() -> float:
+    val = load_config().get("proxy_request_deadline_sec", 120.0)
+    return max(0.0, float(val if val not in (None, "") else 120.0))
+
 # 流式首字节超时（秒）：上游返回 2xx 后迟迟不产出第一个响应体字节时视为
 # “假成功”（常见于 gs-codex 等上游对流式攒批），终止本 Key 并切换下一个。
 # 0 表示关闭该保护（不预读，恢复旧行为）。
@@ -304,8 +312,33 @@ async def _handle_upstream_error(
     return "switch"
 
 
+async def _send_with_deadline(route_client, req, *, stream: bool, request_timeout: float | None = None):
+    """带 event-loop 级硬性总超时发送上游请求。
+
+    兜底 httpx 各阶段超时（read/write/connect/pool）管不到的卡点——最典型的是
+    连接建立前的 DNS 解析：httpx 把 getaddrinfo 丢进 anyio 线程池执行，没有超时
+    保护，macOS 休眠唤醒/网络栈异常时单次解析可阻塞数十分钟到数小时（实测出现过
+    单次尝试 7301s）。这里用 asyncio 层总死限包住 send 全程，超时抛
+    asyncio.TimeoutError，由调用方按网络级失败处理并重试/切换 Key。
+
+    调用方若显式给了更宽裕的 request_timeout（如图片生成的 300s），死限自动取二者
+    较大值，避免误掐上游合法的慢响应（图片渲染本身可能耗时数十秒）。
+    """
+    deadline = _proxy_request_deadline()
+    if deadline <= 0:
+        return await route_client.send(req, stream=stream)
+    if request_timeout and request_timeout > deadline:
+        deadline = request_timeout
+    async with asyncio.timeout(deadline):
+        return await route_client.send(req, stream=stream)
+
+
 async def _resolve_route_client(client, key: dict, model: str, upstream_api_path: str):
-    """按最终路由获取隔离后的 HTTP client；测试或旧调用方仍可传普通 client。"""
+    """按最终路由获取隔离后的 HTTP client；测试或旧调用方仍可传普通 client。
+
+    池内创建失败时 get_client 会返回 None（已写 error.log），这里原样透传，
+    由调用方（forward_request）按该 Key 上游不可用降级处理。
+    """
     if getattr(client, "is_route_pool", False) is not True:
         return client
     get_client = getattr(client, "get_client", None)
@@ -633,6 +666,39 @@ async def forward_request(
                     headers[name] = value
         route_client = await _resolve_route_client(client, key, model, upstream_api_path)
 
+        if route_client is None:
+            # 路由 client 构造失败（HttpClientPoolManager.get_client 内部已 catch 并
+            # 写入 error.log，如失效 SSL_CERT_FILE 指向缺失文件、无效代理 URL 等）。
+            # 把它当作该 Key 的一次网络级失败：记录尝试并 continue 触发外层 while 重选
+            # Key（tries 已 +1、alias 已入 tried_aliases），避免向上冒泡成 500。
+            error_msg = f"无法创建到上游的 HTTP 客户端: {key['alias']}"
+            await _emit_on_response_meta({
+                "ok": False,
+                "phase": "request",
+                "status_code": 0,
+                "key_alias": key["alias"],
+                "provider": key["provider"],
+                "model": model,
+                "latency_ms": 0,
+                "error": error_msg,
+                "error_type": "connect",
+                "attempt": 0,
+                "api_path": api_path,
+                "upstream_api_path": upstream_api_path,
+            })
+            if log_callback:
+                log_callback({
+                    "provider": key["provider"],
+                    "key_alias": key["alias"],
+                    "model": model,
+                    "request_body": json.dumps(body if isinstance(body, dict) else {}, ensure_ascii=False),
+                    "response_body": "",
+                    "status_code": 0,
+                    "latency_ms": 0,
+                    "error": error_msg,
+                })
+            continue
+
         if adapter and hasattr(adapter, "set_request_context"):
             adapter.set_request_context(provider=key.get("provider", ""))
 
@@ -704,7 +770,41 @@ async def forward_request(
                         headers=headers,
                         timeout=request_timeout or _proxy_default_timeout(),
                     )
-                resp = await route_client.send(req, stream=client_wants_stream)
+                resp = await _send_with_deadline(route_client, req, stream=client_wants_stream, request_timeout=request_timeout)
+            except asyncio.TimeoutError:
+                # 硬性总死限触发：多发生在 DNS 解析/网络栈黑洞（休眠唤醒等），
+                # httpx 各阶段超时都覆盖不到，按网络级超时失败处理。
+                action = await _handle_upstream_error(
+                    plugin_manager, ctx, 0, "timeout", attempt, key
+                )
+                error_msg = (
+                    f"上游请求超过单次硬性死限（{_proxy_request_deadline():.0f}s）: {key['alias']}"
+                )
+                write_error_log(
+                    source="proxy.forward_request",
+                    error=error_msg,
+                    extra={"provider": key.get("provider", ""), "key_alias": key["alias"], "model": model},
+                )
+                await _emit_on_response_meta({
+                    "ok": False,
+                    "phase": "request",
+                    "status_code": 0,
+                    "key_alias": key["alias"],
+                    "provider": key["provider"],
+                    "model": model,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "error": error_msg,
+                    "error_type": "timeout",
+                    "attempt": attempt,
+                    "api_path": api_path,
+                    "upstream_api_path": upstream_api_path,
+                    "action": action,
+                })
+                if action == "retry" and attempt < _proxy_max_retries_per_key():
+                    await asyncio.sleep(_proxy_retry_backoff_base() * (2 ** attempt))
+                    continue
+                last_error = error_msg
+                break
             except (httpx.TimeoutException, httpx.ConnectError) as e:
                 error_type = "timeout" if isinstance(e, httpx.TimeoutException) else "connect"
                 action = await _handle_upstream_error(
@@ -1159,7 +1259,24 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
         return base
 
     _proxy = resolve_http_proxy_url()
-    async with httpx.AsyncClient(**({"proxy": _proxy} if _proxy else {})) as client:
+    # trust_env=False：连通性测试同样不读系统 HTTP(S)_PROXY / SSL_CERT_FILE 环境变量，
+    # 避免宿主机残留失效证书变量时 AsyncClient 构造期直接抛 FileNotFoundError（见
+    # http_client_pool._build_client 注释）。构造异常单独兜底并如实返回错误文案。
+    try:
+        client_ctx = httpx.AsyncClient(
+            trust_env=False,
+            **({"proxy": _proxy} if _proxy else {}),
+        )
+    except Exception as e:
+        write_error_log(
+            source="proxy.connectivity_test",
+            error=f"创建测试 HTTP client 失败: {e}",
+            extra={"key_alias": key.get("alias", "")},
+        )
+        return _result(
+            agent.resolve_url(key, candidate_paths[0]), candidate_paths[0], error="测试环境初始化失败"
+        )
+    async with client_ctx as client:
         last_result = None
         for api_path in candidate_paths:
             attempted_paths.append(api_path)

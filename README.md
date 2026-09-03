@@ -225,6 +225,7 @@ akm-menubar
   "proxy_max_retries_per_key": 2,
   "proxy_retry_backoff_base_sec": 0.5,
   "proxy_default_timeout_sec": 120.0,
+  "proxy_request_deadline_sec": 120.0,
   "rate_limit_cooldown_sec": 60,
   "audit_queue_maxsize": 512,
   "usage_query_check_interval_sec": 60,
@@ -268,6 +269,8 @@ akm-menubar
 
 仅作用于 AKM 访问上游供应商的请求（主转发连接池与连通性测试），不是系统 VPN，不影响本机其它软件；SOCKS 依赖运行环境中的 `socksio`。
 
+AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的 `HTTP(S)_PROXY` / `ALL_PROXY` 代理，也不读取 `SSL_CERT_FILE` / `SSL_CERT_DIR` 指向的证书文件，证书走 httpx 默认信任库。这样既保证出站代理只由上述配置控制，也避免宿主机残留指向不存在文件的失效证书环境变量导致 HTTP client 在构造期直接抛 `FileNotFoundError`（历史缺陷，曾让代理请求意外变成 500）。
+
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `http_proxy_enabled` | `false` | 是否启用出站代理 |
@@ -299,6 +302,7 @@ akm-menubar
 | `proxy_max_retries_per_key` | `2` | 单个 Key 在 5xx 或连接/超时错误时的最大重试次数 |
 | `proxy_retry_backoff_base_sec` | `0.5` | 重试退避基础等待秒数，实际等待 = 基数 × 2^attempt |
 | `proxy_default_timeout_sec` | `120` | 聊天等非图片请求的默认上游超时秒数；图片接口另有独立的 `image_request_timeout_sec` |
+| `proxy_request_deadline_sec` | `120` | 单次上游连接的硬性总死限秒数：以 event-loop 级超时兜底 httpx 各阶段超时（read/write/connect/pool）管不到的卡点（主要是 DNS 解析——httpx 的 `getaddrinfo` 跑在线程池无超时保护，休眠唤醒/网络栈黑洞时单次解析可阻塞数十分钟到数小时，实测出现过单次 7301s）。死限触发后按网络超时失败处理并自动重试/切换 Key；`0` 关闭该保护 |
 | `proxy_first_byte_timeout_sec` | `12` | 流式首字节超时秒数：上游返回 2xx 后迟迟不产出第一个响应体字节时视为“假成功”，关闭该 Key 并自动切换下一个重试；`0` 关闭该保护 |
 
 流式转发时会额外做一层 SSE 兼容性保护：个别中转上游（如 agentrouter.org）会在正常的 `data: {…}` 分片之间插入一行裸 `data: null`（data 值为 JSON null），这不符合 OpenAI SSE 约定（data 应为对象或 `[DONE]`），会直接导致 opencode/@ai-sdk 等在解析时抛 `Type validation failed: Value: null` / `invalid_union expected object received null path=[]`。网关在纯字节透传路径上会按 SSE 事件维度识别并丢弃这类异常事件（含其事件分隔空行），其余内容原样透传，不影响正常流式返回。
@@ -375,7 +379,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | PATCH | `/api/keys/{alias}/usage-config` | 设置用量查询配置（脚本/间隔） |
 | POST | `/api/keys/{alias}/usage-query` | 手动触发一次用量查询 |
 | POST | `/api/keys/usage-query-all` | 批量触发所有已配置自动查询的 Key |
-| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细） |
+| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_empty=true` 仅保留含请求体/响应体内容的可回放记录——判定任一请求体/响应体列有内容；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细） |
 | GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
 | POST | `/api/logs/clean-bodies` | 清空请求体/响应体及客户端、上游请求头快照，保留轻量来源头、元数据与统计列 |
