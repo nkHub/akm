@@ -2703,6 +2703,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             request_timeout=request_timeout,
             original_user_agent=_trace_headers.get("user-agent", ""),
             passthrough_headers=dict(request.headers),
+            client_headers=dict(request.headers),
         )
         request_body_for_log = str(result.get("request_body_for_log", "") or "")
 
@@ -2756,6 +2757,7 @@ async def _handle_ai_request(request: Request, api_path: str):
                     stream_request if isinstance(stream_request, dict) else body,
                     api_path=api_path,
                     client_user_agent=str(getattr(request, "headers", {}).get("user-agent", "") or ""),
+                    client_headers=dict(request.headers) if getattr(request, "headers", None) else None,
                 )
                 # 兼容旧插件把 reverse_map 塞进 request 的路径
                 if isinstance(stream_request, dict):

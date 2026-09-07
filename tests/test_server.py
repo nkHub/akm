@@ -692,7 +692,7 @@ def setup(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_success(monkeypatch):
     """正常请求返回上游响应"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"hello"}}]}',
@@ -719,7 +719,7 @@ async def test_chat_completions_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_completions_no_keys(monkeypatch):
     """没有可用 key 时返回 503"""
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "status_code": 503,
             "body": "",
@@ -747,7 +747,7 @@ async def test_chat_completions_no_keys(monkeypatch):
 async def test_embeddings_forward_success(monkeypatch):
     """/v1/embeddings 应复用通用转发链路返回普通 JSON。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         assert api_path == "embeddings"
         assert original_user_agent == "python-httpx/0.28.1"
         return {
@@ -780,7 +780,7 @@ async def test_embeddings_forward_success(monkeypatch):
 async def test_rerank_forward_success(monkeypatch):
     """/v1/rerank 应参考 embeddings 走普通 JSON 透传链路。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         assert api_path == "rerank"
         assert original_user_agent == "python-httpx/0.28.1"
         return {
@@ -813,7 +813,7 @@ async def test_rerank_forward_success(monkeypatch):
 async def test_image_generations_forward_success(monkeypatch):
     """/v1/images/generations 应复用通用转发链路返回普通 JSON。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         assert api_path == "images/generations"
         assert request_timeout == 300
         assert original_user_agent == "python-httpx/0.28.1"
@@ -846,7 +846,7 @@ async def test_image_generations_forward_success(monkeypatch):
 async def test_image_generations_uses_default_model_when_omitted(monkeypatch):
     """图片生成接口未显式传 model 时，应自动回填 gpt-image-2。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         assert api_path == "images/generations"
         assert body["model"] == "gpt-image-2"
         assert request_timeout == 300
@@ -928,7 +928,7 @@ async def test_image_generations_returns_clear_error_when_default_model_unavaila
 async def test_image_edits_forward_success(monkeypatch):
     """/v1/images/edits 应接收 multipart/form-data 并复用通用转发链路。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         assert api_path == "images/edits"
         assert body["model"] == "gpt-image-2"
         assert body["__akm_multipart__"] is True
@@ -968,7 +968,7 @@ async def test_special_routes_forward_original_user_agent_when_present(monkeypat
 
     captured = []
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         captured.append((api_path, original_user_agent))
         return {
             "status_code": 200,
@@ -1019,7 +1019,7 @@ async def test_special_routes_forward_original_user_agent_when_present(monkeypat
 async def test_image_edits_uses_default_model_when_omitted(monkeypatch):
     """图片编辑接口未显式传 model 时，应在存在可用 key 时自动回填 gpt-image-2。"""
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         assert api_path == "images/edits"
         assert body["model"] == "gpt-image-2"
         assert body["__akm_form_fields__"]["model"] == "gpt-image-2"
@@ -1119,7 +1119,7 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
 
     captured = {}
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"ok"}}]}',
@@ -1168,7 +1168,7 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
     class _FakeAdapter:
         pass
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "stream": True,
             "status_code": 200,
@@ -1216,7 +1216,7 @@ async def test_audit_skips_transformed_bodies_without_conversion(monkeypatch):
         async def aclose(self):
             return None
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"ok"}}]}',
@@ -1287,7 +1287,7 @@ async def test_streaming_response_emits_on_response_only_after_stream_finishes(m
 
     upstream_resp = DummyResp()
 
-    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None):
+    async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "stream": True,
             "status_code": 200,
@@ -1374,6 +1374,7 @@ async def test_stream_restores_placeholder_from_local_request_reverse_map(monkey
         request_timeout=None,
         original_user_agent="",
         passthrough_headers=None,
+        client_headers=None,
     ):
         # 入口 body 故意不含 reverse map；map 只挂在 request_context.bag
         assert "__akm_reverse_map__" not in body

@@ -359,11 +359,14 @@ async def forward_request(
     request_timeout: float | None = None,
     original_user_agent: str = "",
     passthrough_headers: dict | None = None,
+    client_headers: dict | None = None,
 ) -> dict:
     """转发请求到上游 AI API，自动处理故障切换
 
     chat/messages/responses 支持流式；embeddings/rerank/images/generations/images/edits 始终走普通响应。
     request_timeout 允许调用方对单次请求超时做链路级覆盖；图片接口会传入更宽松的超时。
+    client_headers: 客户端原始请求头快照（供 ctx.client_headers 透传给插件）。
+                   仅真实客户端入口传入；内部子请求省略时保持空 dict。
     """
     model = body.get("model", "")
     supports_stream = api_path in {"chat/completions", "messages", "responses"}
@@ -409,6 +412,7 @@ async def forward_request(
         body if isinstance(body, dict) else {},
         api_path=api_path,
         client_user_agent=original_user_agent or "",
+        client_headers=client_headers,
     )
     model = ctx.model or model
 
@@ -652,18 +656,31 @@ async def forward_request(
         #      让依赖身份/会话头的网关（如 Codex 官方）能识别为原生客户端。
         #   3. build_headers 默认头。
         # 二者互斥：插件显式覆写存在时优先，避免原生透传的杂项头与模拟身份冲突。
+        # 写入前按小写删同名：httpx 对仅大小写不同的同名头会同时上送两条
+        # （如 User-Agent 与 user-agent），上游会收到重复/逗号折叠值；先删后写
+        # 保证规则里 to_header 的任意大小写都能原子替换既有同名头。
         if ctx.upstream_headers:
             for name, value in ctx.upstream_headers.items():
-                if str(name).lower() in _PLUGIN_HEADER_SKIP:
+                name_s = str(name)
+                if name_s.lower() in _PLUGIN_HEADER_SKIP:
                     continue
-                if value is not None:
-                    headers[name] = value
+                if value is None:
+                    continue
+                for existing in list(headers):
+                    if existing.lower() == name_s.lower():
+                        del headers[existing]
+                headers[name_s] = value
         elif passthrough_headers and bool(load_config().get("use_native_user_agent", False)):
             for name, value in passthrough_headers.items():
-                if str(name).lower() in _NATIVE_PASSTHROUGH_SKIP:
+                name_s = str(name)
+                if name_s.lower() in _NATIVE_PASSTHROUGH_SKIP:
                     continue
-                if value is not None:
-                    headers[name] = value
+                if value is None:
+                    continue
+                for existing in list(headers):
+                    if existing.lower() == name_s.lower():
+                        del headers[existing]
+                headers[name_s] = value
         route_client = await _resolve_route_client(client, key, model, upstream_api_path)
 
         if route_client is None:
