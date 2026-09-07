@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-03T16:37:01+0800",
+  "generated_at": "2026-09-07T16:21:25+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -73,6 +73,15 @@
       "sha256": "f29d3eac7ec00c8b1da75e0019ec734d0644d7e1baf905a82ca1059ed7a50f04",
       "size": 4578
     },
+    "header_toolkit": {
+      "version": "0.1.0",
+      "description": "客户端请求头变换工具：按规则对原始客户端请求头做重命名/补缺/加前后缀后写入上游请求头",
+      "category": "filter",
+      "has_menu": false,
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/header_toolkit-0.1.0.zip",
+      "sha256": "8224b8ffd9bc2355718eacf2020e128e1249c5678ebafa1f7f8c6efc31ce082f",
+      "size": 7334
+    },
     "key_source_guard": {
       "version": "0.1.0",
       "description": "按客户端 User-Agent 来源绑定指定上游 Key；来源不匹配时跳过该 Key",
@@ -128,13 +137,13 @@
       "size": 3585
     },
     "protocol_converter": {
-      "version": "0.1.3",
+      "version": "0.1.4",
       "description": "协议格式转换：Responses↔Chat、Messages↔Chat、Chat↔Responses/Messages",
       "category": "converter",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/protocol_converter-0.1.3.zip",
-      "sha256": "1cb8c15223146bf5582d84509a95baaaccec91eb77c2a4af79c5dcbe3a58e1e7",
-      "size": 50881
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/protocol_converter-0.1.4.zip",
+      "sha256": "e7cbcedcba287392bdda1de527cf358ee41b98a3433315e8dc318d224ecaa944",
+      "size": 51057
     },
     "provider_health_probe": {
       "version": "0.1.0",
