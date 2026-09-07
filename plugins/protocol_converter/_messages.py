@@ -415,7 +415,8 @@ class MessagesAdapter(BaseAdapter):
 
         # 兜底：user 消息没有任何有效内容（无文本/图片/tool_result）时，
         # 也不能产出空串 content，否则 OpenAI 兼容上游会报 must have content。
-        return result if result else [{"role": "user", "content": "[tool output processed]"}]
+        # 占位用续推指令 "[continue]"，与 _responses.py 的 tool 结尾追加占位保持一致。
+        return result if result else [{"role": "user", "content": "[continue]"}]
 
     def _convert_image_block(self, block: dict) -> dict:
         """Anthropic image content block → OpenAI image_url content block"""

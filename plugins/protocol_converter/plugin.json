@@ -1,15 +1,27 @@
 {
   "name": "protocol_converter",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "has_menu": false,
   "category": "converter",
   "description": "协议格式转换：Responses↔Chat、Messages↔Chat、Chat↔Responses/Messages",
   "required": false,
   "converts": [
-    {"from": "responses", "to": "chat"},
-    {"from": "messages", "to": "chat"},
-    {"from": "chat", "to": "responses"},
-    {"from": "chat", "to": "messages"}
+    {
+      "from": "responses",
+      "to": "chat"
+    },
+    {
+      "from": "messages",
+      "to": "chat"
+    },
+    {
+      "from": "chat",
+      "to": "responses"
+    },
+    {
+      "from": "chat",
+      "to": "messages"
+    }
   ],
   "hooks": {}
 }
