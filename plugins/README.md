@@ -18,6 +18,7 @@
 | `budget_gate` | filter | 关 | 按全局/模型/用户累计估算费用，超预算阻断 |
 | `fallback_router` | handler | 关 | 失败后切到备用模型并重选 Key |
 | `key_source_guard` | matcher | 关 | 按客户端 UA 绑定 Key，来源不匹配则跳过 |
+| `header_toolkit` | filter | 关 | 客户端请求头重命名/补缺/加前后缀后写上游（`from_header` 支持逗号分隔候选源顺序优先） |
 | `response_schema_guard` | post | 关 | 校验调用方声明的 JSON Schema |
 | `webhook_notifier` | post | 关 | 失败/安全/慢请求异步 Webhook + 原生 App 通知 |
 | `frontend_static_server` | app | 关 | 托管前端构建产物与 SPA History 回退 |
@@ -45,6 +46,9 @@
 - **`prompt_profiles`**  
   用 JSON 配置多条 profile：按模型 glob、接口路径、客户端 UA 等过滤，再按顺序叠加 `prompt`。适合多客户端、多模型不同系统提示。
 
+- **`header_toolkit`**：读取客户端原始请求头快照，按 `rules_json` 规则重命名/补缺/加前后缀后写入上游请求头（需内核 `client_headers` 透传）。`from_header` 支持逗号分隔多候选源，按顺序取第一个存在且非空的值；可选 `match_client` 按客户端 UA 子串过滤。  
+  读取客户端原始请求头快照（`ctx.client_headers`，需经真实客户端入口透传，见 `docs/design/plugin-system.md`），按 `rules_json` 规则做重命名 / 复制 / 固定值 / 补缺 / 加前后缀变换后写入上游请求头。典型用途：把官方客户端会话头改名给上游、补网关要求的身份头、给代理 UA 加标记。启用本插件写任何上游头后即接管「原生透传」分支（两者互斥，见插件独立 README）。规则 JSON 非法时只跳过本次变换，不影响请求。
+
 ### 安全与策略
 
 - **`data_filter_guard`**  
@@ -57,6 +61,9 @@
   与 `usage_quota_guard` 不同：后者偏「配额用尽后跳过 Key」，本插件偏「入口 QPS/并发闸门」。
 - **`response_schema_guard`**  
   仅当请求声明了 `json_object` / `json_schema` 时，校验非流式响应是否符合常见 Schema 子集；可告警或返回错误。
+
+- **`key_source_guard`**  
+  按客户端 UA 绑定 Key，来源不匹配则跳过；可配置多条绑定。
 
 ### 稳定性与容量
 
@@ -140,6 +147,7 @@ Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `
 | `cache_proxy` | [plugins/cache_proxy/README.md](cache_proxy/README.md) | 7 |
 | `data_filter_guard` | [plugins/data_filter_guard/README.md](data_filter_guard/README.md) | 14 |
 | `fallback_router` | [plugins/fallback_router/README.md](fallback_router/README.md) | 5 |
+| `header_toolkit` | [plugins/header_toolkit/README.md](header_toolkit/README.md) | 2 |
 | `frontend_static_server` | [plugins/frontend_static_server/README.md](frontend_static_server/README.md) | 4 |
 | `agent_chat` | [plugins/agent_chat/README.md](agent_chat/README.md) | 2 |
 | `key_source_guard` | [plugins/key_source_guard/README.md](key_source_guard/README.md) | 3 |

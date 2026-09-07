@@ -500,6 +500,8 @@ class Plugin(PluginBase):
 | `response` | 结构化响应元信息 dict（见下表） |
 | `api_path` | 客户端入口路径，如 `chat/completions` |
 | `client_user_agent` | 原始 User-Agent，供策略插件匹配客户端 |
+| `client_headers` | 客户端原始请求头快照 dict；**键统一转小写、值统一字符串化**（任意大小写可查）。仅真实客户端入口（server 公开端点）透传；agent 内部子请求 / flow 引擎不携带，保持空 dict |
+| `get_client_header(name, default)` | 大小写不敏感地读取单个客户端原始请求头 |
 | `model` / `key` | 当前模型与已选 Key |
 | `bag` | 插件共享袋；约定键名 `{plugin_name}.{field}` |
 | `action` | 管道控制结构：`block` / `skip_key` |
@@ -523,7 +525,7 @@ class Plugin(PluginBase):
 | `budget_gate.scope_key` / `period_id` / `last_cost_usd` | budget_gate | 预算分桶键、周期与本次估算费用 |
 | `mcp_tool_gateway.injected` / `stripped` | mcp_tool_gateway | 本请求注入或剥离的工具名列表 |
 
-> **禁止**把跨阶段状态塞进 `request` 的 `__akm_*` 字段作为主路径（multipart 等传输字段可仍用 `__akm_*`，由 `forwardable_request()` 统一剥离）。网关元数据（`api_path` / `client_user_agent`）直接挂在 ctx 上，不再写入 body。
+> **禁止**把跨阶段状态塞进 `request` 的 `__akm_*` 字段作为主路径（multipart 等传输字段可仍用 `__akm_*`，由 `forwardable_request()` 统一剥离）。网关元数据（`api_path` / `client_user_agent`）直接挂在 ctx 上，不再写入 body。`client_headers` 同理直接挂 ctx，键在构造时统一小写，插件**不要**依赖客户端头键的原始大小写（HTTP 头名大小写不敏感，Starlette 传入的键大小写可能变化）。
 
 `key_source_guard` 是默认关闭的项目本地 matcher 插件。它在 `on_key_selected` 阶段读取当前 `ctx.key.alias` 和 `ctx.client_user_agent`，以 `bindings_json` 中的 `{ "key_alias": "...", "client_patterns": ["CodexCLI/*"] }` 规则做大小写不敏感的 glob 匹配。仅配置中明确列出的 Key 会受限制；来源不匹配时调用 `ctx.set_skip_key(...)`，由代理继续选择其它 Key。若全部候选都被跳过，代理以 429 结束请求。`User-Agent` 可以被调用方伪造，因此该插件适合作为客户端路由约束，不能替代网络层身份认证或 API 入站鉴权。
 
@@ -962,3 +964,12 @@ class Plugin(PluginBase):
 费用估算已并入核心（不再使用 `cost_tracker` 插件）：设置页可开关 `cost_stats_enabled` 并编辑 `cost_pricing_table`（仅 `model=输入/输入缓存/输出`，每 1M tokens，固定美元）。开启后 `GET /api/stats` 与首页在「总请求」左侧以 `$金额` 显示总费用，每日用量增加费用列；同时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列图标悬停可查看输入未命中缓存（含缓存写入）、输入缓存命中、输出三者的 Token 数与价格明细（各 bucket 的 `cost_detail` 字段，三部分价格之和与总费用一致）；审计页会在状态前显示每条请求的估算费用。计费口径与 token 统计同源。估算值不能替代供应商账单。
 
 项目本地 `budget_gate` 可基于同一单价口径做进程内日预算/滚动预算硬闸门（默认关闭）：`GET /api/budget-gate/status`、`POST /api/budget-gate/reset`；超预算在入口阻断，重启后计数清零。
+
+### 12.9 header_toolkit（客户端请求头变换）
+
+`header_toolkit` 是默认关闭的项目本地 filter 插件，作用在 `on_request`：读取 `ctx.client_headers` 快照，按 `rules_json` 规则（`rename` / `copy` / `set` / `add_if_missing` / `prefix` / `suffix`，可加 `match_client` UA 过滤）变换后写入上游请求头。`from_header` 支持逗号分隔多候选源（如 `x-opencode-session, session-id, x-session-id`），按顺序取第一个存在且非空的值，便于不同客户端统一映射。规则要求源存在与值非空，全部候选源缺失时单条 no-op；同一目标头多规则按声明顺序串行叠加。
+
+- 客户端头**必须来自真实客户端入口**：只有 `server.py` 公开端点（`/v1/*`）才在 `forward_request(...)` 透传 `client_headers=dict(request.headers)`；agent_runtime 内部子请求 / flow 引擎不携带（空 dict），插件自动跳过。内核 `RequestContext` 构造时统一把键转小写、值字符串化，源匹配因此天然大小写不敏感，插件不要依赖头键原始大小写。
+- **与原生透传互斥**：转发层合并顺序为「插件覆写 > 原生透传 > 默认头」。`ctx.upstream_headers` 非空即进入插件分支，原生透传（`use_native_user_agent` 驱动）不再生效；启用本插件后客户端业务头需显式写成规则。
+- 合并写前先按小写删除同名头再写入：httpx 对仅大小写不同的同名头会同时上送两条（如 `User-Agent` 与 `user-agent`），先删后写保证 `User-Agent` / `Content-Type` / `accept` 可被插件小写键原子替换；`authorization`、`host`、`content-length`、`connection`、`accept-encoding`、`transfer-encoding`、`upgrade` 始终受保护不可覆写。
+- 配置项：`enabled`（布尔）+ `rules_json`（text，textarea 编辑）。规则 JSON 非法时跳过本次变换并告警，不影响请求。示例与 action 语义见 `plugins/header_toolkit/README.md`。
