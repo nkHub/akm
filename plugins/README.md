@@ -47,7 +47,7 @@
   用 JSON 配置多条 profile：按模型 glob、接口路径、客户端 UA 等过滤，再按顺序叠加 `prompt`。适合多客户端、多模型不同系统提示。
 
 - **`header_toolkit`**：读取客户端原始请求头快照，按 `rules_json` 规则重命名/补缺/加前后缀后写入上游请求头（需内核 `client_headers` 透传）。`from_header` 支持逗号分隔多候选源，按顺序取第一个存在且非空的值；可选 `match_client` 按客户端 UA 子串过滤。  
-  读取客户端原始请求头快照（`ctx.client_headers`，需经真实客户端入口透传，见 `docs/design/plugin-system.md`），按 `rules_json` 规则做重命名 / 复制 / 固定值 / 补缺 / 加前后缀变换后写入上游请求头。典型用途：把官方客户端会话头改名给上游、补网关要求的身份头、给代理 UA 加标记。启用本插件写任何上游头后即接管「原生透传」分支（两者互斥，见插件独立 README）。规则 JSON 非法时只跳过本次变换，不影响请求。
+  读取客户端原始请求头快照（`ctx.client_headers`，需经真实客户端入口透传，见 `docs/design/plugin-system.md`），按 `rules_json` 规则做重命名 / 复制 / 固定值 / 补缺 / 加前后缀变换后写入上游请求头。典型用途：把官方客户端会话头改名给上游、补网关要求的身份头、给代理 UA 加标记。插件写入与「原生透传」**叠加**：开启 `use_native_user_agent` 时客户端业务头先整体透传保留，插件再增量覆写声明的头（如补 `x-opencode-session`），不会丢弃 codex 等客户端的原生身份头（见插件独立 README）。规则 JSON 非法时只跳过本次变换，不影响请求。
 
 ### 安全与策略
 

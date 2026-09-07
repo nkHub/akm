@@ -1855,6 +1855,80 @@ async def test_forward_injects_plugin_upstream_headers_and_dedups_case(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_forward_native_passthrough_then_plugin_overlay(monkeypatch):
+    """开启 use_native_user_agent 后，原生透传先保留客户端业务头，插件再在其上增量补写覆写头，两者共存。
+
+    回归场景：codex 原生头（x-oai-attestation / session-id / chatgpt-account-id 等）必须保留给
+    上游（opencode go / codex 官方网关），header_toolkit 只补写 x-opencode-session，不再互斥丢包。
+    """
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "x", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
+        "base_url": "https://api.openai.com",
+    }))
+    monkeypatch.setattr("akm.proxy.load_config", lambda: {"use_native_user_agent": True})
+    monkeypatch.setattr("akm.agent.config_get", lambda key, default=None: True if key == "use_native_user_agent" else default)
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                # 模拟 header_toolkit：从客户端 session-id 合成 x-opencode-session 补写
+                session = ctx.client_headers.get("session-id", "")
+                if session:
+                    ctx.set_upstream_header("x-opencode-session", session)
+                return ctx
+            return ctx if ctx is not None else kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-5", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
+        client=mock_client,
+        api_path="responses",
+        original_user_agent="Codex Desktop/9.9.9",
+        plugin_manager=DummyPM(),
+        passthrough_headers={
+            "authorization": "Bearer client-token",
+            "host": "127.0.0.1:8800",
+            "user-agent": "Codex Desktop/9.9.9",
+            "session-id": "019fb7bd-6079-7d03",
+            "thread-id": "019fb7bd-6079-7d03",
+            "x-oai-attestation": "v1.attest",
+            "chatgpt-account-id": "acct-001",
+            "x-codex-turn-metadata": '{"installation_id":"i1"}',
+            "accept": "text/event-stream",
+            "content-length": "63348",
+            "connection": "keep-alive",
+        },
+        client_headers={
+            "session-id": "019fb7bd-6079-7d03",
+            "x-oai-attestation": "v1.attest",
+            "chatgpt-account-id": "acct-001",
+        },
+    )
+
+    assert result["status_code"] == 200
+    sent = send_calls[0]["req"].headers
+    # 原生透传：codex 业务头保留到上游
+    assert sent["session-id"] == "019fb7bd-6079-7d03"
+    assert sent["thread-id"] == "019fb7bd-6079-7d03"
+    assert sent["x-oai-attestation"] == "v1.attest"
+    assert sent["chatgpt-account-id"] == "acct-001"
+    assert sent["x-codex-turn-metadata"] == '{"installation_id":"i1"}'
+    assert sent["accept"] == "text/event-stream"
+    # 插件覆写叠加：header_toolkit 补写的 x-opencode-session 存在，值来自客户端 session-id
+    assert sent["x-opencode-session"] == "019fb7bd-6079-7d03"
+    # 认证/传输基础设施头仍不旁路
+    assert sent["Authorization"] == "Bearer __AKM_CREDENTIAL_VALUE_63353636d4c9__"
+    assert "connection" not in sent
+    assert "content-length" not in sent or sent.get("content-length") != "63348"
+
+
+@pytest.mark.asyncio
 async def test_forward_client_headers_reach_ctx_in_on_request_hook(monkeypatch):
     """内核透传的客户端原始请求头（任意大小写）应完整到达 ctx.client_headers（归一为小写）。"""
 

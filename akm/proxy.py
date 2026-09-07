@@ -648,21 +648,22 @@ async def forward_request(
         upstream_api_path = target_api_path or api_path
         url = agent.resolve_url(key, upstream_api_path)
         headers = agent.build_headers(key, upstream_api_path, original_user_agent=original_user_agent)
-        # 上游请求头合并策略（优先级从高到低）：
-        #   1. 插件覆写：on_request 阶段经 ctx.set_upstream_headers() 写入（如客户端模拟插件），
-        #      允许覆盖 User-Agent / Content-Type 等业务头，但认证头与传输基础设施头仍被排除，
-        #      防止插件破坏密钥注入或 httpx 传输。
+        # 上游请求头合并策略（优先级从低到高，全部按序叠加）：
+        #   1. build_headers 默认头：认证/UA/Content-Type 等基础头。
         #   2. 原生透传（use_native_user_agent=true）：把客户端携带的业务头原样带给上游，
-        #      让依赖身份/会话头的网关（如 Codex 官方）能识别为原生客户端。
-        #   3. build_headers 默认头。
-        # 二者互斥：插件显式覆写存在时优先，避免原生透传的杂项头与模拟身份冲突。
+        #      让依赖身份/会话头的上游（如 Codex 官方、opencode go）能识别为原生客户端。
+        #   3. 插件覆写：on_request 阶段经 ctx.set_upstream_headers() 写入（如 header_toolkit），
+        #      在原生透传之上做增量补写/覆写（如补 x-opencode-session），不再与原生透传互斥：
+        #      开启原生透传时客户端原始业务头仍保留，插件仅补写其声明的头，避免把
+        #      codex 的 x-oai-attestation / chatgpt-account-id 等身份头整包丢弃。
+        #      插件仍不能写认证头与传输基础设施头（_PLUGIN_HEADER_SKIP），防止破坏密钥注入或 httpx 传输。
         # 写入前按小写删同名：httpx 对仅大小写不同的同名头会同时上送两条
         # （如 User-Agent 与 user-agent），上游会收到重复/逗号折叠值；先删后写
         # 保证规则里 to_header 的任意大小写都能原子替换既有同名头。
-        if ctx.upstream_headers:
-            for name, value in ctx.upstream_headers.items():
+        if passthrough_headers and bool(load_config().get("use_native_user_agent", False)):
+            for name, value in passthrough_headers.items():
                 name_s = str(name)
-                if name_s.lower() in _PLUGIN_HEADER_SKIP:
+                if name_s.lower() in _NATIVE_PASSTHROUGH_SKIP:
                     continue
                 if value is None:
                     continue
@@ -670,10 +671,10 @@ async def forward_request(
                     if existing.lower() == name_s.lower():
                         del headers[existing]
                 headers[name_s] = value
-        elif passthrough_headers and bool(load_config().get("use_native_user_agent", False)):
-            for name, value in passthrough_headers.items():
+        if ctx.upstream_headers:
+            for name, value in ctx.upstream_headers.items():
                 name_s = str(name)
-                if name_s.lower() in _NATIVE_PASSTHROUGH_SKIP:
+                if name_s.lower() in _PLUGIN_HEADER_SKIP:
                     continue
                 if value is None:
                     continue
