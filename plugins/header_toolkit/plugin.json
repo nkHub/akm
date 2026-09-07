@@ -1,0 +1,29 @@
+{
+  "name": "header_toolkit",
+  "version": "0.1.0",
+  "has_menu": false,
+  "category": "filter",
+  "description": "客户端请求头变换工具：按规则对原始客户端请求头做重命名/补缺/加前后缀后写入上游请求头",
+  "builtin": false,
+  "default_enabled": false,
+  "priority": 100,
+  "hooks": {
+    "on_request": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用头变换",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不改写任何上游请求头。"
+    },
+    {
+      "key": "rules_json",
+      "label": "变换规则 JSON",
+      "type": "text",
+      "default": "[]",
+      "description": "JSON 数组。每项为 {action, from_header, to_header, value, prefix, suffix, match_client}; from_header 支持逗号分隔多候选源顺序优先匹配; 支持 rename / copy / set / add_if_missing / prefix / suffix，详见插件 README。"
+    }
+  ]
+}

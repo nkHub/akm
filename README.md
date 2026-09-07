@@ -328,6 +328,8 @@ AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的
 
 设为 `true` 后启用**原生透传**：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。
 
+若需要比原生透传更精细的头变换（重命名/补缺/加前后缀，并同时改写 `User-Agent`/`Content-Type`/`accept`），可用 `header_toolkit` 插件：读取客户端原始请求头快照按规则写入上游；`from_header` 支持逗号分隔多候选源顺序优先匹配。两者**互斥**：一旦插件经 `ctx.set_upstream_header(...)` 写入任何上游头即接管该分支，原生透传不再生效（详见 `plugins/header_toolkit/README.md`）。
+
 ## 数据与日志存储
 
 Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。代理转发过程中因上游 401/403/402/429 触发的自动降级（禁用/限流）同样会追加写入 `key.status.changed`（含 before/after 状态与触发原因）到 `~/.akm/keys.log`，并同步写入 `~/.akm/error.log`（source 为 `proxy.auto_disable`），避免“无痕禁用”导致难以追溯。菜单栏应用的休眠恢复链路会单独把关键节点追加写入 `~/.akm/wake_recovery.log`，采用逐行 JSON 的形式记录收到唤醒、去抖跳过、等待、探针结果、重启动作和最终恢复结果；插件管理器会把每个启用插件的 `on_load` 结束状态及汇总追加写入 `~/.akm/plugin.launch.log`，用于判断插件是否真正进入 `runtime_ready`。系统内部错误（全局异常、代理转发失败、用量查询异常、插件加载失败等）会以逐行 JSON 写入 `~/.akm/error.log`，不再将 traceback 或内部报错详情返回给客户端；客户端仅收到通用错误提示，排障时请查看该文件。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
@@ -512,6 +514,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `error_handler` | handler | 默认开启 | 429 限流换 Key、5xx 指数退避重试 |
 | `usage_quota_guard` | matcher | | 可选本地窗口配额：按 Key/模型限制请求次数和已观测 Token，超额时跳过 Key |
 | `key_source_guard` | matcher | | 可选 Key 来源绑定：按客户端 `User-Agent` glob 限制指定上游 Key，未匹配时跳过该 Key |
+| `header_toolkit` | filter | | 可选客户端请求头变换：读取客户端原始请求头，按规则重命名/补缺/加前后缀后写上游（`from_header` 支持逗号分隔候选源顺序优先；需内核 `client_headers` 透传） |
 | `budget_gate` | filter | | 可选预算闸门：按全局/模型/用户累计估算费用，超预算阻断新请求 |
 | `fallback_router` | handler | | 可选模型降级：指定错误后切到备用模型并重新选 Key |
 | `data_filter_guard` | filter/post | | 可选请求脱敏（正则含原代码敏感规则）与响应安全拦截（流式字段级滑动窗口） |
