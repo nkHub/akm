@@ -339,7 +339,8 @@ class PluginBase:
 
         - 直接改写 ctx.request（in-place）或返回新的 request dict；
         - 用 ctx.set_upstream_headers(...) 覆写上游请求头（如客户端模拟插件）；
-          转发层在 build_headers 之后按「插件覆写 > 原生透传 > 默认头」的顺序合并，
+          转发层在 build_headers 之后按「插件覆写 > 原生透传 > 默认头」的顺序叠加合并：
+          开启原生透传时客户端业务头先透传保留，插件再增量覆写声明的头，
           Authorization 等认证头与 host/content-length/connection 等传输基础设施头始终被保护；
         - 跨阶段状态写入 ctx.bag（约定键 ``{plugin}.{field}``）；
         - 需要阻断时调用 ctx.set_block(...)
@@ -509,7 +510,7 @@ class Plugin(PluginBase):
 | `bag_get` / `bag_set` / `bag_pop` | 读写跨阶段状态 |
 | `set_block(...)` | 标记 on_request 阻断，proxy 直接返回客户端 |
 | `set_skip_key(...)` | 标记 on_key_selected 跳过当前 Key |
-| `upstream_headers` | 插件对上游请求头的覆写集合（on_request 写入，转发层在 build_headers 后优先合并） |
+| `upstream_headers` | 插件对上游请求头的覆写集合（on_request 写入，转发层在 build_headers 后按「插件 > 原生透传 > 默认」叠加合并，插件写同名头会覆盖透传/默认值） |
 | `set_upstream_header(name, value)` | 覆写单个上游请求头（None 值忽略） |
 | `set_upstream_headers(dict)` | 批量覆写上游请求头（客户端模拟插件用） |
 | `forwardable_request()` | 生成可发往上游的请求体：剥离所有 `__akm_*` 本地字段 |
@@ -970,6 +971,6 @@ class Plugin(PluginBase):
 `header_toolkit` 是默认关闭的项目本地 filter 插件，作用在 `on_request`：读取 `ctx.client_headers` 快照，按 `rules_json` 规则（`rename` / `copy` / `set` / `add_if_missing` / `prefix` / `suffix`，可加 `match_client` UA 过滤）变换后写入上游请求头。`from_header` 支持逗号分隔多候选源（如 `x-opencode-session, session-id, x-session-id`），按顺序取第一个存在且非空的值，便于不同客户端统一映射。规则要求源存在与值非空，全部候选源缺失时单条 no-op；同一目标头多规则按声明顺序串行叠加。
 
 - 客户端头**必须来自真实客户端入口**：只有 `server.py` 公开端点（`/v1/*`）才在 `forward_request(...)` 透传 `client_headers=dict(request.headers)`；agent_runtime 内部子请求 / flow 引擎不携带（空 dict），插件自动跳过。内核 `RequestContext` 构造时统一把键转小写、值字符串化，源匹配因此天然大小写不敏感，插件不要依赖头键原始大小写。
-- **与原生透传互斥**：转发层合并顺序为「插件覆写 > 原生透传 > 默认头」。`ctx.upstream_headers` 非空即进入插件分支，原生透传（`use_native_user_agent` 驱动）不再生效；启用本插件后客户端业务头需显式写成规则。
+- **与原生透传叠加而非互斥**：转发层合并顺序为「插件覆写 > 原生透传 > 默认头」。开启 `use_native_user_agent` 时客户端业务头先整体透传保留（codex 的 `x-oai-attestation` / `chatgpt-account-id` 等身份头不丢），插件在其上增量补写/覆写声明的头（如把会话 id 合成 `x-opencode-session`）；未开原生透传时插件单独生效。插件覆写优先于透传：同一头插件声明值覆盖透传值。
 - 合并写前先按小写删除同名头再写入：httpx 对仅大小写不同的同名头会同时上送两条（如 `User-Agent` 与 `user-agent`），先删后写保证 `User-Agent` / `Content-Type` / `accept` 可被插件小写键原子替换；`authorization`、`host`、`content-length`、`connection`、`accept-encoding`、`transfer-encoding`、`upgrade` 始终受保护不可覆写。
 - 配置项：`enabled`（布尔）+ `rules_json`（text，textarea 编辑）。规则 JSON 非法时跳过本次变换并告警，不影响请求。示例与 action 语义见 `plugins/header_toolkit/README.md`。

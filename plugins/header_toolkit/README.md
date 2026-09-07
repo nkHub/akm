@@ -112,7 +112,7 @@
 
 ## 与原生透传（`use_native_user_agent`）的关系
 
-转发层合并优先级为 **插件覆写 > 原生透传 > 默认头**：一旦本插件（或其它 on_request 插件）通过 `ctx.set_upstream_header(...)` 写入了任何上游头，整条请求即进入「插件接管」分支，**原生透传不再生效**。因此启用本插件后，需要补发的客户端业务头都应显式写成规则，而不是依赖全局原生透传。`User-Agent` / `Content-Type` / `accept` 允许被本插件改写；`authorization` / `host` / `content-length` / `connection` / `accept-encoding` / `transfer-encoding` / `upgrade` 等认证与传输基础设施头始终受保护、不可覆写（`authorization` 等敏感头的值在审计日志中会被掩码）。
+转发层合并顺序为 **插件覆写 > 原生透传 > 默认头**，全部按序叠加：开启 `use_native_user_agent` 时，客户端业务头先整体透传保留（如 codex 的 `x-oai-attestation` / `chatgpt-account-id` / `x-codex-turn-metadata` 等身份头不丢），本插件再在其上增量补写 / 覆写规则声明的头；未开原生透传时插件单独生效。插件声明值优先于透传值（同头插件覆盖透传）。适用场景：`use_native_user_agent=true` 保留 codex 原生身份头，同时用本插件把客户端会话 id 合成上游强制要求的 `x-opencode-session`——两者可共存，不再互斥丢包。`User-Agent` / `Content-Type` / `accept` 允许被本插件改写；`authorization` / `host` / `content-length` / `connection` / `accept-encoding` / `transfer-encoding` / `upgrade` 等认证与传输基础设施头始终受保护、不可覆写（`authorization` 等敏感头的值在审计日志中会被掩码）。
 
 ## 使用建议
 
