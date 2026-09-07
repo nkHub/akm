@@ -7,8 +7,26 @@ import pytest
 
 from akm.plugins.context import RequestContext
 from plugins.cache_proxy.index import Plugin as CacheProxy
+from plugins.header_toolkit.index import Plugin as HeaderToolkit
 from plugins.key_source_guard.index import Plugin as KeySourceGuard
 from plugins.rate_limit_guard.index import Plugin as RateLimitGuard
+
+
+def _header_toolkit(rules: list[dict]) -> HeaderToolkit:
+    """构造已启用、带指定规则的 header_toolkit 插件实例。"""
+    plugin = HeaderToolkit()
+    plugin.logger = logging.getLogger("test.header_toolkit")
+    plugin.config = {"enabled": True, "rules_json": json.dumps(rules, ensure_ascii=False)}
+    return plugin
+
+
+def _header_ctx(client_headers: dict | None, user_agent: str = "opencode/1.18.26") -> RequestContext:
+    """构造携带客户端原始请求头快照的请求上下文（服务端真实入口形态）。"""
+    return RequestContext(
+        {"model": "deepseek-v4-pro", "messages": []},
+        client_user_agent=user_agent,
+        client_headers=client_headers,
+    )
 
 
 def _ctx(request: dict | None = None, **kwargs) -> RequestContext:
@@ -234,3 +252,231 @@ def test_cost_pricing_table_migrates_legacy_currency_column():
     assert _normalize_cost_pricing_table(
         "gpt-4=1/0.1/2/USD\n*=0.5/0.05/1/CNY"
     ) == "gpt-4=1/0.1/2\n*=0.5/0.05/1"
+
+
+# ── header_toolkit：客户端请求头变换 ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_rename_copies_value_to_upstream_header():
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "x-client-token", "to_header": "x-session-id"},
+    ])
+    ctx = _header_ctx({"X-Client-Token": "tok-1", "user-agent": "opencode/1.18.26"})
+    assert await plugin.on_request(ctx) is None
+    assert ctx.upstream_headers == {"x-session-id": "tok-1"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_source_lookup_is_case_insensitive():
+    plugin = _header_toolkit([
+        {"action": "copy", "from_header": "X-SESSION", "to_header": "x-upstream-session"},
+    ])
+    ctx = _header_ctx({"x-session": "s-abc"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"x-upstream-session": "s-abc"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_missing_source_is_noop():
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "x-not-there", "to_header": "x-session-id"},
+        {"action": "copy", "from_header": "x-also-not", "to_header": "x-other"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_empty_source_value_is_noop():
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "x-empty", "to_header": "x-target"},
+    ])
+    ctx = _header_ctx({"x-empty": ""})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_set_and_add_if_missing():
+    plugin = _header_toolkit([
+        {"action": "set", "to_header": "x-gateway-token", "value": "gt-9f2a"},
+        {"action": "add_if_missing", "to_header": "x-gateway-token", "value": "should-not-write"},
+        {"action": "add_if_missing", "to_header": "x-lang", "value": "ts"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26", "x-stainless-lang": "ts"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {
+        "x-gateway-token": "gt-9f2a",
+        "x-lang": "ts",
+    }
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_add_if_missing_respects_target_case():
+    """add_if_missing 判断已写目标时应大小写不敏感。"""
+    plugin = _header_toolkit([
+        {"action": "set", "to_header": "X-Gateway-Token", "value": "first"},
+        {"action": "add_if_missing", "to_header": "x-gateway-token", "value": "second"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26", "accept": "*/*"})
+    await plugin.on_request(ctx)
+    # 第二规则命中已写目标，不再写重复键
+    assert ctx.upstream_headers == {"X-Gateway-Token": "first"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_prefix_suffix_chain_on_same_target():
+    plugin = _header_toolkit([
+        {"action": "set", "to_header": "x-tag", "value": "mid"},
+        {"action": "prefix", "from_header": "user-agent", "to_header": "x-tag", "prefix": "[p]"},
+        {"action": "suffix", "from_header": "user-agent", "to_header": "x-tag", "suffix": "[s]"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"x-tag": "[p]mid[s]"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_prefix_in_place_when_to_header_omitted():
+    plugin = _header_toolkit([
+        {"action": "prefix", "from_header": "user-agent", "prefix": "akm|"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"user-agent": "akm|opencode/1.18.26"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_match_client_filters_rule():
+    plugin = _header_toolkit([
+        {"action": "set", "to_header": "x-only-opencode", "value": "1", "match_client": "opencode"},
+        {"action": "set", "to_header": "x-only-other", "value": "1", "match_client": "codex"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"}, user_agent="opencode/1.18.26")
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"x-only-opencode": "1"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_no_client_headers_noop():
+    """内部子请求无客户端头快照，插件必须安静跳过，不写任何上游头。"""
+    plugin = _header_toolkit([
+        {"action": "set", "to_header": "x-anything", "value": "1"},
+    ])
+    ctx = RequestContext({"model": "m", "messages": []})  # 无 client_headers
+    assert await plugin.on_request(ctx) is None
+    assert ctx.upstream_headers == {}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_disabled_does_nothing():
+    plugin = HeaderToolkit()
+    plugin.logger = logging.getLogger("test.header_toolkit")
+    plugin.config = {"enabled": False, "rules_json": json.dumps([
+        {"action": "set", "to_header": "x-anything", "value": "1"},
+    ])}
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_invalid_json_rules_skips_safely():
+    plugin = HeaderToolkit()
+    plugin.logger = logging.getLogger("test.header_toolkit")
+    plugin.config = {"enabled": True, "rules_json": "{not json"}
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"})
+    assert await plugin.on_request(ctx) is None
+    assert ctx.upstream_headers == {}
+
+
+# ── header_toolkit：from_header 逗号分隔候选源 ────────────────
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_takes_first_present():
+    """from_header 逗号分隔时，按顺序取第一个存在且非空的值。"""
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "x-opencode-session, session-id, x-session-id", "to_header": "x-session-id"},
+    ])
+    ctx = _header_ctx({"session-id": "sess-2", "x-opencode-session": "sess-1"})
+    await plugin.on_request(ctx)
+    # 第一个候选 x-opencode-session 存在，取它；忽略顺序上的后位
+    assert ctx.upstream_headers == {"x-session-id": "sess-1"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_skips_missing_and_empty():
+    """候选源缺失或值为空时跳过，落到下一个存在的候选。"""
+    plugin = _header_toolkit([
+        {"action": "copy", "from_header": "x-not-there, x-session-id, x-last", "to_header": "x-up"},
+    ])
+    ctx = _header_ctx({"x-session-id": "s-9"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"x-up": "s-9"}
+
+    # 空值候选也要跳过，落到 x-last
+    plugin2 = _header_toolkit([
+        {"action": "copy", "from_header": "x-empty, x-last", "to_header": "x-up2"},
+    ])
+    ctx2 = _header_ctx({"x-empty": "", "x-last": "fallback"})
+    await plugin2.on_request(ctx2)
+    assert ctx2.upstream_headers == {"x-up2": "fallback"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_all_missing_is_noop():
+    """全部候选源缺失时整体 no-op。"""
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "a, b, c", "to_header": "x-target"},
+    ])
+    ctx = _header_ctx({"user-agent": "opencode/1.18.26"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_case_insensitive():
+    """候选源名字大小写不敏感。"""
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "X-Opencode-Session, Session-Id", "to_header": "x-target"},
+    ])
+    ctx = _header_ctx({"x-opencode-session": "sess-X"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"x-target": "sess-X"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_prefix_suffix_fallback_target():
+    """prefix/suffix 缺省 to_header 时以第一个候选源名为原位加工目标。"""
+    plugin = _header_toolkit([
+        {"action": "prefix", "from_header": "x-opencode-session, x-session-id", "prefix": "akm|"},
+    ])
+    ctx = _header_ctx({"x-opencode-session": "s-1"})
+    await plugin.on_request(ctx)
+    # 目标 = 第一个候选源名 x-opencode-session，原位加前缀
+    assert ctx.upstream_headers == {"x-opencode-session": "akm|s-1"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_copy_with_explicit_target():
+    """copy 用候选源时 to_header 正常生效。"""
+    plugin = _header_toolkit([
+        {"action": "copy", "from_header": "x-session-id, x-opencode-session", "to_header": "x-gw-session"},
+    ])
+    ctx = _header_ctx({"x-opencode-session": "os-1"})
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {"x-gw-session": "os-1"}
+
+
+@pytest.mark.asyncio
+async def test_header_toolkit_candidate_source_noop_when_no_client_headers():
+    """内部子请求无客户端头快照时，候选源规则也应安全 no-op。"""
+    plugin = _header_toolkit([
+        {"action": "rename", "from_header": "x-a, x-b", "to_header": "x-target"},
+    ])
+    ctx = RequestContext({"model": "m", "messages": []})  # 无 client_headers
+    await plugin.on_request(ctx)
+    assert ctx.upstream_headers == {}

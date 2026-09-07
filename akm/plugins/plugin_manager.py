@@ -586,6 +586,11 @@ class PluginManager:
                     or request.get("__akm_client_user_agent__", "")
                     or ""
                 ),
+                client_headers=(
+                    kwargs.get("client_headers")
+                    or request.get("__akm_client_headers__")
+                    or None
+                ),
             )
         if "response" in kwargs and isinstance(kwargs.get("response"), dict):
             ctx.response = kwargs["response"]

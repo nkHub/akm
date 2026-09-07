@@ -1795,3 +1795,103 @@ async def test_forward_route_client_none_is_network_failure_and_switches_key(mon
     failed_aliases = [a["key_alias"] for a in attempts if a["status_code"] == 0]
     assert failed_aliases == ["k1", "k2"]
     assert all(a["error_type"] == "connect" for a in attempts if a["status_code"] == 0)
+
+
+# ── header_toolkit：客户端头透传 + 内核合并 ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_forward_injects_plugin_upstream_headers_and_dedups_case(monkeypatch):
+    """插件写入的上游请求头应真实上送；仅大小写不同的同名头应被原子替换。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "x", "provider": "openai", "api_key": "sk-a",
+        "base_url": "https://api.openai.com",
+    }))
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                # 模拟 header_toolkit：把客户端会话头改名，并覆写 UA 为上游身份
+                session = ctx.client_headers.get("x-opencode-session", "")
+                if session:
+                    ctx.set_upstream_header("x-session-id", session)
+                ctx.set_upstream_header("user-agent", "opencode-upstream/2.0")
+                ctx.set_upstream_header("content-type", "application/json")
+                return ctx
+            return ctx if ctx is not None else kwargs
+
+    mock_client = AsyncMock()
+    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')])
+
+    result = await forward_request(
+        body={"model": "deepseek-v4-pro", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
+        client=mock_client,
+        api_path="chat/completions",
+        plugin_manager=DummyPM(),
+        client_headers={
+            "X-OpenCode-Session": "sess-001",
+            "user-agent": "opencode/1.18.26 ai-sdk",
+            "accept": "*/*",
+        },
+    )
+
+    assert result["status_code"] == 200
+    sent = send_calls[0]["req"].headers
+    # 插件规则写入的头真实上送
+    assert sent["x-session-id"] == "sess-001"
+    # UA 仅有一条（delete-then-set 去重），插件小写 user-agent 覆盖内置大写 User-Agent
+    assert sent["user-agent"] == "opencode-upstream/2.0"
+    ua_raw = [(k, v) for k, v in send_calls[0]["req"].headers.raw if k.lower() == b"user-agent"]
+    assert len(ua_raw) == 1 and ua_raw[0][1] == b"opencode-upstream/2.0"
+    # content-type 同理：插件小写键覆盖 build_headers 的首字母大写键
+    assert sent["content-type"] == "application/json"
+    # 客户端原始头未通过（插件分支接管后不原生透传杂项业务头）
+    assert "x-opencode-session" not in sent
+    assert sent.get("accept") != "*/*"
+
+
+@pytest.mark.asyncio
+async def test_forward_client_headers_reach_ctx_in_on_request_hook(monkeypatch):
+    """内核透传的客户端原始请求头（任意大小写）应完整到达 ctx.client_headers（归一为小写）。"""
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "x", "provider": "openai", "api_key": "sk-a",
+        "base_url": "https://api.openai.com",
+    }))
+
+    captured = {}
+
+    class DummyPM:
+        def get_converter(self, from_fmt, to_fmt):
+            return None
+
+        async def run_hook(self, hook, ctx=None, **kwargs):
+            if hook == "on_request" and ctx is not None:
+                captured["client_headers"] = dict(ctx.client_headers)
+                return ctx
+            return ctx if ctx is not None else kwargs
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"message":{"content":"ok"}}]}')])
+
+    await forward_request(
+        body={"model": "gpt-4", "stream": False, "messages": []},
+        client=mock_client,
+        api_path="chat/completions",
+        plugin_manager=DummyPM(),
+        client_headers={
+            "X-OpenCode-Session": "sess-001",
+            "User-Agent": "opencode/1.18.26",
+            "X-Stainless-Lang": "typescript",
+        },
+    )
+
+    assert captured["client_headers"] == {
+        "x-opencode-session": "sess-001",
+        "user-agent": "opencode/1.18.26",
+        "x-stainless-lang": "typescript",
+    }

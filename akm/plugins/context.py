@@ -21,6 +21,7 @@ class RequestContext:
         *,
         api_path: str = "",
         client_user_agent: str = "",
+        client_headers: dict | None = None,
     ):
         """创建请求上下文。
 
@@ -29,13 +30,23 @@ class RequestContext:
                      由转发层统一剥离 ``__akm_*`` 前缀键后再发往上游。
             api_path: 客户端入口路径，如 ``chat/completions``。
             client_user_agent: 原始 User-Agent，供策略插件匹配客户端。
+            client_headers: 客户端原始请求头快照。**键统一转小写**存储（HTTP
+                头名大小写不敏感，Starlette 传入后大小写可能变化），值统一转为
+                字符串。仅来自真实客户端入口（server.py 透传）；内核内部子请求
+                （agent_runtime / flow）无客户端头，保持为空 dict，插件按空跳过。
         """
         self.request: dict = request if isinstance(request, dict) else {}
         self.response: dict | None = None
         self.api_path: str = str(api_path or "")
         self.client_user_agent: str = str(client_user_agent or "")
+        self.client_headers: dict[str, str] = self._normalize_headers(client_headers)
         self.model: str = str(self.request.get("model", "") or "")
         self.key: dict | None = None
+        # 客户端头不存在时回退到 request 上的兼容字段（旧调用方 / 旧测试）
+        if not self.client_headers and isinstance(request, dict):
+            legacy = request.get("__akm_client_headers__")
+            if isinstance(legacy, dict):
+                self.client_headers = self._normalize_headers(legacy)
         # 插件共享袋：约定键名 ``{plugin_name}.{field}``
         self.bag: dict[str, Any] = {}
         # 管道控制结构：block（阻断请求）/ skip_key（跳过当前 Key）
@@ -43,6 +54,23 @@ class RequestContext:
         # 插件对上游请求头的覆写集合：由 on_request 阶段的插件写入，
         # 转发层在 build_headers 之后按此合并进实际发出的请求头（模拟客户端身份等）。
         self.upstream_headers: dict = {}
+
+    @staticmethod
+    def _normalize_headers(headers: dict | None) -> dict[str, str]:
+        """头快照归一：键转小写、值转字符串，便于插件做大小写不敏感查找。
+
+        重复的仅大小写不同的键（理论非法但可能出现）后者覆盖；键非字符串时
+        转 str 再小写；值统一转为字符串（None 转为空串，便于插件统一按
+        「键存在但值为空」处理，避免类型分支）。
+        """
+        normalized: dict[str, str] = {}
+        for key, value in (headers or {}).items():
+            name = str(key).lower()
+            if value is None:
+                normalized[name] = ""
+            else:
+                normalized[name] = str(value)
+        return normalized
 
     # ── 请求体 ──────────────────────────────────────────────
 
@@ -113,6 +141,17 @@ class RequestContext:
     def clear_action(self) -> None:
         """清除管道控制标记。"""
         self.action = None
+
+    # ── 客户端原始请求头 ──────────────────────────────────
+
+    def get_client_header(self, name: str, default: str = "") -> str:
+        """大小写不敏感地读取单个客户端原始请求头（值已字符串化）。
+
+        Args:
+            name: 头名，任意大小写（内部统一转小写比对）。
+            default: 未找到时返回的默认值。
+        """
+        return self.client_headers.get(str(name).lower(), default)
 
     # ── 上游请求头覆写 ─────────────────────────────────────
 
