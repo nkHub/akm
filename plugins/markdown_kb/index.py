@@ -3098,6 +3098,10 @@ class Plugin(PluginBase):
             # 与 auto_inject 正交：仅当请求带工作区信号时在首轮注入，
             # 之后各轮仅在记忆版本更新时做轻量刷新注入；不影响 RAG 检索。
             "inject_project_context": bool(cfg.get("inject_project_context", False)),
+            # 每轮都注入项目全量 context/memory（默认关闭，配合
+            # inject_project_context 使用）。关闭时保持“首轮全量 + 之后版本刷新”
+            # 策略；开启后每个带工作区信号的请求都注入全量块。
+            "inject_project_context_each_turn": bool(cfg.get("inject_project_context_each_turn", False)),
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "top_k": top_k,
@@ -5115,10 +5119,15 @@ class Plugin(PluginBase):
         ).strip()
         return self._normalize_workspace_root(raw)
 
-    def _project_injection_block(self, protocol: str, request: dict, project_context: dict) -> str | None:
+    def _project_injection_block(
+        self, protocol: str, request: dict, project_context: dict, *, each_turn: bool = False
+    ) -> str | None:
         """按“首轮全量 / 之后仅版本刷新”策略生成项目注入块。
 
         返回 None 表示本轮无需注入（未命中任何项目信号 / 非首轮且记忆版本未变）。
+
+        each_turn 为 True（配置 inject_project_context_each_turn）时，每个带工作区
+        信号的请求都注入全量 context.md + memory.md，不再走版本刷新判定。
         """
         workspace = self._project_workspace(project_context)
         if not workspace:
@@ -5153,7 +5162,7 @@ class Plugin(PluginBase):
         revisions = self._project_inject_revisions
         seen = revisions.get(project_id, -1)
 
-        if self._first_request_turn(protocol, request):
+        if each_turn or self._first_request_turn(protocol, request):
             text = self._build_project_full_block(snap, project_context)
         elif seen >= 0 and revision > seen:
             text = self._build_project_refresh_block(snap)
@@ -5217,6 +5226,7 @@ class Plugin(PluginBase):
            任何一步失败/未命中都直接透传；
         4. 项目路径：仅当请求带可识别工作区信号时生效——会话首轮注入全量
            （context.md + memory.md），后续轮次仅在记忆版本更新时做轻量刷新；
+           开启 inject_project_context_each_turn 时改为每个请求都注入全量；
            两者同时命中时合并为一段注入，不重复注入；
         5. 两类都关闭、请求无工作区信号、或纯聊天无命中时，一律透传。
         """
@@ -5238,10 +5248,13 @@ class Plugin(PluginBase):
         project_context = None
         project_block = None
         if project_enabled:
+            each_turn = bool(settings.get("inject_project_context_each_turn"))
             try:
                 project_context = self._extract_project_context(request)
                 if project_context:
-                    project_block = self._project_injection_block(protocol, request, project_context)
+                    project_block = self._project_injection_block(
+                        protocol, request, project_context, each_turn=each_turn
+                    )
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("[markdown_kb] 项目上下文注入失败: %s", exc)
                 project_block = None

@@ -44,7 +44,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 - **索引**：内置标题树切片器，`sqlite-vec` KNN 粗召回（自动回退 Python），支持全量重建、单文件重建、增量同步
 - **检索与问答**：通过本地 AKM 代理的 `/v1/embeddings`、可选 `/v1/rerank`、`/v1/chat/completions` 完成 `query / ask` 闭环
 - **自动注入**：默认关闭（插件配置 `auto_inject`），开启后自动拦截 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 三类请求，命中知识库时注入参考资料
-- **项目级 context/memory 自动维护**：默认关闭（插件配置 `inject_project_context`），为每个绑定过工作区的项目在插件数据目录下自动维护 `context.md` / `memory.md`，开启后在带工作区信号的首轮请求里注入项目上下文 + 最近修改记忆，后续轮次仅在记忆版本更新时轻量刷新；两个注入开关正交互不影响。context.md 由本地模型“首次生成 / 最小化增量更新”维护（只依据一次性读取的真实仓库材料，≤150 行、固定章节、1 天冷却），memory.md 由 KB 事件确定性渲染
+- **项目级 context/memory 自动维护**：默认关闭（插件配置 `inject_project_context`），为每个绑定过工作区的项目在插件数据目录下自动维护 `context.md` / `memory.md`，开启后在带工作区信号的首轮请求里注入项目上下文 + 最近修改记忆，后续轮次仅在记忆版本更新时轻量刷新；可再开启 `inject_project_context_each_turn` 让每个请求都注入全量。两个注入开关正交互不影响。context.md 由本地模型“首次生成 / 最小化增量更新”维护（只依据一次性读取的真实仓库材料，≤150 行、固定章节、1 天冷却），memory.md 由 KB 事件确定性渲染
 - **Hook 学习入库**：通过 Codex/Claude 的 `UserPromptSubmit / Stop / PreCompact` hooks 将会话片段沉淀为 `.learn.md` 知识，自动 workspace 绑定、幂等判重并重建索引；重建文件时自动对新 chunk 做向量相似度比对，相似 chunk 仍保留新文档内容，并通过 LLM 判断是否有补充信息，有补充时合并存量文本并重新 embedding，同时 boost 存量记忆
 - **会话扫描器**：`POST /api/markdown-kb/scan-sessions` 扫描 `~/.codex/sessions/` 和 `~/.claude/projects/*/` 下的 JSONL 会话文件，自动归纳知识并更新记忆
 - **记忆系统**：chunk 级 `hit_count` / `memory_value`，艾宾浩斯衰减曲线驱动，多源 boost（learn_new 0.30 / hook_confirm 0.20 / scan_cross 0.20 / retrieval_hit 0.10），高记忆值 chunk（>0.5）可豁免 score_threshold 独立放行；定时自动整理过期记忆并清理无价值 `.learn.md` 文档
@@ -64,6 +64,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 | `chat_model` | select | `""` | 执行 ask 问答时调用 AKM `/v1/chat/completions` 使用的模型名。 |
 | `auto_inject` | boolean | `False` | 默认关闭。开启后，对 chat / messages / responses 三类文本请求自动抽取最后一个用户问题检索知识库并注入参考资料；关闭时可使用管理台 query / ask 或 `/api/markdown-kb/query`、ask 手动使用。 |
 | `inject_project_context` | boolean | `False` | 默认关闭。开启后，对带工作区信号（`workspace_root` / `working_directory` / `project_id`）的三类文本请求：会话首轮注入该工作区的 `context.md` + `memory.md`，后续轮次仅在记忆版本更新时轻量刷新。与 `auto_inject` 正交：不改变既有 RAG 自动注入行为。 |
+| `inject_project_context_each_turn` | boolean | `False` | 默认关闭，保持默认“首轮全量 + 之后版本刷新”策略。开启后（需同时开启 `inject_project_context`）每个带工作区信号的请求都注入全量 `context.md` + `memory.md`，不再依赖首轮/版本刷新判定；代价是每轮占用更多上下文 token。 |
 | `chunk_size` | number | `800` | 单个 chunk 的目标最大字符数。 |
 | `chunk_overlap` | number | `120` | 相邻 chunk 之间保留的重叠字符数。 |
 | `top_k` | number | `4` | query / ask 在未显式传 top_k 时默认返回的片段数量。启用 rerank 后也仍然生效，但只控制最终保留条数。 |
@@ -98,7 +99,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 - **触发源只收“知识库内容变化”事件**：文档新增/覆盖（upload / write / sync / rebuild-file / learn / scan 落盘均记录）、删除；不监听项目目录 fs，不依赖 git
 - **两级维护**：文件级事件零成本同步追加（`meta.json` 事件表 + 重渲染 `memory.md`）；语义摘要（digest）攒批 + 冷却后调用一次本地 chat 把事件折叠成“近期要点”（事件达标 `≥3` 立即触发，否则距上次 digest 超 5 分钟触发；模型为空 / 调用失败自动降级为纯文本摘要，不 crash）
 - **context.md 语义生成**：首次生成时，模型只依据触发时刻一次性读取的真实材料（两级目录树 + AGENTS/README/package.json 等固定文件原文 + 知识库关联文档）重组成 ≤150 行、7 个固定章节的项目说明书，禁止临期词与脑补目录；之后按 1 天冷却做“最小化增量更新”（只改过时条目，输出与现状一致不落盘）；无模型 / 调用失败保留现状并标记 degraded；人工自建（无自动维护标记）的 context 绝不覆盖，context 变化不影响 memory 的 revision
-- **注入策略**：开启 `inject_project_context` 后，命中工作区的会话**首轮**注入全量（项目上下文 + 最近修改记忆），后续轮次仅当记忆 `revision` 更新时注入轻量“记忆更新”段；项目注入与 RAG 注入同时命中时合并为一段，只注入一次
+- **注入策略**：开启 `inject_project_context` 后，命中工作区的会话**首轮**注入全量（项目上下文 + 最近修改记忆），后续轮次仅当记忆 `revision` 更新时注入轻量“记忆更新”段；若同时开启 `inject_project_context_each_turn`，则每个带工作区信号的请求都注入全量块（不依赖首轮/版本判定）；项目注入与 RAG 注入同时命中时合并为一段，只注入一次
 - **信号抽取严格化（v0.1.4）**：工作区信号只从会话开头 3 条消息内识别——opencode 取完整 `<env>...</env>` 块里成行的 `Working directory:`，Claude 取 system / 早期消息文本里的 `Primary working directory`；对话正文（含被客户端整段重发的历史消息）中出现的同类字样不再触发。抽取值先做路径清洗（只收绝对路径，拒绝夹带 `<`、`>`、反引号、全角括号、省略号、引号等对话残片的取值），清洗为空则不命中；命中后若目录不存在或已删除，跳过自动建项目与后台刷新（不产生垃圾项目、不烧 token）；后台自动刷新任务在 KB 材料为空时直接跳过，避免生成“全缺失”占位文档
 - **降级与容错**：项目目录写满 500 个、模型不可用、manifest 读取失败等均不影响主 RAG 链路
 
