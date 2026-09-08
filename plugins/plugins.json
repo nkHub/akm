@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-07T16:21:25+0800",
+  "generated_at": "2026-09-08T11:35:04+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -79,8 +79,8 @@
       "category": "filter",
       "has_menu": false,
       "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/header_toolkit-0.1.0.zip",
-      "sha256": "8224b8ffd9bc2355718eacf2020e128e1249c5678ebafa1f7f8c6efc31ce082f",
-      "size": 7334
+      "sha256": "5b62b26de929a18b47cb956664a9c82f47c4dd0c68554d73888412f05672f5e2",
+      "size": 7438
     },
     "key_source_guard": {
       "version": "0.1.0",
@@ -92,13 +92,13 @@
       "size": 2878
     },
     "markdown_kb": {
-      "version": "0.1.2",
-      "description": "Markdown 本地知识库最小骨架，支持状态查看与 .md 文件上传保存",
+      "version": "0.1.3",
+      "description": "Markdown 本地知识库，支持状态查看、.md 文件上传保存与项目级 context/memory 自动维护",
       "category": "app",
       "has_menu": true,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.2.zip",
-      "sha256": "47d6b6aa0d63c287abfb32fc79c249df09a0fbc3aaccad86ffe342f450a3a411",
-      "size": 1122589
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.3.zip",
+      "sha256": "1cba49c9278f6819b663d998a8a552a51cd65a86341c9cb4a218f26ea90341b1",
+      "size": 1144118
     },
     "mcp_tool_gateway": {
       "version": "0.1.0",
