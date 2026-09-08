@@ -57,6 +57,23 @@ session_scanner = _importlib_util.module_from_spec(_session_scanner_spec)
 _sys.modules["markdown_kb_session_scanner"] = session_scanner
 _session_scanner_spec.loader.exec_module(session_scanner)
 
+_project_memory_spec = _importlib_util.spec_from_file_location(
+    "markdown_kb_project_memory", _os.path.join(_dir, "project_memory.py")
+)
+if _project_memory_spec is None or _project_memory_spec.loader is None:
+    raise ImportError("无法加载 markdown_kb project_memory 模块")
+project_memory = _importlib_util.module_from_spec(_project_memory_spec)
+_sys.modules["markdown_kb_project_memory"] = project_memory
+_project_memory_spec.loader.exec_module(project_memory)
+from markdown_kb_project_memory import (  # noqa: E402
+    CONTEXT_SOURCE_LLM as _PROJECT_CONTEXT_SOURCE_LLM,
+    DIGEST_COOLDOWN_SECONDS as _PROJECT_DIGEST_COOLDOWN_SECONDS,
+    DIGEST_MIN_PENDING as _PROJECT_DIGEST_MIN_PENDING,
+    KB_MATERIAL_EXCERPT_CHARS as _PROJECT_MATERIAL_EXCERPT_CHARS,
+    KB_MATERIAL_MAX_DOCS as _PROJECT_MATERIAL_MAX_DOCS,
+    ProjectMemory,
+)
+
 
 router = APIRouter()
 _plugin_instance: "Plugin | None" = None
@@ -1401,6 +1418,58 @@ async def markdown_kb_memory_stats():
     return plugin.get_memory_stats()
 
 
+@router.get("/projects")
+async def list_project_memories():
+    """列出全部项目级 context/memory 记忆（按工作区根目录聚合）。"""
+    plugin = _get_plugin()
+    return {"ok": True, "count": len(plugin.list_project_memories()), "projects": plugin.list_project_memories()}
+
+
+@router.get("/project-context")
+async def read_project_memory(workspace_root: str = ""):
+    """读取单个工作区的项目上下文与最近修改记忆全文。"""
+    plugin = _get_plugin()
+    data = plugin.read_project_memory(workspace_root)
+    if data is None:
+        raise HTTPException(status_code=404, detail="该工作区还没有项目记忆，可调用 /projects/init 初始化")
+    return {"ok": True, "project": data}
+
+
+@router.post("/projects/init")
+async def init_project_memories(payload: dict = Body(default={})):
+    """初始化/回填项目记忆：为已有工作区绑定补齐 context.md / memory.md。
+
+    请求体可选传入 `workspace_roots` 列表限定范围；缺省时扫描知识库中全部已绑定根目录
+    （老项目升级后首次开启该功能时使用）。
+    """
+    plugin = _get_plugin()
+    requested = (payload or {}).get("workspace_roots") or None
+    if requested is not None and not isinstance(requested, list):
+        raise HTTPException(status_code=400, detail="workspace_roots 必须是列表")
+    return plugin.init_project_memories(requested)
+
+
+@router.post("/projects/maintain")
+async def maintain_project_memory(payload: dict = Body(default={})):
+    """手动触发一次项目记忆 digest（LLM 折叠事件 + 刷新 memory.md）。"""
+    plugin = _get_plugin()
+    return await plugin.maintain_project_memory(str((payload or {}).get("workspace_root", "") or ""))
+
+
+@router.post("/projects/context")
+async def refresh_project_context(payload: dict = Body(default={})):
+    """LLM 首次生成 / 最小化增量更新单个工作区的 context.md。
+
+    自动模式受 1 天冷却保护；`force=true` 可无视冷却立即重生成。
+    未配置 chat_model、或模型调用失败时返回 degraded，不破坏现有内容。
+    """
+    plugin = _get_plugin()
+    return await plugin.maintain_project_context(
+        str((payload or {}).get("workspace_root", "") or ""),
+        force=bool((payload or {}).get("force", False)),
+    )
+
+
 class Plugin(PluginBase):
     """Markdown 知识库最小应用插件。"""
 
@@ -1418,6 +1487,11 @@ class Plugin(PluginBase):
         _plugin_instance = self
         self._ensure_runtime_ready()
         self._validate_state_files()
+        # 项目级 context.md / memory.md 管理器（懒创建，见 _get_project_memory）
+        self._get_project_memory()
+        # 老项目升级回填：开启 inject_project_context 时，把已有工作区绑定一次性补齐
+        if self._settings().get("inject_project_context"):
+            self._schedule_project_init()
         self.logger.info("[markdown_kb] 数据目录已就绪: %s", self._data_root)
 
     def _validate_state_files(self) -> None:
@@ -1748,6 +1822,13 @@ class Plugin(PluginBase):
 
         manifest = [item for item in self._load_doc_manifest() if str(item.get("doc_id") or "") != str(entry.get("doc_id") or "")]
         self._save_doc_manifest(manifest)
+
+        # 项目级最近修改记忆：删除事件（公共文档 workspace 为空会被忽略）。
+        self._record_workspace_event(
+            self._normalize_workspace_root(entry.get("workspace_root") or ""),
+            "deleted",
+            safe_name,
+        )
 
         existing_documents = self._store.list_documents()
         removed_count = sum(1 for item in existing_documents if str(item.get("doc_id") or "") == str(entry.get("doc_id") or ""))
@@ -2245,9 +2326,11 @@ class Plugin(PluginBase):
 
         normalized_workspace = self._normalize_workspace_root(workspace_root)
         manifest = self._load_doc_manifest()
+        existed = False
         for item in manifest:
             if item.get("file_name") == safe_name and self._normalize_workspace_root(item.get("workspace_root") or "") == normalized_workspace:
                 entry = self._normalize_doc_entry(item)
+                existed = True
                 break
         else:
             storage_name = self._storage_name_for_entry(safe_name, normalized_workspace)
@@ -2256,6 +2339,10 @@ class Plugin(PluginBase):
         target = self._doc_storage_path(entry)
         target.write_bytes(payload)
         self._save_doc_manifest(manifest)
+
+        # 项目级最近修改记忆：A 类内容变化事件（新增/覆盖）。learn/scan 落盘同走本方法，
+        # 因此也自动产生“沉淀知识”记录；公共文档（workspace 为空）会被忽略。
+        self._record_workspace_event(normalized_workspace, "updated" if existed else "added", safe_name)
 
         sha256 = hashlib.sha256(payload).hexdigest()
         return {
@@ -3002,6 +3089,10 @@ class Plugin(PluginBase):
             "reranker_model": str(cfg.get("reranker_model") or "").strip(),
             "chat_model": str(cfg.get("chat_model") or "").strip(),
             "auto_inject": bool(cfg.get("auto_inject", False)),  # 是否自动注入参考资料，默认关闭
+            # 是否开启“项目上下文 + 最近修改记忆”自动注入（默认关闭）。
+            # 与 auto_inject 正交：仅当请求带工作区信号时在首轮注入，
+            # 之后各轮仅在记忆版本更新时做轻量刷新注入；不影响 RAG 检索。
+            "inject_project_context": bool(cfg.get("inject_project_context", False)),
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "top_k": top_k,
@@ -4628,17 +4719,447 @@ class Plugin(PluginBase):
         request["instructions"] = injection_text if not original else injection_text + "\n\n原始系统要求：\n" + original
         return request
 
+    def _get_project_memory(self) -> ProjectMemory | None:
+        """懒获取项目 context/memory 管理器（数据目录就绪后才可创建）。"""
+        pm = getattr(self, "_project_memory", None)
+        if pm is not None:
+            return pm
+        if getattr(self, "_data_root", None) is None:
+            self._ensure_runtime_ready()
+        if getattr(self, "_data_root", None) is None:
+            return None
+        pm = ProjectMemory(self._data_root, self.logger)
+        self._project_memory = pm
+        self._project_digest_tasks = {}
+        self._project_context_tasks = {}
+        self._project_context_slots = None
+        self._project_inject_revisions = OrderedDict()
+        return pm
+
+    # ──────────────── 项目记忆：内容事件钩子与摘要调度 ────────────────
+
+    def _record_workspace_event(self, workspace_root: str, action: str, file_name: str) -> None:
+        """记录一次知识库内容变化事件（A 类触发：add/update/delete/learn）。
+
+        只影响项目级 memory；公共文档（workspace 为空）自动忽略。
+        """
+        try:
+            pm = self._get_project_memory()
+            if pm is None:
+                return
+            result = pm.record_event(workspace_root, action, file_name)
+            if result:
+                self._schedule_project_digest(workspace_root)
+                self._schedule_project_context_refresh(workspace_root)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[markdown_kb] 记录项目事件失败 %s/%s/%s: %s", workspace_root, action, file_name, exc)
+
+    def _schedule_project_digest(self, workspace_root: str) -> None:
+        """为某工作区安排一次去重的 digest 任务（攒批 + 冷却）。"""
+        try:
+            pm = self._get_project_memory()
+            if pm is None:
+                return
+            project_id = pm.project_id(workspace_root)
+            if not project_id:
+                return
+            tasks = self._project_digest_tasks
+            if project_id in tasks:
+                return  # 已有一个待执行任务，新事件会被它一并消费
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+
+            due_now = pm.due_for_digest(workspace_root, _PROJECT_DIGEST_COOLDOWN_SECONDS, _PROJECT_DIGEST_MIN_PENDING)
+
+            async def runner():
+                try:
+                    if not due_now:
+                        # 事件太少且刚 digest 过：等一个冷却窗口攒批后再消费
+                        await asyncio.sleep(_PROJECT_DIGEST_COOLDOWN_SECONDS)
+                    if pm.due_for_digest(workspace_root, 0, _PROJECT_DIGEST_MIN_PENDING):
+                        await self._run_project_digest(workspace_root)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning("[markdown_kb] 项目记忆 digest 执行失败: %s", exc)
+                finally:
+                    tasks.pop(project_id, None)
+                    try:
+                        if pm.pending_count(workspace_root) > 0:
+                            # digest 期间又有新事件（或 digest 失败留有积压）：延迟再排，防热循环
+                            await asyncio.sleep(30)
+                            self._schedule_project_digest(workspace_root)
+                    except Exception:
+                        pass
+
+            task = loop.create_task(runner())
+            tasks[project_id] = task
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[markdown_kb] 安排项目记忆 digest 失败: %s", exc)
+
+    async def _run_project_digest(self, workspace_root: str) -> dict:
+        """执行一次项目记忆语义摘要（LLM 折叠事件 + 刷新 memory.md）。"""
+        pm = self._get_project_memory()
+        if pm is None or not workspace_root:
+            return {"ok": False, "reason": "unavailable"}
+        material = self._project_kb_material(workspace_root)
+        settings = self._settings()
+        result = await pm.run_digest(
+            workspace_root,
+            base_url=self._akm_base_url(),
+            model=str(settings.get("chat_model") or ""),
+            kb_material=material,
+        )
+        # digest 成功后捎带一次 context 刷新（内部有 1 天冷却，通常直接跳过）
+        if result and result.get("ok"):
+            self._schedule_project_context_refresh(workspace_root)
+        return result
+
+    def _project_kb_material(self, workspace_root: str) -> list[dict]:
+        """收集某工作区在知识库中的文档摘要，供 context 初始化与 digest 使用。"""
+        normalized = self._normalize_workspace_root(workspace_root)
+        if not normalized:
+            return []
+        material = []
+        try:
+            for entry in self._load_doc_manifest():
+                if self._normalize_workspace_root(entry.get("workspace_root") or "") != normalized:
+                    continue
+                path = self._doc_storage_path(entry)
+                try:
+                    if not path.exists():
+                        continue
+                    stat = path.stat()
+                    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                        excerpt = handle.read(_PROJECT_MATERIAL_EXCERPT_CHARS + 64)[:_PROJECT_MATERIAL_EXCERPT_CHARS]
+                except OSError:
+                    continue
+                updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat()
+                material.append({
+                    "file_name": str(entry.get("file_name") or ""),
+                    "updated_at": updated_at,
+                    "excerpt": str(excerpt or ""),
+                    "_mtime": stat.st_mtime,
+                })
+            material.sort(key=lambda item: item.get("_mtime") or 0, reverse=True)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[markdown_kb] 收集项目文档材料失败 %s: %s", workspace_root, exc)
+            return []
+        for item in material:
+            item.pop("_mtime", None)
+        return material[:_PROJECT_MATERIAL_MAX_DOCS]
+
+    def _collect_workspace_roots(self) -> list[str]:
+        """从已有绑定（manifest / bindings / learn 记录）里收敛全部工作区根目录。"""
+        roots: set[str] = set()
+        for entry in self._load_doc_manifest():
+            root = self._normalize_workspace_root(entry.get("workspace_root") or "")
+            if root:
+                roots.add(root)
+        try:
+            for root in (self._load_file_bindings() or {}).values():
+                root = self._normalize_workspace_root(root)
+                if root:
+                    roots.add(root)
+        except Exception:
+            pass
+        try:
+            for record in (self._load_learn_records() or {}).values():
+                if isinstance(record, dict):
+                    root = self._normalize_workspace_root(record.get("workspace_root") or "")
+                    if root:
+                        roots.add(root)
+        except Exception:
+            pass
+        return sorted(roots)
+
+    def _schedule_project_init(self) -> None:
+        """后台执行一次项目记忆初始化/回填（老项目补齐 context/memory 文件）。"""
+        if getattr(self, "_project_init_scheduled", False):
+            return
+        self._project_init_scheduled = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            loop.create_task(self._initialize_project_memories_async())
+        except Exception:
+            self._project_init_scheduled = False
+
+    async def _initialize_project_memories_async(self) -> None:
+        try:
+            roots = self._collect_workspace_roots()
+            result = await asyncio.to_thread(self.init_project_memories, roots)
+            # 回填只是建骨架；真正的 context 首次生成交给各自去重的刷新任务
+            for workspace_root in roots:
+                self._schedule_project_context_refresh(workspace_root)
+            self.logger.info("[markdown_kb] 项目记忆初始化完成: %s", result)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[markdown_kb] 项目记忆初始化失败: %s", exc)
+
+    def init_project_memories(self, workspace_roots: list[str] | None = None) -> dict:
+        """初始化/回填：为一批工作区（默认取知识库中全部已绑定根目录）建 context/memory。"""
+        pm = self._get_project_memory()
+        if pm is None:
+            return {"ok": False, "reason": "project_memory_unavailable"}
+        roots = workspace_roots if workspace_roots is not None else self._collect_workspace_roots()
+        return pm.init_projects(roots, kb_material_fn=self._project_kb_material)
+
+    def list_project_memories(self) -> list[dict]:
+        """列出全部项目记忆摘要（供管理台 /projects 使用）。"""
+        pm = self._get_project_memory()
+        if pm is None:
+            return []
+        return pm.list_projects()
+
+    def read_project_memory(self, workspace_root: str = "") -> dict | None:
+        """读取单个工作区的 context/memory 详情。"""
+        pm = self._get_project_memory()
+        if pm is None:
+            return None
+        return pm.read_project(workspace_root)
+
+    async def maintain_project_memory(self, workspace_root: str = "") -> dict:
+        """手动触发一次项目记忆 digest（供管理台与测试使用）。"""
+        pm = self._get_project_memory()
+        if pm is None:
+            return {"ok": False, "reason": "unavailable"}
+        if not pm.has_project(workspace_root):
+            pm.ensure_skeleton(workspace_root, self._project_kb_material(workspace_root))
+        digest = await self._run_project_digest(workspace_root)
+        return {
+            "ok": True,
+            "workspace_root": self._normalize_workspace_root(workspace_root),
+            "digest": digest,
+        }
+
+    # ──────────────── 项目记忆：context.md LLM 生成 / 增量更新 ────────────────
+
+    def _schedule_project_context_refresh(self, workspace_root: str) -> None:
+        """为某工作区安排一次去重的 context.md 刷新任务。
+
+        任务内部自行决定走“首次生成”还是“最小化增量更新”（含 1 天冷却），
+        无模型或未到期时快速返回、不产生 LLM 调用；用信号量限制并发。
+        """
+        try:
+            pm = self._get_project_memory()
+            if pm is None:
+                return
+            project_id = pm.project_id(workspace_root)
+            if not project_id:
+                return
+            tasks = getattr(self, "_project_context_tasks", None)
+            if tasks is None:
+                tasks = {}
+                self._project_context_tasks = tasks
+            if project_id in tasks:
+                return  # 已有一个待执行/执行中的任务
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            if getattr(self, "_project_context_slots", None) is None:
+                self._project_context_slots = asyncio.Semaphore(2)
+            slots = self._project_context_slots
+
+            async def runner():
+                try:
+                    async with slots:
+                        await self._run_project_context(workspace_root)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning("[markdown_kb] 项目 context 刷新失败 %s: %s", workspace_root, exc)
+                finally:
+                    tasks.pop(project_id, None)
+
+            task = loop.create_task(runner())
+            tasks[project_id] = task
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[markdown_kb] 安排项目 context 刷新失败: %s", exc)
+
+    async def _run_project_context(self, workspace_root: str, *, force: bool = False) -> dict:
+        """按项目状态决定执行一次“首次生成”或“增量更新”。"""
+        pm = self._get_project_memory()
+        if pm is None:
+            return {"ok": False, "reason": "unavailable"}
+        settings = self._settings()
+        model = str(settings.get("chat_model") or "")
+        state = pm.context_state(workspace_root)
+        if not state["exists"] or not state["has_content"] or state["source"] != _PROJECT_CONTEXT_SOURCE_LLM:
+            return await pm.run_context_init(
+                workspace_root,
+                base_url=self._akm_base_url(),
+                model=model,
+                kb_material=self._project_kb_material(workspace_root),
+            )
+        return await pm.run_context_update(
+            workspace_root,
+            base_url=self._akm_base_url(),
+            model=model,
+            kb_material=self._project_kb_material(workspace_root),
+            force=force,
+        )
+
+    async def maintain_project_context(self, workspace_root: str = "", force: bool = False) -> dict:
+        """手动触发一次 context.md 首次生成/增量更新（POST /projects/context）。"""
+        pm = self._get_project_memory()
+        if pm is None:
+            return {"ok": False, "reason": "unavailable"}
+        if not pm.has_project(workspace_root):
+            pm.ensure_skeleton(workspace_root, self._project_kb_material(workspace_root))
+        context = await self._run_project_context(workspace_root, force=force)
+        return {
+            "ok": True,
+            "workspace_root": self._normalize_workspace_root(workspace_root),
+            "context": context,
+        }
+
+    # ──────────────── 项目记忆：首轮 / 版本刷新注入判定 ────────────────
+
+    def _first_request_turn(self, protocol: str, request: dict) -> bool:
+        """粗略判定当前请求是否是一段会话的第一轮（没有历史助手/工具回复）。
+
+        - chat / messages：历史里出现 assistant / tool / function 消息即非首轮；
+        - responses：携带 previous_response_id，或 input 里出现 assistant 消息 /
+          function_call / function_call_output 即非首轮。
+        """
+        if protocol == "responses":
+            if str(request.get("previous_response_id") or "").strip():
+                return False
+            input_value = request.get("input")
+            if isinstance(input_value, list):
+                for item in input_value:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type") or "")
+                    role = str(item.get("role") or "").lower()
+                    if item_type in ("function_call", "function_call_output"):
+                        return False
+                    if item_type == "message" and role == "assistant":
+                        return False
+            return True
+        if protocol in ("chat", "messages"):
+            messages = request.get("messages")
+            if not isinstance(messages, list):
+                return True
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                if str(message.get("role") or "").lower() in ("assistant", "tool", "function"):
+                    return False
+            return True
+        return True
+
+    def _project_workspace(self, project_context: dict | None) -> str:
+        """从归一化工作域上下文里取工作区根目录。"""
+        ctx = project_context or {}
+        raw = (
+            str(ctx.get("workspace_root") or "")
+            or str(ctx.get("working_directory") or "")
+            or str(ctx.get("project_id") or "")
+        ).strip()
+        return self._normalize_workspace_root(raw)
+
+    def _project_injection_block(self, protocol: str, request: dict, project_context: dict) -> str | None:
+        """按“首轮全量 / 之后仅版本刷新”策略生成项目注入块。
+
+        返回 None 表示本轮无需注入（未命中任何项目信号 / 非首轮且记忆版本未变）。
+        """
+        workspace = self._project_workspace(project_context)
+        if not workspace:
+            return None
+        pm = self._get_project_memory()
+        if pm is None:
+            return None
+        try:
+            if not pm.has_project(workspace):
+                # 第一次命中该工作区：先按 KB 材料懒初始化 context/memory，
+                # 再在后台安排 context.md 的 LLM 首次生成（失败不影响本轮注入）
+                created = pm.ensure_skeleton(workspace, self._project_kb_material(workspace))
+                if created.get("created"):
+                    self._schedule_project_context_refresh(workspace)
+            snap = pm.snapshot(workspace)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[markdown_kb] 项目注入块读取失败 %s: %s", workspace, exc)
+            return None
+        if not snap:
+            return None
+
+        project_id = snap["project_id"]
+        revision = int(snap.get("revision") or 0)
+        revisions = self._project_inject_revisions
+        seen = revisions.get(project_id, -1)
+
+        if self._first_request_turn(protocol, request):
+            text = self._build_project_full_block(snap, project_context)
+        elif seen >= 0 and revision > seen:
+            text = self._build_project_refresh_block(snap)
+        else:
+            return None
+        revisions[project_id] = revision
+        revisions.move_to_end(project_id)
+        while len(revisions) > 256:
+            revisions.popitem(last=False)
+        return text
+
+    def _build_project_full_block(self, snap: dict, project_context: dict) -> str:
+        """首轮全量项目块：工作域 + context.md + memory.md。"""
+        context_md = str(snap.get("context_md") or "").strip()
+        memory_md = str(snap.get("memory_md") or "").strip()
+        context_md = context_md[:3000] or "（暂无内容）"
+        memory_md = memory_md[:4000] or "（暂无内容）"
+        revision = int(snap.get("revision") or 0)
+        updated_at = str(snap.get("updated_at") or "")
+        parts = [
+            "以下是与你当前工作域绑定的「项目上下文 + 最近修改记忆」，由 markdown_kb 自动维护。",
+            "当前工作域：",
+            f"- project: {snap.get('project_name') or '-'}",
+            f"- workspace_root: {snap.get('workspace_root') or '-'}",
+            "回答与本项目相关的问题时请优先参考以下信息。",
+            "注意：记忆只覆盖知识库能感知到的文档变化与知识沉淀；",
+            "仓库内未经知识库的改动不在其中。若与用户当前说法冲突，以用户为准。",
+            "与本项目无关的问题可忽略本段。",
+            "",
+            "## 项目上下文",
+            context_md,
+            "",
+            f"## 最近修改记忆（版本 v{revision}" + (f"，更新于 {updated_at}" if updated_at else "") + "）",
+            memory_md,
+        ]
+        return "\n".join(parts)
+
+    def _build_project_refresh_block(self, snap: dict) -> str:
+        """非首轮轻量刷新块：只带记忆最新版本（有新的维护事件才触发）。"""
+        memory_md = str(snap.get("memory_md") or "").strip()
+        memory_md = memory_md[:2500] or "（暂无内容）"
+        revision = int(snap.get("revision") or 0)
+        updated_at = str(snap.get("updated_at") or "")
+        parts = [
+            "【项目记忆更新】你所处工作区的知识库记忆已更新到新版本，补充如下（其余上下文不变）。",
+            "本段之外的先前项目上下文仍然有效；若与用户当前说法冲突，以用户为准。",
+            "",
+            f"## 最近修改记忆（版本 v{revision}" + (f"，更新于 {updated_at}" if updated_at else "") + "）",
+            memory_md,
+        ]
+        return "\n".join(parts)
+
     async def on_request(self, ctx) -> dict | None:
         """为三类文本请求执行按需知识库注入。
 
-        当前规则：
+        规则（与历史版本兼容，纯 `auto_inject` 场景行为不变）：
         1. 仅处理 `chat / messages / responses` 三类文本请求；
-        2. 默认不自动注入，需在插件配置开启 `auto_inject` 后才尝试抽取最后一个
-           用户问题并执行检索（关闭时直接透传，可在管理台用 query / ask 或
-           `/api/markdown-kb/query`、`ask` 手动使用知识库）；
-        3. 只有检索命中非空时才真正注入参考资料；
-        4. 请求里的模型名不再承担知识库开关语义，保持原样继续下游转发；
-        5. 没命中、抽不到问题或检索失败时都直接透传。
+        2. `auto_inject`（RAG 参考资料注入）与 `inject_project_context`（项目级
+           context/memory 注入）是两个正交开关，默认都关闭；
+        3. RAG 路径：抽最后一个用户问题 → 检索 → 命中非空才注入参考资料，
+           任何一步失败/未命中都直接透传；
+        4. 项目路径：仅当请求带可识别工作区信号时生效——会话首轮注入全量
+           （context.md + memory.md），后续轮次仅在记忆版本更新时做轻量刷新；
+           两者同时命中时合并为一段注入，不重复注入；
+        5. 两类都关闭、请求无工作区信号、或纯聊天无命中时，一律透传。
         """
         self._ensure_runtime_ready()
         request = ctx.request
@@ -4646,42 +5167,60 @@ class Plugin(PluginBase):
             return None
 
         settings = self._settings()
-        if not settings["auto_inject"]:
+        rag_enabled = bool(settings["auto_inject"])
+        project_enabled = bool(settings.get("inject_project_context"))
+        if not rag_enabled and not project_enabled:
             return request
 
         protocol = self._detect_request_protocol(request)
         if not protocol:
             return request
 
-        if protocol == "chat":
-            question = self._extract_user_question_for_chat(request)
-        elif protocol == "messages":
-            question = self._extract_user_question_for_messages(request)
-        elif protocol == "responses":
-            question = self._extract_user_question_for_responses(request)
+        project_context = None
+        project_block = None
+        if project_enabled:
+            try:
+                project_context = self._extract_project_context(request)
+                if project_context:
+                    project_block = self._project_injection_block(protocol, request, project_context)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("[markdown_kb] 项目上下文注入失败: %s", exc)
+                project_block = None
+
+        hits = None
+        if rag_enabled:
+            if protocol == "chat":
+                question = self._extract_user_question_for_chat(request)
+            elif protocol == "messages":
+                question = self._extract_user_question_for_messages(request)
+            elif protocol == "responses":
+                question = self._extract_user_question_for_responses(request)
+            else:
+                question = None
+            if question:
+                if project_context is None:
+                    project_context = self._extract_project_context(request)
+                try:
+                    hits = await self._retrieve(
+                        question,
+                        settings["top_k"],
+                        settings["embedding_model"],
+                        settings["reranker_model"],
+                        project_context,
+                    )
+                except Exception:
+                    hits = None
+
+        if project_block and hits:
+            # 项目块自带工作域说明，RAG 模板不再重复注入工作域段
+            injection_text = project_block + "\n\n" + self._build_injection_text(hits, None)
+        elif project_block:
+            injection_text = project_block
+        elif hits:
+            injection_text = self._build_injection_text(hits, project_context)
         else:
             return request
 
-        if not question:
-            return request
-
-        project_context = self._extract_project_context(request)
-
-        try:
-            hits = await self._retrieve(
-                question,
-                settings["top_k"],
-                settings["embedding_model"],
-                settings["reranker_model"],
-                project_context,
-            )
-        except Exception:
-            return request
-
-        if not hits:
-            return request
-
-        injection_text = self._build_injection_text(hits, project_context)
         if protocol == "chat":
             return self._inject_for_chat(request, injection_text)
         if protocol == "messages":

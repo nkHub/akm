@@ -835,3 +835,128 @@ learn 成功、交叉验证失败时，必须确保 learn dedupe 已写入，
 
 1. Session JSONL 解析器（Codex + Claude Code 双格式自动检测）
 2. `POST /api/markdown-kb/scan-sessions` 路由
+
+---
+
+## 十二、项目级 context/memory 自动维护（v0.1.3）
+
+### 12.1 目标与边界
+
+在 chunk 级记忆之外，为“绑定过知识库文档的工作区”维护一份**项目级**记忆：`context.md`
+（项目上下文）+ `memory.md`（最近修改记忆）。与既有 RAG / chunk 记忆完全解耦：
+
+- 存储于插件数据根下 `<data_root>/projects/<project_id(sha1)>/`（`context.md` / `memory.md` /
+  `meta.json`），**不进** docs 清单、不切片、不建向量索引、不参与检索候选与记忆分；
+- 触发源只接收 **A 类知识库内容事件**（文档新增/覆盖/删除、learn/scan 落盘），不做项目目录
+  fs 监听、不依赖 git；
+- `meta.json` 是机器侧唯一事实源；`memory.md` 是其确定性重渲染（事件表 + digest 文本），
+  避免双写漂移。
+
+### 12.2 数据模型
+
+```text
+meta.json:
+{
+  workspace_root, created_at, updated_at, context_updated_at,
+  context_source,          # skeleton | llm：llm = 已由本地模型生成/维护（允许自动增量更新）
+  last_context_refresh_at, # 最近一次 LLM 触碰 context.md 的时刻（增量更新 1 天冷却基准）
+  revision,            # 每次 memory 内容写入 +1（事件追加与 digest 都会自增），注入刷新的依据
+  pending_events,      # 自上次 digest 起待消费事件数
+  last_digest_at,
+  digest_text,         # 最近一次语义摘要的“近期要点”，独立保存 → 事件表裁掉老事件也不丢要点
+  events: [{ts, action, file_name}, ...]   # 上限 300，渲染只取后 30
+}
+```
+
+### 12.3 事件与 digest 两级维护
+
+- **文件级事件**：`record_event` 零成本同步追加 + 重渲染 `memory.md`；工作区为空
+  （公共文档 / 未绑定）直接忽略。接入点统一收敛在 `_save_markdown_payload`
+  （upload / write / sync / rebuild-file / learn / scan 都走它，`existed` 区分
+  added / updated）与 `delete_file`（deleted）。
+- **语义摘要 digest**：`run_digest` 消费自上次 digest 以来的事件，调用一次本地 chat
+  折叠成“近期要点”（`DIGEST_SYSTEM_PROMPT` 限定 JSON 输出，≤8 条 / ≤500 字）；
+  模型为空、请求失败、JSON 解析失败都**降级为纯文本摘要并照样消费**，避免同一批事件
+  反复重试。调度按项目去重：pending ≥ 3 立即跑；否则等 5 分钟冷却窗口攒批。
+- **职责分离**：`context.md` 只写“长期稳定事实”（技术栈 / 目录职责 / 命令 / 编码约定 /
+  架构决策），`memory.md` 是“热记忆”（随事件日更）。两文件由不同流程维护，互不混写：
+  context 的“最近进展”永远放 memory，memory 里也不放稳定的架构结论。
+
+### 12.3b context.md 语义生成（LLM 首次生成 + 最小化增量更新）
+
+骨架（同步、零 LLM）只在 `ensure_skeleton` 首次创建时生成，材料来自工作区 AGENTS.md /
+README.md 前 1400 字 + 知识库内该工作区 ≤12 篇文档名；此后 context 由本地 chat 维护：
+
+- **首次生成**（`run_context_init`）：把一份“仓库调研材料”交给模型重组成 ≤150 行、固定 7 章节的
+  项目说明书（一句话定位 / 技术栈 / 目录速览 / 常用命令 / 编码约定 / 架构决策 / 环境依赖）。
+  调研材料只来自触发时刻的一次性读取——两级目录树（跳过隐藏/噪音目录，≤220 条目）+ 固定名称文件
+  （AGENTS/README/CLAUDE/package.json/pyproject.toml 等，单文件 ≤2000 字、总量 ≤6000 字）+
+  知识库关联文档列表——模型只能依据这些真实材料归纳，命令必须照抄配置脚本；提示词禁止写
+  “最近/本次/临时/待办”等会过期的词。模型为空、调用失败、输出为空时保留骨架并标记 degraded，
+  绝不写入垃圾文本。
+- **增量更新**（`run_context_update`）：以现有 context.md 为基线做最小化修订，只改已过时条目
+  （版本升级 / 目录新增 / 命令变化 / 约定调整 / 架构演进），保持原有章节结构、行数量级与口吻，
+  不越改越长；模型把全文原样返回（无过时条目）时不落盘。自动轮询受 1 天冷却保护
+  （`meta.last_context_refresh_at` 基准），仅 `context_source == llm` 的内容参与轮询；
+  `force=true` 可无视冷却立即重生成。
+- **守护规则**：无自动维护标记（“由 markdown_kb 自动维护”头）的 context.md 视为人工自建，
+  自动流程绝不覆盖；增量更新保留人工编辑除非与最新材料冲突；LLM 输出落盘前防御性截断到
+  200 行以内。context.md 的任何内容变化**都不自增 revision**——revision 只由 memory 内容
+  （事件/digest）驱动，重生成 context 不会触发后续轮次的“记忆刷新”注入。
+- **触发与成本**：新工作区骨架建立（首轮懒创建 / on_load 回填 / 首个记录事件）后都会排一个
+  去重的 context 刷新任务，digest 成功后也会捎带排期；任务内部先判断“是否需要真的调 LLM”
+  （未配置模型 / 已 llm 化 / 冷却期内）——多数排期直接跳过，不产生请求；真正执行时受全局
+  2 路并发信号量约束。
+- **与“会话记忆”模板的取舍说明**：部分方案建议 memory.md 由模型直接沉淀“踩坑 / 待办”热记忆；
+  本插件不做项目目录 fs 监听、也不接管会话历史，因此 memory 由 KB 事件确定性渲染（digest 折叠
+  “近期要点”承载热记忆），无法凭空总结会话里的踩坑。将来 learn 落盘内容已随事件进入事件表，
+  会被 digest 一并折叠——稳定结论依然能进 memory。
+
+### 12.4 注入策略（on_request）
+
+- 新增正交配置 `inject_project_context`（默认关闭），纯 `auto_inject`（RAG）路径
+  字节级不变；
+- 项目注入只在请求带工作区信号（`workspace_root` / `working_directory` /
+  `project_id`）时生效：**首轮**注入全量项目块（context.md 截断 ~3000 + memory.md
+  截断 ~4000），后续轮次仅当 `revision` 高于上次注入值（LRU `_project_inject_revisions`，
+  上限 256）时注入轻量“【项目记忆更新】”段；
+- 首轮判定不依赖会话服务端跟踪：chat/messages 看历史里有没有 assistant/tool/function
+  消息，responses 看 `previous_response_id` 与 input 里的 assistant / function 条目；
+- 项目块与 RAG 参考资料同时命中时**合并为一段**注入，只注入一次；
+- 首次命中某工作区时先懒创建 skeleton（`ensure_skeleton`）并排一个后台 context 刷新任务，
+  “先有绑定、后开启开关”也能自动补齐（context 的 LLM 首次生成随后异步完成，不阻塞本轮注入）；
+
+### 12.5 初始化 / 回填（老数据升级）
+
+老项目升级前没有 `context.md` / `memory.md`。插件 `on_load` 时若开启
+`inject_project_context`，后台从 manifest / file_bindings / learn_records 收敛全部工作区
+并批量 `init_projects`（幂等，已存在的不重复创建）。回填只建骨架，各工作区的 context LLM
+首次生成由各自的刷新任务异步补齐。手动侧 API：
+
+- `POST /api/markdown-kb/projects/init`：批量回填（可选 `workspace_roots` 限定范围）；
+- `POST /api/markdown-kb/projects/context`：单个工作区 context 首次生成 / 增量更新
+  （body：`workspace_root` / 可选 `force`）；
+- `GET /projects` / `GET /project-context`：检查结果。
+
+MCP 工具集同步新增：`list_kb_projects`、`read_kb_project_context`、`init_kb_projects`、
+`maintain_kb_projects`、`refresh_kb_project_context`——与插件 API 一一对应，经宿主
+`akm/markdown_kb_mcp.py` 转发到上述端点。
+
+### 12.6 权衡
+
+| 场景 | 处理方式 |
+|------|---------|
+| 老项目无 context/memory | 开启开关后后台回填；手动 `/projects/init` 兜底 |
+| 公共文档（无 workspace）事件 | 忽略，不建项目 |
+| digest 模型不可用 | 纯文本降级摘要，照常消费事件 |
+| 事件表膨胀 | meta 裁到 300 条；digest_text 独立保存不受影响 |
+| 首次命中未初始化工作区 | 注入侧懒创建 skeleton |
+| 后续轮次无新事件 | revision 未变 → 不注入（省 token） |
+| 项目目录膨胀 | 上限 500 个项目，超限跳过新项目创建 |
+| context 首次生成（无模型/失败/空输出） | 保留骨架并标记 degraded，绝不写入垃圾文本 |
+| context 增量更新频率 | 1 天冷却（`last_context_refresh_at` 基准）；`force` 才可无视 |
+| 人工编辑的 context.md | 无自动维护标记 → 自动流程绝不覆盖；增量更新保留人工内容 |
+| LLM 输出超长 | 落盘前防御性截断到 200 行 |
+| 多项目同时生成 | 每项目去重任务 + 全局 2 路并发信号量 |
+| context 材料越界 | 目录树限两层 / ≤220 条目，固定文件名读取（单个 ≤2000、总量 ≤6000），仅触发时刻一次性读取、不监听 |
+| 生成与记忆的耦合 | context 内容变化不自增 revision；注入刷新只跟随 memory 版本 |

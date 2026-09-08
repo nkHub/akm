@@ -284,6 +284,67 @@ _MAINT_SPECS: list[dict[str, Any]] = [
         },
         "endpoint": "files/write",
     },
+    {
+        "name": "list_kb_projects",
+        "description": "列出知识库中全部已建立“项目级 context/memory”的工作区（项目 id、目录、context 状态、记忆版本、最近更新）",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "endpoint": "projects",
+        "method": "GET",
+    },
+    {
+        "name": "read_kb_project_context",
+        "description": "读取单个工作区的项目上下文（context.md）与最近修改记忆（memory.md）全文",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_root": {"type": "string", "description": "工作目录绝对路径（必须与绑定时一致）"},
+            },
+            "required": ["workspace_root"],
+        },
+        "endpoint": "project-context",
+        "method": "GET",
+    },
+    {
+        "name": "init_kb_projects",
+        "description": "初始化/回填项目记忆：为已绑定工作区（默认自动收集知识库中全部已绑定根目录）补建 context.md / memory.md；可选 workspace_roots 限定范围。老项目升级后首次使用本功能时调用",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_roots": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要初始化的工作目录列表（可选；缺省时扫描知识库全部已绑定根目录）",
+                },
+            },
+            "required": [],
+        },
+        "endpoint": "projects/init",
+    },
+    {
+        "name": "maintain_kb_projects",
+        "description": "手动触发一次项目记忆 digest：用 LLM 把工作区积压的修改事件折叠进 memory.md（无事件或未攒够时返回空摘要）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_root": {"type": "string", "description": "工作目录绝对路径"},
+            },
+            "required": ["workspace_root"],
+        },
+        "endpoint": "projects/maintain",
+    },
+    {
+        "name": "refresh_kb_project_context",
+        "description": "重生成单个工作区的 context.md：首次走“LLM 首次生成”，之后按 1 天冷却做“最小化增量更新”；force=true 可无视冷却立即重生成（未配置模型时返回 degraded，不破坏现有内容）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workspace_root": {"type": "string", "description": "工作目录绝对路径"},
+                "force": {"type": "boolean", "description": "是否无视 1 天冷却强制重生成（默认 false）"},
+            },
+            "required": ["workspace_root"],
+        },
+        "endpoint": "projects/context",
+    },
 ]
 
 
