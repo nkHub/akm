@@ -75,6 +75,11 @@ from markdown_kb_project_memory import (  # noqa: E402
 )
 
 
+# 项目信号抽取只扫描会话开头若干条消息：opencode/Claude 的环境块总是出现在
+# system / 首轮，对话正文（可能被用户粘贴/转述）里的 `Working directory:` 字样
+# 不应被误认为工作区信号。
+_PROJECT_SIGNAL_SCAN_MESSAGES = 3
+
 router = APIRouter()
 _plugin_instance: "Plugin | None" = None
 
@@ -4518,8 +4523,12 @@ class Plugin(PluginBase):
         return {}
 
     def _extract_project_context_from_opencode_messages(self, messages: list[Any]) -> dict:
-        """从 OpenCode 风格消息文本中的 `<env>` 片段抽取工作域信息。"""
-        for message in messages:
+        """从 OpenCode 风格消息文本中的 `<env>` 片段抽取工作域信息。
+
+        只扫描会话开头的少量消息（opencode 的 `<env>` 块总在 system/首轮），
+        避免把对话正文里的同类字样误当成工作区信号。
+        """
+        for message in messages[:_PROJECT_SIGNAL_SCAN_MESSAGES]:
             if not isinstance(message, dict):
                 continue
             for text in self._iter_text_blocks(message.get("content")):
@@ -4594,15 +4603,19 @@ class Plugin(PluginBase):
         1. 兼容把环境提示包进 `messages[].content[].text` 的客户端；
         2. 避免把 Claude / 其他兼容客户端强耦合到单一顶层字段结构；
         3. 当前只识别 `Primary working directory` 这一条保守信号。
+
+        与 opencode 抽取一致：只扫会话开头少量消息，正文里转述的工作目录不命中。
         """
-        for message in messages:
+        for message in messages[:_PROJECT_SIGNAL_SCAN_MESSAGES]:
             if not isinstance(message, dict):
                 continue
             for text in self._iter_text_blocks(message.get("content")):
                 match = re.search(r"Primary working directory\s*:\s*(.+)", text)
                 if not match:
                     continue
-                working_directory = match.group(1).strip()
+                working_directory = self._sanitize_path_value(match.group(1))
+                if not working_directory:
+                    continue
                 return self._normalize_project_context({
                     "workspace_root": "",
                     "working_directory": working_directory,
@@ -4625,27 +4638,51 @@ class Plugin(PluginBase):
         return []
 
     def _extract_xml_like_env_value(self, text: str, label: str) -> str:
-        """从 OpenCode `<env>` 文本块中提取 `Label: value` 形式字段。"""
-        if not isinstance(text, str) or not text:
-            return ""
-        match = re.search(rf"{re.escape(label)}\s*:\s*(.+)", text)
-        return match.group(1).strip() if match else ""
+        """从 OpenCode `<env>` 文本块中提取 `Label: value` 形式字段。
 
-    def _extract_tag_value(self, text: str, tag_name: str) -> str:
-        """从类似 XML 的上下文文本中提取指定标签内容。"""
+        只有文本包含完整的 `<env>...</env>` 块才解析，且标签必须成行出现；
+        对话正文里裸露的 `Working directory: …` 字样不会命中。
+        """
         if not isinstance(text, str) or not text:
             return ""
-        match = re.search(rf"<{re.escape(tag_name)}>(.*?)</{re.escape(tag_name)}>", text, re.DOTALL)
-        return match.group(1).strip() if match else ""
+        pattern = re.compile(rf"^[ \t]*{re.escape(label)}\s*:\s*([^\r\n]+)", re.MULTILINE)
+        for block in re.finditer(r"<env>(.*?)</env>", text, re.DOTALL):
+            match = pattern.search(block.group(1))
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _sanitize_path_value(self, value: str) -> str:
+        """清洗从消息文本抽取出的路径值，拒绝夹带对话残片的畸形值。
+
+        - 只接受绝对路径（`/` 开头，或 Windows 盘符）；
+        - 拒绝含尖括号 / 反引号 / 全角括号 / 省略号 / 引号等非路径内容的取值，
+          避免把代码示例、截断展示或对话句子误当成工作区。
+        """
+        if not isinstance(value, str):
+            return ""
+        raw = value.splitlines()[0].strip() if value else ""
+        if not raw:
+            return ""
+        if not (raw.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", raw)):
+            return ""
+        if re.search(r'[<>`（）…"]', raw):
+            return ""
+        return raw
 
     def _normalize_project_context(self, raw: dict) -> dict:
         """把不同来源的工作域字段收敛成统一结构。"""
         if not isinstance(raw, dict):
             return {}
 
+        source = str(raw.get("source") or "").strip()
         workspace_root = str(raw.get("workspace_root") or "").strip()
         working_directory = str(raw.get("working_directory") or "").strip()
-        source = str(raw.get("source") or "").strip()
+        # 仅对“从消息文本抽取”的来源做路径清洗；直接 payload 保留协议原值。
+        # （清洗会把夹带对话残片的畸形取值变成空串，从而整体不命中。）
+        if source != "direct.payload":
+            workspace_root = self._sanitize_path_value(workspace_root)
+            working_directory = self._sanitize_path_value(working_directory)
         canonical_root = workspace_root or working_directory
         if not canonical_root:
             return {}
@@ -4658,6 +4695,15 @@ class Plugin(PluginBase):
             "project_id": canonical_root,
             "source": source,
         }
+
+    def _extract_tag_value(self, text: str, tag_name: str) -> str:
+        """从类似 XML 的上下文文本中提取指定标签内容。"""
+        if not isinstance(text, str) or not text:
+            return ""
+        match = re.search(rf"<{re.escape(tag_name)}>(.*?)</{re.escape(tag_name)}>", text, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+
 
     def _detect_request_protocol(self, request: dict) -> str:
         """根据请求体特征判断当前协议类型。"""
@@ -4873,7 +4919,8 @@ class Plugin(PluginBase):
                         roots.add(root)
         except Exception:
             pass
-        return sorted(roots)
+        # 只保留真实存在的目录：目录已被删除/失效的工作区不参与回填与列表。
+        return sorted(root for root in roots if Path(root).is_dir())
 
     def _schedule_project_init(self) -> None:
         """后台执行一次项目记忆初始化/回填（老项目补齐 context/memory 文件）。"""
@@ -4968,6 +5015,10 @@ class Plugin(PluginBase):
             async def runner():
                 try:
                     async with slots:
+                        # 自动刷新只对真实材料存在的仓库执行：目录无 KB 文档时
+                        # 直接跳过，避免对着空材料生成“全缺失”占位文档、白烧 token。
+                        if not self._project_kb_material(workspace_root):
+                            return
                         await self._run_project_context(workspace_root)
                 except asyncio.CancelledError:
                     raise
@@ -5077,7 +5128,15 @@ class Plugin(PluginBase):
             return None
         try:
             if not pm.has_project(workspace):
-                # 第一次命中该工作区：先按 KB 材料懒初始化 context/memory，
+                # 第一次命中该工作区：先按 KB 材料懒初始化 context/memory。
+                # 只对真实存在的目录自动建项目，避免对话正文夹带/失效路径
+                # 触发垃圾项目与无意义的 LLM 生成。
+                if not Path(workspace).is_dir():
+                    self.logger.warning(
+                        "[markdown_kb] 忽略不可达工作区（目录不存在），跳过自动建项目: %s",
+                        workspace,
+                    )
+                    return None
                 # 再在后台安排 context.md 的 LLM 首次生成（失败不影响本轮注入）
                 created = pm.ensure_skeleton(workspace, self._project_kb_material(workspace))
                 if created.get("created"):

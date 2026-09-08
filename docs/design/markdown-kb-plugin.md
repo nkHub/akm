@@ -938,6 +938,7 @@ Markdown 知识库非常适合作为 AKM 的第三方插件实现，而不是改
 - 向量去重合并：新 chunk 入库时按 embedding 余弦相似度与存量 chunk 比对；相似时仍保留新 chunk 以保证文档索引完整，并通过 LLM 判断是否有补充信息，有则合并存量文本并重新 embedding，同时 boost 存量记忆值
 - 项目级 context/memory 自动维护（v0.1.3）：`inject_project_context` 开关，数据根 `~/.akm/markdown_kb/projects/<sha1>/` 下维护 `context.md` / `memory.md` / `meta.json`（不进 docs / 不切片 / 不参与检索）；触发源为知识库内容事件（add/update/delete/learn），两级维护（文件级事件 + digest 语义摘要，模型不可用自动降级）；命中工作区的请求首轮注入全量、后续轮次仅版本更新时轻量刷新，与 `auto_inject` 正交且同时命中合并为一段；老数据后台回填 + `POST /api/markdown-kb/projects/init`，调试接口 `GET /projects` / `GET /project-context` / `POST /projects/maintain`
 - context.md 语义生成（同 v0.1.3 特性）：先由本地材料建零成本骨架，再调用本地模型做“首次生成”——仅依据触发时刻一次性读取的真实仓库材料（两级目录树 + AGENTS/README/package.json 等固定文件原文 + 知识库关联文档）重组成 ≤150 行、固定 7 章节的项目说明书（禁临期词与脑补目录），随后按 1 天冷却做“最小化增量更新”（只改过时条目，输出与现状一致不落盘）；无模型/失败保留现状并标记 degraded；人工无标记内容绝不覆盖；context 变化不自增 memory `revision`；手动接口 `POST /projects/context`（`workspace_root` + 可选 `force`），MCP 新增 `init_kb_projects` / `list_kb_projects` / `read_kb_project_context` / `maintain_kb_projects` / `refresh_kb_project_context`
+- 工作区信号抽取严格化与目录防御（v0.1.4）：信号只在会话开头 3 条消息内识别（opencode 取完整 `<env>` 块内成行 `Working directory:`，Claude 取 system / 早期消息文本里的 `Primary working directory`），对话正文里的同类字样不再触发；抽取值强制路径清洗（只收绝对路径，拒绝夹带 `<>` 反引号、全角括号、省略号、引号等对话残片），清洗为空不命中；命中目录不存在/已删除则不自动建项目；后台自动刷新对无 KB 材料仓库直接跳过（不生成“全缺失”占位、不烧 token）
 - 无价值记忆自动清理：`organize_cleanup_enabled` 默认关闭，需手动开启后自动清理长期未被检索的 `.learn.md` 文档
 - 知识库页面不再内置独立配置弹窗，配置统一收口到插件列表页弹窗
 - `markdown_kb` 的模型配置使用 `/v1/models` 驱动的动态下拉
