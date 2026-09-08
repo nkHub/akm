@@ -54,4 +54,9 @@ else
   echo "WARN: tinyaes.so 未找到，跳过（运行时 import tinyaes 将失败）"
 fi
 
+# py2app 已对应用签名，但后续资源精简和扩展补入会破坏资源封印；
+# 所有打包后处理完成后重新做 ad-hoc 签名，并在校验失败时阻止发布包生成。
+codesign --force --deep --sign - "dist/AI Key Manager.app"
+codesign --verify --deep --strict "dist/AI Key Manager.app"
+
 echo "Build complete: $ROOT_DIR/dist/AI Key Manager.app"

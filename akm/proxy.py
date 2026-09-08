@@ -748,8 +748,6 @@ async def forward_request(
                 },
                 ensure_ascii=False,
             )
-        else:
-            forwarded_request_body = json.dumps(upstream_body, ensure_ascii=False)
 
         # 实际发往上游的请求头（脱敏后），随结果回传供审计落库。
         # multipart 场景下 Content-Type 已在上方移除，交由 httpx 生成 boundary，
@@ -766,6 +764,11 @@ async def forward_request(
                 stream_options["include_usage"] = True
             else:
                 upstream_body["stream_options"] = {"include_usage": True}
+
+        # 等流式字段补齐后再固定 JSON 快照，确保审计内容与发送给上游的请求一致；
+        # multipart 仍使用前面的表单与文件元信息摘要，不记录文件内容。
+        if not is_multipart_request:
+            forwarded_request_body = json.dumps(upstream_body, ensure_ascii=False)
 
         last_error = ""
         for attempt in range(1 + _proxy_max_retries_per_key()):

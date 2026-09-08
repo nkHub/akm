@@ -2,6 +2,10 @@
 
 ## 一、版本号统一
 
+AKM v0.1.43 同步更新 `akm/__init__.py`、`pyproject.toml` 与 `uv.lock` 的本项目版本。内置 Markdown KB MCP 的握手版本独立于 AKM 版本，读取当前已加载 `markdown_kb` 插件的 `meta.version`；本次不提升插件版本。
+
+`scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
+
 ### 当前问题
 
 版本号应以 `akm/__init__.py` 为唯一运行时来源；`pyproject.toml` 的包元数据也必须同步，避免 pip 安装包与应用显示版本不一致：

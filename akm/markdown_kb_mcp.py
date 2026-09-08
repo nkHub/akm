@@ -436,19 +436,24 @@ def _format_hits(data: dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
-async def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
+async def _handle(message: dict[str, Any], request: Request) -> dict[str, Any] | None:
     """按 JSON-RPC method 分发；通知类请求返回 None（HTTP 202）。"""
     method = message.get("method")
     msg_id = message.get("id")
 
     if method == "initialize":
+        # 从当前加载实例读取元数据，避免插件更新后仍报告宿主或固定版本。
+        manager = getattr(request.app.state, "plugin_manager", None)
+        plugin = manager.plugins.get("markdown_kb") if manager is not None else None
+        if plugin is None:
+            return _error(msg_id, -32603, "markdown_kb 插件未加载，无法获取版本")
         # 握手：声明协议版本、能力与服务器信息
         return _result(
             msg_id,
             {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "akm-markdown-kb", "version": "1.0.0"},
+                "serverInfo": {"name": "akm-markdown-kb", "version": plugin.meta.version},
                 "instructions": "使用 search_kb 检索本地 Markdown 知识库，ask_kb 进行基于知识库的问答。",
             },
         )
@@ -584,7 +589,7 @@ async def mcp_endpoint(request: Request) -> Response:
     if not isinstance(message, dict):
         return JSONResponse(_error(None, -32600, "无效的请求：应为 JSON 对象"), status_code=400)
 
-    result = await _handle(message)
+    result = await _handle(message, request)
     if result is None:
         # 通知类请求：返回 202 Accepted 空响应
         return Response(status_code=202)
