@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-08T14:07:39+0800",
+  "generated_at": "2026-09-08T16:01:37+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -92,13 +92,13 @@
       "size": 2878
     },
     "markdown_kb": {
-      "version": "0.1.4",
+      "version": "0.1.5",
       "description": "Markdown 本地知识库，支持状态查看、.md 文件上传保存与项目级 context/memory 自动维护",
       "category": "app",
       "has_menu": true,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.4.zip",
-      "sha256": "9594c1f939195692a90f3158dcf50cdfa4382ce7d880a621293d99322945bd45",
-      "size": 1145771
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.5.zip",
+      "sha256": "94d9907d2f74cdf6191b901a4075b98c6092e4601e92c5cb7233a617bb97916f",
+      "size": 1146312
     },
     "mcp_tool_gateway": {
       "version": "0.1.0",
