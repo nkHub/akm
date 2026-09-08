@@ -940,7 +940,8 @@ README.md 前 1400 字 + 知识库内该工作区 ≤12 篇文档名；此后 co
 
 MCP 工具集同步新增：`list_kb_projects`、`read_kb_project_context`、`init_kb_projects`、
 `maintain_kb_projects`、`refresh_kb_project_context`——与插件 API 一一对应，经宿主
-`akm/markdown_kb_mcp.py` 转发到上述端点。
+`akm/markdown_kb_mcp.py` 转发到上述端点；stdio 同构脚本 `scripts/markdown-kb-mcp.py`
+同步提供同样工具（工具规格与宿主内置版保持一致，需同步维护）。
 
 ### 12.6 权衡
 
