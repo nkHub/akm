@@ -270,6 +270,30 @@ async def test_first_turn_full_inject_then_refresh_on_version_bump():
 
 
 @pytest.mark.asyncio
+async def test_each_turn_injects_full_block_on_every_turn():
+    # inject_project_context_each_turn 开启后：每个带工作区信号的请求都注入全量，
+    # 第二轮（有助手历史、版本未变）也不再是“不注入”或“轻量刷新”，而是全量块。
+    plugin, tmp = _build_plugin({"inject_project_context": True, "inject_project_context_each_turn": True})
+    workspace = str(_workspace_dir(tmp, "proj-a"))
+
+    out1 = await plugin.on_request(_ctx(_responses_request(workspace)))
+    assert "## 项目上下文" in str(out1["instructions"] or "")
+    assert "最近修改记忆" in str(out1["instructions"] or "")
+
+    out2 = await plugin.on_request(_ctx(_responses_request(workspace, with_history=True)))
+    instructions2 = str(out2["instructions"] or "")
+    assert "## 项目上下文" in instructions2
+    assert "最近修改记忆" in instructions2
+    assert "【项目记忆更新】" not in instructions2
+
+    # 开关开启但无工作区信号：仍透传不注入
+    plain = {"model": "x", "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "你好"}]}]}
+    out3 = await plugin.on_request(_ctx(plain))
+    assert out3 is plain
+    assert not str(out3.get("instructions") or "").strip()
+
+
+@pytest.mark.asyncio
 async def test_project_inject_only_when_workspace_signal_present():
     plugin, _tmp = _build_plugin({"inject_project_context": True})
     # 纯聊天（无 cwd / workspace_root）：透传不注入
