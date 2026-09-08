@@ -1,5 +1,7 @@
 # 插件系统设计
 
+内置 `/api/markdown-kb/mcp` 的 `initialize` 响应中，`serverInfo.version` 动态读取当前已加载 `markdown_kb` 插件的 `meta.version`，不使用 AKM 宿主版本或固定版本。插件未加载时握手返回 JSON-RPC 错误；插件更新后新握手使用新实例的版本。
+
 > 版本：WIP | 状态：设计中
 
 ## 目标

@@ -1111,7 +1111,11 @@ def test_default_image_generation_model_uses_first_configured_value():
 
 
 @pytest.mark.asyncio
-async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
+@pytest.mark.parametrize("has_adapter", [False, True])
+@pytest.mark.parametrize("save_request_body", [False, True])
+@pytest.mark.parametrize("snapshot", ["", '{"messages":[{"content":"upstream"}]}'])
+@pytest.mark.parametrize("save_response_body", [False, True])
+async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch, has_adapter, save_request_body, snapshot, save_response_body):
     """审计日志应优先记录 proxy 返回的实际转发请求体，而不是入口原始 body。"""
 
     class _FakeAdapter:
@@ -1123,8 +1127,8 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
         return {
             "status_code": 200,
             "body": '{"choices":[{"message":{"content":"ok"}}]}',
-            "adapter": _FakeAdapter(),
-            "request_body_for_log": '{"messages":[{"content":"__AKM_EMAIL_deadbeefcafe__"}]}',
+            "adapter": _FakeAdapter() if has_adapter else None,
+            "request_body_for_log": snapshot,
             "key_alias": "test-key",
             "provider": "openai",
             "model": "gpt-4",
@@ -1137,7 +1141,7 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
 
     monkeypatch.setattr("akm.server.forward_request", mock_forward)
     monkeypatch.setattr("akm.server._submit_audit_log", fake_submit)
-    monkeypatch.setattr("akm.server.load_config", lambda: {"log_request_body": True, "log_response_body": False, "stream_capture_max_bytes": 262144})
+    monkeypatch.setattr("akm.server.load_config", lambda: {"log_request_body": save_request_body, "log_response_body": save_response_body, "stream_capture_max_bytes": 262144})
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -1147,12 +1151,19 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
         )
 
     assert resp.status_code == 200
-    assert captured["request_body"] == '{"messages":[{"content":"__AKM_EMAIL_deadbeefcafe__"}]}'
+    assert captured["request_body"] == (snapshot if save_request_body else "")
+    assert bool(captured["client_request_body"]) is save_request_body
+    assert captured["response_body"] == ('{"choices":[{"message":{"content":"ok"}}]}' if save_response_body else "")
+    assert captured["converted"] == int(has_adapter)
     assert "a@test.com" not in captured["request_body"]
 
 
 @pytest.mark.asyncio
-async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
+@pytest.mark.parametrize("has_adapter", [False, True])
+@pytest.mark.parametrize("save_request_body", [False, True])
+@pytest.mark.parametrize("snapshot", ["", '{"messages":[{"content":"upstream"}],"stream":true}'])
+@pytest.mark.parametrize("save_response_body", [False, True])
+async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch, has_adapter, save_request_body, snapshot, save_response_body):
     """流式审计日志同样应优先记录实际转发请求体。"""
 
     captured = {}
@@ -1166,15 +1177,17 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
             return None
 
     class _FakeAdapter:
-        pass
+        async def convert_sse_stream(self, chunks):
+            async for chunk in chunks:
+                yield chunk
 
     async def mock_forward(body, client, log_callback=None, api_path="chat/completions", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
         return {
             "stream": True,
             "status_code": 200,
             "response": DummyResp(),
-            "adapter": _FakeAdapter(),
-            "request_body_for_log": '{"messages":[{"content":"__AKM_PHONE_deadbeefcafe__"}],"stream":true}',
+            "adapter": _FakeAdapter() if has_adapter else None,
+            "request_body_for_log": snapshot,
             "key_alias": "stream-key",
             "provider": "openai",
             "model": "gpt-4",
@@ -1185,7 +1198,7 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
 
     monkeypatch.setattr("akm.server.forward_request", mock_forward)
     monkeypatch.setattr("akm.server._submit_audit_log", fake_submit)
-    monkeypatch.setattr("akm.server.load_config", lambda: {"log_request_body": True, "log_response_body": False, "stream_capture_max_bytes": 262144})
+    monkeypatch.setattr("akm.server.load_config", lambda: {"log_request_body": save_request_body, "log_response_body": save_response_body, "stream_capture_max_bytes": 262144})
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -1198,13 +1211,16 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch):
             async for _ in resp.aiter_text():
                 pass
 
-    assert captured["request_body"] == '{"messages":[{"content":"__AKM_PHONE_deadbeefcafe__"}],"stream":true}'
+    assert captured["request_body"] == (snapshot if save_request_body else "")
+    assert bool(captured["client_request_body"]) is save_request_body
+    assert captured["response_body"] == ('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n' if save_response_body else "")
+    assert captured["converted"] == int(has_adapter)
     assert "13800138000" not in captured["request_body"]
 
 
 @pytest.mark.asyncio
-async def test_audit_skips_transformed_bodies_without_conversion(monkeypatch):
-    """未发生协议转换（converter 插件未触发）时，「转换后请求体/响应体」两列不落库。"""
+async def test_audit_records_upstream_request_without_conversion(monkeypatch):
+    """未发生协议转换时也按记录开关保存上游请求体和客户端响应体。"""
 
     captured = {}
 
@@ -1244,8 +1260,8 @@ async def test_audit_skips_transformed_bodies_without_conversion(monkeypatch):
         )
 
     assert resp.status_code == 200
-    assert captured["request_body"] == ""
-    assert captured["response_body"] == ""
+    assert captured["request_body"] == '{"messages":[{"content":"__AKM_PHONE_deadbeefcafe__"}]}'
+    assert captured["response_body"] == '{"choices":[{"message":{"content":"ok"}}]}'
     # 原始请求体归属 client_request_body 列，未被丢弃
     assert "13800138000" in (captured["client_request_body"] or "")
 

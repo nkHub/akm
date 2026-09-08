@@ -1,6 +1,7 @@
 """akm.markdown_kb_mcp 的 MCP streamable HTTP 端点测试。"""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -35,9 +36,13 @@ async def _rpc(client, method, params=None, msg_id=1, accept="application/json")
 
 
 @pytest.mark.asyncio
-async def test_mcp_initialize_handshake(monkeypatch):
+@pytest.mark.parametrize("version", ["0.1.4", "0.2.0"])
+async def test_mcp_initialize_handshake(monkeypatch, version):
     """initialize 握手应声明协议版本、能力与工具 serverInfo。"""
     captured = {}
+    monkeypatch.setattr(app.state, "plugin_manager", SimpleNamespace(
+        plugins={"markdown_kb": SimpleNamespace(meta=SimpleNamespace(version=version))}
+    ), raising=False)
 
     async def fake_call(endpoint, payload, timeout=120.0):
         captured["endpoint"] = endpoint
@@ -56,6 +61,16 @@ async def test_mcp_initialize_handshake(monkeypatch):
     assert result["protocolVersion"] == "2025-06-18"
     assert result["capabilities"]["tools"]["listChanged"] is False
     assert result["serverInfo"]["name"] == "akm-markdown-kb"
+    assert result["serverInfo"]["version"] == version
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialize_without_plugin(monkeypatch):
+    """插件未加载时明确报错，不返回虚构的版本号。"""
+    monkeypatch.setattr(app.state, "plugin_manager", SimpleNamespace(plugins={}), raising=False)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await _rpc(client, "initialize")
+    assert resp.json()["error"]["code"] == -32603
 
 
 @pytest.mark.asyncio

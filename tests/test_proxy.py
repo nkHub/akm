@@ -1,4 +1,5 @@
 import pytest
+import json
 from akm import __version__
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
@@ -683,6 +684,7 @@ async def test_forward_messages_converter_receives_provider_context(monkeypatch)
     assert result["status_code"] == 200
     payload = send_calls[0]["req"].content.decode("utf-8")
     assert '"provider_seen":"openai"' in payload
+    assert json.loads(result["request_body_for_log"]) == json.loads(payload)
 
 
 @pytest.mark.asyncio
@@ -708,6 +710,7 @@ async def test_forward_streaming_request_still_forces_upstream_sse(monkeypatch):
     payload = send_calls[0]["req"].content.decode("utf-8")
     assert '"stream":true' in payload
     assert '"include_usage":true' in payload
+    assert json.loads(result["request_body_for_log"]) == json.loads(payload)
 
 
 @pytest.mark.asyncio
