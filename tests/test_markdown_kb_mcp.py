@@ -91,6 +91,11 @@ async def test_mcp_tools_list(monkeypatch):
         "scan_kb_sessions",
         "read_kb_file",
         "write_kb_file",
+        "list_kb_projects",
+        "read_kb_project_context",
+        "init_kb_projects",
+        "maintain_kb_projects",
+        "refresh_kb_project_context",
     ):
         assert maint in names
     learn = next(t for t in tools if t["name"] == "learn_kb")
@@ -628,4 +633,93 @@ async def test_mcp_maintenance_write_kb_file_requires_content(monkeypatch):
     err = resp.json()["error"]
     assert err["code"] == -32603
     assert "content 不能为空" in err["message"]
+    assert called == []
+
+
+# ─────────────────── 项目级 context/memory 维护工具 ───────────────────
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_init_projects_payload(monkeypatch):
+    """init_kb_projects 应把 workspace_roots 数组透传到 projects/init；缺省时发空体。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        captured["method"] = method
+        return {"ok": True, "created": 2, "projects": [{"workspace_root": "/a"}, {"workspace_root": "/b"}]}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "init_kb_projects", "arguments": {"workspace_roots": ["/a", "/b"]}},
+        )
+        assert resp.status_code == 200
+        text = resp.json()["result"]["content"][0]["text"]
+        assert '"created": 2' in text
+        assert captured["endpoint"] == "projects/init"
+        assert captured["method"] == "POST"
+        assert captured["payload"] == {"workspace_roots": ["/a", "/b"]}
+
+        # 不带 workspace_roots：空请求体 → 插件端默认扫描全部已绑定根目录
+        resp = await _rpc(client, "tools/call", {"name": "init_kb_projects", "arguments": {}})
+        assert resp.status_code == 200
+        assert captured["payload"] == {}
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_read_project_context_get(monkeypatch):
+    """read_kb_project_context 应以 GET 调 project-context，workspace_root 拼进 query。"""
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        captured["method"] = method
+        return {"ok": True, "project": {"workspace_root": "/proj", "memory_md": "近期修改..."}}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "read_kb_project_context", "arguments": {"workspace_root": "/proj/我的 目录"}},
+        )
+    assert resp.status_code == 200
+    text = resp.json()["result"]["content"][0]["text"]
+    assert "近期修改" in text
+    assert captured["method"] == "GET"
+    assert captured["payload"] is None
+    assert captured["endpoint"].startswith("project-context?")
+    assert "workspace_root=" in captured["endpoint"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_maintenance_refresh_context_required_fields(monkeypatch):
+    """refresh_kb_project_context 缺 workspace_root 应报错且不调插件。"""
+    called = []
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        called.append(endpoint)
+        return {"ok": True}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "refresh_kb_project_context", "arguments": {"force": True}},
+        )
+    assert resp.status_code == 200
+    err = resp.json()["error"]
+    assert err["code"] == -32603
+    assert "workspace_root 不能为空" in err["message"]
     assert called == []
