@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-AKM v0.1.44：管理台首页新增**通用插件卡片插槽**——已启用插件实现 `dashboard_card()` 即可在统计页以统一卡片展示指标/最近事件/操作链接，插件增删改首页卡片只需发插件更新、无需升级内核；旧内核/旧插件双向兼容自动跳过。data_filter_guard v0.1.4 为首个采用者（脱敏/还原/拦截运行统计卡）。内置 Markdown KB MCP 握手版本跟随 markdown_kb 插件版本。
+AKM v0.1.45：管理台首页插件卡片区改为**瀑布流布局**（CSS columns，卡片按各自高度自然交错排布、不强制同行等高）。首页插件卡片统一由 **通用插槽**（`dashboard_card()`）渲染——data_filter_guard v0.1.5 运行统计卡与 markdown_kb v0.1.6 记忆统计卡均经此展示；宿主已移除早期 markdown_kb 专用首页渲染（`mk-memory-section`），插件增删改首页卡片只需发插件更新、无需升级内核。内置 Markdown KB MCP 握手版本跟随 markdown_kb 插件版本。
 
 macOS 构建在资源后处理完成后重新进行 ad-hoc 签名并校验，校验失败时阻止生成发布包；该签名不等同于 Apple 公证。
 

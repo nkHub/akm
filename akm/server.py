@@ -666,7 +666,7 @@ def _build_plugin_dashboard_cards_section(pm) -> str:
         return ""
     return (
         '<div id="plugin-dashboard-cards" class="mt-6">'
-        '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">'
+        '<div class="plugin-cards-masonry">'
         + "".join(rendered)
         + "</div></div>"
     )
