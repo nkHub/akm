@@ -4260,6 +4260,75 @@ async def test_build_markdown_kb_memory_card_disabled(monkeypatch):
     assert _build_markdown_kb_memory_card(NoPluginPM()) == ""
 
 
+@pytest.mark.asyncio
+async def test_build_data_filter_guard_section(monkeypatch):
+    """data_filter_guard 启用且有统计时，首页记录区块应含数字与最近记录。"""
+    from akm.server import _build_data_filter_guard_section
+
+    class FakePlugin:
+        enabled = True
+
+        def get_guard_stats(self):
+            return {
+                "counters": {
+                    "masked_request": 3,
+                    "redactions": 7,
+                    "restored_response": 2,
+                    "guard_warn": 0,
+                    "guard_mask": 1,
+                    "guard_block": 1,
+                    "guard_total": 2,
+                },
+                "recent": [
+                    {"ts": "2026-09-09T10:20:30+08:00", "type": "guard_block", "path": "responses", "count": 1},
+                    {"ts": "2026-09-09T09:15:00+08:00", "type": "masked_request", "path": "chat/completions", "count": 4},
+                ],
+            }
+
+    class FakePM:
+        plugins = {"data_filter_guard": FakePlugin()}
+
+    html = _build_data_filter_guard_section(FakePM())
+    assert html
+    assert "数据安全记录" in html and "最近记录" in html
+    assert "脱敏请求" in html and "替换片段" in html and "还原响应" in html and "风险拦截" in html
+    assert "3" in html and "7" in html and "2" in html
+    # 最近记录行：时间/中文标签/入口路径均已渲染
+    assert "风险拦截" in html and "responses" in html and "脱敏请求" in html and "chat/completions" in html
+
+
+@pytest.mark.asyncio
+async def test_build_data_filter_guard_section_defensive(monkeypatch):
+    """插件缺失/未启用/旧版本无统计方法时返回空串，首页不展示记录区块。"""
+    from akm.server import _build_data_filter_guard_section
+
+    class NoPluginPM:
+        plugins = {}
+    assert _build_data_filter_guard_section(NoPluginPM()) == ""
+
+    class DisabledPlugin:
+        enabled = False
+    class DisabledPM:
+        plugins = {"data_filter_guard": DisabledPlugin()}
+    assert _build_data_filter_guard_section(DisabledPM()) == ""
+
+    # 旧版本插件没有 get_guard_stats 方法：应兼容返回空串而非抛错
+    class LegacyPlugin:
+        enabled = True
+    class LegacyPM:
+        plugins = {"data_filter_guard": LegacyPlugin()}
+    assert _build_data_filter_guard_section(LegacyPM()) == ""
+
+    # 插件已加载但从未产生记录：返回空串（区块整体不展示，避免出现全零死卡片）
+    class EmptyPlugin:
+        enabled = True
+        def get_guard_stats(self):
+            return {}
+    class EmptyPM:
+        plugins = {"data_filter_guard": EmptyPlugin()}
+    assert _build_data_filter_guard_section(EmptyPM()) == ""
+
+
 def test_build_sidebar_plugin_menu_uses_global_plugin_manager(monkeypatch):
     """侧边栏菜单应读取模块级全局 plugin_manager（lifespan 填充），而非不存在的局部变量。
 
