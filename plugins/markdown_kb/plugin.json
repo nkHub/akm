@@ -1,12 +1,12 @@
 {
   "name": "markdown_kb",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "has_menu": true,
   "category": "app",
   "default_enabled": false,
   "priority": 200,
   "settings_columns": 2,
-  "description": "Markdown 本地知识库，支持状态查看、.md 文件上传保存与项目级 context/memory 自动维护",
+  "description": "Markdown 本地知识库，支持状态查看、.md 文件上传保存与项目级 context/memory 自动维护；内置记忆统计首页卡片（dashboard_card）",
   "menu": {
     "title": "知识库",
     "icon": "book",

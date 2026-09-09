@@ -4200,64 +4200,21 @@ async def test_landing_page_serves_launch_html():
 
 
 @pytest.mark.asyncio
-async def test_admin_injects_memory_section(monkeypatch):
-    """首页应保留知识库记忆卡片，并移除与侧边栏重复的插件卡片入口。"""
+async def test_admin_dashboard_renders_without_plugin_cards(monkeypatch):
+    """首页不再有专用记忆卡区；无启用插件卡片时通用卡片区不渲染、占位被替换。"""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/admin")
     assert resp.status_code == 200
     text = resp.text
-    # 仅保留知识库记忆区
-    assert "mk-memory-section" in text
-    assert "plugin-cards-section" not in text
-    # 侧边栏菜单占位被渲染（空菜单时注入空字符串，占位符应被替换掉）
+    # 专用知识库记忆卡区块已移除（记忆卡收编到通用 dashboard_card 插槽）
+    assert "mk-memory-section" not in text
+    # 无任何可渲染卡片时，通用卡片区整区不出现
+    assert "plugin-dashboard-cards" not in text
+    # 模板占位均被替换（空串注入后不应残留原占位符）
     assert "{{ plugin_menu_html }}" not in text
+    assert "{{ plugin_cards_html }}" not in text
     assert "{{ mk_memory_html }}" not in text
-
-
-@pytest.mark.asyncio
-async def test_build_markdown_kb_memory_card(monkeypatch):
-    """markdown-kb 插件启用时，首页记忆卡片应含 4 项指标。"""
-    from akm.server import _build_markdown_kb_memory_card
-
-    class FakePlugin:
-        enabled = True
-        def get_memory_stats(self):
-            return {
-                "summary": {
-                    "memory_chunk_count": 12,
-                    "memory_avg_value": 0.66,
-                    "memory_total_hits": 99,
-                    "memory_high_value_count": 5,
-                }
-            }
-
-    class FakePM:
-        plugins = {"markdown_kb": FakePlugin()}
-
-    html = _build_markdown_kb_memory_card(FakePM())
-    assert html
-    assert "akm-plugin-card" in html
-    assert "12" in html and "0.66" in html and "99" in html and "5" in html
-    assert "记忆条目" in html and "平均记忆值" in html
-
-
-@pytest.mark.asyncio
-async def test_build_markdown_kb_memory_card_disabled(monkeypatch):
-    """插件未启用时返回空串，首页不展示记忆卡片。"""
-    from akm.server import _build_markdown_kb_memory_card
-
-    class FakePlugin:
-        enabled = False
-
-    class FakePM:
-        plugins = {"markdown_kb": FakePlugin()}
-
-    assert _build_markdown_kb_memory_card(FakePM()) == ""
-
-    class NoPluginPM:
-        plugins = {}
-    assert _build_markdown_kb_memory_card(NoPluginPM()) == ""
 
 
 @pytest.mark.asyncio
@@ -4428,6 +4385,39 @@ async def test_build_plugin_dashboard_cards_section_defensive(monkeypatch):
     assert 'akm-plugin-card' in html
     # 同 id 只渲染首张（dupe_a → title="A"）；B 的 title 不应出现
     assert 'title="A"' in html and 'title="B"' not in html
+
+
+@pytest.mark.asyncio
+async def test_markdown_kb_memory_card_renders_via_generic_slot():
+    """markdown_kb 记忆卡收编后应经通用插槽渲染：统计值透传且去重 id 生效。"""
+    from akm.server import _build_plugin_dashboard_cards_section
+
+    class MkPlugin:
+        enabled = True
+        def dashboard_card(self):
+            return {
+                "id": "markdown_kb",
+                "icon": "book",
+                "title": "知识库记忆",
+                "metrics": [
+                    {"label": "记忆条目", "value": 12},
+                    {"label": "平均记忆值", "value": 0.66},
+                    {"label": "累计命中", "value": 99},
+                    {"label": "高值(>0.5)", "value": 5},
+                ],
+                "actions": [{"label": "查看 ›", "href": "/plugins/markdown_kb"}],
+            }
+
+    class FakePM:
+        plugins = {"markdown_kb": MkPlugin()}
+
+    html = _build_plugin_dashboard_cards_section(FakePM())
+    assert html
+    assert 'id="plugin-dashboard-cards"' in html
+    assert 'title="知识库记忆"' in html
+    assert "记忆条目" in html and "平均记忆值" in html and "累计命中" in html and "高值(>0.5)" in html
+    assert ">12<" in html and ">0.66<" in html and ">99<" in html and ">5<" in html
+    assert 'href="/plugins/markdown_kb"' in html and "查看 ›" in html
 
 
 def test_build_sidebar_plugin_menu_uses_global_plugin_manager(monkeypatch):

@@ -91,3 +91,33 @@ async def test_embed_texts_empty_input_returns_empty():
         vectors = await plugin._embed_texts([], "text-embedding-3-small")
     assert vectors == []
     assert batch_sizes == []
+
+
+def test_dashboard_card_returns_zero_metrics_without_store():
+    """记忆存储未就绪（__new__ 轻量实例）时，卡片仍应返回、四项指标为 0。"""
+    plugin = _build_plugin()
+    card = plugin.dashboard_card()
+    assert isinstance(card, dict)
+    assert card["id"] == "markdown_kb"
+    assert card["icon"] == "book"
+    assert card["title"] == "知识库记忆"
+    labels = [m["label"] for m in card["metrics"]]
+    assert labels == ["记忆条目", "平均记忆值", "累计命中", "高值(>0.5)"]
+    assert all(m["value"] == 0 or m["value"] == 0.0 for m in card["metrics"])
+    assert card["actions"] == [{"label": "查看 ›", "href": "/plugins/markdown_kb"}]
+
+
+def test_dashboard_card_maps_memory_stats():
+    """有记忆统计时，卡片应把 summary 四项映射为对应指标值。"""
+    plugin = _build_plugin()
+    plugin.get_memory_stats = lambda: {
+        "summary": {
+            "memory_chunk_count": 12,
+            "memory_avg_value": 0.66,
+            "memory_total_hits": 99,
+            "memory_high_value_count": 5,
+        }
+    }
+    card = plugin.dashboard_card()
+    values = {m["label"]: m["value"] for m in card["metrics"]}
+    assert values == {"记忆条目": 12, "平均记忆值": 0.66, "累计命中": 99, "高值(>0.5)": 5}

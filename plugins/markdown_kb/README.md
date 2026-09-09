@@ -47,6 +47,7 @@ py2app 打包入口已显式包含 `sqlite_vec`，避免菜单栏应用中因动
 - **项目级 context/memory 自动维护**：默认关闭（插件配置 `inject_project_context`），为每个绑定过工作区的项目在插件数据目录下自动维护 `context.md` / `memory.md`，开启后在带工作区信号的首轮请求里注入项目上下文 + 最近修改记忆，后续轮次仅在记忆版本更新时轻量刷新；可再开启 `inject_project_context_each_turn` 让每个请求都注入全量。两个注入开关正交互不影响。context.md 由本地模型“首次生成 / 最小化增量更新”维护（只依据一次性读取的真实仓库材料，≤150 行、固定章节、1 天冷却），memory.md 由 KB 事件确定性渲染
 - **Hook 学习入库**：通过 Codex/Claude 的 `UserPromptSubmit / Stop / PreCompact` hooks 将会话片段沉淀为 `.learn.md` 知识，自动 workspace 绑定、幂等判重并重建索引；重建文件时自动对新 chunk 做向量相似度比对，相似 chunk 仍保留新文档内容，并通过 LLM 判断是否有补充信息，有补充时合并存量文本并重新 embedding，同时 boost 存量记忆
 - **会话扫描器**：`POST /api/markdown-kb/scan-sessions` 扫描 `~/.codex/sessions/` 和 `~/.claude/projects/*/` 下的 JSONL 会话文件，自动归纳知识并更新记忆
+- **首页记忆卡片**：插件实现宿主「首页插件卡片插槽」的 `dashboard_card()` 协议，把 `get_memory_stats()` 的四项指标（记忆条目 / 平均记忆值 / 累计命中 / 高值(>0.5)）渲染为管理台首页卡片（图标 book，右侧「查看 ›」跳转本插件宿主页）；存储未就绪时仍返回全 0 卡片保证首见可见。宿主不感知插件细节，卡片增改只需发插件更新。
 - **记忆系统**：chunk 级 `hit_count` / `memory_value`，艾宾浩斯衰减曲线驱动，多源 boost（learn_new 0.30 / hook_confirm 0.20 / scan_cross 0.20 / retrieval_hit 0.10），高记忆值 chunk（>0.5）可豁免 score_threshold 独立放行；定时自动整理过期记忆并清理无价值 `.learn.md` 文档
 
 ## 检索排序策略
