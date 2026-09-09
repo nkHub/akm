@@ -27,6 +27,8 @@ from akm.plugins import PluginBase
 import hashlib
 import json
 import re
+from datetime import datetime
+from pathlib import Path
 
 
 # 默认请求文本扫描路径：对话正文 + 系统/指令 + Chat 续接工具参数
@@ -70,6 +72,27 @@ _SSE_CONTENT_FIELD_KEYS = frozenset({
     "text",
     "thinking",
 })
+
+
+# ── 运行记录（脱敏/还原/拦截统计，供首页仪表盘卡片展示） ──────────
+# 记录落盘到 ``~/.akm/data_filter_guard/stats.json``（不保存任何明文/占位符原文，
+# 只保存累计数字与命中 tag 的聚合计数），重启后累计量仍可恢复。
+_STATS_SCHEMA = 1
+_STATS_RECENT_LIMIT = 20
+# 固定计数键：masked_request 脱敏过的请求数；redactions 累计替换占位符数；
+# restored_response 做过占位符还原的响应数；guard_* 非流式响应防护三类动作。
+_STATS_COUNTER_KEYS = (
+    "masked_request",
+    "redactions",
+    "restored_response",
+    "guard_warn",
+    "guard_mask",
+    "guard_block",
+)
+# 从 ``<AKM-SEC:tag@seq:hash/>`` 占位符中提取 tag（字段名/规则标签），用于聚合展示
+_PLACEHOLDER_TAG_RE = re.compile(
+    r"^<AKM-SEC:([A-Za-z0-9_.-]{1,48})@\d+:[0-9a-fA-F]{6}/>$"
+)
 
 
 class Plugin(PluginBase):
@@ -736,6 +759,8 @@ class Plugin(PluginBase):
         self._request_text_paths = set()
         self._response_block_patterns = []
         self._reset_reverse_map()
+        # 载入历史脱敏/拦截统计（跨重启累计，供首页仪表盘卡片展示）
+        self._load_stats()
         self._diag("info", "[data_filter_guard] on_load 完成")
 
     def _reload_config(self):
@@ -1010,6 +1035,168 @@ class Plugin(PluginBase):
 
         return value, False
 
+    # ── 运行记录统计（脱敏/还原/拦截，首页卡片数据源）────────────
+
+    def _now_iso(self) -> str:
+        """本地时区的 ISO 时间字符串，用于事件时间戳。"""
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def _stats_path(self) -> Path:
+        """统计文件路径：~/.akm/<插件名>/stats.json。"""
+        root = getattr(self, "_data_root", None)
+        if root is None:
+            root = Path.home() / ".akm" / self.name
+            self._data_root = root
+        return Path(root) / "stats.json"
+
+    def _load_stats(self) -> None:
+        """从磁盘加载历史累计统计；损坏/版本不符时回退为空统计。
+
+        只有被 PluginManager 注入 name（正式运行）的实例才落盘；直接实例化
+        （单元测试等）只保留内存统计，避免测试污染用户目录。
+        """
+        if not self.name:
+            self._stats = self._empty_stats()
+            return
+        parsed = None
+        try:
+            path = self._stats_path()
+            if path.is_file():
+                raw = path.read_text("utf-8")
+                if raw.strip():
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict) and loaded.get("schema") == _STATS_SCHEMA:
+                        parsed = loaded
+        except Exception:
+            parsed = None
+        if parsed is None:
+            self._stats = self._empty_stats()
+            return
+        counters = {key: 0 for key in _STATS_COUNTER_KEYS}
+        saved = parsed.get("counters")
+        if isinstance(saved, dict):
+            for key in counters:
+                val = saved.get(key)
+                if isinstance(val, (int, float)) and val > 0:
+                    counters[key] = int(val)
+        raw_tags = parsed.get("tags")
+        tags = {}
+        if isinstance(raw_tags, dict):
+            for key, val in raw_tags.items():
+                if isinstance(val, (int, float)) and val > 0:
+                    tags[str(key)] = int(val)
+        recent = parsed.get("recent")
+        if not isinstance(recent, list):
+            recent = []
+        recent = [e for e in recent if isinstance(e, dict)][-_STATS_RECENT_LIMIT:]
+        self._stats = {
+            "schema": _STATS_SCHEMA,
+            "started_at": str(parsed.get("started_at") or self._now_iso()),
+            "updated_at": str(parsed.get("updated_at") or self._now_iso()),
+            "counters": counters,
+            "tags": tags,
+            "recent": recent,
+        }
+
+    def _empty_stats(self, started_at: str = "") -> dict:
+        """构造结构完整的空统计（schema/计数/tag/recent）。"""
+        now = started_at or self._now_iso()
+        return {
+            "schema": _STATS_SCHEMA,
+            "started_at": now,
+            "updated_at": now,
+            "counters": {key: 0 for key in _STATS_COUNTER_KEYS},
+            "tags": {},
+            "recent": [],
+        }
+
+    def _save_stats(self) -> None:
+        """把统计写到临时文件后原子替换，避免半截文件；失败仅静默跳过。"""
+        if not self.name:
+            return
+        try:
+            path = self._stats_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._stats, ensure_ascii=False), "utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def _tags_from_map(self, reverse_map: dict) -> dict:
+        """从占位符映射表聚合 tag 计数（tag=敏感字段名/规则标签，不含原文）。"""
+        tags: dict[str, int] = {}
+        for placeholder in reverse_map or {}:
+            match = _PLACEHOLDER_TAG_RE.match(str(placeholder))
+            if not match:
+                continue
+            tag = match.group(1)
+            tags[tag] = tags.get(tag, 0) + 1
+        return tags
+
+    def _record(self, etype: str, *, path: str = "", count: int = 0, tags: dict | None = None) -> None:
+        """记录一次脱敏/还原/拦截事件并落盘。
+
+        只记录聚合数字与占位符 tag，绝不保存敏感明文或占位符原文；
+        最近事件保留 _STATS_RECENT_LIMIT 条，配合固定计数键避免文件无限增长。
+        """
+        stats = getattr(self, "_stats", None)
+        if stats is None:
+            return
+        counters = stats.get("counters")
+        if etype in counters:
+            counters[etype] = int(counters.get(etype, 0)) + 1
+        if count:
+            counters["redactions"] = int(counters.get("redactions", 0)) + int(count)
+        if tags:
+            tag_counter = stats.get("tags")
+            for tag, num in tags.items():
+                tag_counter[tag] = int(tag_counter.get(tag, 0)) + int(num)
+        recent = stats.get("recent")
+        recent.append({"ts": self._now_iso(), "type": etype, "path": path, "count": int(count or 0)})
+        if len(recent) > _STATS_RECENT_LIMIT:
+            del recent[: len(recent) - _STATS_RECENT_LIMIT]
+        stats["updated_at"] = self._now_iso()
+        self._save_stats()
+
+    def _event_path(self, ctx) -> str:
+        """从 ctx/response 提取可读入口路径（如 chat/completions），取不到返回空串。"""
+        try:
+            if ctx is not None:
+                response = getattr(ctx, "response", None)
+                if isinstance(response, dict) and response.get("api_path"):
+                    return str(response["api_path"])
+                if getattr(ctx, "api_path", ""):
+                    return str(ctx.api_path)
+        except Exception:
+            pass
+        return ""
+
+    def get_guard_stats(self) -> dict:
+        """返回脱敏运行统计摘要（供首页卡片等服务端读取）。
+
+        只暴露聚合计数/标签/事件元数据，不含任何敏感明文。
+        """
+        stats = getattr(self, "_stats", None)
+        if stats is None:
+            self._load_stats()
+            stats = self._stats
+        counters = dict(stats.get("counters") or {})
+        counters["guard_total"] = (
+            int(counters.get("guard_warn", 0))
+            + int(counters.get("guard_mask", 0))
+            + int(counters.get("guard_block", 0))
+        )
+        recent = list(stats.get("recent") or [])
+        recent.reverse()
+        return {
+            "counters": counters,
+            "tags": dict(stats.get("tags") or {}),
+            "recent": recent,
+            "started_at": str(stats.get("started_at") or ""),
+            "updated_at": str(stats.get("updated_at") or ""),
+        }
+
     # ── on_request / on_response ─────────────────────────────
 
     async def on_request(self, ctx) -> dict | None:
@@ -1046,6 +1233,13 @@ class Plugin(PluginBase):
             )
         if changed:
             self._diag("info", "[data_filter_guard] 请求体已执行脱敏/过滤（可逆占位符）")
+            # 记录一次脱敏请求事件（含累计片段数与命中 tag 聚合，不含原文）
+            self._record(
+                "masked_request",
+                path=str(ctx.api_path or ""),
+                count=len(rev_copy) if self._reverse_map else 0,
+                tags=self._tags_from_map(rev_copy) if self._reverse_map else None,
+            )
             # 请求入口始终传入 dict；这里再次收窄类型，防止递归处理函数的
             # 任意 JSON 节点返回类型扩散到插件回调契约。
             return new_request if isinstance(new_request, dict) else None
@@ -1261,6 +1455,8 @@ class Plugin(PluginBase):
                 response = dict(response)
                 response["response_body"] = restored
                 self._diag("info", "[data_filter_guard] 响应体已反向还原占位符")
+                # 记录一次占位符还原事件（仅计数，不含还原出的明文）
+                self._record("restored_response", path=self._event_path(ctx))
             else:
                 self._diag(
                     "warning",
@@ -1297,6 +1493,7 @@ class Plugin(PluginBase):
             if action == "warn":
                 guarded["security_warned"] = True
                 guarded["security_action"] = "warn"
+                self._record("guard_warn", path=self._event_path(ctx))
                 self.logger.warning("[data_filter_guard] 响应命中高风险规则，已标记告警")
                 return guarded
 
@@ -1309,12 +1506,14 @@ class Plugin(PluginBase):
                     guarded["response_body"] = masked_body
                     guarded["security_masked"] = True
                     guarded["security_action"] = "mask"
+                    self._record("guard_mask", path=self._event_path(ctx))
                     self.logger.warning("[data_filter_guard] 响应命中高风险规则，已局部替换")
                     return guarded
 
             guarded["security_blocked"] = True
             guarded["security_action"] = "block"
             guarded["response_body"] = self._make_safe_response_body(api_path)
+            self._record("guard_block", path=self._event_path(ctx))
             self.logger.warning("[data_filter_guard] 响应命中高风险规则，已拦截返回")
             return guarded
         return response

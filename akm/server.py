@@ -568,6 +568,93 @@ def _build_markdown_kb_memory_card(pm) -> str:
     )
 
 
+# 首页「数据安全记录」事件类型 → 中文标签（data_filter_guard 运行统计）
+_DFG_EVENT_LABELS = {
+    "masked_request": "脱敏请求",
+    "restored_response": "占位符还原",
+    "guard_warn": "风险告警",
+    "guard_mask": "风险替换",
+    "guard_block": "风险拦截",
+}
+
+
+def _build_data_filter_guard_section(pm) -> str:
+    """服务端生成首页「数据安全 · 运行记录」区块 HTML（data_filter_guard 统计）。
+
+    读取已加载的 data_filter_guard 插件实例 ``get_guard_stats()`` 摘要；
+    插件未加载/未启用/旧版本无该方法/统计不可读/异常时返回空串（首页不展示）。
+    只展示聚合计数与事件元数据（路径/时间），不含任何敏感内容。
+    """
+    try:
+        plugin = (pm.plugins or {}).get("data_filter_guard")
+        if plugin is None or not getattr(plugin, "enabled", False):
+            return ""
+        get_stats = getattr(plugin, "get_guard_stats", None)
+        if not callable(get_stats):
+            return ""
+        stats = get_stats()
+    except Exception:
+        return ""
+    if not isinstance(stats, dict) or not stats:
+        return ""
+    counters = stats.get("counters") or {}
+
+    def _num(key: str) -> int:
+        try:
+            return int(counters.get(key) or 0)
+        except Exception:
+            return 0
+
+    shield = _plugin_svg_icon("shield")
+    stat_grid = (
+        '<span slot="desc" class="mk-memory-grid">'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("masked_request")}</div><div class="mk-mem-label">脱敏请求</div></div>'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("redactions")}</div><div class="mk-mem-label">替换片段</div></div>'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("restored_response")}</div><div class="mk-mem-label">还原响应</div></div>'
+        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("guard_total")}</div><div class="mk-mem-label">风险拦截</div></div>'
+        "</span>"
+    )
+    stat_card = (
+        f'<akm-plugin-card title="数据安全记录" class="mk-memory-card">'
+        f'<span slot="icon">{shield}</span>{stat_grid}'
+        f'<a slot="actions" href="/plugins" class="text-xs text-indigo-400 hover:text-indigo-300">配置 ›</a>'
+        f"</akm-plugin-card>"
+    )
+    # 最近记录：新在前（get_guard_stats 已倒序），逐行渲染 ts + 类型 + 入口路径
+    rows: list[str] = []
+    for event in stats.get("recent") or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        label = _DFG_EVENT_LABELS.get(event_type, event_type or "记录")
+        raw_ts = str(event.get("ts") or "")
+        ts = raw_ts[5:16].replace("T", " ") if len(raw_ts) >= 16 else (raw_ts or "-")
+        path = str(event.get("path") or "-") or "-"
+        rows.append(
+            f'<div class="flex items-center justify-between gap-3 py-1.5 text-xs">'
+            f'<span class="text-gray-400 whitespace-nowrap">{ts}</span>'
+            f'<span class="text-gray-200 whitespace-nowrap">{label}</span>'
+            f'<span class="text-gray-500 truncate text-right">{path}</span>'
+            f"</div>"
+        )
+    recent_body = "\n".join(rows) if rows else (
+        '<div class="py-1 text-xs text-gray-500">暂无脱敏/还原/拦截记录</div>'
+    )
+    recent_card = (
+        f'<akm-plugin-card title="最近记录" class="mk-memory-card">'
+        f'<span slot="icon">{shield}</span>'
+        f'<span slot="desc" class="block">{recent_body}</span>'
+        f"</akm-plugin-card>"
+    )
+    return (
+        '<div id="dfg-guard-section" class="mt-6">'
+        '<div class="text-xs font-medium text-gray-400 mb-3">数据安全 · 运行记录</div>'
+        '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">'
+        f"{stat_card}{recent_card}"
+        "</div></div>"
+    )
+
+
 def _render_template(name: str, **kwargs) -> str:
     """读取模板文件，替换 {{ var }} 占位符，支持 {% extends %}, {% include %}, {% block %}"""
     # 为静态资源提供默认版本参数，前端可用于 querystring 破缓存，避免替换 logo 后仍命中旧缓存。
@@ -2469,9 +2556,12 @@ async def admin_page(request: Request):
     """统计页面"""
     # 侧边栏插件菜单统一由 _render_template 注入。
     mk_html = _build_markdown_kb_memory_card(request.app.state.plugin_manager)
+    # data_filter_guard 运行记录区块（插件未加载/旧版本时为空串，页面不展示）
+    dfg_section_html = _build_data_filter_guard_section(request.app.state.plugin_manager)
     return HTMLResponse(_render_template(
         "dashboard.html", title="统计", active="admin",
         mk_memory_html=mk_html,
+        dfg_section_html=dfg_section_html,
     ))
 
 

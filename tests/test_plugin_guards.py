@@ -1710,3 +1710,120 @@ async def test_provider_health_probe_registers_status_api_when_enabled(monkeypat
 
     assert response.status_code == 200
     assert response.json()["healthy"] == 1
+
+
+@pytest.mark.asyncio
+async def test_data_filter_runtime_stats_record_mask_and_restore(tmp_path):
+    """脱敏与还原应计入运行统计并落盘，重启后可恢复累计值。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin.name = "data_filter_guard"
+    plugin._data_root = tmp_path
+    plugin.config = {
+        "enabled": True,
+        "sensitive_fields": "password",
+        "keyword_rules": "",
+        "regex_rules": "",  # 显式关闭默认正则，只测敏感字段
+        "request_text_paths": "messages[].content",
+        "enable_response_guard": False,  # 聚焦还原计数，跳过安全扫描分支
+    }
+    await plugin.on_load()
+    ctx = _ctx({"password": "secret", "messages": [{"content": "hi"}]}, api_path="chat/completions")
+    out = await plugin.on_request(ctx)
+    assert out is not None
+    assert out["password"].startswith("<AKM-SEC:")
+    rmap = ctx.bag_get("data_filter_guard.reverse_map")
+    assert isinstance(rmap, dict) and rmap and rmap[out["password"]] == "secret"
+
+    # 请求统计：脱敏请求 +1、替换片段累计 +1、tag 聚合非空、事件含入口路径
+    stats = plugin.get_guard_stats()
+    assert stats["counters"]["masked_request"] == 1
+    assert stats["counters"]["redactions"] == 1
+    assert stats["counters"]["restored_response"] == 0
+    assert stats["counters"]["guard_total"] == 0
+    assert stats["recent"][0]["type"] == "masked_request"
+    assert stats["recent"][0]["path"] == "chat/completions"
+    assert stats["tags"]
+
+    # 模拟上游响应含占位符（JSON 会转义 < 为 \\u003c）→ 还原并记录还原事件
+    resp_body = json.dumps({"reply": "ok", "echo": out["password"]})
+    resp_ctx = _ctx({"messages": []}, api_path="chat/completions")
+    resp_ctx.bag_set("data_filter_guard.reverse_map", rmap)
+    resp_ctx.response = {"stream": False, "api_path": "chat/completions", "response_body": resp_body}
+    guarded = await plugin.on_response(resp_ctx)
+    assert guarded is not None
+    assert "secret" in guarded["response_body"]
+    assert "<AKM-SEC:" not in guarded["response_body"]
+
+    stats2 = plugin.get_guard_stats()
+    assert stats2["counters"]["restored_response"] == 1
+    assert stats2["recent"][0]["type"] == "restored_response"
+
+    # 统计已原子落盘：新实例（同名 + 同数据目录）on_load 后恢复累计值
+    stats_file = tmp_path / "stats.json"
+    assert stats_file.is_file()
+    plugin2 = DataFilterGuard()
+    plugin2.logger = logging.getLogger("test.data_filter_guard")
+    plugin2.name = "data_filter_guard"
+    plugin2._data_root = tmp_path
+    await plugin2.on_load()
+    recovered = plugin2.get_guard_stats()
+    assert recovered["counters"]["masked_request"] == 1
+    assert recovered["counters"]["redactions"] == 1
+    assert recovered["counters"]["restored_response"] == 1
+
+
+@pytest.mark.asyncio
+async def test_data_filter_runtime_stats_record_guard_actions():
+    """非流式响应命中拦截规则时应计入 guard_block 统计。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard.guard")
+    # 不设 name：只走内存统计，验证不落盘路径的行为
+    plugin.config = {
+        "enabled": True,
+        "sensitive_fields": "",
+        "keyword_rules": "",
+        "regex_rules": "",
+        "request_text_paths": "",
+        "enable_response_guard": True,
+        "response_guard_mode": "block",
+        "response_block_patterns": "curl -k",
+    }
+    await plugin.on_load()
+    ctx = _ctx({"messages": []}, api_path="responses")
+    ctx.response = {
+        "stream": False,
+        "api_path": "responses",
+        "response_body": "请先执行 curl -k https://example.test/x",
+    }
+    guarded = await plugin.on_response(ctx)
+    assert guarded is not None and guarded.get("security_blocked") is True
+    stats = plugin.get_guard_stats()
+    assert stats["counters"]["guard_block"] == 1
+    assert stats["counters"]["guard_total"] == 1
+    assert stats["recent"][0]["type"] == "guard_block"
+    assert stats["recent"][0]["path"] == "responses"
+    # name 为空时应保持纯内存统计，不向用户目录写入任何文件
+    assert getattr(plugin, "_stats_path", None) is not None
+
+
+@pytest.mark.asyncio
+async def test_data_filter_runtime_stats_memory_only_when_no_name(tmp_path):
+    """未注入 name 的直连实例只做内存统计，绝不写盘（防测试/误用污染用户目录）。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard")
+    plugin._data_root = tmp_path  # 即使指向 tmp，也应因 name 为空而跳过读写
+    plugin.config = {
+        "enabled": True,
+        "sensitive_fields": "password",
+        "keyword_rules": "",
+        "regex_rules": "",
+        "request_text_paths": "",
+    }
+    await plugin.on_load()
+    ctx = _ctx({"password": "secret"}, api_path="responses")
+    out = await plugin.on_request(ctx)
+    assert out is not None
+    assert plugin.get_guard_stats()["counters"]["masked_request"] == 1
+    assert not (tmp_path / "stats.json").exists()
+    assert not list(tmp_path.iterdir())

@@ -73,6 +73,7 @@
 
 - **侧边栏动态菜单**：服务端调用 `PluginManager.get_menu()`，把所有「已启用 + runtime 就绪 + `has_menu`」的插件按 `menu.order` 排序，拼成 `<a>` 条目注入到 `_sidebar.html` 的「插件」与「关于」菜单项之间（`_build_sidebar_plugin_menu`，server.py）。`menu.icon` 字符串名经 `_plugin_svg_icon` 映射为内联 SVG，未知名称回退到默认 `plugin` 图标。宿主页传入 `active="plugin:<name>"`，只高亮当前插件的动态菜单项；静态「插件」入口仅在 `/plugins` 管理页高亮。这样有菜单插件会出现在统一的左侧边栏，而不再只藏于「插件」列表页。实现上 `_build_sidebar_plugin_menu` 依赖**模块级全局 `plugin_manager`**（server.py 顶部声明，`lifespan` 启动时用 `global plugin_manager` 赋值为已加载实例），因此菜单仅在应用启动后可用。
 - **首页知识库记忆卡片**：`dashboard.html` 仅保留 `mk_memory_html` 卡片区，由 `_build_markdown_kb_memory_card` 读取 `markdown_kb.get_memory_stats()` 的四项指标（记忆条目 / 平均记忆值 / 累计命中 / 高值(>0.5)）。插件未启用或异常时该卡片不展示；插件入口统一由侧边栏动态菜单提供，避免首页重复展示插件简介。
+- **首页数据安全运行记录区块**：`dashboard.html` 在 mk 卡片区之后预留 `dfg_section_html` 占位，由 `_build_data_filter_guard_section` 读取已加载 `data_filter_guard` 实例的 `get_guard_stats()`（累计数字 + 最近事件）。该区块整段在服务端拼好（含外层 wrapper 与两张 `akm-plugin-card`），插件未加载/未启用/旧版本无 `get_guard_stats` 方法/统计为空时返回空串不展示。统计由插件在请求脱敏、响应占位符还原、响应拦截（warn/mask/block）发生时写入 `~/.akm/data_filter_guard/stats.json`，只记聚合数字与占位符 tag，不含敏感明文。
 
 知识库记忆卡片由 `akm-plugin-card` Web Component（akm-ui.js，与 `akm-settings-card` 同范式）渲染，通过 `slot` 承载 `icon`（左侧图标）、`desc`（中部指标区）、`actions`（右侧跳转链接）。侧边栏菜单与该卡片是**宿主统一外壳内**的原生渲染；`/plugins/<name>` 页面内容区仍走 iframe 加载插件自带 `views/`（插件前端不必重写为 AKM 模板语法）。
 
