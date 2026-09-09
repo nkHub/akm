@@ -2044,6 +2044,53 @@ class Plugin(PluginBase):
         self._ensure_runtime_ready()
         return self._store.get_memory_detail_stats()
 
+    def dashboard_card(self) -> dict:
+        """首页通用插件卡片：知识库记忆统计（dashboard_card 协议）。
+
+        返回结构与宿主「插件首页卡片插槽」约定一致：
+        - id: 卡片去重 ID（宿主按插件名兜底）；
+        - icon: 使用宿主 _plugin_svg_icon 支持的 "book"；
+        - title: 卡片标题「知识库记忆」；
+        - metrics: 四项主指标（记忆条目 / 平均记忆值 / 累计命中 / 高值(>0.5)）；
+        - actions: 右侧跳转到 markdown_kb 插件宿主页的「查看 ›」链接。
+
+        统计来自记忆存储；存储未就绪或读取异常时退化为全 0 卡片，
+        保证启用插件后首页卡片始终可见（与 data_filter_guard 一致）。
+        """
+        summary = {}
+        try:
+            stats = self.get_memory_stats()
+            if isinstance(stats, dict):
+                summary = stats.get("summary") or {}
+        except Exception:
+            summary = {}
+        if not isinstance(summary, dict):
+            summary = {}
+
+        def _int(key: str) -> int:
+            try:
+                return int(summary.get(key) or 0)
+            except Exception:
+                return 0
+
+        try:
+            avg = round(float(summary.get("memory_avg_value") or 0.0), 2)
+        except Exception:
+            avg = 0.0
+
+        return {
+            "id": "markdown_kb",
+            "icon": "book",
+            "title": "知识库记忆",
+            "metrics": [
+                {"label": "记忆条目", "value": _int("memory_chunk_count")},
+                {"label": "平均记忆值", "value": avg},
+                {"label": "累计命中", "value": _int("memory_total_hits")},
+                {"label": "高值(>0.5)", "value": _int("memory_high_value_count")},
+            ],
+            "actions": [{"label": "查看 ›", "href": "/plugins/markdown_kb"}],
+        }
+
     def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """计算两个向量的余弦相似度，返回 0~1 之间的值。"""
         if not a or not b or len(a) != len(b):

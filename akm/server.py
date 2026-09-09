@@ -535,39 +535,6 @@ def _build_sidebar_plugin_menu(active: str = "") -> str:
     return "\n".join(parts)
 
 
-def _build_markdown_kb_memory_card(pm) -> str:
-    """服务端生成首页「知识库记忆」卡片 HTML。
-
-    读取已加载的 markdown_kb 插件实例记忆统计（get_memory_stats）。
-    插件未加载/未启用/异常时返回空串（首页不展示该卡片）。
-    """
-    try:
-        plugin = (pm.plugins or {}).get("markdown_kb")
-        if plugin is None or not getattr(plugin, "enabled", False):
-            return ""
-        stats = plugin.get_memory_stats()
-    except Exception:
-        return ""
-    summary = stats.get("summary") or {}
-    chunk_count = summary.get("memory_chunk_count") or 0
-    avg = round(float(summary.get("memory_avg_value") or 0.0), 2)
-    total_hits = summary.get("memory_total_hits") or 0
-    high = summary.get("memory_high_value_count") or 0
-    icon = _plugin_svg_icon("book")
-    return (
-        f'<akm-plugin-card title="知识库记忆" class="mk-memory-card">'
-        f'<span slot="icon">{icon}</span>'
-        f'<span slot="desc" class="mk-memory-grid">'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{chunk_count}</div><div class="mk-mem-label">记忆条目</div></div>'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{avg}</div><div class="mk-mem-label">平均记忆值</div></div>'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{total_hits}</div><div class="mk-mem-label">累计命中</div></div>'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{high}</div><div class="mk-mem-label">高值(>0.5)</div></div>'
-        f'</span>'
-        f'<a slot="actions" href="/plugins/markdown_kb" class="text-xs text-indigo-400 hover:text-indigo-300">查看 ›</a>'
-        f'</akm-plugin-card>'
-    )
-
-
 def _render_plugin_dashboard_card(plugin_name: str, card) -> str:
     """按「插件首页卡片」协议把插件的 dashboard_card() 返回值渲染为单张卡片 HTML。
 
@@ -581,8 +548,8 @@ def _render_plugin_dashboard_card(plugin_name: str, card) -> str:
     - empty_text: recent 为空时的占位文案；
     - actions: [{label, href}] 右侧操作链接，可为空。
 
-    信任边界：与既有知识库记忆卡先例一致，插件返回的片段不做 HTML 转义——
-    插件本就以本地代码运行且持有请求改写权，提供展示 HTML 不扩大威胁面。
+    信任边界：插件返回的 HTML 片段不做转义——插件本就以本地代码运行
+    且持有请求改写权，提供展示 HTML 不扩大威胁面。
     数值/文本字段以字符串渲染；字段缺失或类型不符按缺省处理，不抛异常。
     """
     if not isinstance(card, dict) or not card:
@@ -2605,13 +2572,11 @@ async def about_page(request: Request):
 async def admin_page(request: Request):
     """统计页面"""
     # 侧边栏插件菜单统一由 _render_template 注入。
-    mk_html = _build_markdown_kb_memory_card(request.app.state.plugin_manager)
-    # 插件首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件在此展示，
+    # 首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件在此展示，
     # 无可用卡片时为空串，页面不渲染整区）
     plugin_cards_html = _build_plugin_dashboard_cards_section(request.app.state.plugin_manager)
     return HTMLResponse(_render_template(
         "dashboard.html", title="统计", active="admin",
-        mk_memory_html=mk_html,
         plugin_cards_html=plugin_cards_html,
     ))
 
