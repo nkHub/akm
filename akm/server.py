@@ -568,90 +568,140 @@ def _build_markdown_kb_memory_card(pm) -> str:
     )
 
 
-# 首页「数据安全记录」事件类型 → 中文标签（data_filter_guard 运行统计）
-_DFG_EVENT_LABELS = {
-    "masked_request": "脱敏请求",
-    "restored_response": "占位符还原",
-    "guard_warn": "风险告警",
-    "guard_mask": "风险替换",
-    "guard_block": "风险拦截",
-}
+def _render_plugin_dashboard_card(plugin_name: str, card) -> str:
+    """按「插件首页卡片」协议把插件的 dashboard_card() 返回值渲染为单张卡片 HTML。
 
+    协议字段（均可选，缺省有兜底）：
+    - id: 去重 ID，缺省用插件名（宿主在 _build_plugin_dashboard_cards_section 使用）；
+    - icon: 图标名（_plugin_svg_icon 支持集合），缺省 "plugin"；
+    - title: 卡片标题，缺省用插件名；
+    - metrics: [{label, value}] 主指标网格，可为空；
+    - recent_title: 最近记录区小标题（recent 非空时显示，缺省「最近记录」）；
+    - recent: [{ts, text, detail}] 事件行（时间 / 文本 / 右对齐截断详情）；
+    - empty_text: recent 为空时的占位文案；
+    - actions: [{label, href}] 右侧操作链接，可为空。
 
-def _build_data_filter_guard_section(pm) -> str:
-    """服务端生成首页「数据安全 · 运行记录」区块 HTML（data_filter_guard 统计）。
-
-    读取已加载的 data_filter_guard 插件实例 ``get_guard_stats()`` 摘要；
-    插件未加载/未启用/旧版本无该方法/统计不可读/异常时返回空串（首页不展示）。
-    只展示聚合计数与事件元数据（路径/时间），不含任何敏感内容。
+    信任边界：与既有知识库记忆卡先例一致，插件返回的片段不做 HTML 转义——
+    插件本就以本地代码运行且持有请求改写权，提供展示 HTML 不扩大威胁面。
+    数值/文本字段以字符串渲染；字段缺失或类型不符按缺省处理，不抛异常。
     """
-    try:
-        plugin = (pm.plugins or {}).get("data_filter_guard")
-        if plugin is None or not getattr(plugin, "enabled", False):
-            return ""
-        get_stats = getattr(plugin, "get_guard_stats", None)
-        if not callable(get_stats):
-            return ""
-        stats = get_stats()
-    except Exception:
+    if not isinstance(card, dict) or not card:
         return ""
-    if not isinstance(stats, dict) or not stats:
-        return ""
-    counters = stats.get("counters") or {}
+    icon = _plugin_svg_icon(card.get("icon") or "plugin")
+    title = str(card.get("title") or plugin_name or "插件")
 
-    def _num(key: str) -> int:
-        try:
-            return int(counters.get(key) or 0)
-        except Exception:
-            return 0
+    body_parts: list[str] = []
+    # 主指标网格：复用 mk 记忆卡的 mk-mem 视觉样式
+    metric_items = []
+    for item in card.get("metrics") or []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "")
+        value = item.get("value")
+        value_html = str(value) if value is not None else ""
+        metric_items.append(
+            f'<div class="mk-mem-item"><div class="mk-mem-num">{value_html}</div>'
+            f'<div class="mk-mem-label">{label}</div></div>'
+        )
+    if metric_items:
+        body_parts.append('<span class="mk-memory-grid">' + "".join(metric_items) + "</span>")
 
-    shield = _plugin_svg_icon("shield")
-    stat_grid = (
-        '<span slot="desc" class="mk-memory-grid">'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("masked_request")}</div><div class="mk-mem-label">脱敏请求</div></div>'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("redactions")}</div><div class="mk-mem-label">替换片段</div></div>'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("restored_response")}</div><div class="mk-mem-label">还原响应</div></div>'
-        f'<div class="mk-mem-item"><div class="mk-mem-num">{_num("guard_total")}</div><div class="mk-mem-label">风险拦截</div></div>'
-        "</span>"
-    )
-    stat_card = (
-        f'<akm-plugin-card title="数据安全记录" class="mk-memory-card">'
-        f'<span slot="icon">{shield}</span>{stat_grid}'
-        f'<a slot="actions" href="/plugins" class="text-xs text-indigo-400 hover:text-indigo-300">配置 ›</a>'
-        f"</akm-plugin-card>"
-    )
-    # 最近记录：新在前（get_guard_stats 已倒序），逐行渲染 ts + 类型 + 入口路径
-    rows: list[str] = []
-    for event in stats.get("recent") or []:
+    # 最近记录区：新在前（协议约定插件已排序），逐行渲染 ts + 文本 + 详情
+    recent_rows = []
+    for event in card.get("recent") or []:
         if not isinstance(event, dict):
             continue
-        event_type = str(event.get("type") or "")
-        label = _DFG_EVENT_LABELS.get(event_type, event_type or "记录")
         raw_ts = str(event.get("ts") or "")
         ts = raw_ts[5:16].replace("T", " ") if len(raw_ts) >= 16 else (raw_ts or "-")
-        path = str(event.get("path") or "-") or "-"
-        rows.append(
+        text = str(event.get("text") or "") or "-"
+        detail = str(event.get("detail") or "") or "-"
+        recent_rows.append(
             f'<div class="flex items-center justify-between gap-3 py-1.5 text-xs">'
             f'<span class="text-gray-400 whitespace-nowrap">{ts}</span>'
-            f'<span class="text-gray-200 whitespace-nowrap">{label}</span>'
-            f'<span class="text-gray-500 truncate text-right">{path}</span>'
+            f'<span class="text-gray-200 whitespace-nowrap">{text}</span>'
+            f'<span class="text-gray-500 truncate text-right">{detail}</span>'
             f"</div>"
         )
-    recent_body = "\n".join(rows) if rows else (
-        '<div class="py-1 text-xs text-gray-500">暂无脱敏/还原/拦截记录</div>'
-    )
-    recent_card = (
-        f'<akm-plugin-card title="最近记录" class="mk-memory-card">'
-        f'<span slot="icon">{shield}</span>'
-        f'<span slot="desc" class="block">{recent_body}</span>'
+    if recent_rows:
+        recent_title = str(card.get("recent_title") or "最近记录")
+        body_parts.append(
+            '<div class="mt-2">'
+            f'<div class="text-xs font-medium text-gray-400 mb-1">{recent_title}</div>'
+            + "\n".join(recent_rows)
+            + "</div>"
+        )
+    elif card.get("empty_text"):
+        body_parts.append(
+            f'<div class="py-1 text-xs text-gray-500">{str(card.get("empty_text"))}</div>'
+        )
+
+    if not body_parts:
+        return ""
+    action_links = []
+    for action in card.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        label = str(action.get("label") or "")
+        href = str(action.get("href") or "#")
+        action_links.append(
+            f'<a slot="actions" href="{href}" class="text-xs text-indigo-400 hover:text-indigo-300">{label}</a>'
+        )
+    return (
+        f'<akm-plugin-card title="{title}" class="mk-memory-card">'
+        f'<span slot="icon">{icon}</span>'
+        f'<span slot="desc" class="block">{"".join(body_parts)}</span>'
+        f'{"".join(action_links)}'
         f"</akm-plugin-card>"
     )
+
+
+def _build_plugin_dashboard_cards_section(pm) -> str:
+    """服务端拼接首页「插件卡片」区 HTML（通用插件首页卡片插槽）。
+
+    遍历已加载且启用的插件：凡实现 ``dashboard_card() -> dict`` 的插件
+    渲染为一张 akm-plugin-card；插件未加载/未启用/未实现该方法/抛异常/
+    返回非 dict 或空 dict/与既有卡片 id 重复时自动跳过（单卡失败不拖垮整页）。
+    卡片数为 0 时返回空串（首页不渲染该区，对旧版内核/旧插件天然兼容）。
+
+    设计目的：插件增删改首页卡片只发插件更新，无需为每个卡片升级宿主内核。
+    """
+    try:
+        plugins = dict(pm.plugins or {})
+    except Exception:
+        return ""
+    rendered = []
+    seen_ids: set[str] = set()
+    for name in sorted(plugins.keys()):
+        plugin = plugins.get(name)
+        if plugin is None or not getattr(plugin, "enabled", False):
+            continue
+        build = getattr(plugin, "dashboard_card", None)
+        if not callable(build):
+            continue
+        try:
+            card = build()
+        except Exception:
+            # 单插件异常仅跳过该卡，避免影响首页整页渲染
+            continue
+        if not isinstance(card, dict) or not card:
+            continue
+        card_id = str(card.get("id") or name or "").strip()
+        if not card_id or card_id in seen_ids:
+            continue
+        seen_ids.add(card_id)
+        try:
+            html = _render_plugin_dashboard_card(name, card)
+        except Exception:
+            continue
+        if html:
+            rendered.append(html)
+    if not rendered:
+        return ""
     return (
-        '<div id="dfg-guard-section" class="mt-6">'
-        '<div class="text-xs font-medium text-gray-400 mb-3">数据安全 · 运行记录</div>'
+        '<div id="plugin-dashboard-cards" class="mt-6">'
         '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">'
-        f"{stat_card}{recent_card}"
-        "</div></div>"
+        + "".join(rendered)
+        + "</div></div>"
     )
 
 
@@ -2556,12 +2606,13 @@ async def admin_page(request: Request):
     """统计页面"""
     # 侧边栏插件菜单统一由 _render_template 注入。
     mk_html = _build_markdown_kb_memory_card(request.app.state.plugin_manager)
-    # data_filter_guard 运行记录区块（插件未加载/旧版本时为空串，页面不展示）
-    dfg_section_html = _build_data_filter_guard_section(request.app.state.plugin_manager)
+    # 插件首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件在此展示，
+    # 无可用卡片时为空串，页面不渲染整区）
+    plugin_cards_html = _build_plugin_dashboard_cards_section(request.app.state.plugin_manager)
     return HTMLResponse(_render_template(
         "dashboard.html", title="统计", active="admin",
         mk_memory_html=mk_html,
-        dfg_section_html=dfg_section_html,
+        plugin_cards_html=plugin_cards_html,
     ))
 
 

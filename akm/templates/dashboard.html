@@ -87,8 +87,8 @@
     {{ mk_memory_html }}
   </div>
 </div>
-<!-- data_filter_guard 运行记录区块（整段服务端拼接，插件未启用时为空） -->
-{{ dfg_section_html }}
+<!-- 插件首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件卡片，宿主统一渲染；无卡片时为空串） -->
+{{ plugin_cards_html }}
 </div>
 {% endblock %}
 

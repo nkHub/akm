@@ -2,7 +2,7 @@
 
 ## 一、版本号统一
 
-AKM v0.1.43 同步更新 `akm/__init__.py`、`pyproject.toml` 与 `uv.lock` 的本项目版本。内置 Markdown KB MCP 的握手版本独立于 AKM 版本，读取当前已加载 `markdown_kb` 插件的 `meta.version`；本次不提升插件版本。
+AKM v0.1.44 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版在管理台首页落地**通用插件卡片插槽**（`akm/server.py` 的 `_build_plugin_dashboard_cards_section` / `_render_plugin_dashboard_card` 与 `dashboard.html` 的 `plugin_cards_html` 占位），取代 v0.1.43 引入的 data_filter_guard 专用首页区块——已启用插件实现 `dashboard_card()` 即可在统计页统一展示；data_filter_guard v0.1.4（插件市场随本版发布）为首个采用者。内置 Markdown KB MCP 的握手版本仍跟随当前加载的 `markdown_kb` 插件 `meta.version`，与 AKM 主程序版本独立。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
 
