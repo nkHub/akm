@@ -44,6 +44,22 @@
   .mk-mem-item { display: flex; flex-direction: column; gap: 2px; }
   .mk-mem-num { font-size: 1.35rem; font-weight: 600; color: #a5b4fc; font-variant-numeric: tabular-nums; }
   .mk-mem-label { font-size: 0.72rem; color: #9ca3af; }
+  /* 首页插件卡片瀑布流（CSS columns）：卡片按各自高度自然交错排布，不强制同行等高 */
+  .plugin-cards-masonry {
+    columns: 1;
+    column-gap: 1rem;
+  }
+  .plugin-cards-masonry > * {
+    break-inside: avoid;
+    -webkit-column-break-inside: avoid;
+    margin-bottom: 1rem;
+  }
+  @media (min-width: 768px) {
+    .plugin-cards-masonry { columns: 2; }
+  }
+  @media (min-width: 1280px) {
+    .plugin-cards-masonry { columns: 3; }
+  }
   /* 聊天 Markdown 渲染 */
   .chat-md p { margin: 0.25em 0; }
   .chat-md p:first-child { margin-top: 0; }
