@@ -1,6 +1,6 @@
 {
   "name": "data_filter_guard",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "has_menu": false,
   "category": "filter",
   "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录（管理台首页卡片展示）",

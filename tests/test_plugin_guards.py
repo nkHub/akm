@@ -1827,3 +1827,47 @@ async def test_data_filter_runtime_stats_memory_only_when_no_name(tmp_path):
     assert plugin.get_guard_stats()["counters"]["masked_request"] == 1
     assert not (tmp_path / "stats.json").exists()
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_data_filter_dashboard_card_always_returns(tmp_path):
+    """dashboard_card 无任何记录时也应返回卡片（首页首见可见，计数为 0）。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard.card")
+    plugin.name = "data_filter_guard"
+    plugin._data_root = tmp_path
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+    card = plugin.dashboard_card()
+    assert isinstance(card, dict)
+    assert card["id"] == "data_filter_guard"
+    assert card["icon"] == "shield"
+    assert card["title"] == "数据安全记录"
+    # 四格指标顺序固定：脱敏请求 / 替换片段 / 还原响应 / 风险拦截
+    assert [m["label"] for m in card["metrics"]] == ["脱敏请求", "替换片段", "还原响应", "风险拦截"]
+    assert all(m["value"] == 0 for m in card["metrics"])
+    assert card["recent"] == []
+    assert card["empty_text"] == "暂无脱敏/还原/拦截记录"
+    assert card["actions"] == [{"label": "配置 ›", "href": "/plugins"}]
+
+
+@pytest.mark.asyncio
+async def test_data_filter_dashboard_card_maps_recent(tmp_path):
+    """dashboard_card 应把统计事件映射为中文文本并暴露 path 详情。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger("test.data_filter_guard.card")
+    plugin.name = "data_filter_guard"
+    plugin._data_root = tmp_path
+    plugin.config = {"enabled": True}
+    await plugin.on_load()
+    plugin._record("masked_request", path="chat/completions", count=4, tags={"password": 2})
+    plugin._record("guard_block", path="responses")
+    card = plugin.dashboard_card()
+    assert card["metrics"][0] == {"label": "脱敏请求", "value": 1}
+    assert card["metrics"][1]["label"] == "替换片段" and card["metrics"][1]["value"] == 4
+    assert card["metrics"][3] == {"label": "风险拦截", "value": 1}
+    # recent 已倒序（新在前）：最新一条是 guard_block
+    assert card["recent"][0]["text"] == "风险拦截"
+    assert card["recent"][0]["detail"] == "responses"
+    assert card["recent"][1]["text"] == "脱敏请求"
+    assert card["recent"][1]["detail"] == "chat/completions"

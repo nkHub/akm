@@ -93,6 +93,14 @@ _STATS_COUNTER_KEYS = (
 _PLACEHOLDER_TAG_RE = re.compile(
     r"^<AKM-SEC:([A-Za-z0-9_.-]{1,48})@\d+:[0-9a-fA-F]{6}/>$"
 )
+# 运行记录事件类型 → 中文标签（首页 dashboard_card / 最近记录展示用）
+_EVENT_LABELS = {
+    "masked_request": "脱敏请求",
+    "restored_response": "占位符还原",
+    "guard_warn": "风险告警",
+    "guard_mask": "风险替换",
+    "guard_block": "风险拦截",
+}
 
 
 class Plugin(PluginBase):
@@ -1195,6 +1203,43 @@ class Plugin(PluginBase):
             "recent": recent,
             "started_at": str(stats.get("started_at") or ""),
             "updated_at": str(stats.get("updated_at") or ""),
+        }
+
+    def dashboard_card(self) -> dict:
+        """返回首页插件卡片声明数据（宿主通用卡片插槽协议）。
+
+        统计为空也始终返回卡片：用户打开首页即可看到入口，
+        计数全部以 0 呈现，等运行后自然累积。只聚合展示，不含明文。
+        """
+        stats = self.get_guard_stats()
+        counters = stats.get("counters") or {}
+        metrics = [
+            {"label": "脱敏请求", "value": int(counters.get("masked_request") or 0)},
+            {"label": "替换片段", "value": int(counters.get("redactions") or 0)},
+            {"label": "还原响应", "value": int(counters.get("restored_response") or 0)},
+            {"label": "风险拦截", "value": int(counters.get("guard_total") or 0)},
+        ]
+        recent = []
+        for event in stats.get("recent") or []:
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "")
+            recent.append({
+                "ts": str(event.get("ts") or ""),
+                "text": _EVENT_LABELS.get(event_type, event_type or "记录"),
+                "detail": str(event.get("path") or "-") or "-",
+            })
+            if len(recent) >= 8:
+                break
+        return {
+            "id": "data_filter_guard",
+            "icon": "shield",
+            "title": "数据安全记录",
+            "metrics": metrics,
+            "recent_title": "最近记录",
+            "recent": recent,
+            "empty_text": "暂无脱敏/还原/拦截记录",
+            "actions": [{"label": "配置 ›", "href": "/plugins"}],
         }
 
     # ── on_request / on_response ─────────────────────────────

@@ -4261,72 +4261,173 @@ async def test_build_markdown_kb_memory_card_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_data_filter_guard_section(monkeypatch):
-    """data_filter_guard 启用且有统计时，首页记录区块应含数字与最近记录。"""
-    from akm.server import _build_data_filter_guard_section
+async def test_render_plugin_dashboard_card(monkeypatch):
+    """通用卡片渲染器应把 dashboard_card 协议数据渲染成完整 akm-plugin-card。"""
+    from akm.server import _render_plugin_dashboard_card
 
-    class FakePlugin:
-        enabled = True
-
-        def get_guard_stats(self):
-            return {
-                "counters": {
-                    "masked_request": 3,
-                    "redactions": 7,
-                    "restored_response": 2,
-                    "guard_warn": 0,
-                    "guard_mask": 1,
-                    "guard_block": 1,
-                    "guard_total": 2,
-                },
-                "recent": [
-                    {"ts": "2026-09-09T10:20:30+08:00", "type": "guard_block", "path": "responses", "count": 1},
-                    {"ts": "2026-09-09T09:15:00+08:00", "type": "masked_request", "path": "chat/completions", "count": 4},
-                ],
-            }
-
-    class FakePM:
-        plugins = {"data_filter_guard": FakePlugin()}
-
-    html = _build_data_filter_guard_section(FakePM())
+    card = {
+        "icon": "shield",
+        "title": "数据安全记录",
+        "metrics": [
+            {"label": "脱敏请求", "value": 3},
+            {"label": "风险拦截", "value": 2},
+        ],
+        "recent_title": "最近记录",
+        "recent": [
+            {"ts": "2026-09-09T10:20:30+08:00", "text": "风险拦截", "detail": "responses"},
+        ],
+        "actions": [{"label": "配置 ›", "href": "/plugins"}],
+    }
+    html = _render_plugin_dashboard_card("data_filter_guard", card)
     assert html
-    assert "数据安全记录" in html and "最近记录" in html
-    assert "脱敏请求" in html and "替换片段" in html and "还原响应" in html and "风险拦截" in html
-    assert "3" in html and "7" in html and "2" in html
-    # 最近记录行：时间/中文标签/入口路径均已渲染
-    assert "风险拦截" in html and "responses" in html and "脱敏请求" in html and "chat/completions" in html
+    assert "akm-plugin-card" in html
+    assert 'title="数据安全记录"' in html
+    # 指标网格：标签与值
+    assert "脱敏请求" in html and ">3<" in html
+    assert "风险拦截" in html and ">2<" in html
+    # 最近记录：时间截断成 MM-DD HH:MM 展示，中文类型与路径齐全
+    assert "09-09 10:20" in html
+    assert "responses" in html
+    # actions 跳转
+    assert 'href="/plugins"' in html and "配置 ›" in html
+    # slot 结构完整
+    assert 'slot="icon"' in html and 'slot="desc"' in html and 'slot="actions"' in html
 
 
 @pytest.mark.asyncio
-async def test_build_data_filter_guard_section_defensive(monkeypatch):
-    """插件缺失/未启用/旧版本无统计方法时返回空串，首页不展示记录区块。"""
-    from akm.server import _build_data_filter_guard_section
+async def test_render_plugin_dashboard_card_defensive(monkeypatch):
+    """渲染器对缺字段/空卡应优雅返回，不抛异常。"""
+    from akm.server import _render_plugin_dashboard_card
 
-    class NoPluginPM:
+    # 非 dict / 空 dict / 空 body（无指标无 recent 无 empty_text）→ 空串
+    assert _render_plugin_dashboard_card("p", "not-dict") == ""
+    assert _render_plugin_dashboard_card("p", {}) == ""
+    assert _render_plugin_dashboard_card("p", {"title": "只有标题"}) == ""
+    # recent 为空但有 empty_text：应渲染占位文案
+    html = _render_plugin_dashboard_card("p", {"title": "t", "empty_text": "暂无记录"})
+    assert html and "暂无记录" in html
+    # 未知 icon 名回退默认插件图标，标题缺省取插件名
+    html = _render_plugin_dashboard_card("dfg", {"icon": "not-exist", "metrics": [{"label": "a", "value": 0}]})
+    assert html and 'title="dfg"' in html
+
+
+@pytest.mark.asyncio
+async def test_build_plugin_dashboard_cards_section_renders(monkeypatch):
+    """启用且实现 dashboard_card() 的插件应在首页渲染为卡片区。"""
+    from akm.server import _build_plugin_dashboard_cards_section
+
+    class DfgPlugin:
+        enabled = True
+        def dashboard_card(self):
+            return {
+                "id": "data_filter_guard",
+                "icon": "shield",
+                "title": "数据安全记录",
+                "metrics": [
+                    {"label": "脱敏请求", "value": 3},
+                    {"label": "替换片段", "value": 7},
+                    {"label": "还原响应", "value": 2},
+                    {"label": "风险拦截", "value": 2},
+                ],
+                "recent": [
+                    {"ts": "2026-09-09T10:20:30+08:00", "text": "风险拦截", "detail": "responses"},
+                    {"ts": "2026-09-09T09:15:00+08:00", "text": "脱敏请求", "detail": "chat/completions"},
+                ],
+                "actions": [{"label": "配置 ›", "href": "/plugins"}],
+            }
+
+    class OtherPlugin:
+        enabled = True
+        def dashboard_card(self):
+            return {"title": "其他插件卡", "metrics": [{"label": "命中", "value": 1}]}
+
+    class FakePM:
+        plugins = {"data_filter_guard": DfgPlugin(), "other": OtherPlugin()}
+
+    html = _build_plugin_dashboard_cards_section(FakePM())
+    assert html
+    assert 'id="plugin-dashboard-cards"' in html
+    assert 'akm-plugin-card' in html
+    # 两张卡都在：dfg 专属数据与另一插件的卡并存
+    assert "数据安全记录" in html and "其他插件卡" in html
+    assert "脱敏请求" in html and "替换片段" in html and "还原响应" in html and "风险拦截" in html
+    assert ">3<" in html and ">7<" in html and ">2<" in html
+    assert "responses" in html and "chat/completions" in html
+    assert 'href="/plugins"' in html
+
+
+@pytest.mark.asyncio
+async def test_build_plugin_dashboard_cards_section_defensive(monkeypatch):
+    """缺失/禁用/旧版无方法/返回异常/重复 id 的插件应被跳过，全跳或空列表返回空串。"""
+    from akm.server import _build_plugin_dashboard_cards_section
+
+    # 插件字典为空
+    class EmptyPM:
         plugins = {}
-    assert _build_data_filter_guard_section(NoPluginPM()) == ""
+    assert _build_plugin_dashboard_cards_section(EmptyPM()) == ""
 
+    # pm.plugins 属性读取抛异常也应回退空串
+    class BrokenPM:
+        @property
+        def plugins(self):
+            raise RuntimeError("boom")
+    assert _build_plugin_dashboard_cards_section(BrokenPM()) == ""
+
+    # 禁用 / 旧版无 dashboard_card / 返回 None / 返回空 dict / 抛异常
     class DisabledPlugin:
         enabled = False
-    class DisabledPM:
-        plugins = {"data_filter_guard": DisabledPlugin()}
-    assert _build_data_filter_guard_section(DisabledPM()) == ""
+        def dashboard_card(self):
+            return {"title": "x"}
 
-    # 旧版本插件没有 get_guard_stats 方法：应兼容返回空串而非抛错
     class LegacyPlugin:
         enabled = True
-    class LegacyPM:
-        plugins = {"data_filter_guard": LegacyPlugin()}
-    assert _build_data_filter_guard_section(LegacyPM()) == ""
 
-    # 插件已加载但从未产生记录：返回空串（区块整体不展示，避免出现全零死卡片）
-    class EmptyPlugin:
+    class NonePlugin:
         enabled = True
-        def get_guard_stats(self):
+        def dashboard_card(self):
+            return None
+
+    class EmptyCardPlugin:
+        enabled = True
+        def dashboard_card(self):
             return {}
-    class EmptyPM:
-        plugins = {"data_filter_guard": EmptyPlugin()}
-    assert _build_data_filter_guard_section(EmptyPM()) == ""
+
+    class BoomPlugin:
+        enabled = True
+        def dashboard_card(self):
+            raise RuntimeError("card boom")
+
+    class FakePM:
+        plugins = {
+            "disabled": DisabledPlugin(),
+            "legacy": LegacyPlugin(),
+            "none": NonePlugin(),
+            "empty": EmptyCardPlugin(),
+            "boom": BoomPlugin(),
+        }
+
+    # 全部不可渲染：整区不出现
+    assert _build_plugin_dashboard_cards_section(FakePM()) == ""
+
+    # 单插件抛异常不影响其它卡渲染；同 id 只渲染首张
+    class DupeA:
+        enabled = True
+        def dashboard_card(self):
+            return {"id": "same", "title": "A", "metrics": [{"label": "a", "value": 1}]}
+
+    class DupeB:
+        enabled = True
+        def dashboard_card(self):
+            return {"id": "same", "title": "B", "metrics": [{"label": "b", "value": 2}]}
+
+    class MixedPM:
+        plugins = {"boom": BoomPlugin(), "dupe_a": DupeA(), "dupe_b": DupeB()}
+
+    html = _build_plugin_dashboard_cards_section(MixedPM())
+    assert html
+    assert 'akm-plugin-card' in html
+    # 同 id 只渲染首张（dupe_a → title="A"）；B 的 title 不应出现
+    assert 'title="A"' in html and 'title="B"' not in html
 
 
 def test_build_sidebar_plugin_menu_uses_global_plugin_manager(monkeypatch):
