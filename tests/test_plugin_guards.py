@@ -1846,14 +1846,14 @@ async def test_data_filter_dashboard_card_always_returns(tmp_path):
     # 四格指标顺序固定：脱敏请求 / 替换片段 / 还原响应 / 风险拦截
     assert [m["label"] for m in card["metrics"]] == ["脱敏请求", "替换片段", "还原响应", "风险拦截"]
     assert all(m["value"] == 0 for m in card["metrics"])
-    assert card["recent"] == []
-    assert card["empty_text"] == "暂无脱敏/还原/拦截记录"
+    assert "recent" not in card
+    assert "empty_text" not in card
     assert card["actions"] == [{"label": "配置 ›", "href": "/plugins"}]
 
 
 @pytest.mark.asyncio
-async def test_data_filter_dashboard_card_maps_recent(tmp_path):
-    """dashboard_card 应把统计事件映射为中文文本并暴露 path 详情。"""
+async def test_data_filter_dashboard_card_keeps_stats_without_recent(tmp_path):
+    """dashboard_card 不再暴露最近记录，但底层统计仍继续累积。"""
     plugin = DataFilterGuard()
     plugin.logger = logging.getLogger("test.data_filter_guard.card")
     plugin.name = "data_filter_guard"
@@ -1866,8 +1866,12 @@ async def test_data_filter_dashboard_card_maps_recent(tmp_path):
     assert card["metrics"][0] == {"label": "脱敏请求", "value": 1}
     assert card["metrics"][1]["label"] == "替换片段" and card["metrics"][1]["value"] == 4
     assert card["metrics"][3] == {"label": "风险拦截", "value": 1}
-    # recent 已倒序（新在前）：最新一条是 guard_block
-    assert card["recent"][0]["text"] == "风险拦截"
-    assert card["recent"][0]["detail"] == "responses"
-    assert card["recent"][1]["text"] == "脱敏请求"
-    assert card["recent"][1]["detail"] == "chat/completions"
+    # 卡片声明不再携带 recent / recent_title / empty_text
+    assert "recent" not in card
+    assert "recent_title" not in card
+    assert "empty_text" not in card
+    # 底层 get_guard_stats 的 recent 仍保留（倒序新在前：最新 guard_block）
+    stats = plugin.get_guard_stats()
+    recent = stats.get("recent") or []
+    assert recent[0]["type"] == "guard_block"
+    assert recent[1]["type"] == "masked_request"
