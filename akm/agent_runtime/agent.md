@@ -37,7 +37,6 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_edit_file` | 结构化编辑工作区内文件：行号模式（传 `start_line`，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`，内容模式把 `old_string` → `new_string`（支持 `replace_all`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内的文件或目录。默认只删除**单个文件**；`recursive=true` 可删除目录并递归清除其中所有内容（批量删除）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled`） |
-| `akm_xlsx` | 创建工作区内 `.xlsx` 文件（`action=create`，`data` 传二维数组或 `{工作表名: 二维数组}`，已存在需 `overwrite=true`）或修改已有文件的单元格（`action=edit`，`updates` 传 `[{"sheet","cell","value"}]`）；可选 `styles` / `column_widths` / `row_heights` / `merge_cells` / `freeze_panes` / `charts` 自定义样式、布局与图表；需开启 `agent_write_tools_enabled` |
 | `akm_run_shell` | 在工作区内用系统 shell 执行命令字符串并返回输出与退出码（需开启 `agent_run_shell_enabled`） |
 | `akm_run_git` | 在工作区内执行固定的结构化 Git 操作并返回输出与退出码；`dir` 参数可切换工作区内任意仓库目录（含根目录），默认工作区根（需开启 `agent_git_enabled`） |
 | `akm_send_email` | 通过 SMTP 发送纯文本邮件，返回 Message-ID（需管理员在 config.json 配置 `agent_email_smtp_host`/`agent_email_smtp_user`/`agent_email_smtp_password` 并开启 `agent_email_enabled`）；支持自定义发件人 `from_`，正文单次上限 10MB |
@@ -77,7 +76,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
 | `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
-| `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_xlsx`），默认关闭需显式开启 |
+| `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file`），默认关闭需显式开启 |
 | `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行。**注意：这不是文件系统沙箱**，命令可访问工作区之外（如 `/etc`、家目录），仅以工作区为 cwd，启用前应确认调用方可信 |
 | `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区与临时目录，全局禁写（仅放行工作区/TMP/`/dev`），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zprofile` / `.bash_profile` / `.bashrc` / `.zsh_history` / `.bash_history` / `.gitconfig` / `.git-credentials` / `.npmrc` / `.netrc`）/ `/etc` / `/private/etc` / `/var/log` / `/private/var/log` / `/var/db` / `/private/var/db` / `/tmp` / `/private/tmp` 等敏感路径，同时拒绝 `~` 的目录列举（`file-read-metadata`）；系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
@@ -214,23 +213,6 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 `akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zsh_history` / `.gitconfig` / `.npmrc` 等）/ `/etc` / `/private/etc` / `/var/log` / `/var/db` / `/tmp` 等敏感路径与家目录列举），将越界风险从「无限制」降到「限制敏感读写」级别。此外，父进程若携带 `PYTHONHOME`/`PYTHONPATH`（py2app 打包的 app 内嵌 Python 运行时设置），执行前会被剥离，避免污染 shell 里外部 `python3` 使其启动即崩溃。
 
 `akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。可选 `dir` 参数指定 git 仓库目录（等价于 `git -C <dir>`，默认工作区根）：接受工作区内的相对或绝对路径（含根目录），用于切换不同仓库；越界（工作区外）会返回错误。`paths` 为相对 `dir` 的路径。
-
-`akm_xlsx` 通过 `action` 区分创建与修改，基于 `openpyxl`：
-
-- `create`：`data` 传纯二维数组（写入默认 `Sheet1`）或 `{"工作表名": [[...]]}` 映射（每个工作表写入对应数组）；目标文件已存在时需 `overwrite=true`，否则返回错误。
-- `edit`：`updates` 传 `[{"sheet": "Sheet1", "cell": "B2", "value": 42}]` 列表，按坐标写入已有文件的单元格；`sheet` 缺省为 `Sheet1`，目标工作表不存在时自动创建。
-
-两种模式共用以下可选自定义参数（均为单工作表时可直接传，多工作表时以 `{"工作表名": 配置}` 映射）：
-
-- `styles`：单元格样式数组 `[{"sheet"?, "cell", "bold"?, "italic"?, "size"?, "color"?, "fill"?, "align"?, "number_format"?}]`。`color`/`fill` 为十六进制色值（如 `FF0000`），`align` 可传 `left`/`center`/`right`/`fill`/`justify`/`center_continuous`/`distributed` 之一。
-- `column_widths` / `row_heights`：列宽/行高映射，如 `{"A": 25}` / `{1: 30}`，键分别为列名（`A`）与行号（`1`）。
-- `merge_cells`：合并单元格区间列表，如 `["A1:C1"]`。
-- `freeze_panes`：冻结窗格坐标，如 `"A2"`（冻结首行）。
-- `charts`：图表数组 `[{"sheet"?, "type", "title"?, "data_range", "categories_range"?, "x_title"?, "y_title"?, "anchor"?, "legend"?}]`。`type` 支持 `bar`/`line`/`pie`/`scatter`/`area`/`doughnut`，`data_range`/`categories_range` 为单元格区间（如 `"B2:B3"`），`anchor` 缺省 `F2`。
-
-`data`/`updates` 中值以 `=` 开头的字符串会按公式写入（如 `"=SUM(A2:A3)"`）。
-
-两种模式都以工作区为沙箱，路径越界返回「超出工作区范围」错误。
 
 ### 路径沙箱
 
