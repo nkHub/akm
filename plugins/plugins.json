@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-09T17:55:35+0800",
+  "generated_at": "2026-09-10T11:04:34+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -38,13 +38,13 @@
       "size": 4823
     },
     "data_filter_guard": {
-      "version": "0.1.4",
+      "version": "0.1.5",
       "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录（管理台首页卡片展示）",
       "category": "filter",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/data_filter_guard-0.1.4.zip",
-      "sha256": "af0e0aa11ce3d260471e1ef933046fad2d99d7d1dc064cdb09293acca1149e81",
-      "size": 29127
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/data_filter_guard-0.1.5.zip",
+      "sha256": "35f5572d8fbd64826dca6d0763c5769aa998a964e5caadcd637d00347ca42430",
+      "size": 29097
     },
     "error_handler": {
       "version": "0.1.1",
@@ -92,13 +92,13 @@
       "size": 2878
     },
     "markdown_kb": {
-      "version": "0.1.5",
-      "description": "Markdown 本地知识库，支持状态查看、.md 文件上传保存与项目级 context/memory 自动维护",
+      "version": "0.1.6",
+      "description": "Markdown 本地知识库，支持状态查看、.md 文件上传保存与项目级 context/memory 自动维护；内置记忆统计首页卡片（dashboard_card）",
       "category": "app",
       "has_menu": true,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.5.zip",
-      "sha256": "94d9907d2f74cdf6191b901a4075b98c6092e4601e92c5cb7233a617bb97916f",
-      "size": 1146312
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/markdown_kb-0.1.6.zip",
+      "sha256": "88c5b05bde9c375dbf43814225d8594e540142bffc2a537e38a37daaf33e764c",
+      "size": 1147198
     },
     "mcp_tool_gateway": {
       "version": "0.1.0",
