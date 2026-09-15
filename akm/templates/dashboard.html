@@ -111,9 +111,13 @@ function fmtCostDetailTip(v) {
   var im = get('input_missed');
   var ic = get('input_cached');
   var op = get('output');
+  // 缓存命中率：命中缓存 token /（未命中输入 + 命中缓存）token，无输入时显示 -
+  var inTotal = im.tokens + ic.tokens;
+  var hitRate = inTotal > 0 ? (ic.tokens / inTotal * 100).toFixed(1) + '%' : '-';
   return '输入: ' + fmtNum(im.tokens) + ' / $' + fmt4(im.cost) + '\n'
     + '缓存: ' + fmtNum(ic.tokens) + ' / $' + fmt4(ic.cost) + '\n'
-    + '输出: ' + fmtNum(op.tokens) + ' / $' + fmt4(op.cost);
+    + '输出: ' + fmtNum(op.tokens) + ' / $' + fmt4(op.cost) + '\n'
+    + '缓存命中率: ' + hitRate;
 }
 // 信息图标 SVG：由 akm-tooltip 组件包裹，hover 时显示费用明细浮层
 function costTipIcon(v) {
