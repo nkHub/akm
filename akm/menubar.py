@@ -93,6 +93,10 @@ CHECK_INTERVAL = 86400
 UPDATE_DOWNLOAD_TIMEOUT = 600
 # 静默（自动）更新在应用启动后等待的秒数：避免刚启动就被更新重启打断用户操作。
 AUTO_UPDATE_STARTUP_DELAY_SEC = 60.0
+# 自动更新检测到在途请求/流式响应时的重试间隔（秒）：推迟下载安装，等用户请求结束。
+AUTO_UPDATE_BUSY_RETRY_SEC = 30.0
+# 更新安装替换 .app 前，等待在途请求排空的最长秒数，避免重启掐断正在进行的转发。
+AUTO_UPDATE_DRAIN_WAIT_SEC = 300.0
 # NSAlert.runModal 的按钮返回码：第一个 addButtonWithTitle_ 是主按钮（右侧，响应 Enter），
 # 依次对应 1000/1001/1002。rumps.alert 透传该值，不取模转换。
 NSAlertFirstButtonReturn = 1000
@@ -423,6 +427,45 @@ class AKMApp(rumps.App):
         else:
             self._apply_update_menu(info)
 
+    def _active_request_counts(self) -> tuple[int, int]:
+        """读取当前在途请求与流式响应数量，用于判断转发服务是否空闲。
+
+        菜单栏与 uvicorn 共享同一进程及 ``akm.server:app`` 单例，直接读取
+        ``app.state.health_monitor`` 的计数即可；监控缺失或读取失败时按空闲
+        (0, 0) 处理，避免因监控异常阻塞更新。
+        """
+        try:
+            from akm.server import app as fastapi_app
+
+            monitor = getattr(getattr(fastapi_app, "state", None), "health_monitor", None)
+            if monitor is None:
+                return 0, 0
+            inflight = int(getattr(monitor, "inflight_requests", 0) or 0)
+            streams = int(getattr(monitor, "active_streams", 0) or 0)
+            return inflight, streams
+        except Exception:
+            return 0, 0
+
+    def _wait_for_idle(self, timeout: float) -> bool:
+        """等待在途请求/流式响应全部结束，返回是否在超时前变为空闲。
+
+        每 2 秒轮询一次；超时后返回 False 并由调用方决定是否继续（更新流程
+        已下载并校验完成，长时间占用服务时不宜无限期搁置）。
+        """
+        deadline = time.time() + timeout
+        while True:
+            inflight, streams = self._active_request_counts()
+            if inflight <= 0 and streams <= 0:
+                return True
+            if time.time() >= deadline:
+                logger.warning(
+                    "等待在途请求结束超时（inflight=%s streams=%s），继续更新",
+                    inflight,
+                    streams,
+                )
+                return False
+            time.sleep(2)
+
     def _start_auto_update(self, info: dict) -> None:
         """按自动更新开关触发静默更新：启动初期延迟执行，并做去重保护。"""
         if self._updating:
@@ -436,8 +479,27 @@ class AKMApp(rumps.App):
         threading.Timer(delay, self._start_auto_update_exec, args=(info,)).start()
 
     def _start_auto_update_exec(self, info: dict) -> None:
-        """延迟到点后真正开始静默更新（后台线程执行下载/安装）。"""
+        """延迟到点后真正开始静默更新（后台线程执行下载/安装）。
+
+        若此时仍有在途请求或流式响应，说明用户正在使用转发服务，推迟重试，
+        避免下载安装与随后的重启打断请求；直到服务空闲才真正开始更新。
+        """
         if self._updating:
+            return
+        inflight, streams = self._active_request_counts()
+        if inflight > 0 or streams > 0:
+            logger.info(
+                "检测到在途请求（inflight=%s streams=%s），%.0f 秒后重试自动更新",
+                inflight,
+                streams,
+                AUTO_UPDATE_BUSY_RETRY_SEC,
+            )
+            retry = threading.Timer(
+                AUTO_UPDATE_BUSY_RETRY_SEC, self._start_auto_update_exec, args=(info,)
+            )
+            # 设为守护线程，避免用户在此期间退出应用时被未到期的重试定时器阻塞退出
+            retry.daemon = True
+            retry.start()
             return
         threading.Thread(target=self._perform_update, args=(info, True), daemon=True).start()
 
@@ -499,6 +561,14 @@ class AKMApp(rumps.App):
             new_app = _extract_app(zip_path, tmp_dir)
             if not new_app or not os.path.isdir(new_app):
                 raise RuntimeError("更新包内容无效，未找到 .app")
+
+            # 静默更新：替换 .app 后紧接退出重启，期间若仍有在途请求会被直接掐断，
+            # 因此先等请求排空（最长 AUTO_UPDATE_DRAIN_WAIT_SEC 秒）再替换。
+            # 手动更新由用户主动点击触发，保持“立即执行”，不做等待。
+            if silent:
+                self._updating_msg = "正在等待进行中的请求结束..."
+                self._wait_for_idle(AUTO_UPDATE_DRAIN_WAIT_SEC)
+                self._updating_msg = "正在安装..."
 
             # 3. 备份当前 .app 后替换为新版本，替换失败时回滚旧版本
             backup_dir = os.path.join(cache_dir, "backups")

@@ -2,7 +2,7 @@
 
 ## 一、版本号统一
 
-AKM v0.1.45 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版将首页插件卡片区改为**瀑布流布局**（`akm/templates/_styles.html` 的 `.plugin-cards-masonry` CSS columns 规则，`akm/server.py` 的 `_build_plugin_dashboard_cards_section` 输出容器改用该 class），并随 v0.1.44 通用插件卡片插槽路线收编 markdown_kb——移除 v0.1.44 及更早宿主内的 `_build_markdown_kb_memory_card` 专用渲染与 `dashboard.html` 的 `mk-memory-section`，首页卡片全部改由 `dashboard_card()` 插槽统一渲染：data_filter_guard v0.1.5（运行统计，随本版发插件市场）与 markdown_kb v0.1.6（记忆统计，同样随本版发插件市场）为采用者。内置 Markdown KB MCP 的握手版本仍跟随当前加载的 `markdown_kb` 插件 `meta.version`，与 AKM 主程序版本独立。
+AKM v0.1.46 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版为缺陷修复：① 上游转发 HTTP client 的 TLS 信任库改由 `akm/http_client_pool.py::build_upstream_ssl_context()` 显式解析（`SSL_CERT_FILE` → `certifi` → 系统默认），修复 `certifi` 解包的临时 `cacert.pem` 被系统清理后抛 `FileNotFoundError`、被降级为一次 connect 失败而刷出成片「无法创建到上游的 HTTP 客户端」的问题，`test_key_connectivity` 同步改用该上下文；② 静默自动更新避让进行中的转发请求——检测到 `app.state.health_monitor` 的在途请求/流式响应时推迟下载（每 30s 重试）、替换 `.app` 前等待请求排空（最长 300s）再重启，手动「立即更新」仍立即执行。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
 
@@ -176,7 +176,7 @@ updater = SparkleUpdater(
 1. 统一版本号来源（`akm/__init__.py`）并确保发布时先升级版本号。
 2. 启动时调用 `releases/latest` 检查最新 tag，并匹配 Release 资产中的 `.zip` 更新包（架构优先，`_pick_zip_download_url`）。
 3. 有更新时（`_handle_update_info`）：
-   - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。
+   - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。**静默更新会避让进行中的转发请求**：启动前若检测到在途请求/流式响应（`app.state.health_monitor` 的 `inflight_requests` / `active_streams`），每 30 秒（`AUTO_UPDATE_BUSY_RETRY_SEC`）重试直至服务空闲再开始下载；替换 `.app` 前再次等待请求排空（最长 300 秒，`AUTO_UPDATE_DRAIN_WAIT_SEC`），避免重启掐断请求。手动「立即更新」由用户主动触发，不做等待。
    - `auto_update` 关闭：在菜单栏插入「更新到 vX.Y.Z」菜单项，点击后弹窗确认再下载安装。
 4. 菜单栏「检查更新」：立即检查并弹窗展示 Release Note（`releases/latest` 返回的 `body`），用户点击「立即更新」才下载安装；无更新时弹窗提示已是最新；检查失败（如 GitHub 匿名 API 限流 403、网络异常）会如实弹出「检查更新失败」并附原因，不会误报「已是最新」。点击「立即更新」后在**同一个自定义弹窗**（NSWindow + NSScrollView 可滚动 Release Note + NSProgressIndicator，主线程创建/刷新，后台线程只写进度数值）内于内容区底部实时显示下载百分比，下载完成转为安装动画；弹窗为现代卡片式外观（透明标题栏 + 内容延伸到标题栏、粗体标题配 accent 色版本号、圆角浅底 Release Note 卡片、分隔线，全部使用系统语义色自动适配深色/浅色模式）；底部按钮并排（左侧「取消」、右侧「立即更新」），确认后右侧按钮变「取消更新」并禁用左侧「取消」，点击「取消更新」中断下载并清理临时更新包，弹窗保留并恢复「立即更新」供重试；安装成功后自动关闭弹窗并重启；失败时弹窗关闭并弹窗提示原因。
 5. 为避免触发 GitHub API 限流，结果建议本地缓存 24 小时（已有 `CHECK_INTERVAL = 86400`）。

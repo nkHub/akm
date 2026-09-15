@@ -19,6 +19,7 @@ from akm.db import get_connection, get_keys_log_path
 from akm.agent import BUILTIN_AGENTS, get_agent
 from akm.plugins.context import RequestContext
 from akm.error_log import write_error_log
+from akm.http_client_pool import build_upstream_ssl_context
 
 
 # 原生透传模式下需要跳过的请求头：认证头与传输基础设施头由本服务负责重建，
@@ -1280,12 +1281,14 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
         return base
 
     _proxy = resolve_http_proxy_url()
-    # trust_env=False：连通性测试同样不读系统 HTTP(S)_PROXY / SSL_CERT_FILE 环境变量，
-    # 避免宿主机残留失效证书变量时 AsyncClient 构造期直接抛 FileNotFoundError（见
-    # http_client_pool._build_client 注释）。构造异常单独兜底并如实返回错误文案。
+    # trust_env=False：连通性测试同样不读系统 HTTP(S)_PROXY 环境变量，代理由 AKM
+    # 配置显式控制。证书统一用 build_upstream_ssl_context() 解析出的稳定 CA，避免
+    # certifi 临时解包文件被清理后构造期抛 FileNotFoundError（见 http_client_pool
+    # 内的相关注释）。构造异常单独兜底并如实返回错误文案。
     try:
         client_ctx = httpx.AsyncClient(
             trust_env=False,
+            verify=build_upstream_ssl_context(),
             **({"proxy": _proxy} if _proxy else {}),
         )
     except Exception as e:

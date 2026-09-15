@@ -1,5 +1,6 @@
 import pytest
 import json
+import ssl
 from akm import __version__
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
@@ -8,7 +9,7 @@ import asyncio
 from akm.proxy import forward_request, test_key_connectivity as check_key_connectivity, _diagnose_no_key, redact_headers
 from akm.agent import AGENT_REGISTRY
 from akm.db import get_connection, init_db
-from akm.http_client_pool import HttpClientPoolManager
+from akm.http_client_pool import HttpClientPoolManager, build_upstream_ssl_context
 from akm.key_pool import add_key, set_status
 
 
@@ -1751,6 +1752,36 @@ async def test_http_client_pool_builds_with_trust_env_disabled(monkeypatch):
     assert captured["kwargs"].get("trust_env") is False
     assert captured["kwargs"].get("proxy") == "http://127.0.0.1:1080"
     await pool_proxy.aclose()
+
+
+def test_build_upstream_ssl_context_prefers_existing_ssl_cert_file(tmp_path, monkeypatch):
+    """SSL_CERT_FILE 指向存在的证书时，应优先用它构造上下文。
+
+    打包的 .app 启动时会把 SSL_CERT_FILE 指向自带的 openssl.ca/cert.pem，
+    这是修复 certifi 临时解包文件丢失（ENOENT）根因的关键路径。
+    """
+    ca = tmp_path / "cert.pem"
+    ca.write_text("dummy")
+    calls = []
+
+    def fake_create_default_context(cafile=None):
+        calls.append(cafile)
+        return "ctx"
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    monkeypatch.setattr("akm.http_client_pool.ssl.create_default_context", fake_create_default_context)
+    assert build_upstream_ssl_context() == "ctx"
+    assert calls == [str(ca)]
+
+
+def test_build_upstream_ssl_context_never_raises_when_ca_missing(tmp_path, monkeypatch):
+    """候选 CA 文件都不存在时应回退系统默认，而不是抛 FileNotFoundError。
+
+    对应 certifi 临时 cacert.pem 被清理后再构造 client 会失败的真实故障。
+    """
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    ctx = build_upstream_ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
 
 
 @pytest.mark.asyncio
