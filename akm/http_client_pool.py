@@ -1,12 +1,56 @@
 """按上游路由隔离的 HTTP client 池。"""
 
 import asyncio
+import os
+import ssl
 import time
+import traceback
 from dataclasses import dataclass
 
 import httpx
 
 from akm.error_log import write_error_log
+
+
+def _ca_file_candidates() -> list[str]:
+    """返回可用的 CA 文件候选路径，按稳定性从高到低排列。
+
+    说明：certifi 在首次调用 where() 时会把 cacert.pem 解包到系统临时目录，并把
+    路径缓存在模块级变量里。当该临时文件被系统清理后，后续再用这个旧路径构造
+    ssl 上下文就会抛 FileNotFoundError。因此这里优先使用更稳定的来源：
+    1) SSL_CERT_FILE：打包后的 .app 在启动时会指向自带的 openssl.ca/cert.pem；
+    2) certifi.where()：开发环境或未注入环境变量时的默认信任库。
+    """
+    candidates: list[str] = []
+    env_ca = (os.environ.get("SSL_CERT_FILE") or "").strip()
+    if env_ca:
+        candidates.append(env_ca)
+    try:
+        import certifi
+
+        candidates.append(certifi.where())
+    except Exception:
+        # certifi 缺失或解包失败时忽略，交给后续的系统默认 CA 兜底
+        pass
+    return candidates
+
+
+def build_upstream_ssl_context() -> ssl.SSLContext:
+    """构建访问上游时使用的 TLS 上下文。
+
+    逐个尝试候选 CA 文件，返回第一个可成功加载的上下文；全部不可用时回退到
+    系统默认 CA（ssl.create_default_context()），从而彻底避开 certifi 缓存路径
+    失效这一根因，保证 client 构造期不再因证书文件丢失而抛 FileNotFoundError。
+    """
+    for cafile in _ca_file_candidates():
+        if not cafile or not os.path.isfile(cafile):
+            continue
+        try:
+            return ssl.create_default_context(cafile=cafile)
+        except (OSError, ssl.SSLError):
+            # 文件存在但不可读/内容非法时继续尝试下一个候选
+            continue
+    return ssl.create_default_context()
 
 
 @dataclass
@@ -60,16 +104,18 @@ class HttpClientPoolManager:
         kwargs = {
             "limits": limits,
             "timeout": httpx.Timeout(self.timeout_sec, connect=self.connect_timeout_sec),
+            # 显式传入稳定的 TLS 上下文：避免 httpx 默认走 certifi.where() 时，
+            # 其临时解包出的 cacert.pem 被系统清理后构造期抛 FileNotFoundError，
+            # 导致本应正常的请求被降级成“上游不可用”并频繁切换 Key。
+            "verify": build_upstream_ssl_context(),
         }
         if self.proxy_url:
             # httpx 0.28+ 使用 proxy=；SOCKS 需安装 httpx[socks] / socksio
             kwargs["proxy"] = self.proxy_url
         # 统一关闭 trust_env：无论是否配置出站代理，都不读取系统环境变量里的
-        # HTTP(S)_PROXY / ALL_PROXY 代理，也不读取 SSL_CERT_FILE / SSL_CERT_DIR
-        # 指定的证书文件。代理由 AKM 配置显式控制；证书走 httpx 默认信任库。
-        # 否则当环境变量指向不存在的证书文件时，httpx 会在 AsyncClient 构造期
-        # （create_default_context）抛 FileNotFoundError，让本应在网络期的错误
-        # 变成 500（实测：代理节点 + 失效 SSL_CERT_FILE 即可复现）。
+        # HTTP(S)_PROXY / ALL_PROXY，代理由 AKM 配置显式控制。证书已由上面的
+        # verify 显式指定，不再依赖环境变量解析，因此不会再出现“环境变量指向
+        # 不存在的证书文件导致 AsyncClient 构造失败”的问题。
         kwargs["trust_env"] = False
         return httpx.AsyncClient(**kwargs)
 
@@ -97,6 +143,7 @@ class HttpClientPoolManager:
                 write_error_log(
                     source="http_client_pool.get_client",
                     error=f"创建上游 HTTP client 失败: {exc}",
+                    traceback_str=traceback.format_exc(),
                     extra={"provider": provider, "key_alias": key_alias, "model": model, "api_path": api_path},
                 )
                 return None

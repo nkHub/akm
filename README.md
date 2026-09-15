@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-AKM v0.1.45：管理台首页插件卡片区改为**瀑布流布局**（CSS columns，卡片按各自高度自然交错排布、不强制同行等高）。首页插件卡片统一由 **通用插槽**（`dashboard_card()`）渲染——data_filter_guard v0.1.5 运行统计卡与 markdown_kb v0.1.6 记忆统计卡均经此展示；宿主已移除早期 markdown_kb 专用首页渲染（`mk-memory-section`），插件增删改首页卡片只需发插件更新、无需升级内核。内置 Markdown KB MCP 握手版本跟随 markdown_kb 插件版本。
+AKM v0.1.46：修复上游转发 HTTP client 的 TLS 信任库构造缺陷——不再依赖 `certifi` 解包到临时目录的 `cacert.pem`（该临时文件被系统清理后会抛 `FileNotFoundError`，表现为审计日志成片「无法创建到上游的 HTTP 客户端」），改由 `build_upstream_ssl_context()` 显式按 `SSL_CERT_FILE`（打包 `.app` 自带 CA）→ `certifi` → 系统默认三级取用；同时静默自动更新改为**避让进行中的转发请求**，检测到在途请求/流式响应时推迟下载、替换前等待请求排空再重启，避免更新掐断请求。
 
 macOS 构建在资源后处理完成后重新进行 ad-hoc 签名并校验，校验失败时阻止生成发布包；该签名不等同于 Apple 公证。
 
@@ -43,7 +43,7 @@ python setup.py py2app
 
 应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。
 
-打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后下载 zip、解压替换并自动重启；菜单栏「检查更新」可手动检查，有更新时在自定义弹窗内展示可滚动 Release Note，确认后同一弹窗实时显示下载/安装进度，下载期间右侧按钮变「取消更新」可中断并重试，无更新则弹窗提示已是最新；检查失败（如 GitHub 匿名限流 403）会如实提示「检查更新失败」，不会误报「已是最新」。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
+打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后下载 zip、解压替换并自动重启（静默更新会避让进行中的转发请求，检测到在途请求/流式响应时每隔 30 秒重试、替换前等待请求排空最长 300 秒再重启）；菜单栏「检查更新」可手动检查，有更新时在自定义弹窗内展示可滚动 Release Note，确认后同一弹窗实时显示下载/安装进度，下载期间右侧按钮变「取消更新」可中断并重试，无更新则弹窗提示已是最新；检查失败（如 GitHub 匿名限流 403）会如实提示「检查更新失败」，不会误报「已是最新」。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
 
 ## 快速开始
 
@@ -255,7 +255,7 @@ akm-menubar
 |--------|--------|------|
 | `launch_at_login` | `false` | 开机自启动（仅打包后的 `.app` 生效） |
 | `menu_bar_show_usage` | `false` | 菜单栏显示今日用量（Token 数 / 费用交替展示） |
-| `auto_update` | `true` | 自动更新：发现新版本后静默下载 zip 并替换重启；关闭后需手动「检查更新」确认 |
+| `auto_update` | `true` | 自动更新：发现新版本后静默下载 zip 并替换重启（有在途请求时先等待其结束）；关闭后需手动「检查更新」确认 |
 | `wake_recover_delay_sec` | `8` | 菜单栏应用收到系统唤醒事件后，执行本地 ready 检查与上游探活前的等待秒数；VPN/Wi-Fi/代理恢复偏慢的机器可调大 |
 
 ### 图片
@@ -273,7 +273,9 @@ akm-menubar
 
 仅作用于 AKM 访问上游供应商的请求（主转发连接池与连通性测试），不是系统 VPN，不影响本机其它软件；SOCKS 依赖运行环境中的 `socksio`。
 
-AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的 `HTTP(S)_PROXY` / `ALL_PROXY` 代理，也不读取 `SSL_CERT_FILE` / `SSL_CERT_DIR` 指向的证书文件，证书走 httpx 默认信任库。这样既保证出站代理只由上述配置控制，也避免宿主机残留指向不存在文件的失效证书环境变量导致 HTTP client 在构造期直接抛 `FileNotFoundError`（历史缺陷，曾让代理请求意外变成 500）。
+AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的 `HTTP(S)_PROXY` / `ALL_PROXY` 代理，出站代理只由上述配置控制。TLS 信任库不走 httpx 默认（certifi），而是由 `http_client_pool.build_upstream_ssl_context()` 显式解析：优先使用 `SSL_CERT_FILE`（打包后的 `.app` 启动时指向自带的 `Resources/openssl.ca/cert.pem`），其次 certifi 的 `cacert.pem`，都不可用时回退系统默认 CA。
+
+这样可避免 certifi 首次使用时把 `cacert.pem` 解包到系统临时目录、临时文件被系统清理后再构造 client 时抛 `FileNotFoundError` 的历史缺陷（ENOENT）：该缺陷曾让主转发连接池在构造期失败，被降级成一次「无法创建到上游的 HTTP 客户端」并频繁切换 Key。连通性测试同样使用该稳定证书上下文。
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
