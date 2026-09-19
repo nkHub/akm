@@ -2,6 +2,8 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
+AKM v0.1.47：新增本地数据目录自动维护。服务启动与系统唤醒恢复时执行一次维护（`akm.cleanup.run_auto_maintenance`），含三步互相独立的动作：① 按 `log_retention_days` 清理过期审计日志并 VACUUM（始终执行）；② **更新包缓存清理**（`update_cache_cleanup`，默认开启）——`~/.akm/updates/` 只保留最新更新包与一个可回滚的旧版本 `.app` 备份，其余历史包与旧备份自动删除，10 分钟内修改过的文件视为更新进行中而跳过；③ **文本日志轮转**（`text_log_rotation`，默认关闭）——`error.log`、`keys.log`、`wake_recovery.log`、`plugin.launch.log` 等根目录 append-only 日志超过 `log_file_max_mb` 后转存 `.1` 并保留一代。维护只处理 AKM 自己产生的派生数据，不触碰 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
+
 AKM v0.1.46：修复上游转发 HTTP client 的 TLS 信任库构造缺陷——不再依赖 `certifi` 解包到临时目录的 `cacert.pem`（该临时文件被系统清理后会抛 `FileNotFoundError`，表现为审计日志成片「无法创建到上游的 HTTP 客户端」），改由 `build_upstream_ssl_context()` 显式按 `SSL_CERT_FILE`（打包 `.app` 自带 CA）→ `certifi` → 系统默认三级取用；同时静默自动更新改为**避让进行中的转发请求**，检测到在途请求/流式响应时推迟下载、替换前等待请求排空再重启，避免更新掐断请求。
 
 macOS 构建在资源后处理完成后重新进行 ad-hoc 签名并校验，校验失败时阻止生成发布包；该签名不等同于 Apple 公证。
@@ -218,6 +220,9 @@ akm-menubar
   "launch_at_login": false,
   "menu_bar_show_usage": false,
   "auto_update": true,
+  "update_cache_cleanup": true,
+  "text_log_rotation": false,
+  "log_file_max_mb": 5,
   "http_proxy_enabled": false,
   "http_proxy_url": "",
   "http_client_max_connections": 8,
@@ -237,15 +242,18 @@ akm-menubar
 }
 ```
 
-### 服务与日志
+### 服务、日志与存储
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `server_port` | `8800` | 服务端口 |
 | `auto_open_admin` | `true` | 启动时自动打开管理台 |
-| `log_retention_days` | `30` | 日志保留天数 |
+| `log_retention_days` | `30` | 审计日志保留天数（超期日志在服务启动与系统唤醒恢复时自动清理并 VACUUM） |
 | `log_request_body` | `false` | 是否记录客户端请求体、最终上游请求体与客户端/上游请求头快照（不依赖协议转换；含完整对话内容，占用空间大；轻量来源头始终记录） |
 | `log_response_body` | `false` | 是否记录上游原始响应体和客户端响应体（不依赖协议转换；占用空间大，关闭不影响统计） |
+| `update_cache_cleanup` | `true` | 自动清理 `~/.akm/updates/` 历史更新包与旧版本 `.app` 备份，只保留最新更新包与回滚备份（启动与唤醒时执行；仅显式设为 `false` 才关闭） |
+| `text_log_rotation` | `false` | 自动轮转数据目录根下的 append-only 文本日志（`error.log`、`keys.log`、`wake_recovery.log`、`plugin.launch.log` 等），超过阈值转存为 `.1` 并保留一代；默认关闭，需显式设为 `true` 开启 |
+| `log_file_max_mb` | `5` | 单个文本日志的轮转阈值（MB），仅在上一条开启时生效 |
 | `stream_capture_max_bytes` | `262144` | 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB） |
 | `json_viewer_max_text_length` | `600000` | JSON 查看器超长文本阈值（超过后仅允许下载原文） |
 
@@ -339,6 +347,8 @@ AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的
 ## 数据与日志存储
 
 Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增删改、启停和模型刷新会额外追加写入 `~/.akm/keys.log`，它的定位是“Key 配置/状态审计日志”，主要用于复盘谁在什么时间改了哪些 Key 元数据，不包含 `api_key` 明文；事件名统一采用 `key.config.*`、`key.status.*`、`key.models.*` 这种层级化审计风格。代理转发过程中因上游 401/403/402/429 触发的自动降级（禁用/限流）同样会追加写入 `key.status.changed`（含 before/after 状态与触发原因）到 `~/.akm/keys.log`，并同步写入 `~/.akm/error.log`（source 为 `proxy.auto_disable`），避免“无痕禁用”导致难以追溯。菜单栏应用的休眠恢复链路会单独把关键节点追加写入 `~/.akm/wake_recovery.log`，采用逐行 JSON 的形式记录收到唤醒、去抖跳过、等待、探针结果、重启动作和最终恢复结果；插件管理器会把每个启用插件的 `on_load` 结束状态及汇总追加写入 `~/.akm/plugin.launch.log`，用于判断插件是否真正进入 `runtime_ready`。系统内部错误（全局异常、代理转发失败、用量查询异常、插件加载失败等）会以逐行 JSON 写入 `~/.akm/error.log`，不再将 traceback 或内部报错详情返回给客户端；客户端仅收到通用错误提示，排障时请查看该文件。运行时卡顿、请求堆积、连接池重建等问题请优先查看 `/health/detail` 与 `/debug/runtime`。
+
+`~/.akm` 会在服务启动和系统唤醒恢复时执行一次本地数据维护（`akm.cleanup.run_auto_maintenance`），三步互相独立、任一步失败不影响其余：① 按 `log_retention_days` 清理过期审计日志并回收 SQLite 空间（始终执行）；② 清理 `~/.akm/updates/` 下的历史更新包与旧版本 `.app` 备份，只留最新更新包与一个回滚备份（受 `update_cache_cleanup` 控制，默认开启，正在下载/替换的文件有 10 分钟宽限期）；③ 轮转数据目录根下的 append-only 文本日志（受 `text_log_rotation` 控制，默认关闭，阈值 `log_file_max_mb`）。维护只处理 AKM 自己产生的派生数据，不会删除 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
 
 ## 本地智能体接入指引
 
@@ -549,6 +559,8 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 在设置页「供应商代理管理」可添加自定义供应商（如第三方中转站），定义其默认 base_url、认证头模板和协议能力，持久化到 `~/.akm/config.json`。添加后新建 Key 选择该供应商时可省略 base_url 和认证头。
 
 自定义供应商做连通性测试时，会优先使用该供应商第一个启用的协议能力发起请求：优先级为 `Chat -> Responses -> Messages`。
+
+若某供应商的 `/responses` 端点只接受 `type: "function"` 的工具，可关闭其 `supports_responses`（保留 `supports_chat`），让 Responses 请求改经协议转换为 Chat 通道发出；Codex 等客户端注入的 `web_search`、`file_search` 等内置工具会在转换时被过滤，避免上游返回 400（如 `tools.7.type`）。
 
 Key 管理页「添加 Key」中的供应商下拉会自动读取 `/api/agents`（即设置页维护的数据），并保留「自定义」选项用于手工填写 `base_url`/`auth_header`。当保存的 `models='*'` 时，管理台会同步请求该提供商的 `{base_url}/models`，并把返回的模型列表缓存到当前 key，用于前端展示以及 wildcard 模式下的模型匹配；显式自定义模型时不会自动请求该列表。
 

@@ -2,7 +2,7 @@
 
 ## 一、版本号统一
 
-AKM v0.1.46 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版为缺陷修复：① 上游转发 HTTP client 的 TLS 信任库改由 `akm/http_client_pool.py::build_upstream_ssl_context()` 显式解析（`SSL_CERT_FILE` → `certifi` → 系统默认），修复 `certifi` 解包的临时 `cacert.pem` 被系统清理后抛 `FileNotFoundError`、被降级为一次 connect 失败而刷出成片「无法创建到上游的 HTTP 客户端」的问题，`test_key_connectivity` 同步改用该上下文；② 静默自动更新避让进行中的转发请求——检测到 `app.state.health_monitor` 的在途请求/流式响应时推迟下载（每 30s 重试）、替换 `.app` 前等待请求排空（最长 300s）再重启，手动「立即更新」仍立即执行。
+AKM v0.1.47 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版新增**本地数据目录自动维护**：新增 `akm/cleanup.py`，以 `run_auto_maintenance()` 作为统一入口，在服务启动（`akm/server.py` lifespan）与系统唤醒恢复（`akm/menubar.py`，后台线程）时各执行一次，三步互相独立、任一步失败不影响其余——① 按 `log_retention_days` 清理过期审计日志并 VACUUM（沿用既有行为，始终执行）；② 更新包缓存清理（`update_cache_cleanup`，默认开启）：`~/.akm/updates/` 与 `updates/backups/` 合起来只保留最新一个 zip，`backups/` 只保留最新一份与本版本对应的旧 `.app` 备份（回滚点），10 分钟内修改过的文件视为进行中的更新而跳过；③ 文本日志轮转（`text_log_rotation`，默认关闭，阈值 `log_file_max_mb`）：数据目录根下的 append-only `*.log` 超阈值转存 `.1` 并保留一代，不递归因此不进入会话/知识库/插件目录。设置页「日志与存储」新增上述两个开关，均为向后兼容的可选行为。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
 
@@ -175,6 +175,7 @@ updater = SparkleUpdater(
 
 1. 统一版本号来源（`akm/__init__.py`）并确保发布时先升级版本号。
 2. 启动时调用 `releases/latest` 检查最新 tag，并匹配 Release 资产中的 `.zip` 更新包（架构优先，`_pick_zip_download_url`）。
+   - **本地更新包缓存保留策略**：下载落在 `~/.akm/updates/`，替换前的旧 `.app` 备份落在 `~/.akm/updates/backups/`。服务启动与系统唤醒恢复时由 `akm.cleanup.cleanup_update_cache` 维护：两层合起来只保留修改时间最新的一个 `.zip`，`backups/` 只保留最新一份 `.app` 备份与当前运行版本对应的备份（回滚点），其余删除；10 分钟内修改过的文件视为进行中的更新而跳过。该行为由 `update_cache_cleanup` 控制，默认开启，用户可在设置页「日志与存储」关闭。
 3. 有更新时（`_handle_update_info`）：
    - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。**静默更新会避让进行中的转发请求**：启动前若检测到在途请求/流式响应（`app.state.health_monitor` 的 `inflight_requests` / `active_streams`），每 30 秒（`AUTO_UPDATE_BUSY_RETRY_SEC`）重试直至服务空闲再开始下载；替换 `.app` 前再次等待请求排空（最长 300 秒，`AUTO_UPDATE_DRAIN_WAIT_SEC`），避免重启掐断请求。手动「立即更新」由用户主动触发，不做等待。
    - `auto_update` 关闭：在菜单栏插入「更新到 vX.Y.Z」菜单项，点击后弹窗确认再下载安装。

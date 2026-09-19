@@ -124,9 +124,9 @@ async def lifespan(app: FastAPI):
     conn = get_connection()
     init_db(conn)
     conn.close()
-    # 启动时自动清理过期日志
-    from akm.audit import auto_cleanup_logs
-    auto_cleanup_logs()
+    # 启动时自动维护本地数据目录：清理过期审计日志，并按配置清理更新包缓存 / 轮转文本日志
+    from akm.cleanup import run_auto_maintenance
+    run_auto_maintenance()
     # 加载配置（后续连接池、队列等参数均从此读取）
     cfg = load_config()
     # 菜单栏唤醒恢复会复用同一个 FastAPI 实例；先清理上一轮插件注册的

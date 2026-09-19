@@ -194,12 +194,20 @@ def _wake_recovery_log_path() -> str:
 
 
 def _trigger_log_cleanup():
-    """在后台线程中执行一次审计日志自动清理，不阻塞恢复流程。"""
-    try:
-        from akm.audit import auto_cleanup_logs
-        auto_cleanup_logs()
-    except Exception:
-        pass
+    """在后台线程中执行一次本地数据目录维护，不阻塞唤醒恢复流程。
+
+    维护内容见 akm.cleanup.run_auto_maintenance：审计日志清理（始终执行）、
+    更新包缓存清理（默认开启）、文本日志轮转（默认关闭）。
+    """
+
+    def _run():
+        try:
+            from akm.cleanup import run_auto_maintenance
+            run_auto_maintenance()
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 class _WakeObserver(NSObject):

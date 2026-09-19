@@ -71,9 +71,9 @@
     </div>
   </section>
 
-  <!-- 日志 -->
+  <!-- 日志与存储 -->
   <section>
-    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">日志</h3>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">日志与存储</h3>
     <div class="grid grid-cols-2 gap-4">
       <akm-settings-card align="start">
         <div>
@@ -99,6 +99,20 @@
           <akm-switch id="cfg-log-req" label="记录请求体"></akm-switch>
           <akm-switch id="cfg-log-resp" label="记录响应体"></akm-switch>
         </div>
+      </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">更新包缓存清理</h4>
+          <p class="text-xs text-gray-500 mt-0.5">启动或唤醒时自动删除历史更新包与旧版本备份，只保留最新更新包与回滚备份</p>
+        </div>
+        <akm-switch id="cfg-update-cleanup" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+      </akm-settings-card>
+      <akm-settings-card>
+        <div>
+          <h4 class="text-sm font-semibold text-white">文本日志自动轮转</h4>
+          <p class="text-xs text-gray-500 mt-0.5">error.log、keys.log 等文本日志超过阈值后转存为 .1（保留一代），不涉及会话与知识库数据</p>
+        </div>
+        <akm-switch id="cfg-text-log-rotation" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card align="start">
         <div>
@@ -272,6 +286,8 @@ var _jsonViewerMaxTextLength = 600000;
 var _launchAtLogin = false;
 var _menuBarShowUsage = false;
 var _autoUpdate = true;
+var _updateCacheCleanup = true;
+var _textLogRotation = false;
 
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
@@ -339,6 +355,10 @@ function loadConfig() {
     updateMenuUsageToggle();
     _autoUpdate = cfg.auto_update !== false;
     updateAutoUpdateToggle();
+    _updateCacheCleanup = cfg.update_cache_cleanup !== false;
+    updateUpdateCleanupToggle();
+    _textLogRotation = cfg.text_log_rotation === true;
+    updateTextLogRotationToggle();
     document.getElementById('cost-pricing-table').value = cfg.cost_pricing_table || '';
     _httpProxyEnabled = cfg.http_proxy_enabled === true;
     updateHttpProxyToggle();
@@ -431,6 +451,30 @@ function toggleAutoUpdate() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({auto_update: _autoUpdate})
+  });
+}
+
+function updateUpdateCleanupToggle() { _updateSwitch('cfg-update-cleanup', _updateCacheCleanup); }
+
+function toggleUpdateCacheCleanup() {
+  _updateCacheCleanup = !_updateCacheCleanup;
+  updateUpdateCleanupToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({update_cache_cleanup: _updateCacheCleanup})
+  });
+}
+
+function updateTextLogRotationToggle() { _updateSwitch('cfg-text-log-rotation', _textLogRotation); }
+
+function toggleTextLogRotation() {
+  _textLogRotation = !_textLogRotation;
+  updateTextLogRotationToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text_log_rotation: _textLogRotation})
   });
 }
 
@@ -838,6 +882,10 @@ document.addEventListener('DOMContentLoaded', function() {
   if (menuUsageEl) menuUsageEl.addEventListener('click', toggleMenuUsage);
   var autoUpdateEl = document.getElementById('cfg-auto-update');
   if (autoUpdateEl) autoUpdateEl.addEventListener('click', toggleAutoUpdate);
+  var updateCleanupEl = document.getElementById('cfg-update-cleanup');
+  if (updateCleanupEl) updateCleanupEl.addEventListener('click', toggleUpdateCacheCleanup);
+  var textLogRotationEl = document.getElementById('cfg-text-log-rotation');
+  if (textLogRotationEl) textLogRotationEl.addEventListener('click', toggleTextLogRotation);
   loadConfig();
   loadAgents();
 });
