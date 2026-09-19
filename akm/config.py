@@ -11,6 +11,9 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULTS = {
     "auto_open_admin": True,  # 启动时自动打开管理台
     "log_retention_days": 30,  # 日志保留天数
+    "update_cache_cleanup": True,  # 自动清理 updates/ 历史更新包与旧版本备份（只保留最新 zip 与回滚备份），默认开启
+    "text_log_rotation": False,  # 自动轮转数据目录根下的 append-only 文本日志（error.log / keys.log 等），默认关闭
+    "log_file_max_mb": 5,      # 单个文本日志的轮转阈值（MB），超过后转存为 .1 并保留一代
     "server_port": 8800,       # 默认服务端口
     "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）；关闭时客户端请求头与上游请求头快照（client_request_headers / upstream_request_headers 两列）同样不落库，但 request_headers（轻量白名单源信息，用于来源/徽章展示）始终记录
     "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
@@ -225,6 +228,10 @@ def load_config() -> dict:
     merged["http_proxy_url"] = normalize_http_proxy_url(merged.get("http_proxy_url", ""))
     # macOS 原生功能：自动更新默认开启，仅显式设为 false 才关闭
     merged["auto_update"] = merged.get("auto_update") is not False
+    # 本地数据目录维护：更新包清理默认开启（仅显式 false 关闭），文本日志轮转默认关闭（仅显式 true 开启）
+    merged["update_cache_cleanup"] = merged.get("update_cache_cleanup") is not False
+    merged["text_log_rotation"] = merged.get("text_log_rotation") is True
+    merged["log_file_max_mb"] = max(1, _safe_int(merged.get("log_file_max_mb"), 5))
     # 连接池参数：确保为合理整数，防止配置异常导致连接池初始化失败
     merged["http_client_max_connections"] = max(1, int(merged.get("http_client_max_connections", 8) or 8))
     merged["http_client_max_keepalive"] = max(0, int(merged.get("http_client_max_keepalive", 2) or 2))
@@ -291,6 +298,10 @@ def save_config(data: dict) -> None:
     current["http_proxy_url"] = normalize_http_proxy_url(current.get("http_proxy_url", ""))
     # macOS 原生功能：自动更新默认开启，仅显式设为 false 才关闭
     current["auto_update"] = current.get("auto_update") is not False
+    # 本地数据目录维护：与 load_config 保持同一套布尔归一化，避免传入字符串/数字时误判
+    current["update_cache_cleanup"] = current.get("update_cache_cleanup") is not False
+    current["text_log_rotation"] = current.get("text_log_rotation") is True
+    current["log_file_max_mb"] = max(1, _safe_int(current.get("log_file_max_mb"), 5))
     # 连接池参数：确保为合理整数/浮点，防止配置异常导致连接池初始化失败
     current["http_client_max_connections"] = max(1, int(current.get("http_client_max_connections", 8) or 8))
     current["http_client_max_keepalive"] = max(0, int(current.get("http_client_max_keepalive", 2) or 2))
