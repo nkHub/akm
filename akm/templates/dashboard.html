@@ -20,15 +20,45 @@
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
     <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
       <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
-      <div class="p-4 space-y-3">
-        <div class="skeleton h-4 w-full"></div><div class="skeleton h-4 w-3/4"></div><div class="skeleton h-4 w-5/6"></div><div class="skeleton h-4 w-2/3"></div>
+      <div class="p-4" style="height:260px">
+        <div class="skeleton h-2.5 w-24"></div>
+        <div class="flex items-center gap-4 mt-4">
+          <div class="skeleton rounded-full shrink-0" style="width:168px;height:168px"></div>
+          <div class="flex-1 space-y-3">
+            <div class="skeleton h-3 w-full"></div><div class="skeleton h-3 w-5/6"></div><div class="skeleton h-3 w-4/6"></div><div class="skeleton h-3 w-3/6"></div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
       <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
-      <div class="p-4 space-y-3">
-        <div class="skeleton h-4 w-full"></div><div class="skeleton h-4 w-3/4"></div><div class="skeleton h-4 w-5/6"></div><div class="skeleton h-4 w-2/3"></div>
+      <div class="p-4" style="height:260px">
+        <div class="skeleton h-2.5 w-24"></div>
+        <div class="flex items-center gap-4 mt-4">
+          <div class="skeleton rounded-full shrink-0" style="width:168px;height:168px"></div>
+          <div class="flex-1 space-y-3">
+            <div class="skeleton h-3 w-full"></div><div class="skeleton h-3 w-5/6"></div><div class="skeleton h-3 w-4/6"></div><div class="skeleton h-3 w-3/6"></div>
+          </div>
+        </div>
       </div>
+    </div>
+  </div>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+    <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
+      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
+      <div class="p-4" style="height:260px">
+        <div class="skeleton h-2.5 w-24"></div>
+        <div class="flex items-center gap-4 mt-4">
+          <div class="skeleton rounded-full shrink-0" style="width:168px;height:168px"></div>
+          <div class="flex-1 space-y-3">
+            <div class="skeleton h-3 w-full"></div><div class="skeleton h-3 w-5/6"></div><div class="skeleton h-3 w-4/6"></div><div class="skeleton h-3 w-3/6"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
+      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-16"></div></div>
+      <div class="p-4" style="height:260px"><div class="skeleton h-full w-full"></div></div>
     </div>
   </div>
 </div>
@@ -62,13 +92,81 @@
   </div>
 </div>
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-  <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-    <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按 Key</div>
-    <div class="overflow-x-auto"><table class="w-full text-sm table-fixed"><colgroup id="cg-provider"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-provider"></tbody></table></div>
+  <div class="bg-surface-light border border-border rounded-lg overflow-hidden flex flex-col">
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+      <span class="text-xs font-medium text-gray-400">按 Key</span>
+      <div class="flex items-center gap-2">
+        <div id="metricwrap-key" class="invisible"><akm-range-tabs id="metric-key"></akm-range-tabs></div>
+        <akm-range-tabs id="view-key"></akm-range-tabs>
+      </div>
+    </div>
+    <div id="table-key" class="hidden flex-col" style="height:260px">
+      <div class="flex-1 min-h-0">
+        <table class="w-full text-sm table-fixed"><colgroup id="cg-provider"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-provider"></tbody></table>
+      </div>
+      <div id="pagerwrap-key" class="hidden shrink-0 border-t border-border px-3 py-1 items-center justify-end">
+        <akm-pagination id="pager-key"></akm-pagination>
+      </div>
+    </div>
+    <div id="chart-key" class="p-4 flex items-center" style="height:260px">
+      <akm-donut-chart id="donut-key" class="w-full"></akm-donut-chart>
+    </div>
   </div>
-  <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-    <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">按模型</div>
-    <div class="overflow-x-auto"><table class="w-full text-sm table-fixed"><colgroup id="cg-model"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-model"></tbody></table></div>
+  <div class="bg-surface-light border border-border rounded-lg overflow-hidden flex flex-col">
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+      <span class="text-xs font-medium text-gray-400">按模型</span>
+      <div class="flex items-center gap-2">
+        <div id="metricwrap-model" class="invisible"><akm-range-tabs id="metric-model"></akm-range-tabs></div>
+        <akm-range-tabs id="view-model"></akm-range-tabs>
+      </div>
+    </div>
+    <div id="table-model" class="hidden flex-col" style="height:260px">
+      <div class="flex-1 min-h-0">
+        <table class="w-full text-sm table-fixed"><colgroup id="cg-model"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-model"></tbody></table>
+      </div>
+      <div id="pagerwrap-model" class="hidden shrink-0 border-t border-border px-3 py-1 items-center justify-end">
+        <akm-pagination id="pager-model"></akm-pagination>
+      </div>
+    </div>
+    <div id="chart-model" class="p-4 flex items-center" style="height:260px">
+      <akm-donut-chart id="donut-model" class="w-full"></akm-donut-chart>
+    </div>
+  </div>
+</div>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+  <div id="source-section" class="bg-surface-light border border-border rounded-lg overflow-hidden flex flex-col">
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+      <span class="text-xs font-medium text-gray-400">按来源</span>
+      <div class="flex items-center gap-2">
+        <div id="metricwrap-source" class="invisible"><akm-range-tabs id="metric-source"></akm-range-tabs></div>
+        <akm-range-tabs id="view-source"></akm-range-tabs>
+      </div>
+    </div>
+    <div id="table-source" class="hidden flex-col" style="height:260px">
+      <div class="flex-1 min-h-0">
+        <table class="w-full text-sm table-fixed"><colgroup id="cg-source"><col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup><tbody id="tbl-source"></tbody></table>
+      </div>
+      <div id="pagerwrap-source" class="hidden shrink-0 border-t border-border px-3 py-1 items-center justify-end">
+        <akm-pagination id="pager-source"></akm-pagination>
+      </div>
+    </div>
+    <div id="chart-source" class="p-4 flex items-center" style="height:260px">
+      <akm-donut-chart id="donut-source" class="w-full"></akm-donut-chart>
+    </div>
+  </div>
+  <div id="error-section" class="bg-surface-light border border-border rounded-lg overflow-hidden flex flex-col">
+    <!-- 头部强制单行：右侧摘要在宽度不够时省略号截断（hover 看全文），避免换行把卡片撑高 -->
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 shrink-0">
+      <div class="flex items-center gap-3 shrink-0">
+        <span id="error-title" class="text-xs font-medium text-gray-400 shrink-0 w-16">报错趋势</span>
+        <akm-range-tabs id="error-metric-tabs"></akm-range-tabs>
+      </div>
+      <span id="error-summary" class="text-xs text-gray-500 truncate min-w-0 text-right" title="">—</span>
+    </div>
+    <!-- 卡片体锁死 260px（与左侧「按来源」卡片等高）：切换指标或头部变化都不会改变图表高度 -->
+    <div class="p-4 flex flex-col justify-center" style="height:260px">
+      <akm-line-chart id="error-chart"></akm-line-chart>
+    </div>
   </div>
 </div>
 <div id="daily-section" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
@@ -126,19 +224,364 @@ function costTipIcon(v) {
     + '<svg class="w-3.5 h-3.5 ml-1 inline-block align-[-2px] cursor-help text-gray-500 hover:text-rose-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4M12 8h.01"/></svg>'
     + '</akm-tooltip>';
 }
-// 根据是否开启费用估算，动态生成按 Key / 按模型表格的 colgroup 列宽
+// 根据是否开启费用估算，动态生成按 Key / 按模型 / 按来源表格的 colgroup 列宽
 function syncTableCols(costOn) {
   var html = costOn
     ? '<col style="width:30%"><col style="width:12%"><col style="width:28%"><col style="width:30%">'
     : '<col style="width:30%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%">';
-  var cgP = document.getElementById('cg-provider');
-  var cgM = document.getElementById('cg-model');
-  if (cgP) cgP.innerHTML = html;
-  if (cgM) cgM.innerHTML = html;
+  ['cg-provider', 'cg-model', 'cg-source'].forEach(function(id) {
+    var cg = document.getElementById(id);
+    if (cg) cg.innerHTML = html;
+  });
+}
+
+// 分桶表按 Token 总量降序分页展示（复用 akm-pagination），表格区不再内部滚动，
+// 避免整页出现多个滚动条。每页 6 行，正好落在 260px 卡片体（扣掉分页条）里。
+var BUCKET_PAGE_SIZE = 6;
+var _bucketPage = { key: 1, model: 1, source: 1 };
+var _bucketTotalPages = { key: 1, model: 1, source: 1 };
+
+function bucketEntries(store) {
+  return Object.keys(store || {}).map(function(name) {
+    return { name: name, item: store[name] || {} };
+  }).sort(function(a, b) { return (b.item.total || 0) - (a.item.total || 0); });
+}
+
+// 单行：费用开启时「名称/请求次数/Token 总用量/费用」，否则展开输入/输出/缓存明细。
+function bucketRowHtml(k, v, costOn) {
+  return costOn
+    ? '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="' + esc(k) + '">' + esc(k) + '</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">' + v.requests + '次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">' + fmtNum(v.total) + '</td><td class="px-4 py-2 text-xs text-right text-rose-300 whitespace-nowrap">' + esc(fmtCost(v.cost, v.currency, v.costs_by_currency)) + costTipIcon(v) + '</td></tr>'
+    : '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="' + esc(k) + '">' + esc(k) + '</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">' + v.requests + '次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">' + fmtNum(v.total) + '</td><td class="px-4 py-2 text-xs text-right text-gray-400">' + fmtNum(v.prompt) + '</td><td class="px-4 py-2 text-xs text-right text-gray-400">' + fmtNum(v.completion) + '</td><td class="px-4 py-2 text-xs text-right text-teal-400">' + fmtNum(v.cached || 0) + '</td></tr>';
+}
+
+// 单张卡片的分桶表：只渲染当前页的行 + 更新分页条（不动视图可见性）
+function renderBucketTable(panel) {
+  var entries = bucketEntries(_bucketStores[panel.store]);
+  var totalPages = Math.max(1, Math.ceil(entries.length / BUCKET_PAGE_SIZE));
+  _bucketTotalPages[panel.id] = totalPages;
+  // 数据刷新后行数可能变少，页码夹回合法范围
+  var page = Math.min(Math.max(1, _bucketPage[panel.id] || 1), totalPages);
+  _bucketPage[panel.id] = page;
+  var slice = entries.slice((page - 1) * BUCKET_PAGE_SIZE, page * BUCKET_PAGE_SIZE);
+  var tbody = document.getElementById(panel.id === 'key' ? 'tbl-provider' : 'tbl-' + panel.id);
+  if (tbody) {
+    tbody.innerHTML = slice.length
+      ? slice.map(function(entry) { return bucketRowHtml(entry.name, entry.item, _bucketCostOn); }).join('')
+      : '<tr><td colspan="' + (_bucketCostOn ? 4 : 6) + '" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
+  }
+  var pager = document.getElementById('pager-' + panel.id);
+  if (pager && typeof pager.renderPagination === 'function') {
+    pager.renderPagination({
+      totalPages: totalPages,
+      currentPage: page,
+      onSelectName: 'switchBucketPage_' + panel.id,
+      summary: entries.length + ' 项'
+    });
+  }
+}
+
+function setBucketPage(panelId, page) {
+  var panel = null;
+  BUCKET_PANELS.forEach(function(item) { if (item.id === panelId) panel = item; });
+  if (!panel) return;
+  var clamped = Math.min(Math.max(1, parseInt(page, 10) || 1), _bucketTotalPages[panelId] || 1);
+  if (clamped === _bucketPage[panelId]) return;
+  _bucketPage[panelId] = clamped;
+  renderBucketTable(panel);
+}
+
+function setVisible(el, show, asFlex) {
+  if (!el) return;
+  el.classList.toggle('hidden', !show);
+  if (asFlex) el.classList.toggle('flex', show);
 }
 
 var _currentDays = 1;
 var DASHBOARD_DAYS_KEY = 'akm_dashboard_days';
+
+// 趋势卡片指标：报错次数 / 成功率 / P95 延迟（三者同桶同口径，后端一次算好）
+var _currentMetric = 'errors';
+var DASHBOARD_METRIC_KEY = 'akm_dashboard_metric';
+var TREND_METRICS = {
+  errors:  { label: '报错次数', title: '报错趋势', color: '#f87171', unit: '次', emptyText: '该时段无报错' },
+  success: { label: '成功率',   title: '成功率',   color: '#34d399', unit: '%',  emptyText: '该时段无请求' },
+  latency: { label: 'P95 延迟', title: 'P95 延迟', color: '#fbbf24', unit: 'ms', emptyText: '该时段无成功请求' }
+};
+
+// 延迟友好显示：>=1s 用秒，避免 4~5 位数字挤在提示里
+function fmtMs(v) {
+  var n = Number(v);
+  if (!isFinite(n) || n < 0) return '-';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 's';
+  return Math.round(n) + 'ms';
+}
+
+function loadMetricFilter() {
+  try {
+    var saved = localStorage.getItem(DASHBOARD_METRIC_KEY);
+    if (saved && TREND_METRICS[saved]) _currentMetric = saved;
+  } catch (e) {}
+}
+
+function saveMetricFilter() {
+  try {
+    localStorage.setItem(DASHBOARD_METRIC_KEY, _currentMetric);
+  } catch (e) {}
+}
+
+function renderMetricTabs() {
+  var tabs = document.getElementById('error-metric-tabs');
+  if (!tabs || typeof tabs.setOptions !== 'function') return;
+  tabs.setOptions(['errors', 'success', 'latency'].map(function(key) {
+    return { value: key, label: TREND_METRICS[key].label };
+  }), _currentMetric, 'switchMetric');
+}
+
+function switchMetric(metric) {
+  if (!TREND_METRICS[metric] || metric === _currentMetric) return;
+  _currentMetric = metric;
+  saveMetricFilter();
+  renderMetricTabs();
+  // 指标切换只重绘图表，不重新请求接口（数据已在同一份 series 里）
+  renderTrendSeries(_lastTrendSeries);
+}
+
+// 各指标取哪个字段（成功率 / 延迟缺样本时按 0 画，提示里另行说明）
+function metricValue(item, metric) {
+  if (metric === 'success') return item.success_rate == null ? 0 : Number(item.success_rate);
+  if (metric === 'latency') return item.p95_ms == null ? 0 : Number(item.p95_ms);
+  return Number(item.count) || 0;
+}
+
+function metricDetailLines(item, metric) {
+  var requests = Number(item.requests) || 0;
+  var success = Number(item.success) || 0;
+  var failed = item.failed == null ? Math.max(0, requests - success) : Number(item.failed);
+  if (metric === 'success') {
+    if (!requests) return ['该时段无请求'];
+    return [success + ' / ' + requests + ' 成功 · ' + failed + ' 失败'];
+  }
+  if (metric === 'latency') {
+    if (item.p95_ms == null) return ['该时段无成功请求'];
+    return [
+      'P50 ' + fmtMs(item.p50_ms) + ' · 平均 ' + fmtMs(item.avg_ms),
+      '成功 ' + success + ' / ' + requests + ' 请求'
+    ];
+  }
+  var lines = (item.top_errors || []).map(function(err) {
+    return err.count + '× ' + err.message;
+  });
+  // 以 count 为准判断有没有失败：requests/failed 缺失（例如后端版本较旧）时不误报「无失败请求」
+  if (!lines.length) lines.push(Number(item.count) ? '无报错详情' : '该时段无失败请求');
+  return lines;
+}
+
+function renderTrendSeries(series) {
+  var metric = TREND_METRICS[_currentMetric] || TREND_METRICS.errors;
+  var titleEl = document.getElementById('error-title');
+  if (titleEl) titleEl.textContent = metric.title;
+  var chart = document.getElementById('error-chart');
+  if (chart && typeof chart.render === 'function' && series) {
+    chart.render({
+      labels: series.map(function(item) { return item.label; }),
+      values: series.map(function(item) { return metricValue(item, _currentMetric); }),
+      details: series.map(function(item) { return metricDetailLines(item, _currentMetric); }),
+      format: _currentMetric === 'latency'
+        ? function(v) { return fmtMs(v); }
+        : (_currentMetric === 'success'
+          ? function(v) { return (Number(v) || 0).toFixed(2) + '%'; }
+          : null),
+      height: 220,
+      maxHeight: 260,
+      fill: true,
+      color: metric.color,
+      unit: metric.unit,
+      emptyText: metric.emptyText
+    });
+  }
+  var summaryEl = document.getElementById('error-summary');
+  if (summaryEl && series) {
+    var stats = _lastTrendStats || {};
+    var bucketText = _lastTrendBucket === 'hour' ? '今日按小时' : ('近' + _currentDays + '天按天');
+    var summaryText;
+    if (_currentMetric === 'success') {
+      summaryText = stats.success_rate == null
+        ? bucketText + ' · 无请求'
+        : bucketText + ' · 成功率 ' + stats.success_rate.toFixed(2) + '%';
+    } else if (_currentMetric === 'latency') {
+      summaryText = stats.p95_ms == null
+        ? bucketText + ' · 无成功请求'
+        : bucketText + ' · P95 ' + fmtMs(stats.p95_ms) + ' · P50 ' + fmtMs(stats.p50_ms);
+    } else {
+      summaryText = bucketText + ' · 共 ' + (Number(_lastTrendTotal) || 0) + ' 次失败';
+    }
+    // 头部只有一行：超宽时 CSS 截断，全文放 title 里 hover 可见
+    summaryEl.textContent = summaryText;
+    summaryEl.title = summaryText;
+  }
+}
+
+var _lastTrendSeries = null;
+var _lastTrendBucket = 'hour';
+var _lastTrendStats = {};
+var _lastTrendTotal = 0;
+
+// 按 Key / 按模型 / 按来源三张卡片：同一份分桶数据，支持「表 / 图」切换
+// （默认图），图表为环形图，指标可在 请求 / Token / 费用 间切换（三张卡共享同一指标）。
+var BUCKET_PANELS = [
+  { id: 'key', store: 'by_key' },
+  { id: 'model', store: 'by_model' },
+  { id: 'source', store: 'by_source' }
+];
+var DASHBOARD_BUCKET_KEY = 'akm_dashboard_bucket_view';
+var _bucketView = { key: 'chart', model: 'chart', source: 'chart' };
+// 每张卡片各记一个指标，互不影响（Token / 请求 / 费用）
+var _bucketMetricOf = { key: 'requests', model: 'requests', source: 'requests' };
+var _bucketCostOn = false;
+var _bucketStores = {};
+var _bucketMetrics = {
+  requests: { label: '请求', unit: '次', format: function(v) { return String(Math.round(Number(v) || 0)); } },
+  total: { label: 'Token', unit: '', format: function(v) { return fmtNum(v); } },
+  cost: { label: '费用', unit: '', format: function(v) { return '$' + fmtMoney(v); } }
+};
+
+function loadBucketView() {
+  try {
+    var raw = localStorage.getItem(DASHBOARD_BUCKET_KEY);
+    if (!raw) return;
+    var saved = JSON.parse(raw) || {};
+    BUCKET_PANELS.forEach(function(panel) {
+      var entry = saved[panel.id];
+      // 兼容早期版本：视图曾是字符串，指标曾是三卡共享的顶层字段
+      var view = typeof entry === 'string' ? entry : (entry && entry.view);
+      if (view === 'table' || view === 'chart') _bucketView[panel.id] = view;
+      var metric = entry && typeof entry === 'object' ? entry.metric : saved.metric;
+      if (_bucketMetrics[metric]) _bucketMetricOf[panel.id] = metric;
+    });
+  } catch (e) {}
+}
+
+function saveBucketView() {
+  try {
+    var payload = {};
+    BUCKET_PANELS.forEach(function(panel) {
+      payload[panel.id] = { view: _bucketView[panel.id], metric: _bucketMetricOf[panel.id] };
+    });
+    localStorage.setItem(DASHBOARD_BUCKET_KEY, JSON.stringify(payload));
+  } catch (e) {}
+}
+
+function bucketMetricOptions() {
+  var options = [
+    { value: 'total', label: _bucketMetrics.total.label },
+    { value: 'requests', label: _bucketMetrics.requests.label }
+  ];
+  if (_bucketCostOn) options.push({ value: 'cost', label: _bucketMetrics.cost.label });
+  return options;
+}
+
+function renderBucketTabs() {
+  BUCKET_PANELS.forEach(function(panel) {
+    var viewTabs = document.getElementById('view-' + panel.id);
+    if (viewTabs && typeof viewTabs.setOptions === 'function') {
+      viewTabs.setOptions([
+        { value: 'chart', label: '图' },
+        { value: 'table', label: '表' }
+      ], _bucketView[panel.id], 'switchBucketView_' + panel.id);
+    }
+    var metricTabs = document.getElementById('metric-' + panel.id);
+    if (metricTabs && typeof metricTabs.setOptions === 'function') {
+      metricTabs.setOptions(bucketMetricOptions(), _bucketMetricOf[panel.id], 'switchBucketMetric_' + panel.id);
+    }
+    // 表模式下没有指标可切，用 invisible 占位保持头部高度不变（切换不跳高）
+    var wrap = document.getElementById('metricwrap-' + panel.id);
+    if (wrap) wrap.classList.toggle('invisible', _bucketView[panel.id] !== 'chart');
+  });
+}
+
+function setBucketView(panelId, view) {
+  if (view !== 'table' && view !== 'chart') return;
+  if (_bucketView[panelId] === view) return;
+  _bucketView[panelId] = view;
+  saveBucketView();
+  applyBucketLayout();
+}
+
+function setBucketMetric(panelId, metric) {
+  if (!_bucketMetrics[metric] || _bucketMetricOf[panelId] === metric) return;
+  _bucketMetricOf[panelId] = metric;
+  saveBucketView();
+  renderBucketTabs();
+  renderBucketCharts();
+}
+
+// 环形图数据项：数值 + 悬浮明细。
+// 明细与表格保持一致：费用开启时给「费用 + 费用拆解（含价格与缓存命中率）」，
+// 未开启时给「输入 / 输出 / 缓存」Token 构成（这三项不依赖费用估算，表格非费用模式也是这几列）。
+function bucketItemDetails(item) {
+  var lines = ['请求 ' + (item.requests || 0) + ' 次 · Token ' + fmtNum(item.total || 0)];
+  if (_bucketCostOn) {
+    lines.push('费用 ' + fmtCost(item.cost, item.currency, item.costs_by_currency));
+    if (item.cost_detail) {
+      fmtCostDetailTip(item).split('\n').forEach(function(line) { lines.push(line); });
+    }
+  } else {
+    lines.push('输入 ' + fmtNum(item.prompt || 0) + ' · 输出 ' + fmtNum(item.completion || 0) + ' · 缓存 ' + fmtNum(item.cached || 0));
+  }
+  return lines;
+}
+
+function renderBucketCharts() {
+  BUCKET_PANELS.forEach(function(panel) {
+    var donut = document.getElementById('donut-' + panel.id);
+    if (!donut || typeof donut.render !== 'function') return;
+    var metricKey = _bucketMetricOf[panel.id];
+    var metric = _bucketMetrics[metricKey] || _bucketMetrics.requests;
+    var store = _bucketStores[panel.store] || {};
+    donut.render({
+      items: Object.keys(store).map(function(name) {
+        var item = store[name] || {};
+        return {
+          label: name,
+          value: item[metricKey],
+          details: bucketItemDetails(item)
+        };
+      }),
+      unit: metric.unit,
+      format: metric.format,
+      maxSlices: 6,
+      size: 168,
+      centerLabel: metric.label + '合计',
+      emptyText: '暂无数据'
+    });
+  });
+}
+
+// 切换「表 / 图」只动显隐与图表，不重建表格 DOM（分页与页码都保留）
+function applyBucketLayout() {
+  BUCKET_PANELS.forEach(function(panel) {
+    var showChart = _bucketView[panel.id] === 'chart';
+    setVisible(document.getElementById('table-' + panel.id), !showChart, true);
+    setVisible(document.getElementById('chart-' + panel.id), showChart, true);
+    // 分页条只在表视图、且确实多于 1 页时出现
+    setVisible(document.getElementById('pagerwrap-' + panel.id), !showChart && (_bucketTotalPages[panel.id] || 1) > 1, true);
+  });
+  renderBucketTabs();
+  renderBucketCharts();
+}
+
+function renderBuckets(stores, costOn) {
+  _bucketStores = stores || {};
+  _bucketCostOn = costOn === true;
+  // 关闭费用估算后，「费用」指标不再可选，逐卡回落到「请求」
+  if (!_bucketCostOn) {
+    BUCKET_PANELS.forEach(function(panel) {
+      if (_bucketMetricOf[panel.id] === 'cost') _bucketMetricOf[panel.id] = 'requests';
+    });
+  }
+  BUCKET_PANELS.forEach(renderBucketTable);
+  applyBucketLayout();
+}
 
 function loadDaysFilter() {
   if (window.__akmDashboardInitialDays === 1 || window.__akmDashboardInitialDays === 7 || window.__akmDashboardInitialDays === 30) {
@@ -205,31 +648,24 @@ async function loadDashboard() {
     document.getElementById('stat-cached').textContent = fmtNum(s.total_cached_tokens || 0);
     document.getElementById('stat-cached-at').textContent = s.cached_at ? '更新时间 ' + s.cached_at : '';
 
-    var html = '';
-    Object.entries(s.by_key||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
-      var k=e[0], v=e[1];
-      html += costOn
-        ? '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-rose-300 whitespace-nowrap">'+esc(fmtCost(v.cost, v.currency, v.costs_by_currency))+costTipIcon(v)+'</td></tr>'
-        : '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
-    });
-    document.getElementById('tbl-provider').innerHTML = html || '<tr><td colspan="'+(costOn?4:6)+'" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
-
-    html = '';
-    Object.entries(s.by_model||{}).sort(function(a,b){return b[1].total-a[1].total}).forEach(function(e){
-      var k=e[0], v=e[1];
-      html += costOn
-        ? '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-rose-300 whitespace-nowrap">'+esc(fmtCost(v.cost, v.currency, v.costs_by_currency))+costTipIcon(v)+'</td></tr>'
-        : '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300 truncate" title="'+esc(k)+'">'+esc(k)+'</td><td class="px-4 py-2 text-xs text-right text-gray-500 whitespace-nowrap">'+v.requests+'次</td><td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
-    });
-    document.getElementById('tbl-model').innerHTML = html || '<tr><td colspan="'+(costOn?4:6)+'" class="px-4 py-8 text-center text-gray-600 text-xs">暂无数据</td></tr>';
-
     syncTableCols(costOn);
+    renderBuckets({ by_key: s.by_key, by_model: s.by_model, by_source: s.by_source }, costOn);
+
+    // ── 报错趋势 / 成功率 / P95 延迟：days=1 按小时（24 点），7/30 天按自然日 ──
+    var errors = s.errors || {};
+    var series = Array.isArray(errors.series) ? errors.series : [];
+    _lastTrendSeries = series;
+    _lastTrendBucket = errors.bucket || 'hour';
+    _lastTrendStats = errors.stats || {};
+    _lastTrendTotal = errors.total || 0;
+    renderMetricTabs();
+    renderTrendSeries(series);
 
     var dailyEntries = Object.entries(s.daily||{});
     document.getElementById('daily-section').classList.toggle('hidden', dailyEntries.length === 0);
     var thCost = document.getElementById('th-daily-cost');
     if (thCost) thCost.classList.toggle('hidden', !costOn);
-    html = '';
+    var html = '';
     dailyEntries.forEach(function(e){
       var k=e[0], v=e[1];
       var costCell = costOn
@@ -246,6 +682,14 @@ async function loadDashboard() {
 
 document.addEventListener('DOMContentLoaded', function() {
   loadDaysFilter();
+  loadMetricFilter();
+  loadBucketView();
+  // akm-range-tabs 通过 window[回调名] 回传，按卡片各生成一个回调
+  BUCKET_PANELS.forEach(function(panel) {
+    window['switchBucketView_' + panel.id] = function(view) { setBucketView(panel.id, view); };
+    window['switchBucketMetric_' + panel.id] = function(metric) { setBucketMetric(panel.id, metric); };
+    window['switchBucketPage_' + panel.id] = function(page) { setBucketPage(panel.id, page); };
+  });
   var tabs = document.getElementById('dashboard-days');
   if (tabs && typeof tabs.setOptions === 'function') {
     tabs.setOptions([

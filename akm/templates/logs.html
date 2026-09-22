@@ -575,10 +575,8 @@ function renderLogTable() {
   var html = '<table class="w-full text-sm table-fixed">' + colgroup + '<thead><tr class="bg-surface-light text-gray-400 text-xs"><th class="text-left px-4 py-2.5 font-medium">时间</th><th class="text-left px-4 py-2.5 font-medium">Alias</th><th class="text-left px-4 py-2.5 font-medium">供应商</th><th class="text-left px-4 py-2.5 font-medium">模型</th><th class="text-left px-4 py-2.5 font-medium">来源</th><th class="text-center px-4 py-2.5 font-medium">输入(缓存)</th><th class="text-center px-4 py-2.5 font-medium">输出</th>'+costHeader+'<th class="text-center px-2 py-2.5 font-medium">状态</th><th class="text-right px-2 py-2.5 font-medium">延迟</th><th class="text-center px-2 py-2.5 font-medium">详情</th></tr></thead><tbody>';
 
   _logsData.forEach(function(log, i){
-    // ── 从请求头中提取来源标签 ──
     var headers = {};
     try { headers = JSON.parse(log.request_headers || '{}'); } catch(e) {}
-    var ua = (headers['user-agent'] || '').toLowerCase();
     var convWarnText = formatConvWarnings(headers, log);
     var convWarnBadge = convWarnText ? '<span class="ml-1 text-amber-400" title="' + esc(convWarnText) + '">⚠</span>' : '';
     var securityWarnText = formatSecurityWarnings(headers);
@@ -591,21 +589,15 @@ function renderLogTable() {
     var countTokensBadge = hasCountTokensFallback ? '<span class="ml-1 text-cyan-400" title="该条 token 由 messages/count_tokens 回填">CT</span>' : '';
     var adapterFallbackBadge = hasAdapterFallback ? '<span class="ml-1 text-emerald-400" title="该条 token 由适配器收尾 usage 回填">AF</span>' : '';
     var estimateFallbackBadge = hasEstimateFallback ? '<span class="ml-1 text-yellow-300" title="该条 token 为轻量估算值（非上游真实 usage）">EST</span>' : '';
-    // ── 内部请求来源（x-akm-source：chat/flow/task）优先于 user-agent 推断 ──
-    var sourceLabel = '-';
-    var sourceClass = 'text-gray-600';
-    var akSource = String(headers['x-akm-source'] || '').toLowerCase();
-    if (akSource === 'chat') { sourceLabel = 'Chat'; sourceClass = 'text-emerald-400'; }
-    else if (akSource === 'flow') { sourceLabel = 'Flow'; sourceClass = 'text-purple-400'; }
-    else if (akSource === 'task') { sourceLabel = 'Task'; sourceClass = 'text-amber-400'; }
-    else if (ua.includes('opencode')) { sourceLabel = 'OpenCode'; sourceClass = 'text-teal-400'; }
-    else if (ua.includes('claude-cli') || ua.includes('claude code')) { sourceLabel = 'Claude'; sourceClass = 'text-indigo-400'; }
-    else if (ua.includes('codex')) { sourceLabel = 'Codex'; sourceClass = 'text-amber-400'; }
-    else if (ua.includes('cursor')) { sourceLabel = 'Cursor'; sourceClass = 'text-purple-400'; }
-    else if (ua.includes('curl')) { sourceLabel = 'curl'; sourceClass = 'text-gray-400'; }
-    else if (ua.includes('python')) { sourceLabel = 'Python'; sourceClass = 'text-blue-400'; }
-    // 兜底：直接用 UA 里的产品名。不再硬切 12 字符，完整名称交给单元格 truncate + title 呈现。
-    else if (ua) { sourceLabel = ua.split('/')[0]; sourceClass = 'text-gray-400'; }
+    // ── 来源标签由后端统一推导（akm/request_source.py，x-akm-source 优先），
+    //    前端只按标签着色；未识别来源后端已归入「其他」。──
+    var sourceLabel = log.source_label || '-';
+    var sourceClasses = {
+      'Chat': 'text-emerald-400', 'Flow': 'text-purple-400', 'Task': 'text-amber-400',
+      'OpenCode': 'text-teal-400', 'Claude': 'text-indigo-400', 'Codex': 'text-amber-400',
+      'Cursor': 'text-purple-400', 'curl': 'text-gray-400', 'Python': 'text-blue-400'
+    };
+    var sourceClass = sourceClasses[sourceLabel] || 'text-gray-400';
 
     var code = log.status_code;
     var sc = 'status-err';

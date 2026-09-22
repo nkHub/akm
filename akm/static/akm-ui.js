@@ -494,6 +494,486 @@ if (!customElements.get('akm-tooltip')) {
   });
 }
 
+// ── 共享的页面级悬浮浮层：fixed 挂 body，避免被卡片/表格的 overflow-hidden 裁剪 ──
+// 供折线图、环形图等自绘图表复用：
+//   var tip = akmFloatingTip();
+//   tip.show(['第一行', '第二行'], anchorX, anchorY);   // 锚点为视口坐标
+//   tip.hide(); tip.destroy();
+function akmFloatingTip() {
+  var el = null;
+  function ensure() {
+    if (!el) {
+      el = document.createElement('div');
+      el.style.cssText =
+        'position:fixed;z-index:9999;display:none;pointer-events:none;' +
+        'max-width:300px;padding:8px 10px;font-size:11px;line-height:1.7;' +
+        'white-space:pre-line;text-align:left;color:#d1d5db;' +
+        'background:#111827;border:1px solid #374151;border-radius:6px;' +
+        'box-shadow:0 8px 24px rgba(0,0,0,.4);';
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  return {
+    show: function(lines, anchorX, anchorY) {
+      var tip = ensure();
+      tip.textContent = (Array.isArray(lines) ? lines : [lines]).join('\n');
+      tip.style.display = 'block';
+      var rect = tip.getBoundingClientRect();
+      var x = anchorX - rect.width / 2;
+      if (x < 8) x = 8;
+      if (x + rect.width > window.innerWidth - 8) x = window.innerWidth - rect.width - 8;
+      // 优先显示在锚点上方，顶部空间不足时翻到下方
+      var y = anchorY - rect.height - 12;
+      if (y < 8) y = anchorY + 16;
+      tip.style.left = x + 'px';
+      tip.style.top = y + 'px';
+      return tip;
+    },
+    hide: function() { if (el) el.style.display = 'none'; },
+    destroy: function() {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      el = null;
+    }
+  };
+}
+
+// ── akm-line-chart：通用折线图壳组件（内联 SVG，不引入第三方图表库） ──
+// 用法：
+//   var chart = document.getElementById('xxx');
+//   chart.render({
+//     labels: ['00','01',...],   // X 轴刻度，与 values 等长
+//     values: [0, 3, ...],       // 数值序列
+//     height: 220,               // 可选，CSS px，默认 220（fill 时作为最小高度）
+//     maxHeight: 420,            // 可选，fill 模式下的最大高度，默认等于 height
+//     fill: true,                // 可选，垂直拉伸到父容器内容高度并夹在 [height, maxHeight]
+//     color: '#f87171',          // 可选，折线/面积主色，默认 #818cf8
+//     unit: '次',                // 可选，数据点悬浮提示的数值单位
+//     format: fn,                // 可选，自定义悬浮提示里的数值格式（给了它就不再拼 unit）
+//     emptyText: '暂无数据',      // 可选，全 0 时的空态文案
+//     details: [['3× 超时','1× HTTP 429'], null, ...]  // 可选，与 values 等长的附加行
+//   });
+// 传了 details 的数据点改用组件自绘的悬浮浮层（首行「刻度: 数值单位」+ 附加行），
+// 未传时保持 SVG <title> 原生提示。
+// 约定：沿用页面浅色 DOM（不引入 Shadow DOM）；宽度自适应宿主容器，
+//       宿主/父容器尺寸变化（含容器从 display:none 恢复显示）时自动重绘。
+if (!customElements.get('akm-line-chart')) {
+  customElements.define('akm-line-chart', class extends HTMLElement {
+    connectedCallback() {
+      if (this.__mounted) return;
+      this.__mounted = true;
+      this.style.display = 'block';
+      var self = this;
+      if (typeof ResizeObserver === 'function') {
+        // 尺寸变化驱动重绘：容器从隐藏变为可见、窗口缩放、布局调整都会触发。
+        // 用签名比对（宽度 + fill 模式下的父容器可用高度）避免自激循环。
+        this._ro = new ResizeObserver(function() {
+          if (!self._config) return;
+          if (self._sizeSignature() === self._lastSig) return;
+          self.render(self._config);
+        });
+        this._ro.observe(this);
+      } else {
+        this._onResize = function() {
+          clearTimeout(self._resizeTimer);
+          self._resizeTimer = setTimeout(function() {
+            if (self._config && self.isConnected) self.render(self._config);
+          }, 150);
+        };
+        window.addEventListener('resize', this._onResize);
+      }
+    }
+
+    disconnectedCallback() {
+      if (this._ro) { this._ro.disconnect(); this._ro = null; }
+      if (this._onResize) window.removeEventListener('resize', this._onResize);
+      this._hideTip();
+      if (this._tip) { this._tip.destroy(); this._tip = null; }
+    }
+
+    // 父容器内容区高度（剔除 padding），供 fill 模式把图表拉伸到卡片剩余高度
+    _availableHeight() {
+      var parent = this.parentNode;
+      if (!parent || typeof window.getComputedStyle !== 'function') return 0;
+      var style = window.getComputedStyle(parent);
+      var pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+      return Math.max(0, Math.round(parent.clientHeight - pad));
+    }
+
+    // 重绘判定签名：宽度变化总是重绘；fill 模式再叠加父容器可用高度
+    _sizeSignature() {
+      var width = Math.round(this.clientWidth || 0);
+      var fill = !!(this._config && this._config.fill);
+      return width + 'x' + (fill ? this._availableHeight() : 0);
+    }
+
+    // 惰性创建共享浮层（fixed 挂 body，避免被卡片 overflow-hidden 裁剪）
+    _tip() {
+      if (!this._tipHandle) this._tipHandle = akmFloatingTip();
+      return this._tipHandle;
+    }
+
+    _showTip(index) {
+      var geo = this._geo;
+      if (!geo || !geo.points[index]) return;
+      var point = geo.points[index];
+      var shown = geo.format ? geo.format(point.value) : point.value + geo.unit;
+      var lines = [geo.labels[index] + ': ' + shown];
+      var detail = geo.details[index];
+      var detailLines = detail == null ? [] : (Array.isArray(detail) ? detail : [detail]);
+      for (var i = 0; i < detailLines.length; i++) {
+        var line = detailLines[i];
+        if (line != null && String(line) !== '') lines.push(String(line));
+      }
+      var host = this.getBoundingClientRect();
+      this._tip().show(lines, host.left + point.x, host.top + point.y);
+      this._highlight(index);
+    }
+
+    _hideTip() {
+      if (this._tipHandle) this._tipHandle.hide();
+      this._highlight(-1);
+    }
+
+    // 放大当前数据点的圆点（仅在画了圆点时有视觉效果）
+    _highlight(index) {
+      if (!this._hasDots) return;
+      var dots = this.querySelectorAll('[data-dot]');
+      for (var i = 0; i < dots.length; i++) {
+        dots[i].setAttribute('r', i === index ? '5.5' : '3');
+      }
+    }
+
+    render(config) {
+      config = config || {};
+      this._config = config;
+      this._hideTip();
+      var self = this;
+      var labels = Array.isArray(config.labels) ? config.labels : [];
+      var values = (Array.isArray(config.values) ? config.values : []).map(function(v) {
+        var n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      });
+      var details = Array.isArray(config.details) ? config.details : [];
+      var hasDetails = details.some(function(item) { return item != null && item.length !== 0; });
+      var escape = function(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      };
+      // 高度：默认固定；fill 时拉伸到父容器可用高度，并夹在 [height, maxHeight]
+      var baseHeight = Math.max(120, parseInt(config.height || 220, 10) || 220);
+      var maxHeight = Math.max(baseHeight, parseInt(config.maxHeight || 0, 10) || baseHeight);
+      var height = baseHeight;
+      if (config.fill === true) {
+        var available = this._availableHeight();
+        if (available > 0) height = Math.min(maxHeight, Math.max(baseHeight, available));
+        // 父容器尺寸变化时也要重绘；父容器可能晚于 connectedCallback 才挂上，这里补观察
+        if (this._ro && this.parentNode && !this._parentObserved) {
+          try { this._ro.observe(this.parentNode); this._parentObserved = true; } catch (e) {}
+        }
+      }
+      var width = Math.round(this.clientWidth || (this.parentNode && this.parentNode.clientWidth) || 640);
+      if (width < 240) width = 240;
+      this._lastWidth = width;
+
+      var color = config.color || '#818cf8';
+      var unit = config.unit || '';
+      var emptyText = config.emptyText || '暂无数据';
+      var count = values.length;
+      if (!count || !labels.length) {
+        this._geo = null;
+        this.innerHTML = '<div class="flex items-center justify-center text-xs text-gray-600" style="height:' + height + 'px">' + escape(emptyText) + '</div>';
+        this._lastSig = this._sizeSignature();
+        return;
+      }
+
+      var padLeft = 44, padRight = 14, padTop = 16, padBottom = 26;
+      var innerW = Math.max(10, width - padLeft - padRight);
+      var innerH = Math.max(10, height - padTop - padBottom);
+      var maxValue = values.reduce(function(a, b) { return Math.max(a, b); }, 0);
+      // Y 轴上界取“好看的整数”，保证 4 等分刻度都是整数；全 0 时给 4，避免除零。
+      var niceMax = (function(v) {
+        if (v <= 4) return 4;
+        var exp = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+        var frac = v / exp;
+        var mult = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+        return mult * exp;
+      })(maxValue);
+      var xAt = function(i) { return count === 1 ? padLeft + innerW / 2 : padLeft + innerW * i / (count - 1); };
+      var yAt = function(v) { return padTop + innerH * (1 - v / niceMax); };
+      var tickLabel = function(v) { return Number.isInteger(v) ? String(v) : v.toFixed(1); };
+      var showDots = count <= 40;
+      this._hasDots = showDots;
+      this._geo = {
+        labels: labels,
+        details: details,
+        unit: unit,
+        format: typeof config.format === 'function' ? config.format : null,
+        points: values.map(function(v, i) { return { x: xAt(i), y: yAt(v), value: v }; })
+      };
+
+      var svg = '<svg width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '" role="img" style="display:block;overflow:visible">';
+      // 水平网格 + Y 轴刻度（4 等分）
+      for (var t = 0; t <= 4; t++) {
+        var gy = padTop + innerH * t / 4;
+        var gv = niceMax * (1 - t / 4);
+        svg += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1) + '" x2="' + (padLeft + innerW) + '" y2="' + gy.toFixed(1) + '" stroke="#33334d" stroke-width="1"' + (t === 4 ? '' : ' stroke-dasharray="3 4"') + '/>';
+        svg += '<text x="' + (padLeft - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="10" fill="#6b7280">' + escape(tickLabel(gv)) + '</text>';
+      }
+      // 面积 + 折线
+      var linePoints = values.map(function(v, i) { return xAt(i).toFixed(1) + ',' + yAt(v).toFixed(1); });
+      var areaPoints = padLeft + ',' + (padTop + innerH) + ' ' + linePoints.join(' ') + ' ' + (padLeft + innerW) + ',' + (padTop + innerH);
+      svg += '<polygon points="' + areaPoints + '" fill="' + color + '" fill-opacity="0.14" stroke="none"/>';
+      svg += '<polyline points="' + linePoints.join(' ') + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      // 数据点（点多时只保留折线，避免密集圆点糊成一团）
+      values.forEach(function(v, i) {
+        var tip = hasDetails ? '' : '<title>' + escape(labels[i]) + ': ' + v + unit + '</title>';
+        if (showDots) {
+          svg += '<circle data-dot="' + i + '" cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v).toFixed(1) + '" r="3" fill="#1e1e2e" stroke="' + color + '" stroke-width="2">' + tip + '</circle>';
+        } else {
+          svg += '<circle cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v).toFixed(1) + '" r="6" fill="transparent">' + tip + '</circle>';
+        }
+      });
+      // 有 details 时铺一层透明命中区：相邻点中点为边界，整列可悬浮，不要求精准对准圆点
+      if (hasDetails) {
+        for (var h = 0; h < count; h++) {
+          var left = h === 0 ? padLeft : (xAt(h - 1) + xAt(h)) / 2;
+          var right = h === count - 1 ? padLeft + innerW : (xAt(h) + xAt(h + 1)) / 2;
+          svg += '<rect data-pt="' + h + '" x="' + left.toFixed(1) + '" y="' + padTop + '" width="' + Math.max(1, right - left).toFixed(1) + '" height="' + innerH + '" fill="transparent" pointer-events="all"/>';
+        }
+      }
+      // X 轴刻度：最多显示 8 个，首尾必显示
+      var step = Math.max(1, Math.ceil(count / 8));
+      labels.forEach(function(label, i) {
+        if (i % step !== 0 && i !== count - 1) return;
+        svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (padTop + innerH + 16) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + escape(label) + '</text>';
+      });
+      // 全 0 时在绘图区中央给出空态文案
+      if (maxValue <= 0) {
+        svg += '<text x="' + (padLeft + innerW / 2).toFixed(1) + '" y="' + (padTop + innerH / 2 + 4).toFixed(1) + '" text-anchor="middle" font-size="11" fill="#6b7280">' + escape(emptyText) + '</text>';
+      }
+      svg += '</svg>';
+      this.innerHTML = svg;
+
+      if (hasDetails) {
+        var svgEl = this.querySelector('svg');
+        svgEl.addEventListener('mouseleave', function() { self._hideTip(); });
+        this.querySelectorAll('[data-pt]').forEach(function(rect) {
+          rect.addEventListener('mouseenter', function() { self._showTip(parseInt(rect.getAttribute('data-pt'), 10)); });
+        });
+      }
+      this._lastSig = this._sizeSignature();
+    }
+  });
+}
+
+// ── akm-donut-chart：通用环形图壳组件（内联 SVG，占比视角） ──
+// 用法：
+//   var donut = document.getElementById('xxx');
+//   donut.render({
+//     items: [{ label: 'zcode', value: 4170, details: ['请求 4170', '费用 $114.54'] }],
+//     unit: '次',              // 可选，数值单位
+//     format: fn,              // 可选，数值格式化（图例 / 圆心 / 浮层共用）
+//     maxSlices: 6,            // 可选，最多画几片（含合并出的「其他」），默认 6
+//     size: 168,               // 可选，直径 CSS px，默认 168
+//     centerLabel: '总计',      // 可选，圆心默认文案
+//     emptyText: '暂无数据'     // 可选，无正数项时的空态文案
+//   });
+// 交互：悬浮扇区或图例行都会弹出浮层（名称 / 数值 / 占比 / details 附加行），
+//       同时高亮该片、其余片淡出、圆心切换为该片数值。
+// 命名区：扇区按角度命中（不必压在环上，圆心附近除外），长尾小项建议用图例悬浮。
+if (!customElements.get('akm-donut-chart')) {
+  customElements.define('akm-donut-chart', class extends HTMLElement {
+    connectedCallback() {
+      if (this.__mounted) return;
+      this.__mounted = true;
+      this.style.display = 'block';
+    }
+
+    disconnectedCallback() {
+      if (this._tipHandle) { this._tipHandle.destroy(); this._tipHandle = null; }
+    }
+
+    _tip() {
+      if (!this._tipHandle) this._tipHandle = akmFloatingTip();
+      return this._tipHandle;
+    }
+
+    _escape(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    render(config) {
+      config = config || {};
+      this._config = config;
+      var self = this;
+      var escape = function(s) { return self._escape(s); };
+      var unit = config.unit || '';
+      var format = typeof config.format === 'function'
+        ? config.format
+        : function(v) { return String(v); };
+      var size = Math.max(120, parseInt(config.size || 168, 10) || 168);
+      var emptyText = config.emptyText || '暂无数据';
+      var maxSlices = Math.max(1, parseInt(config.maxSlices || 6, 10) || 6);
+      var palette = config.palette || [
+        '#818cf8', '#34d399', '#fbbf24', '#f87171', '#38bdf8', '#a78bfa', '#f472b6', '#2dd4bf'
+      ];
+
+      var raw = (Array.isArray(config.items) ? config.items : []).map(function(item) {
+        return {
+          label: String((item && item.label) || ''),
+          value: Number((item && item.value) || 0),
+          details: (item && item.details) || []
+        };
+      }).filter(function(item) { return item.value > 0; });
+      raw.sort(function(a, b) { return b.value - a.value; });
+
+      this._slices = [];
+      if (!raw.length) {
+        this.innerHTML = '<div class="flex items-center justify-center text-xs text-gray-600" style="height:' + size + 'px">' + escape(emptyText) + '</div>';
+        return;
+      }
+
+      var total = raw.reduce(function(sum, item) { return sum + item.value; }, 0);
+      // maxSlices 是「含其他」的总片数：长尾时留一片给「其他」，其余按大小取前几项
+      var merged = raw.length > maxSlices ? raw.slice(maxSlices - 1) : [];
+      var visible = merged.length ? raw.slice(0, maxSlices - 1) : raw;
+      var slices = visible.map(function(item) {
+        return { label: item.label, value: item.value, details: item.details };
+      });
+      if (merged.length) {
+        var names = merged.map(function(item) { return item.label; }).join('、');
+        slices.push({
+          label: '其他',
+          value: merged.reduce(function(sum, item) { return sum + item.value; }, 0),
+          details: ['合并 ' + merged.length + ' 项：' + (names.length > 60 ? names.slice(0, 60) + '…' : names)]
+        });
+      }
+      slices.forEach(function(item, i) {
+        item.color = palette[i % palette.length];
+        item.share = item.value / total;
+      });
+      this._slices = slices;
+
+      var ring = size >= 150 ? 18 : 14;
+      var radius = (size - ring) / 2 - 2;
+      var cx = size / 2;
+      var cy = size / 2;
+      var circumference = 2 * Math.PI * radius;
+      // 片间留一点缝（单片时不留），视觉上更好分辨
+      var gapRatio = slices.length > 1 ? 0.004 : 0;
+
+      var arcs = '';
+      var ranges = [];
+      var covered = 0;
+      slices.forEach(function(item, i) {
+        var start = covered;
+        covered += item.share * 360;
+        ranges.push({ start: start, end: covered, index: i });
+        var dash = Math.max(0.5, circumference * item.share - gapRatio * circumference);
+        arcs += '<circle data-arc="' + i + '" cx="' + cx + '" cy="' + cy + '" r="' + radius + '"'
+          + ' fill="none" stroke="' + item.color + '" stroke-width="' + ring + '"'
+          + ' stroke-dasharray="' + dash.toFixed(2) + ' ' + (circumference - dash).toFixed(2) + '"'
+          + ' stroke-dashoffset="' + (-circumference * (start / 360)).toFixed(2) + '"'
+          + ' transform="rotate(-90 ' + cx + ' ' + cy + ')"/>';
+      });
+      var centerLabel = config.centerLabel || '总计';
+      var center = '<text data-center-label x="' + cx + '" y="' + (cy - 3) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + escape(centerLabel) + '</text>'
+        + '<text data-center-value x="' + cx + '" y="' + (cy + 14) + '" text-anchor="middle" font-size="13" font-weight="600" fill="#e5e7eb">' + escape(format(total) + unit) + '</text>';
+
+      var legend = slices.map(function(item, i) {
+        return '<div data-legend="' + i + '" class="flex items-center gap-2 px-1.5 py-1 rounded cursor-default">'
+          + '<span class="w-2.5 h-2.5 rounded-sm shrink-0" style="background:' + item.color + '"></span>'
+          + '<span class="flex-1 truncate text-xs text-gray-300" title="' + escape(item.label) + '">' + escape(item.label) + '</span>'
+          + '<span class="text-xs text-gray-400 tabular-nums shrink-0">' + escape(format(item.value) + unit) + '</span>'
+          + '<span class="text-xs text-gray-500 tabular-nums shrink-0 w-11 text-right">' + (item.share * 100).toFixed(1) + '%</span>'
+          + '</div>';
+      }).join('');
+
+      this.innerHTML = '<div style="display:flex;align-items:center;gap:14px">'
+        + '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '" style="display:block;flex:0 0 auto" role="img">' + arcs + center + '</svg>'
+        + '<div style="flex:1;min-width:0">' + legend + '</div>'
+        + '</div>'
+        + (merged.length
+          ? '<div class="text-[10px] text-gray-600 mt-2">仅显示前 ' + maxSlices + ' 项，其余合并为「其他」</div>'
+          : '');
+
+      var svgEl = this.querySelector('svg');
+      var arcEls = this.querySelectorAll('[data-arc]');
+      var legendEls = this.querySelectorAll('[data-legend]');
+      var centerLabelEl = this.querySelector('[data-center-label]');
+      var centerValueEl = this.querySelector('[data-center-value]');
+
+      var highlight = function(index) {
+        for (var i = 0; i < arcEls.length; i++) {
+          arcEls[i].setAttribute('stroke-width', String(i === index ? ring + 4 : ring));
+          arcEls[i].setAttribute('opacity', index < 0 || i === index ? '1' : '0.4');
+        }
+        for (var j = 0; j < legendEls.length; j++) {
+          legendEls[j].style.background = j === index ? 'rgba(99,102,241,.12)' : '';
+        }
+        var current = index >= 0 ? slices[index] : null;
+        if (centerLabelEl) centerLabelEl.textContent = current ? current.label : centerLabel;
+        if (centerValueEl) centerValueEl.textContent = format(current ? current.value : total) + unit;
+      };
+
+      var showTip = function(index, anchorX, anchorY) {
+        var item = slices[index];
+        if (!item) return;
+        var lines = [
+          item.label + ': ' + format(item.value) + unit,
+          '占比 ' + (item.share * 100).toFixed(1) + '%'
+        ];
+        var details = Array.isArray(item.details) ? item.details : [item.details];
+        details.forEach(function(line) {
+          if (line != null && String(line) !== '') lines.push(String(line));
+        });
+        self._tip().show(lines, anchorX, anchorY);
+        highlight(index);
+      };
+
+      var hideTip = function() {
+        self._tip().hide();
+        highlight(-1);
+      };
+      this._highlight = highlight;
+      this._hideSliceTip = hideTip;
+
+      // 扇区命中：按角度判定，整个圆盘（除圆心附近）都算命中区，比只压在环上好点
+      var innerR = radius - ring / 2;
+      var outerR = radius + ring / 2;
+      svgEl.addEventListener('mousemove', function(event) {
+        var rect = svgEl.getBoundingClientRect();
+        var scale = rect.width ? size / rect.width : 1;
+        var lx = (event.clientX - rect.left) * scale;
+        var ly = (event.clientY - rect.top) * scale;
+        var dx = lx - cx;
+        var dy = ly - cy;
+        var distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance < innerR * 0.6 || distance > outerR + 10) { hideTip(); return; }
+        // 0° 指向 12 点方向，顺时针增长，与绘制顺序一致
+        var deg = ((Math.atan2(dy, dx) * 180 / Math.PI) + 90 + 360) % 360;
+        var hit = slices.length - 1;
+        for (var i = 0; i < ranges.length; i++) {
+          if (deg >= ranges[i].start && deg < ranges[i].end) { hit = i; break; }
+        }
+        showTip(hit, event.clientX, event.clientY);
+      });
+      svgEl.addEventListener('mouseleave', hideTip);
+      legendEls.forEach(function(row) {
+        row.addEventListener('mouseenter', function() {
+          var box = row.getBoundingClientRect();
+          showTip(parseInt(row.getAttribute('data-legend'), 10), box.left + box.width / 2, box.top);
+        });
+        row.addEventListener('mouseleave', hideTip);
+      });
+    }
+  });
+}
+
 // ── akm-notification：右上角通知组件（支持进度条） ──
 // 用法：
 //   akmNotify({ id: 'x', type: 'loading', title: '安装插件', message: '下载中...', progress: 40 })

@@ -58,6 +58,7 @@ from akm.usage_query import execute_query_script
 from akm.tasks.router import router as tasks_router
 from akm.tasks.scheduler import TaskScheduler
 from akm.flow.router import router as flow_router
+from akm.request_source import extract_source
 
 
 # ── 用量查询自动调度器 ─────────────────────────────────────
@@ -1867,6 +1868,32 @@ async def _build_usage_metrics(
 # ── 统计内存缓存（30 秒过期，减少重复解析）──
 _stats_cache: dict[str, tuple[float, dict]] = {}
 
+#: 报错趋势折线图每个数据点展示的高频报错条数、单条报错截断长度、单桶保留的不同报错上限
+_ERROR_TOP_N = 3
+_ERROR_MESSAGE_MAX_LEN = 80
+_ERROR_DISTINCT_CAP = 50
+
+
+def _percentile(sorted_values, percent: int) -> int:
+    """最近秩（nearest-rank）百分位，输入需已升序。"""
+    if not sorted_values:
+        return 0
+    rank = (percent * len(sorted_values) + 99) // 100  # 向上取整
+    return sorted_values[max(0, min(rank - 1, len(sorted_values) - 1))]
+
+
+def _normalize_error_message(message, status_code: int = 0) -> str:
+    """把审计日志的 error 文本压成便于聚合的单行短标签。
+
+    换行/多空格折叠成单行并按长度截断，避免同一条报错因堆栈或长 URL 被拆成多组；
+    error 列为空时退化成 HTTP 状态码，保证数据点悬浮提示仍有可读信息。
+    """
+    text = " ".join(str(message or "").split())
+    if not text:
+        return f"HTTP {status_code}" if status_code > 0 else "未知错误"
+    return text[:_ERROR_MESSAGE_MAX_LEN]
+
+
 @app.get("/api/stats")
 async def api_stats(days: int = Query(default=1, ge=1, le=365)):
     """Token 统计概览，可按天数筛选（30 秒内存缓存）"""
@@ -1909,7 +1936,8 @@ def _get_stats(days: int) -> dict:
     rows = conn.execute(
         """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                   cache_creation_tokens,
-                  provider, model, key_alias, timestamp, response_body, request_headers, status_code
+                  provider, model, key_alias, timestamp, response_body, request_headers, status_code,
+                  error, latency_ms
            FROM audit_logs
            WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
            ORDER BY id DESC""",
@@ -1925,8 +1953,43 @@ def _get_stats(days: int) -> dict:
     by_provider = {}
     by_model = {}
     by_key = {}
+    by_source = {}
     daily = {}
     global_costs: dict[str, float] = {}
+
+    # ── 失败请求时序（报错趋势折线图）──
+    # 口径：status_code 不在 2xx 即视为失败，与审计页 status=failed 一致；
+    # 这里刻意不按 key_alias 过滤——选 Key 失败、前置报错往往没有 key_alias，
+    # 而它们恰恰是用户最想看到的报错。
+    # days=1 时按「今天每小时」分桶（24 点），其余按自然日分桶（days 个点）。
+    # 同一批桶还承载「成功率 / P95 延迟」指标，供图表切换，三者口径完全一致。
+    error_total = 0
+    error_counts: dict[str, int] = {}
+    # 每个时间桶内的高频报错（折线图数据点悬浮提示用）：bucket -> {归一化报错: 次数}
+    error_messages: dict[str, dict[str, int]] = {}
+    # 每个时间桶的请求量 / 成功数 / 成功请求延迟（成功率与 P95 指标用）
+    bucket_requests: dict[str, int] = {}
+    bucket_success: dict[str, int] = {}
+    bucket_latencies: dict[str, list[int]] = {}
+    if days == 1:
+        error_bucket = "hour"
+        error_buckets = [(f"{hour:02d}", f"{hour:02d}") for hour in range(24)]
+
+        def _error_key(timestamp: str) -> str:
+            return timestamp[11:13] if len(timestamp) >= 13 else ""
+    else:
+        error_bucket = "day"
+        today = datetime.now().date()
+        error_buckets = [
+            (
+                (today - timedelta(days=offset)).isoformat(),
+                (today - timedelta(days=offset)).strftime("%m-%d"),
+            )
+            for offset in range(days - 1, -1, -1)
+        ]
+
+        def _error_key(timestamp: str) -> str:
+            return timestamp[:10]
 
     def _ensure_bucket(store: dict, name: str) -> dict:
         if name not in store:
@@ -1949,12 +2012,32 @@ def _get_stats(days: int) -> dict:
 
     for row in rows:
         r = dict(row)
+        status_code = int(r.get("status_code", 0) or 0)
+        bucket_key = _error_key(str(r.get("timestamp") or ""))
+        # 请求量 / 成功率 / 延迟：与报错趋势同桶同口径（所有审计记录，不按 key_alias 过滤）
+        if bucket_key:
+            bucket_requests[bucket_key] = bucket_requests.get(bucket_key, 0) + 1
+            if 200 <= status_code < 300:
+                bucket_success[bucket_key] = bucket_success.get(bucket_key, 0) + 1
+                latency = int(r.get("latency_ms", 0) or 0)
+                # 只统计有实测延迟的成功请求，避免 0ms 占位值把分位数拉低
+                if latency > 0:
+                    bucket_latencies.setdefault(bucket_key, []).append(latency)
+        # 失败请求先计入报错趋势（含没有 key_alias 的选 Key / 前置失败）。
+        if not (200 <= status_code < 300):
+            error_total += 1
+            if bucket_key:
+                error_counts[bucket_key] = error_counts.get(bucket_key, 0) + 1
+                message = _normalize_error_message(r.get("error"), status_code)
+                bucket_messages = error_messages.setdefault(bucket_key, {})
+                # 只保留有限个不同报错，避免异常多的长尾文本把内存撑大
+                if message in bucket_messages or len(bucket_messages) < _ERROR_DISTINCT_CAP:
+                    bucket_messages[message] = bucket_messages.get(message, 0) + 1
         key_alias = str(r.get("key_alias") or "").strip()
         # 首页统计只关注真正落到某个 key 上的请求。
         # 没有 key_alias 的记录通常是选 key 失败或前置报错，不应混入总量与分组统计。
         if not key_alias:
             continue
-        status_code = int(r.get("status_code", 0) or 0)
         p = r.get("prompt_tokens", 0) or 0
         c = r.get("completion_tokens", 0) or 0
         t = r.get("total_tokens", 0) or 0
@@ -2000,6 +2083,7 @@ def _get_stats(days: int) -> dict:
 
         provider = r.get("provider", "unknown")
         model = r.get("model", "unknown")
+        source = extract_source(r.get("request_headers"))
         ts = str(r.get("timestamp", ""))[:10]
 
         # 这里统一按归一化后的 token 列做减法：
@@ -2052,6 +2136,7 @@ def _get_stats(days: int) -> dict:
         _bump(_ensure_bucket(by_provider, provider))
         _bump(_ensure_bucket(by_model, model))
         _bump(_ensure_bucket(by_key, key_alias))
+        _bump(_ensure_bucket(by_source, source))
         _bump(_ensure_bucket(daily, ts))
 
     primary_cost, primary_currency, costs_map = finalize_costs(global_costs, 5)
@@ -2079,6 +2164,44 @@ def _get_stats(days: int) -> dict:
             cleaned[name] = out
         return cleaned
 
+    def _bucket_metrics(key: str) -> dict:
+        """单个时间桶的请求量 / 成功率 / 延迟分位数（无样本时返回 None）。"""
+        latencies = bucket_latencies.get(key)
+        if latencies:
+            latencies.sort()
+            avg_ms = int(round(sum(latencies) / len(latencies)))
+            p50_ms = _percentile(latencies, 50)
+            p95_ms = _percentile(latencies, 95)
+        else:
+            avg_ms = p50_ms = p95_ms = None
+        requests = bucket_requests.get(key, 0)
+        success = bucket_success.get(key, 0)
+        return {
+            "requests": requests,
+            "success": success,
+            "failed": max(0, requests - success),
+            "success_rate": round(success * 100.0 / requests, 2) if requests else None,
+            "avg_ms": avg_ms,
+            "p50_ms": p50_ms,
+            "p95_ms": p95_ms,
+        }
+
+    # 整段区间汇总（卡片右上角摘要用），延迟只取成功请求
+    _all_latencies = sorted(v for values in bucket_latencies.values() for v in values)
+    _range_requests = sum(bucket_requests.values())
+    _range_success = sum(bucket_success.values())
+    range_stats = {
+        "requests": _range_requests,
+        "success": _range_success,
+        "failed": max(0, _range_requests - _range_success),
+        "success_rate": (
+            round(_range_success * 100.0 / _range_requests, 2) if _range_requests else None
+        ),
+        "avg_ms": int(round(sum(_all_latencies) / len(_all_latencies))) if _all_latencies else None,
+        "p50_ms": _percentile(_all_latencies, 50) if _all_latencies else None,
+        "p95_ms": _percentile(_all_latencies, 95) if _all_latencies else None,
+    }
+
     result = {
         "total_requests": total_requests,
         "total_prompt_tokens": total_prompt,
@@ -2089,6 +2212,28 @@ def _get_stats(days: int) -> dict:
         "by_provider": _strip_cost_fields(by_provider),
         "by_model": _strip_cost_fields(by_model),
         "by_key": _strip_cost_fields(by_key),
+        "by_source": _strip_cost_fields(by_source),
+        "errors": {
+            "total": error_total,
+            "bucket": error_bucket,
+            "stats": range_stats,
+            "series": [
+                {
+                    "label": label,
+                    "count": error_counts.get(key, 0),
+                    # 悬浮提示展示该时段出现最多的前几条报错（按次数降序，次数相同按文本排序）
+                    "top_errors": [
+                        {"message": message, "count": num}
+                        for message, num in sorted(
+                            error_messages.get(key, {}).items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )[:_ERROR_TOP_N]
+                    ],
+                    **_bucket_metrics(key),
+                }
+                for key, label in error_buckets
+            ],
+        },
         "daily": daily_sorted,
     }
     if cost_enabled:
@@ -2175,6 +2320,9 @@ async def api_logs(
             conv_labels = []
         log["conv_warning_codes"] = conv_codes
         log["conv_warning_labels"] = conv_labels
+        # 来源标签统一由后端推导（akm/request_source.py），前端只负责按标签着色，
+        # 避免审计页与统计页「按来源」各写一份判定逻辑。
+        log["source_label"] = extract_source(log.get("request_headers"))
     return {"data": logs, "total": total, "cost_stats_enabled": cost_enabled}
 
 

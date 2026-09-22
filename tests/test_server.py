@@ -2798,6 +2798,306 @@ async def test_api_stats_normalizes_messages_usage_before_aggregation(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_api_stats_groups_by_source_and_counts_errors(monkeypatch):
+    """/api/stats 返回按来源分组，并给出今日按小时的失败次数时序。"""
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "cost_stats_enabled": False,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+    from akm import server as server_mod
+
+    server_mod._stats_cache.clear()
+
+    def _write(status_code, key_alias, headers):
+        write_log({
+            "provider": "openai",
+            "key_alias": key_alias,
+            "model": "gpt-4",
+            "request_body": "",
+            "response_body": "",
+            "status_code": status_code,
+            "latency_ms": 10,
+            "error": "" if 200 <= status_code < 300 else "boom",
+            "request_headers": headers,
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "cached_tokens": 0,
+            "cache_creation_tokens": 0,
+        })
+
+    # 两条成功请求：一条内部 Chat 来源，一条 curl 客户端
+    _write(200, "k1", json.dumps({"user-agent": "agent/1.0", "x-akm-source": "chat"}))
+    _write(200, "k1", json.dumps({"user-agent": "curl/8.4.0"}))
+    # 两条失败：选 Key 失败（无 key_alias）+ 上游 429（有 key_alias）
+    _write(500, "", "{}")
+    _write(429, "k1", json.dumps({"user-agent": "curl/8.4.0"}))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # 按来源只统计成功且落到 key 上的请求
+    assert data["total_requests"] == 2
+    by_source = data["by_source"]
+    assert by_source["Chat"]["requests"] == 1
+    assert by_source["curl"]["requests"] == 1
+    assert by_source["Chat"]["total"] == 120
+
+    # 报错趋势：今日按小时 24 个桶，两次失败都落在当前小时
+    import datetime as _dt
+
+    errors = data["errors"]
+    assert errors["total"] == 2
+    assert errors["bucket"] == "hour"
+    assert len(errors["series"]) == 24
+    assert [item["label"] for item in errors["series"]] == [f"{h:02d}" for h in range(24)]
+    current_hour = _dt.datetime.now().strftime("%H")
+    counts = {item["label"]: item["count"] for item in errors["series"]}
+    assert counts[current_hour] == 2
+    assert sum(counts.values()) == 2
+    # 每个数据点附带该时段的高频报错（这里两条失败 error 都是 "boom"）
+    current_bucket = next(item for item in errors["series"] if item["label"] == current_hour)
+    assert current_bucket["top_errors"] == [{"message": "boom", "count": 2}]
+
+
+@pytest.mark.parametrize(
+    "values,percent,expected",
+    [
+        ([], 50, 0),
+        ([7], 50, 7),
+        ([7], 95, 7),
+        ([100, 200, 300, 4000], 50, 200),
+        ([100, 200, 300, 4000], 95, 4000),
+        ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50, 5),
+        ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95, 10),
+    ],
+)
+def test_percentile_nearest_rank(values, percent, expected):
+    from akm.server import _percentile
+
+    assert _percentile(values, percent) == expected
+
+
+@pytest.mark.asyncio
+async def test_api_stats_bucket_carries_success_rate_and_latency(monkeypatch):
+    """报错趋势同桶附带请求量 / 成功率 / 延迟分位数；延迟只统计成功请求。"""
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "cost_stats_enabled": False,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+    from akm import server as server_mod
+
+    server_mod._stats_cache.clear()
+
+    def _write(status_code, latency_ms):
+        write_log({
+            "provider": "openai",
+            "key_alias": "k1",
+            "model": "gpt-4",
+            "request_body": "",
+            "response_body": "",
+            "status_code": status_code,
+            "latency_ms": latency_ms,
+            "error": "" if 200 <= status_code < 300 else "boom",
+            "request_headers": "{}",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "cached_tokens": 0,
+            "cache_creation_tokens": 0,
+        })
+
+    for latency in (100, 200, 300, 4000):
+        _write(200, latency)
+    _write(500, 50)  # 失败请求的延迟不计入分位数
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    errors = resp.json()["errors"]
+    import datetime as _dt3
+
+    current_hour = _dt3.datetime.now().strftime("%H")
+    bucket = next(item for item in errors["series"] if item["label"] == current_hour)
+    assert bucket["requests"] == 5
+    assert bucket["success"] == 4
+    assert bucket["failed"] == 1
+    assert bucket["success_rate"] == 80.0
+    assert bucket["p50_ms"] == 200
+    assert bucket["p95_ms"] == 4000
+    assert bucket["avg_ms"] == 1150
+    # 整段区间汇总
+    stats = errors["stats"]
+    assert stats["requests"] == 5
+    assert stats["success"] == 4
+    assert stats["success_rate"] == 80.0
+    assert stats["p95_ms"] == 4000
+    assert stats["p50_ms"] == 200
+    # 空桶没有样本时用 null，前端按 0 画并在悬浮里说明
+    empty = next(item for item in errors["series"] if item["label"] != current_hour)
+    assert empty["requests"] == 0
+    assert empty["success_rate"] is None
+    assert empty["p95_ms"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_stats_error_top_messages_are_normalized(monkeypatch):
+    """报错趋势桶内附带前 3 条报错：多行文本折成单行并截断，error 为空回落 HTTP 状态码。"""
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "cost_stats_enabled": False,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+    from akm import server as server_mod
+
+    server_mod._stats_cache.clear()
+
+    def _write(status_code, error):
+        write_log({
+            "provider": "openai",
+            "key_alias": "k1",
+            "model": "gpt-4",
+            "request_body": "",
+            "response_body": "",
+            "status_code": status_code,
+            "latency_ms": 10,
+            "error": error,
+            "request_headers": "{}",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_creation_tokens": 0,
+        })
+
+    long_error = "x" * 200
+    for _ in range(3):
+        _write(500, long_error)
+    for _ in range(2):
+        _write(502, "boom\n  traceback   line")
+    _write(429, "")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/stats?days=1")
+
+    errors = resp.json()["errors"]
+    assert errors["total"] == 6
+    import datetime as _dt2
+
+    current_hour = _dt2.datetime.now().strftime("%H")
+    bucket = next(item for item in errors["series"] if item["label"] == current_hour)
+    top = bucket["top_errors"]
+    assert len(top) == 3  # 只保留前 3 条
+    assert top[0]["message"] == long_error[:80] and top[0]["count"] == 3
+    assert top[1] == {"message": "boom traceback line", "count": 2}
+    assert top[2] == {"message": "HTTP 429", "count": 1}
+
+
+@pytest.mark.asyncio
+async def test_api_stats_error_series_is_daily_for_multi_day_range(monkeypatch):
+    """days>1 时报错趋势按自然日分桶，长度等于窗口天数。"""
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "cost_stats_enabled": False,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+    from akm import server as server_mod
+
+    server_mod._stats_cache.clear()
+    write_log({
+        "provider": "openai",
+        "key_alias": "k1",
+        "model": "gpt-4",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 502,
+        "latency_ms": 10,
+        "error": "bad gateway",
+        "request_headers": "{}",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp7 = await client.get("/api/stats?days=7")
+        resp30 = await client.get("/api/stats?days=30")
+
+    data7 = resp7.json()["errors"]
+    assert data7["bucket"] == "day"
+    assert data7["total"] == 1
+    assert len(data7["series"]) == 7
+    # 统计窗口含今天，今天对应最后一个点
+    import datetime as _dt
+
+    assert data7["series"][-1]["label"] == _dt.datetime.now().strftime("%m-%d")
+    assert data7["series"][-1]["count"] == 1
+    assert sum(item["count"] for item in data7["series"]) == 1
+
+    data30 = resp30.json()["errors"]
+    assert data30["bucket"] == "day"
+    assert len(data30["series"]) == 30
+    assert data30["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_api_logs_returns_source_label(monkeypatch):
+    """/api/logs 为每条日志附后端推导的 source_label。"""
+    write_log({
+        "provider": "openai",
+        "key_alias": "k1",
+        "model": "gpt-4",
+        "request_body": "",
+        "response_body": "",
+        "status_code": 200,
+        "latency_ms": 10,
+        "error": "",
+        "request_headers": json.dumps({"user-agent": "Codex/1.0"}),
+        "prompt_tokens": 1,
+        "completion_tokens": 1,
+        "total_tokens": 2,
+        "cached_tokens": 0,
+        "cache_creation_tokens": 0,
+    })
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/logs")
+
+    assert resp.status_code == 200
+    rows = resp.json()["data"]
+    assert rows
+    assert rows[0]["source_label"] == "Codex"
+
+
+@pytest.mark.asyncio
 async def test_plugin_config_api_roundtrip():
     class DummyPM:
         def __init__(self):
