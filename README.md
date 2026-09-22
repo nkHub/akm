@@ -2,6 +2,8 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
+AKM v0.1.48：统计页新增**按来源分组**与**趋势折线图（报错次数 / 成功率 / P95 延迟）**。来源标签由新模块 `akm/request_source.py` 统一推导（`x-akm-source` 内部标记优先，其次 User-Agent 关键词，兜底 UA 产品名，无法识别归入「其他」），审计页「来源」列与统计页「按来源」共用同一套规则；`GET /api/stats` 新增 `by_source`（与 `by_key`/`by_model` 同结构的 Token/请求/费用分桶）与 `errors`（失败请求时序：days=1 按今天每小时 24 点，7/30 天按自然日分桶；失败口径为 status 非 2xx，含没有 key_alias 的选 Key/前置失败；每个时间点附 `top_errors` —— 该时段前 3 条高频报错，以及同口径的请求量 / 成功率 / 延迟分位数），`GET /api/logs` 新增 `source_label` 派生字段；管理台通用组件新增 `akm-line-chart`（内联 SVG 折线图，宽度自适应容器、支持 `fill` 垂直拉伸到父容器高度并按 `maxHeight` 封顶，支持 `format` 自定义提示数值、`details` 附加行自定义悬浮浮层），统计页在其上渲染趋势（卡片内用 `akm-range-tabs` 在 报错次数 / 成功率 / P95 延迟 之间切换，不重新请求接口；趋势卡片体固定 260px 高（与左侧「按来源」卡片一致），图表在盒内垂直拉伸填满、上限 260px），数据点悬浮可看该时段前几条报错或样本量；按 Key / 按模型 / 按来源三张卡片同样可用 `akm-range-tabs` 在**「表 / 图」之间切换（默认图）**，图视图为新增的 `akm-donut-chart` 环形图（Top 6 + 「其他」合并、指标可在 请求 / Token / 费用 间切换、悬浮扇区或图例即显示该行数值与占比，费用开启时浮层直接给出与表格 ⓘ 相同的费用拆解），三张卡片体固定 260px 高、表格按每页 6 行分页（复用 `akm-pagination`，不再有卡片内滚动条），因此三表等高、切换视图不跳高度。
+
 AKM v0.1.47：新增本地数据目录自动维护。服务启动与系统唤醒恢复时执行一次维护（`akm.cleanup.run_auto_maintenance`），含三步互相独立的动作：① 按 `log_retention_days` 清理过期审计日志并 VACUUM（始终执行）；② **更新包缓存清理**（`update_cache_cleanup`，默认开启）——`~/.akm/updates/` 只保留最新更新包与一个可回滚的旧版本 `.app` 备份，其余历史包与旧备份自动删除，10 分钟内修改过的文件视为更新进行中而跳过；③ **文本日志轮转**（`text_log_rotation`，默认关闭）——`error.log`、`keys.log`、`wake_recovery.log`、`plugin.launch.log` 等根目录 append-only 日志超过 `log_file_max_mb` 后转存 `.1` 并保留一代。维护只处理 AKM 自己产生的派生数据，不触碰 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
 
 AKM v0.1.46：修复上游转发 HTTP client 的 TLS 信任库构造缺陷——不再依赖 `certifi` 解包到临时目录的 `cacert.pem`（该临时文件被系统清理后会抛 `FileNotFoundError`，表现为审计日志成片「无法创建到上游的 HTTP 客户端」），改由 `build_upstream_ssl_context()` 显式按 `SSL_CERT_FILE`（打包 `.app` 自带 CA）→ `certifi` → 系统默认三级取用；同时静默自动更新改为**避让进行中的转发请求**，检测到在途请求/流式响应时推迟下载、替换前等待请求排空再重启，避免更新掐断请求。
@@ -164,15 +166,15 @@ akm-menubar
   <tbody>
     <tr>
       <td style="white-space: nowrap;">统计</td>
-      <td>Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/日期分组、K/M 格式、1d/7d/30d 自然日切换；可在设置开启费用估算后显示总费用与每日费用；开启费用时按 Key/按模型表格列切换为「名称/请求次数/Token 总用量/费用」，费用列带图标，悬停展示输入未命中缓存、输入缓存命中、输出三者的 Token 数、价格明细及缓存命中率）</td>
+      <td>Token 用量仪表盘（骨架屏加载、缓存命中与缓存创建独立展示、输入 Token 不含缓存、按 Key/模型/来源/日期分组、K/M 格式、1d/7d/30d 自然日切换；按 Key / 按模型 / 按来源三张卡片支持「表 / 图」切换（默认图），图视图为环形图（Top 6 + 「其他」，指标可在 Token / 请求 / 费用 间切换，**每张卡片各记各的、互不联动**，悬浮扇区或图例显示数值与占比，费用开启时浮层含与表格 ⓘ 相同的费用拆解），卡片体固定 260px 高、表格每页 6 行分页（复用 `akm-pagination`，避免整页多个滚动条），三表等高且切换不跳高度；按来源与按 Key/按模型同结构，来源标签由后端统一推导（`x-akm-source` 优先，其次 User-Agent，无法识别归入「其他」）；趋势卡片（失败请求 = status 非 2xx，含无 key_alias 的选 Key/前置失败；1d 按今天每小时 24 点，7d/30d 按自然日）可在「报错次数 / 成功率 / P95 延迟」三个指标间切换，三者同桶同口径、切换只重绘图表不重新请求：报错次数悬浮显示该时段前 3 条高频报错（报错文本折叠成单行并截断、error 为空时回落为 `HTTP <状态码>`），成功率悬浮显示成功/总请求数，P95 延迟悬浮显示 P50 与平均值，且只统计成功请求的实测延迟；图表由通用组件 `akm-line-chart` 渲染，随容器宽度自适应重绘；趋势卡片体固定 260px、图表在盒内垂直拉伸填满（上限 260px），卡片头部锁单行（标题定宽 4rem 避免切换指标时 tab 位移抖动，右侧摘要超宽省略号截断）；可在设置开启费用估算后显示总费用与每日费用；开启费用时按 Key/按模型/按来源表格列切换为「名称/请求次数/Token 总用量/费用」，费用列带图标，悬停展示输入未命中缓存、输入缓存命中、输出三者的 Token 数、价格明细及缓存命中率）</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">审计</td>
-      <td>请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用，费用列带图标，悬停展示输入/缓存/输出三者的 Token 数、价格明细及缓存命中率；表格列宽按百分比分配，窄窗口只省略号截断、不横向溢出，其中「费用/状态/延迟/详情」四列内容宽度固定（金额+图标/徽章/秒数/图标），改为固定列宽，费用列宽按「金额+末尾图标」实测需求给出，避免窄窗口下表头或金额与图标被压成两行；超长字段悬停显示全文，来源列对未识别客户端直接展示 UA 产品名；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags）</td>
+      <td>请求日志（输入/缓存/输出 Token 列；开启费用估算后在状态前显示每条估算费用，费用列带图标，悬停展示输入/缓存/输出三者的 Token 数、价格明细及缓存命中率；表格列宽按百分比分配，窄窗口只省略号截断、不横向溢出，其中「费用/状态/延迟/详情」四列内容宽度固定（金额+图标/徽章/秒数/图标），改为固定列宽，费用列宽按「金额+末尾图标」实测需求给出，避免窄窗口下表头或金额与图标被压成两行；超长字段悬停显示全文，来源列改由后端 `source_label` 统一推导并对未识别客户端展示 UA 产品名（无法识别归入「其他」）；Key/状态筛选、成功/失败切换、筛选持久化、正倒序、每页 10 条、JSON/会话 WebComponent 渲染、超长内容阈值控制；日志头可查看 token 回填来源 flags）</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">管理</td>
-      <td>Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示）</td>
+      <td>Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制（卡片内最多展示 2 行，尾部「查看全部」按钮弹窗列出完整模型列表；渲染后按量到的真实宽度分几轮收敛，样式未就绪/卡片不可见时保持现状并稍后重算，避免 Tailwind 异步注入样式期间量错宽度而误展开）、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示）</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">插件</td>
@@ -189,7 +191,7 @@ akm-menubar
   </tbody>
 </table>
 
-管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉和设置卡片等基础壳组件，供后续页面复用。
+管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉、设置卡片和折线图（`akm-line-chart`）、环形图（`akm-donut-chart`）等基础壳组件，供后续页面复用。
 
 仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，提供 Markdown 知识库、RAG 检索增强生成能力。其「自动注入」也**默认关闭**：开启插件并开启插件配置里的 `auto_inject` 后，才会对 `chat / messages / responses` 三类文本请求自动抽取最后一个用户问题检索并注入参考资料；关闭时可使用管理台 query / ask 或 `/api/markdown-kb/query`、`ask` 手动使用知识库。v0.1.3 起插件还新增了独立开关 `inject_project_context`（同样默认关闭）：开启后为每个绑定过工作区的项目在插件数据目录下自动维护 `context.md` / `memory.md`（项目级上下文 + 最近修改记忆，不进知识库索引，与 `auto_inject` 互不影响），带工作区信号的请求会在会话首轮注入项目上下文、后续轮次仅在记忆版本更新时轻量刷新（若希望每个请求都带全量项目上下文，可再开启 `inject_project_context_each_turn`，默认关闭）；老项目可在插件加载时自动回填，也可调用 `POST /api/markdown-kb/projects/init` 手动补齐；`context.md` 的“首次生成 / 增量更新”由本地模型完成（只依据一次性读取的真实仓库材料，≤150 行固定章节，1 天冷却，无模型时保留现状）。v0.1.4 起信号抽取做了严格化与目录防御：只认会话开头少量消息里的完整环境块 / 系统级工作目录信号，对话正文里的 `Working directory:` 字样不再触发，且自动建项目只面向真实存在的目录，避免产生垃圾项目与无意义生成。该插件的检索接口还以 **MCP（HTTP）** 方式暴露，配置为 `{"type": "http", "url": "http://127.0.0.1:{port}/api/markdown-kb/mcp"}` 即可接入支持 HTTP 的 MCP 客户端（如 Claude Desktop / Cursor）。详见 [plugins/markdown_kb/README.md](plugins/markdown_kb/README.md)。
 
@@ -397,11 +399,11 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | PATCH | `/api/keys/{alias}/usage-config` | 设置用量查询配置（脚本/间隔） |
 | POST | `/api/keys/{alias}/usage-query` | 手动触发一次用量查询 |
 | POST | `/api/keys/usage-query-all` | 批量触发所有已配置自动查询的 Key |
-| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_empty=true` 仅保留含请求体/响应体内容的可回放记录——判定任一请求体/响应体列有内容；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细） |
+| GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_empty=true` 仅保留含请求体/响应体内容的可回放记录——判定任一请求体/响应体列有内容；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细；每条附后端推导的 `source_label` 来源标签） |
 | GET | `/api/logs/size` | 本地缓存占用（数据库 + WAL/SHM + `.log` 文件） |
 | POST | `/api/logs/clean` | 清空日志 |
 | POST | `/api/logs/clean-bodies` | 清空请求体/响应体及客户端、上游请求头快照，保留轻量来源头、元数据与统计列 |
-| GET | `/api/stats` | Token 统计（支持 days 自然日范围：1=今天，7=近7天，30=近30天） |
+| GET | `/api/stats` | Token 统计（支持 days 自然日范围：1=今天，7=近7天，30=近30天；返回 `by_key`/`by_model`/`by_provider`/`by_source`/`daily` 分桶，以及 `errors` 失败请求时序——days=1 为今天每小时 24 点，其余为自然日分桶，失败口径 status 非 2xx 且不排除无 key_alias 的记录；每个时间点带 `top_errors`（该时段前 3 条高频报错，文本折叠单行 / 截断 80 字符，error 为空回落 `HTTP <状态码>`）与同口径的 `requests`/`success`/`failed`/`success_rate`/`avg_ms`/`p50_ms`/`p95_ms`（延迟只统计成功请求的实测值，无样本为 null），并给出整段区间的 `errors.stats` 汇总） |
 | GET/POST | `/api/config` | 配置读写 |
 | GET | `/api/agents` | 供应商代理列表（内置 + 自定义） |
 | POST | `/api/agents` | 添加自定义供应商代理 |

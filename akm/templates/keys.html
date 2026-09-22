@@ -95,6 +95,10 @@
     </div>
   </div>
 </akm-modal>
+<akm-modal id="key-models-modal" title="模型列表" max-width="max-w-2xl" body-class="px-5 py-4">
+  <div class="text-xs text-gray-500 mb-3" id="key-models-modal-summary">—</div>
+  <div id="key-models-modal-list" class="flex flex-wrap gap-2 text-xs"></div>
+</akm-modal>
 {% endblock %}
 
 {% block extra_js %}
@@ -220,15 +224,14 @@ function renderKeys() {
     var latencyText = '';
     var effectiveModelTags = '';
     if (k.models === '*') {
-      effectiveModelTags += '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>';
+      effectiveModelTags += '<span data-model-chip class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>';
     }
     if (modelList.length) {
-      modelList.slice(0, 8).forEach(function(m){
-        effectiveModelTags += '<button type="button" onclick="copyModelName(' + JSON.stringify(m).replace(/"/g, '&quot;') + ')" title="点击复制模型名" class="max-w-full break-all inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-500 hover:text-indigo-300 hover:border-indigo-500 transition-colors cursor-pointer">'+esc(m)+'</button>';
+      // 全部模型都渲染出来，展示时由 clampModelTags 收敛到 2 行
+      modelList.forEach(function(m){
+        effectiveModelTags += modelChipHtml(m);
       });
-      if (modelList.length > 8) {
-        effectiveModelTags += '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-500">+' + (modelList.length - 8) + ' 个</span>';
-      }
+      effectiveModelTags += '<button type="button" data-model-more class="hidden px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-indigo-300 hover:text-indigo-200 hover:border-indigo-500 transition-colors cursor-pointer" onclick="showAllModels(' + JSON.stringify(k.alias).replace(/"/g, '&quot;') + ')"></button>';
     } else {
       effectiveModelTags = '<span class="text-xs text-gray-500">暂无可用模型</span>';
     }
@@ -295,13 +298,142 @@ function renderKeys() {
       '<button onclick="deleteKey(\''+esc(k.alias)+'\')" title="\u5220\u9664" class="p-1 rounded cursor-pointer transition-colors text-gray-400 hover:text-red-400 hover:bg-red-950/30"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button></div></div>'+
       usageInfoLine+
       '<div class="px-4 pb-4 min-w-0">'+
-      '<div class="flex items-start gap-2 flex-wrap text-xs min-w-0">'+
+      '<div class="flex items-start gap-2 flex-wrap text-xs min-w-0" data-model-tags>'+
       effectiveModelTags+
       '</div></div></div>';
   });
   html += '</div>';
   container.innerHTML = html;
+  clampModelTags(container);
+  scheduleClampSettle();
   renderKeyPagination();
+}
+
+// 单个模型标签（点击复制模型名）
+function modelChipHtml(m) {
+  return '<button type="button" data-model-chip onclick="copyModelName(' + JSON.stringify(m).replace(/"/g, '&quot;') + ')" title="点击复制模型名" class="max-w-full break-all inline-block px-1.5 py-0.5 rounded text-xs bg-surface border border-border text-gray-500 hover:text-indigo-300 hover:border-indigo-500 transition-colors cursor-pointer">'+esc(m)+'</button>';
+}
+
+// Tailwind 是 Play CDN 运行时注入的：renderKeys 重建卡片后，样式是异步补上的，
+// 同步量到的宽度往往是「还没应用两列布局」的值（单列 1298px，最终 626px），
+// 据此收敛会把收好的标签误判成「放得下」而全部铺开——看起来就像改动被撤销。
+// 因此渲染后要连做几轮收敛，直到量到的宽度连续两轮一致（视为样式已稳定）。
+var _clampSettleTimer = null;
+var _clampSettleTries = 0;
+var _clampSettleWidth = -1;
+var CLAMP_SETTLE_MAX_TRIES = 12;
+
+function scheduleClampSettle() {
+  _clampSettleTries = 0;
+  _clampSettleWidth = -1;
+  if (_clampSettleTimer) { clearTimeout(_clampSettleTimer); _clampSettleTimer = null; }
+  var kick = function() { clampSettlePass(); };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(function() { requestAnimationFrame(kick); });
+  } else {
+    _clampSettleTimer = setTimeout(kick, 0);
+  }
+}
+
+function clampSettlePass() {
+  _clampSettleTimer = null;
+  var container = document.getElementById('key-list-container');
+  if (!container) return;
+  var box = container.querySelector('[data-model-tags]');
+  var width = box ? box.clientWidth : 0;
+  clampModelTags(container);
+  _clampSettleTries += 1;
+  var stable = width > 0 && width === _clampSettleWidth;
+  if (stable || _clampSettleTries >= CLAMP_SETTLE_MAX_TRIES) return;
+  _clampSettleWidth = width;
+  _clampSettleTimer = setTimeout(clampSettlePass, 60);
+}
+
+// 模型标签最多占 2 行，放不下的收进「查看全部 (N)」；随容器宽度变化重算（可重复调用）。
+// 尺寸量不出来（卡片不可见 / 样式未生效）时保持现状并稍后重试，最后一轮强制收敛兜底。
+var _clampRetry = { timer: null, round: 0 };
+var CLAMP_MAX_ROUNDS = 8;
+
+function scheduleClampRetry() {
+  if (_clampRetry.timer || _clampRetry.round >= CLAMP_MAX_ROUNDS) return;
+  var delay = 60 * Math.pow(2, _clampRetry.round);
+  _clampRetry.round += 1;
+  var lastChance = _clampRetry.round >= CLAMP_MAX_ROUNDS;
+  _clampRetry.timer = setTimeout(function() {
+    _clampRetry.timer = null;
+    var container = document.getElementById('key-list-container');
+    if (container) clampModelTags(container, lastChance);
+  }, delay);
+}
+
+function resetClampRetry() {
+  _clampRetry.round = 0;
+  if (_clampRetry.timer) { clearTimeout(_clampRetry.timer); _clampRetry.timer = null; }
+}
+
+// 样式是否已生效：容器带 flex flex-wrap，Tailwind 未加载时计算值是 block
+function modelTagsStyled(box) {
+  if (typeof window === 'undefined' || !window.getComputedStyle) return true;
+  return window.getComputedStyle(box).display === 'flex';
+}
+
+function clampModelTags(root, force) {
+  var boxes = root.querySelectorAll('[data-model-tags]');
+  var waitingForLayout = false;
+  Array.prototype.forEach.call(boxes, function(box) {
+    var chips = Array.prototype.slice.call(box.querySelectorAll('[data-model-chip]'));
+    var moreBtn = box.querySelector('[data-model-more]');
+    if (!chips.length || !moreBtn) return;
+    // 样式未生效 / 宽度高度为 0（卡片不可见）时量不出真实换行，保持现状等下一轮
+    if ((!force && !modelTagsStyled(box)) || !box.clientWidth || !chips[0].offsetHeight) {
+      waitingForLayout = true;
+      return;
+    }
+    chips.forEach(function(chip) { chip.classList.remove('hidden'); });
+    moreBtn.classList.add('hidden');
+    var first = chips[0];
+    var baseTop = first.offsetTop;
+    // 行距：取第二个换行标签与首个标签的 offsetTop 差，拿不到就退化用标签高度 + gap-2
+    var rowHeight = first.offsetHeight + 8;
+    for (var i = 1; i < chips.length; i++) {
+      if (chips[i].offsetTop > baseTop) { rowHeight = chips[i].offsetTop - baseTop; break; }
+    }
+    var thirdLineTop = baseTop + rowHeight * 2;
+    var hidden = 0;
+    chips.forEach(function(chip) {
+      if (chip.offsetTop >= thirdLineTop) { chip.classList.add('hidden'); hidden++; }
+    });
+    if (!hidden) return;
+    moreBtn.textContent = '查看全部 (' + chips.length + ')';
+    moreBtn.classList.remove('hidden');
+    // 「查看全部」自己也要落在第 2 行内：放不下就再收掉末尾一个标签
+    for (var k = chips.length - 1; k >= 0 && moreBtn.offsetTop >= thirdLineTop; k--) {
+      if (!chips[k].classList.contains('hidden')) chips[k].classList.add('hidden');
+    }
+  });
+  if (waitingForLayout) scheduleClampRetry(); else resetClampRetry();
+}
+
+// 打开某个 Key 的完整模型列表
+function showAllModels(alias) {
+  var key = null;
+  _keysData.forEach(function(k) { if (k.alias === alias) key = k; });
+  var modal = document.getElementById('key-models-modal');
+  var listEl = document.getElementById('key-models-modal-list');
+  var summaryEl = document.getElementById('key-models-modal-summary');
+  if (!key || !modal || !listEl) return;
+  var modelList = Array.isArray(key.model_list) ? key.model_list : [];
+  var isWildcard = key.models === '*';
+  if (summaryEl) {
+    summaryEl.textContent = (isWildcard ? '该 Key 未限制模型（models = *）' : '共 ' + modelList.length + ' 个模型') + '，点击标签复制模型名';
+  }
+  var html = isWildcard
+    ? '<span class="inline-block px-1.5 py-0.5 rounded text-xs bg-indigo-400/10 text-indigo-300">全部</span>'
+    : '';
+  html += modelList.map(modelChipHtml).join('');
+  listEl.innerHTML = html || '<span class="text-xs text-gray-500">暂无可用模型</span>';
+  if (typeof modal.setTitle === 'function') modal.setTitle('模型列表 · ' + alias);
+  if (typeof modal.open === 'function') modal.open();
 }
 
 function goToKeyPage(page) {
@@ -730,6 +862,24 @@ document.addEventListener('DOMContentLoaded', function() {
   document.addEventListener('visibilitychange', function() {
     if (!document.hidden) loadKeys();
   });
+
+  /* 宽度变化会影响「模型标签只占 2 行」的收敛结果，重新算一遍（防抖） */
+  var _clampTimer = null;
+  var reclampModels = function() {
+    var container = document.getElementById('key-list-container');
+    if (!container) return;
+    clampModelTags(container);
+    scheduleClampSettle();
+  };
+  window.addEventListener('resize', function() {
+    clearTimeout(_clampTimer);
+    _clampTimer = setTimeout(reclampModels, 120);
+  });
+  // 样式/字体就绪后再兜一次，避免首次渲染量到「还没上样式」的布局
+  window.addEventListener('load', reclampModels);
+  if (document.fonts && document.fonts.ready && document.fonts.ready.then) {
+    document.fonts.ready.then(reclampModels);
+  }
 });
 </script>
 {% endblock %}
