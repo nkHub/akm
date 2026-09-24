@@ -19,8 +19,62 @@
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #404060; border-radius: 3px; }
+  /* 主内容区始终预留纵向滚动条宽度（选择器带上 Tailwind 的类名以压过 .overflow-y-auto）：
+     审计日志翻页 / 切换筛选时行数变化会让滚动条出现或消失，6px 的宽度差会把整页内容
+     左右推一下造成抖动。这里固定按 scroll 预留 gutter，并额外声明 scrollbar-gutter，
+     滚动条有无都不再改变内容宽度。 */
+  main.overflow-y-auto {
+    overflow-y: scroll;
+    scrollbar-gutter: stable;
+  }
+  /* Key 列表卡片 / 模型标签的尺寸兜底。
+     Tailwind 由 Play CDN 运行时注入样式，而卡片是 JS 后插进 DOM 的；样式表重建往往比
+     「模型标签收敛到 2 行」的第一次测量晚一步 —— 那一轮量到的网格列数、标签宽度与行高都
+     还不是最终值，于是多留一行标签、下一轮再收回去，每次刷新列表都会上下跳一下。
+     这里把「量尺寸相关」的属性写进页面自带的样式（与 Tailwind 的 grid-cols-1 /
+     xl:grid-cols-2 / gap-3 / gap-2 / px-1.5 / py-0.5 / text-xs / border / rounded 同值），
+     保证第一轮测量就是最终值；Tailwind 注入后同值覆盖，外观不变。
+     列数用 .grid[data-key-grid] 提强度：同为单类强度时会被文档顺序更靠后的 .grid-cols-1
+     盖回单列（单列 1192px vs 两列 573px），量错宽度同样会多留一行。 */
+  .grid[data-key-grid] {
+    display: grid;
+    grid-template-columns: repeat(1, minmax(0, 1fr));
+    gap: 12px;
+  }
+  @media (min-width: 1280px) {
+    .grid[data-key-grid] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  [data-model-tags] {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+  }
+  [data-model-chip],
+  [data-model-more] {
+    box-sizing: border-box;
+    display: inline-block;
+    max-width: 100%;
+    padding: 2px 6px;
+    border: 1px solid #33334d;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 16px;
+    word-break: break-all;
+  }
+  /* 收敛时靠 .hidden 收起放不下的标签；上面把 display 钉成 inline-block，
+     这里必须同强度地把 .hidden 钉住，否则样式表晚到的那一瞬标签会全部铺出来 */
+  [data-model-chip].hidden,
+  [data-model-more].hidden {
+    display: none;
+  }
   .fade-in { animation: fadeIn 0.15s ease; }
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  /* 余额 / 用量刷新按钮：查询中让 sync 图标转起来（不依赖 Tailwind 的 animate-spin） */
+  .akm-spin { animation: akm-spin 0.9s linear infinite; }
+  @keyframes akm-spin { to { transform: rotate(360deg); } }
   @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
   .token-number { font-variant-numeric: tabular-nums; }
   /* 避免自定义元素在升级前把原始子节点直接闪到页面上 */

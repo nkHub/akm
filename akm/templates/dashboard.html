@@ -170,12 +170,12 @@
   </div>
 </div>
 <div id="daily-section" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
-  <div class="px-4 py-3 border-b border-border text-xs font-medium text-gray-400">每日用量</div>
-  <div class="">
-    <table class="w-full text-sm table-fixed">
-      <thead><tr class="text-gray-500 text-xs"><th class="text-left px-4 py-2 font-medium w-28">日期</th><th class="text-right px-4 py-2 font-medium">请求</th><th id="th-daily-cost" class="hidden text-right px-4 py-2 font-medium">费用</th><th class="text-right px-4 py-2 font-medium">总计</th><th class="text-right px-4 py-2 font-medium">输入</th><th class="text-right px-4 py-2 font-medium">输出</th><th class="text-right px-4 py-2 font-medium">缓存</th></tr></thead>
-      <tbody id="tbl-daily"></tbody>
-    </table>
+  <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
+    <div class="text-xs font-medium text-gray-400 shrink-0">每日用量</div>
+  </div>
+  <!-- 卡片体锁 260px（与上面几张卡片等高），折线图整行铺开 -->
+  <div class="p-4" style="height:260px">
+    <akm-line-chart id="daily-chart" class="w-full"></akm-line-chart>
   </div>
 </div>
 <!-- 插件首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件卡片，宿主统一渲染；无卡片时为空串） -->
@@ -433,6 +433,11 @@ var BUCKET_PANELS = [
   { id: 'model', store: 'by_model' },
   { id: 'source', store: 'by_source' }
 ];
+// 「图 / 表」用图标表达：柱状图 = 图表视图，表格网格 = 表格视图（内联 SVG，跟随按钮文字色）。
+var BUCKET_VIEW_ICONS = {
+  chart: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>',
+  table: '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>'
+};
 var DASHBOARD_BUCKET_KEY = 'akm_dashboard_bucket_view';
 var _bucketView = { key: 'chart', model: 'chart', source: 'chart' };
 // 每张卡片各记一个指标，互不影响（Token / 请求 / 费用）
@@ -485,8 +490,8 @@ function renderBucketTabs() {
     var viewTabs = document.getElementById('view-' + panel.id);
     if (viewTabs && typeof viewTabs.setOptions === 'function') {
       viewTabs.setOptions([
-        { value: 'chart', label: '图' },
-        { value: 'table', label: '表' }
+        { value: 'chart', label: '图', icon: BUCKET_VIEW_ICONS.chart, title: '图表' },
+        { value: 'table', label: '表', icon: BUCKET_VIEW_ICONS.table, title: '表格' }
       ], _bucketView[panel.id], 'switchBucketView_' + panel.id);
     }
     var metricTabs = document.getElementById('metric-' + panel.id);
@@ -616,6 +621,58 @@ function switchDays(d) {
   loadDashboard();
 }
 
+// ── 每日用量 ──
+// 1d 只有今天一天，与上面的报错趋势 / 按来源重复，整块不显示；
+// 7d / 30d 改成整行折线图，三条线：总 Token（左轴）、成功率与缓存命中率（右轴，固定 0~100%）；
+// 没有请求的自然日率值按 0 画（直接落到基线，不做插值/断线）。
+// 口径与后端一致：daily 与 errors.series 都是「最近 N 个自然日、升序」，
+// 因此按同一个下标取用量与成功率，不用做日期字符串对齐。
+function renderDailyChart(s) {
+  var section = document.getElementById('daily-section');
+  var chart = document.getElementById('daily-chart');
+  if (!section || !chart) return;
+  if (_currentDays <= 1 || typeof chart.render !== 'function') {
+    section.classList.add('hidden');
+    return;
+  }
+  var trend = (s.errors && Array.isArray(s.errors.series)) ? s.errors.series : [];
+  var daily = s.daily || {};
+  var today = new Date();
+  var labels = [], tokens = [], successRates = [], cacheRates = [];
+  for (var i = 0; i < _currentDays; i++) {
+    var d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (_currentDays - 1 - i));
+    var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+    var dd = ('0' + d.getDate()).slice(-2);
+    labels.push(mm + '-' + dd);
+    var item = daily[d.getFullYear() + '-' + mm + '-' + dd] || null;
+    var prompt = item ? Number(item.prompt) || 0 : 0;
+    var cached = item ? Number(item.cached) || 0 : 0;
+    var inputTotal = prompt + cached;
+    tokens.push(item ? Number(item.total) || 0 : 0);
+    // 无请求的自然日：率值没有分母，按 0 画在基线（不插值、不断线），一眼能看出那几天没请求
+    successRates.push(trend[i] && trend[i].success_rate != null ? Number(trend[i].success_rate) : 0);
+    // 缓存命中率口径与费用 tooltip 一致：命中缓存 /（未命中输入 + 命中缓存）
+    cacheRates.push(inputTotal > 0 ? cached * 100 / inputTotal : 0);
+  }
+  section.classList.remove('hidden');
+  chart.render({
+    labels: labels,
+    series: [
+      { label: '总 Token', values: tokens, color: '#818cf8', axis: 'tokens', area: true, format: function(v) { return fmtNum(v); } },
+      { label: '成功率', values: successRates, color: '#34d399', axis: 'percent', format: function(v) { return v.toFixed(2) + '%'; } },
+      { label: '缓存命中率', values: cacheRates, color: '#22d3ee', axis: 'percent', format: function(v) { return v.toFixed(1) + '%'; } }
+    ],
+    axes: [
+      { id: 'tokens', side: 'left', format: function(v) { return fmtNum(v); } },
+      { id: 'percent', side: 'right', min: 0, max: 100, format: function(v) { return Math.round(v) + '%'; } }
+    ],
+    height: 220,
+    maxHeight: 260,
+    fill: true,
+    emptyText: '该时段暂无用量'
+  });
+}
+
 async function loadDashboard() {
   // 显示骨架屏，隐藏真实内容
   document.getElementById('dashboard-skeleton').classList.remove('hidden');
@@ -661,19 +718,7 @@ async function loadDashboard() {
     renderMetricTabs();
     renderTrendSeries(series);
 
-    var dailyEntries = Object.entries(s.daily||{});
-    document.getElementById('daily-section').classList.toggle('hidden', dailyEntries.length === 0);
-    var thCost = document.getElementById('th-daily-cost');
-    if (thCost) thCost.classList.toggle('hidden', !costOn);
-    var html = '';
-    dailyEntries.forEach(function(e){
-      var k=e[0], v=e[1];
-      var costCell = costOn
-        ? '<td class="px-4 py-2 text-xs text-right text-rose-300">'+esc(fmtCost(v.cost, v.currency, v.costs_by_currency))+'</td>'
-        : '';
-      html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2 text-xs text-gray-300">'+k+'</td><td class="px-4 py-2 text-xs text-right text-gray-500">'+v.requests+'</td>'+costCell+'<td class="px-4 py-2 text-xs text-right text-indigo-300">'+fmtNum(v.total)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.prompt)+'</td><td class="px-4 py-2 text-xs text-right text-gray-400">'+fmtNum(v.completion)+'</td><td class="px-4 py-2 text-xs text-right text-teal-400">'+fmtNum(v.cached||0)+'</td></tr>';
-    });
-    document.getElementById('tbl-daily').innerHTML = html;
+    renderDailyChart(s);
     // 数据加载完成，隐藏骨架屏
     document.getElementById('dashboard-skeleton').classList.add('hidden');
     document.getElementById('dashboard-content').classList.remove('hidden');
