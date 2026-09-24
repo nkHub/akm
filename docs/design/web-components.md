@@ -13,7 +13,8 @@
 - `akm-range-tabs`
   - 用途：时间范围或分段按钮切换
   - 常用方法：`setOptions(options, currentValue, onSelectName)`
-  - 说明：`options` 为 `[{ value, label }]`，点击后回调 `window[onSelectName](value)`；同一个页面可挂多组（统计页范围用 `dashboard-days`，趋势指标用 `error-metric-tabs`，按 Key/模型/来源的「表 / 图」与「请求 / Token / 费用」分别用 `view-*`、`metric-*`）
+  - 说明：`options` 为 `[{ value, label, icon?, title? }]`，点击后回调 `window[onSelectName](value)`；同一个页面可挂多组（统计页范围用 `dashboard-days`，趋势指标用 `error-metric-tabs`，按 Key/模型/来源的「表 / 图」与「请求 / Token / 费用」分别用 `view-*`、`metric-*`）
+  - 约定：`icon` 为受信任的内联 SVG 字符串，提供时按钮只渲染图标，可读文本退到 `title` / `aria-label`（缺省用 `label`），按钮内边距不变因此与纯文字态等高（统计页 `view-*` 用柱状图/表格网格图标表达「图 / 表」）
 
 - `akm-pagination`
   - 用途：通用分页壳
@@ -34,6 +35,7 @@
   - 常用属性：`title`、`max-width`、`body-class`、`panel-class`
   - 常用方法：`open()`、`close()`、`setTitle(text)`、`setSubtitle(text)`
   - 约定：底部操作区用 `data-modal-footer`
+  - 约定：内容可能超长时加 `panel-class="max-h-[85vh] flex flex-col"` 与 `body-class="... overflow-y-auto flex-1 min-h-0"`，让弹窗整体限高、内容区内部滚动，标题栏与底部操作区保持固定（模型列表、用量查询配置、插件配置等弹窗均用此写法）
 
 - `akm-drawer`
   - 用途：右侧滑出详情面板
@@ -57,7 +59,12 @@
     - `format`：可选，`function(value) -> string`，自定义悬浮提示里的数值（给了它就不再拼 `unit`），如延迟的 `4.2s`、成功率的 `98.42%`
     - `emptyText`：可选，全 0 时绘图区中央的空态文案
     - `details`：可选，与 `values` 等长的附加提示行（字符串或字符串数组）；传了它时该数据点改用组件自绘浮层展示「刻度: 数值单位」+ 附加行，未传时保持 SVG `<title>` 原生提示
-  - 约定：沿用页面浅色 DOM（不引入 Shadow DOM）；用 `ResizeObserver` 监听宿主宽度与（`fill` 时）父容器尺寸，宿主/父容器尺寸变化、容器从 `display:none` 恢复显示时自动重绘，并以「宽度 + fill 可用高度」签名比对避免自激循环；有 `details` 时按相邻点中点划分整列透明命中区，不必精准对准圆点即可悬浮，浮层为 fixed 定位挂到 `body`（避免被卡片 `overflow-hidden` 裁剪），优先显示在数据点上方、空间不足时翻到下方；数据点多于 40 个时只画折线、不画圆点
+  - 多序列 / 多 Y 轴：`render({ labels, series, axes, height, maxHeight, fill, emptyText })`
+    - `series`：`[{ label, values, color, axis, area, format, unit }]`，`axis` 指向 `axes` 里的轴 id；`area` 为 `true` 时该线带面积填充
+    - `axes`：`[{ id, side, min, max, format, color }]`，`side` 为 `left` / `right`；不写 `max` 时按该轴所有序列自动取「好看整数」上界，量纲固定时（如百分比）显式写 `min: 0, max: 100`
+    - 约定：同一 `side` 的多个轴按声明顺序由内向外排开（第一条最贴近绘图区），刻度文字用该轴第一条线的颜色；图例固定画在绘图区顶部一行；`values` 里的 `null` / 空值按 0 处理（画在基线上、折线连续），调用方需要「无样本」语义时自行决定传什么值
+    - 使用方：统计页「每日用量」7d/30d 折线图（总 Token 左轴 + 成功率/缓存命中率右轴 0~100%）
+  - 约定：沿用页面浅色 DOM（不引入 Shadow DOM）；用 `ResizeObserver` 监听宿主宽度与（`fill` 时）父容器尺寸，宿主/父容器尺寸变化、容器从 `display:none` 恢复显示时自动重绘，并以「宽度 + fill 可用高度」签名比对避免自激循环；有 `details` 或为多序列时按相邻点中点划分整列透明命中区，不必精准对准圆点即可悬浮，浮层为 fixed 定位挂到 `body`（避免被卡片 `overflow-hidden` 裁剪），优先显示在数据点上方、空间不足时翻到下方；数据点多于 40 个时只画折线、不画圆点
 
 - `akm-donut-chart`
   - 用途：通用环形图壳组件（内联 SVG，占比视角），如统计页按 Key / 按模型 / 按来源的「图」视图

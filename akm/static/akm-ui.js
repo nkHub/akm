@@ -156,10 +156,19 @@ if (!customElements.get('akm-range-tabs')) {
       var self = this;
       this.innerHTML = (this._options || []).map(function(option) {
         var active = String(option.value) === String(self._currentValue);
+        // option.icon 为受信任的内联 SVG 字符串（本项目所有图标均为代码内联，非用户输入），
+        // 提供时按钮只渲染图标，可读文本退到 title / aria-label，按钮尺寸与纯文字态保持一致。
+        var icon = option.icon ? String(option.icon) : '';
         var cls = active
           ? 'bg-indigo-600 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer'
           : 'bg-surface-light border border-border hover:border-indigo-500 text-gray-400 hover:text-gray-200 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer';
-        return '<button type="button" data-role="range-tab" data-value="' + self.escape(option.value) + '" class="' + cls + '">' + self.escape(option.label) + '</button>';
+        if (icon) cls += ' inline-flex items-center justify-center';
+        var text = self.escape(option.title || option.label || '');
+        var attrs = icon ? ' title="' + text + '" aria-label="' + text + '"' : (option.title ? ' title="' + text + '"' : '');
+        var inner = icon
+          ? '<span class="pointer-events-none inline-flex items-center justify-center" aria-hidden="true">' + icon + '</span>'
+          : text;
+        return '<button type="button" data-role="range-tab" data-value="' + self.escape(option.value) + '"' + attrs + ' class="' + cls + '">' + inner + '</button>';
       }).join('');
       this.querySelectorAll('[data-role="range-tab"]').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -553,6 +562,14 @@ function akmFloatingTip() {
 //     emptyText: '暂无数据',      // 可选，全 0 时的空态文案
 //     details: [['3× 超时','1× HTTP 429'], null, ...]  // 可选，与 values 等长的附加行
 //   });
+//   // 多序列 / 多 Y 轴（用于量纲不同的多条线，如 Token + 百分比 + 费用）：
+//   chart.render({
+//     labels: ['09-24', ...],
+//     series: [{ label, values, color, axis, area, format }, ...],
+//     axes: [{ id, side: 'left'|'right', min, max, format, color }, ...],
+//     height: 260
+//   });
+//   同 side 的多个轴按声明顺序由内向外排开；values 里的 null 表示无样本（画在基线、提示显示「—」）。
 // 传了 details 的数据点改用组件自绘的悬浮浮层（首行「刻度: 数值单位」+ 附加行），
 // 未传时保持 SVG <title> 原生提示。
 // 约定：沿用页面浅色 DOM（不引入 Shadow DOM）；宽度自适应宿主容器，
@@ -617,13 +634,19 @@ if (!customElements.get('akm-line-chart')) {
       var geo = this._geo;
       if (!geo || !geo.points[index]) return;
       var point = geo.points[index];
-      var shown = geo.format ? geo.format(point.value) : point.value + geo.unit;
-      var lines = [geo.labels[index] + ': ' + shown];
-      var detail = geo.details[index];
-      var detailLines = detail == null ? [] : (Array.isArray(detail) ? detail : [detail]);
-      for (var i = 0; i < detailLines.length; i++) {
-        var line = detailLines[i];
-        if (line != null && String(line) !== '') lines.push(String(line));
+      var lines;
+      if (geo.multi) {
+        // 多序列：首行列名，其余每个序列一行「名称 + 数值」
+        lines = [String(geo.labels[index])].concat((geo.rows && geo.rows[index]) || []);
+      } else {
+        var shown = geo.format ? geo.format(point.value) : point.value + geo.unit;
+        lines = [geo.labels[index] + ': ' + shown];
+        var detail = geo.details[index];
+        var detailLines = detail == null ? [] : (Array.isArray(detail) ? detail : [detail]);
+        for (var i = 0; i < detailLines.length; i++) {
+          var line = detailLines[i];
+          if (line != null && String(line) !== '') lines.push(String(line));
+        }
       }
       var host = this.getBoundingClientRect();
       this._tip().show(lines, host.left + point.x, host.top + point.y);
@@ -639,15 +662,263 @@ if (!customElements.get('akm-line-chart')) {
     _highlight(index) {
       if (!this._hasDots) return;
       var dots = this.querySelectorAll('[data-dot]');
+      var multi = !!(this._geo && this._geo.multi);
       for (var i = 0; i < dots.length; i++) {
-        dots[i].setAttribute('r', i === index ? '5.5' : '3');
+        // 多序列时圆点按序列分组渲染，DOM 顺序与数据下标不一致，改用 data-dot 比对
+        var active = multi ? Number(dots[i].getAttribute('data-dot')) === index : i === index;
+        dots[i].setAttribute('r', active ? '5.5' : '3');
       }
+    }
+
+    // Y 轴上界取「好看的整数」，保证 4 等分刻度尽量整齐（多序列/多轴用；单序列在主渲染里同名内联）
+    _niceMax(v) {
+      if (v <= 4) return 4;
+      var exp = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+      var frac = v / exp;
+      var mult = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+      return mult * exp;
+    }
+
+    // ── 多序列 / 多 Y 轴折线图（单序列仍走 render 主路径，两者互不影响）──
+    // 用法：
+    //   chart.render({
+    //     labels: ['09-24', ...],
+    //     series: [
+    //       { label: '总 Token', values: [...], color: '#818cf8', axis: 'tokens', area: true, format: fn },
+    //       { label: '成功率',   values: [...], color: '#34d399', axis: 'percent', format: fn }
+    //     ],
+    //     axes: [
+    //       { id: 'tokens',  side: 'left' },                       // 不写 max 时按数据自动取「好看整数」
+    //       { id: 'percent', side: 'right', min: 0, max: 100 }     // 固定量程
+    //     ],
+    //     height: 260
+    //   });
+    // 约定：同一 side 的多个轴按「声明顺序由内向外」排开（第一条最贴近绘图区），
+    //       刻度文字用该轴第一条线的颜色，图例画在绘图区顶部；
+    //       values 里的 null / 空值按 0 处理（画在基线上，折线连续）。
+    _renderMultiSeries(config) {
+      var self = this;
+      var escape = function(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      };
+      var PALETTE = ['#818cf8', '#fb7185', '#34d399', '#22d3ee', '#fbbf24', '#a78bfa'];
+      var labels = Array.isArray(config.labels) ? config.labels : [];
+      var emptyText = config.emptyText || '暂无数据';
+      var count = labels.length;
+      // 空值一律按 0 处理（画在基线）：这样「某天没有请求」会直接落到 0，而不是断线或插值
+      var norm = function(v) {
+        if (v == null || v === '') return 0;
+        var n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      };
+      var series = (config.series || []).filter(Boolean).map(function(s, i) {
+        return {
+          label: String(s.label == null ? '' : s.label),
+          color: s.color || PALETTE[i % PALETTE.length],
+          axisId: s.axis == null ? '' : String(s.axis),
+          area: s.area === true,
+          format: typeof s.format === 'function' ? s.format : null,
+          unit: s.unit || '',
+          values: (Array.isArray(s.values) ? s.values : []).slice(0, count).map(norm)
+        };
+      });
+      series.forEach(function(s) {
+        while (s.values.length < count) s.values.push(null);
+      });
+
+      // 高度：默认固定；fill 时拉伸到父容器可用高度，并夹在 [height, maxHeight]
+      var baseHeight = Math.max(120, parseInt(config.height || 220, 10) || 220);
+      var maxHeight = Math.max(baseHeight, parseInt(config.maxHeight || 0, 10) || baseHeight);
+      var height = baseHeight;
+      if (config.fill === true) {
+        var available = this._availableHeight();
+        if (available > 0) height = Math.min(maxHeight, Math.max(baseHeight, available));
+        if (this._ro && this.parentNode && !this._parentObserved) {
+          try { this._ro.observe(this.parentNode); this._parentObserved = true; } catch (e) {}
+        }
+      }
+      var width = Math.round(this.clientWidth || (this.parentNode && this.parentNode.clientWidth) || 640);
+      if (width < 240) width = 240;
+      this._lastWidth = width;
+      if (!count || !series.length) {
+        this._geo = null;
+        this.innerHTML = '<div class="flex items-center justify-center text-xs text-gray-600" style="height:' + height + 'px">' + escape(emptyText) + '</div>';
+        this._lastSig = this._sizeSignature();
+        return;
+      }
+
+      // 轴：显式声明的可固定 min/max，未声明的按该轴全部序列自动取上界
+      var declared = (Array.isArray(config.axes) ? config.axes : []).filter(Boolean);
+      var axisList = [];
+      var axisMap = {};
+      var ensureAxis = function(id, sample) {
+        if (axisMap[id]) return axisMap[id];
+        var decl = null;
+        declared.forEach(function(a) { if (String(a.id) === id) decl = a; });
+        var ax = {
+          id: id,
+          side: decl && decl.side === 'right' ? 'right' : 'left',
+          min: decl && decl.min != null && Number.isFinite(Number(decl.min)) ? Number(decl.min) : 0,
+          max: decl && decl.max != null && Number.isFinite(Number(decl.max)) ? Number(decl.max) : null,
+          format: decl && typeof decl.format === 'function' ? decl.format : null,
+          color: (decl && decl.color) || (sample && sample.color) || '#6b7280',
+          peak: 0
+        };
+        axisMap[id] = ax;
+        axisList.push(ax);
+        return ax;
+      };
+      series.forEach(function(s) {
+        var ax = ensureAxis(s.axisId, s);
+        s.axisRef = ax;
+        s.values.forEach(function(v) { if (v != null && v > ax.peak) ax.peak = v; });
+      });
+      axisList.forEach(function(ax) {
+        if (ax.max == null) ax.max = self._niceMax(ax.peak);
+        if (!(ax.max > ax.min)) ax.max = ax.min + 1;
+      });
+
+      var legendOn = series.some(function(s) { return !!s.label; });
+      // 轴列宽：要放得下「$50.00」「1000.00M」这类刻度文字，两列之间才不会贴在一起
+      var colW = 60;
+      var padTop = legendOn ? 30 : 16;
+      var padBottom = 26;
+      var leftAxes = axisList.filter(function(a) { return a.side === 'left'; });
+      var rightAxes = axisList.filter(function(a) { return a.side === 'right'; });
+      var padLeft = 44 + Math.max(0, leftAxes.length - 1) * colW;
+      var padRight = 18 + Math.max(0, rightAxes.length - 1) * colW;
+      var innerW = Math.max(10, width - padLeft - padRight);
+      var innerH = Math.max(10, height - padTop - padBottom);
+      var xAt = function(i) { return count === 1 ? padLeft + innerW / 2 : padLeft + innerW * i / (count - 1); };
+      var yAt = function(v, ax) {
+        var span = ax.max - ax.min;
+        var ratio = span > 0 ? (v - ax.min) / span : 0;
+        if (ratio < 0) ratio = 0;
+        if (ratio > 1) ratio = 1;
+        return padTop + innerH * (1 - ratio);
+      };
+      var tickText = function(ax, v) {
+        if (ax.format) return String(ax.format(v));
+        return Number.isInteger(v) ? String(v) : v.toFixed(1);
+      };
+
+      var svg = '<svg width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height + '" role="img" style="display:block;overflow:visible">';
+      // 水平网格（用最贴近绘图区的那条轴取值），刻度文字随后按各轴自己的量程单独画
+      var gridAxis = leftAxes[0] || rightAxes[0] || axisList[0];
+      for (var t = 0; t <= 4; t++) {
+        var gy = padTop + innerH * t / 4;
+        svg += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1) + '" x2="' + (padLeft + innerW) + '" y2="' + gy.toFixed(1) + '" stroke="#33334d" stroke-width="1"' + (t === 4 ? '' : ' stroke-dasharray="3 4"') + '/>';
+      }
+      var drawAxisTicks = function(ax, side, idx) {
+        var x = side === 'left' ? padLeft - 6 - idx * colW : padLeft + innerW + 8 + idx * colW;
+        var anchor = side === 'left' ? 'end' : 'start';
+        var out = '';
+        for (var k = 0; k <= 4; k++) {
+          var y = padTop + innerH * k / 4;
+          var v = ax.max - (ax.max - ax.min) * k / 4;
+          out += '<text x="' + x.toFixed(1) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="' + anchor + '" font-size="10" fill="' + ax.color + '">' + escape(tickText(ax, v)) + '</text>';
+        }
+        return out;
+      };
+      leftAxes.forEach(function(ax, i) { svg += drawAxisTicks(ax, 'left', i); });
+      rightAxes.forEach(function(ax, i) { svg += drawAxisTicks(ax, 'right', i); });
+
+      var hasAny = false;
+      series.forEach(function(s) {
+        s.values.forEach(function(v) { if (v !== 0) hasAny = true; });
+      });
+      var pointsOf = function(s) {
+        return s.values.map(function(v, i) { return { x: xAt(i), y: yAt(v, s.axisRef) }; });
+      };
+      // 面积先画，避免后画的面积盖住前面的折线
+      series.forEach(function(s) {
+        if (!s.area || count < 2) return;
+        var pts = pointsOf(s);
+        var head = pts[0], tail = pts[pts.length - 1];
+        var list = pts.map(function(p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); });
+        svg += '<polygon points="' + (head.x.toFixed(1) + ',' + (padTop + innerH) + ' ' + list.join(' ') + ' ' + tail.x.toFixed(1) + ',' + (padTop + innerH)) + '" fill="' + s.color + '" fill-opacity="0.12" stroke="none"/>';
+      });
+      series.forEach(function(s) {
+        if (count < 2) return;
+        var list = pointsOf(s).map(function(p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); });
+        svg += '<polyline points="' + list.join(' ') + '" fill="none" stroke="' + s.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      });
+      var showDots = count <= 40;
+      this._hasDots = showDots;
+      if (showDots) {
+        series.forEach(function(s) {
+          s.values.forEach(function(v, i) {
+            svg += '<circle data-dot="' + i + '" cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v, s.axisRef).toFixed(1) + '" r="3" fill="#1e1e2e" stroke="' + s.color + '" stroke-width="2"/>';
+          });
+        });
+      }
+      // 整列命中区：悬浮一次给出该时间点所有序列的数值
+      for (var h = 0; h < count; h++) {
+        var colLeft = h === 0 ? padLeft : (xAt(h - 1) + xAt(h)) / 2;
+        var colRight = h === count - 1 ? padLeft + innerW : (xAt(h) + xAt(h + 1)) / 2;
+        svg += '<rect data-pt="' + h + '" x="' + colLeft.toFixed(1) + '" y="' + padTop + '" width="' + Math.max(1, colRight - colLeft).toFixed(1) + '" height="' + innerH + '" fill="transparent" pointer-events="all"/>';
+      }
+      // X 轴刻度：最多显示 8 个，首尾必显示
+      var step = Math.max(1, Math.ceil(count / 8));
+      labels.forEach(function(label, i) {
+        if (i % step !== 0 && i !== count - 1) return;
+        svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (padTop + innerH + 16) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + escape(label) + '</text>';
+      });
+      // 图例（顶部一行，色点 + 名称）
+      if (legendOn) {
+        var lx = padLeft;
+        series.forEach(function(s) {
+          if (!s.label) return;
+          var textW = 0;
+          for (var ci = 0; ci < s.label.length; ci++) textW += s.label.charCodeAt(ci) > 0x2e80 ? 10.5 : 6;
+          svg += '<circle cx="' + (lx + 4).toFixed(1) + '" cy="12" r="3.5" fill="' + s.color + '"/>';
+          svg += '<text x="' + (lx + 13).toFixed(1) + '" y="15.5" font-size="10" fill="#9ca3af">' + escape(s.label) + '</text>';
+          lx += 13 + textW + 16;
+        });
+      }
+      // 全 0 时在绘图区中央给出空态文案
+      if (!hasAny) {
+        svg += '<text x="' + (padLeft + innerW / 2).toFixed(1) + '" y="' + (padTop + innerH / 2 + 4).toFixed(1) + '" text-anchor="middle" font-size="11" fill="#6b7280">' + escape(emptyText) + '</text>';
+      }
+      svg += '</svg>';
+      this.innerHTML = svg;
+
+      this._geo = {
+        labels: labels,
+        details: [],
+        unit: '',
+        format: null,
+        multi: true,
+        rows: labels.map(function(label, i) {
+          return series.map(function(s) {
+            var raw = s.values[i];
+            var shown = s.format ? s.format(raw) : raw + s.unit;
+            return (s.label ? s.label + ' ' : '') + shown;
+          });
+        }),
+        points: series[0].values.map(function(v, i) {
+          return { x: xAt(i), y: yAt(v, series[0].axisRef), value: v };
+        })
+      };
+      var svgEl = this.querySelector('svg');
+      svgEl.addEventListener('mouseleave', function() { self._hideTip(); });
+      this.querySelectorAll('[data-pt]').forEach(function(rect) {
+        rect.addEventListener('mouseenter', function() { self._showTip(parseInt(rect.getAttribute('data-pt'), 10)); });
+      });
+      this._lastSig = this._sizeSignature();
     }
 
     render(config) {
       config = config || {};
       this._config = config;
       this._hideTip();
+      // 多序列 / 多 Y 轴走独立路径：单序列渲染逻辑保持原样，避免影响已有图表
+      if (Array.isArray(config.series) && config.series.length) {
+        this._renderMultiSeries(config);
+        return;
+      }
       var self = this;
       var labels = Array.isArray(config.labels) ? config.labels : [];
       var values = (Array.isArray(config.values) ? config.values : []).map(function(v) {

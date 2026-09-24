@@ -95,9 +95,9 @@
     </div>
   </div>
 </akm-modal>
-<akm-modal id="key-models-modal" title="模型列表" max-width="max-w-2xl" body-class="px-5 py-4">
+<akm-modal id="key-models-modal" title="模型列表" max-width="max-w-2xl" panel-class="max-h-[85vh] flex flex-col" body-class="px-5 py-4 overflow-y-auto flex-1 min-h-0">
   <div class="text-xs text-gray-500 mb-3" id="key-models-modal-summary">—</div>
-  <div id="key-models-modal-list" class="flex flex-wrap gap-2 text-xs"></div>
+  <div id="key-models-modal-list" class="flex flex-wrap gap-2 text-xs content-start"></div>
 </akm-modal>
 {% endblock %}
 
@@ -147,15 +147,19 @@ function formatProviderName(name) {
 
 var _copyToastTimer = null;
 
-function showCopyToast(message) {
+function showToast(message) {
   var toast = document.getElementById('copy-toast');
   if (!toast) return;
-  toast.textContent = message || '模型名已复制';
+  toast.textContent = message;
   toast.classList.remove('hidden');
   if (_copyToastTimer) clearTimeout(_copyToastTimer);
   _copyToastTimer = setTimeout(function() {
     toast.classList.add('hidden');
   }, 1600);
+}
+
+function showCopyToast(message) {
+  showToast(message || '模型名已复制');
 }
 
 function copyModelName(modelName) {
@@ -206,6 +210,123 @@ function _evalExtractor(extractorStr, rawResponse) {
   return null;
 }
 
+// ── 余额 / 用量行：前面一个 sync 图标，点它立刻重查一次 ──
+function _usageRefreshIcon() {
+  return '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>';
+}
+
+function _usageRefreshBtnHtml(alias) {
+  // -ml-0.5 / -mt-px 抵消按钮自身的 p-0.5：让图标与卡片内容左边线（Key 名、模型标签）对齐，
+  // 纵向再上抬 1px 与「剩余: …」这行文字的中线对齐
+  return '<button type="button" data-usage-refresh="' + esc(alias) + '" data-loading="0" aria-label="刷新余额" title="刷新余额 / 用量" class="shrink-0 -ml-0.5 -mt-px p-0.5 rounded text-gray-500 hover:text-emerald-400 hover:bg-emerald-950/30 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-default">' + _usageRefreshIcon() + '</button>';
+}
+
+// 解析这一行要展示的文字：优先用脚本里的 extractor 实时解析原始响应；
+// 返回 null 表示还没有可展示的结果（未查询）
+function _usageTextParts(k) {
+  var usageData = k.usage_data;
+  if (!usageData || typeof usageData !== 'object') return null;
+  var extracted = usageData.extracted;
+  if (usageData.raw_response && k.usage_query_script) {
+    var extractorStr = _getExtractorFromScript(k.usage_query_script);
+    if (extractorStr) {
+      var fe = _evalExtractor(extractorStr, usageData.raw_response);
+      if (fe) extracted = fe;
+    }
+  }
+  if (extracted && typeof extracted === 'object') {
+    var parts = [];
+    if (extracted.remaining !== undefined && extracted.remaining !== null) {
+      parts.push('剩余: ' + _fmtQuota(extracted.remaining) + (extracted.unit ? ' ' + extracted.unit : ''));
+    }
+    if (extracted.used !== undefined && extracted.used !== null) {
+      parts.push('已用: ' + _fmtQuota(extracted.used) + (extracted.unit ? ' ' + extracted.unit : ''));
+    }
+    if (extracted.total !== undefined && extracted.total !== null) {
+      parts.push('总额: ' + _fmtQuota(extracted.total) + (extracted.unit ? ' ' + extracted.unit : ''));
+    }
+    if (extracted.planName) {
+      parts.push(extracted.planName);
+    }
+    if (extracted.isValid === false) {
+      parts.push('\u26A0\uFE0F ' + (extracted.invalidMessage || '\u5957\u9910\u5DF2\u5931\u6548'));
+      return { cls: 'text-red-400', html: esc(parts.join(', ')) };
+    }
+    if (parts.length > 0) return { cls: 'text-emerald-400', html: esc(parts.join(', ')) };
+  }
+  if (usageData.ok === false || usageData.error) {
+    return { cls: 'text-red-400', html: '用量查询失败', title: String(usageData.error || '') };
+  }
+  return null;
+}
+
+// 只要这个 Key 配了用量查询就渲染这一行（哪怕还没查过）：否则第一次查询没有入口
+function usageLineHtml(k) {
+  var parts = _usageTextParts(k);
+  // pb-2.5：和下面「模型标签」拉开一点距离（原来 pb-1 太贴，只有 5px）
+  return '<div class="px-4 pb-2.5 flex items-start gap-1 min-w-0" data-usage-line="' + esc(k.alias) + '">' +
+    _usageRefreshBtnHtml(k.alias) +
+    '<span data-usage-text class="text-xs min-w-0 break-all ' + (parts ? parts.cls : 'text-gray-500') + '"' +
+    (parts && parts.title ? ' title="' + esc(parts.title) + '"' : '') + '>' +
+    (parts ? parts.html : '未查询') + '</span></div>';
+}
+
+function setUsageRefreshLoading(btn, loading) {
+  if (!btn) return;
+  btn.setAttribute('data-loading', loading ? '1' : '0');
+  btn.disabled = !!loading;
+  var icon = btn.querySelector('svg');
+  if (icon) icon.classList.toggle('akm-spin', !!loading);
+}
+
+// 只替换这一行的内容，不整列表重渲染（避免刷新余额时列表闪动）
+function renderUsageLine(alias, key) {
+  var lines = document.querySelectorAll('[data-usage-line]');
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].getAttribute('data-usage-line') !== alias) continue;
+    var parts = key ? _usageTextParts(key) : null;
+    lines[i].innerHTML = _usageRefreshBtnHtml(alias) +
+      '<span data-usage-text class="text-xs min-w-0 break-all ' + (parts ? parts.cls : 'text-gray-500') + '"' +
+      (parts && parts.title ? ' title="' + esc(parts.title) + '"' : '') + '>' +
+      (parts ? parts.html : '未查询') + '</span>';
+    return;
+  }
+}
+
+// 手动立刻重查一次余额 / 用量。流程与「用量查询配置」弹窗里的「立即查询」一致：
+// 后端只负责发请求返回原始响应，脚本里的 extractor 在前端沙箱跑，结果再写回库里。
+function refreshKeyUsage(alias, btn) {
+  if (!alias || (btn && btn.getAttribute('data-loading') === '1')) return;
+  setUsageRefreshLoading(btn, true);
+  var key = null;
+  _keysData.forEach(function(k) { if (k.alias === alias) key = k; });
+  fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-query', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+    .then(function(r) {
+      return r.json().catch(function() { return {}; }).then(function(json) {
+        if (!r.ok) throw new Error(json.detail || ('HTTP ' + r.status));
+        return json;
+      });
+    })
+    .then(function(json) {
+      var data = (json && json.data) || json || {};
+      var extractorStr = key ? _getExtractorFromScript(key.usage_query_script || '') : '';
+      if (extractorStr && data.raw_response) {
+        var fe = _evalExtractor(extractorStr, data.raw_response);
+        if (fe) data.extracted = fe;
+      }
+      var usageData = { ok: data.ok, error: data.error, status_code: data.status_code, latency_ms: data.latency_ms, raw_response: data.raw_response, extracted: data.extracted, queried_at: data.queried_at };
+      if (key) key.usage_data = usageData;
+      renderUsageLine(alias, key);
+      showToast(data.ok ? '余额已刷新' : '刷新失败，请查看 error.log');
+      return fetch('/api/keys/' + encodeURIComponent(alias) + '/usage-data', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ usage_data: usageData })
+      });
+    })
+    .catch(function(e) { showToast('刷新失败：' + ((e && e.message) || '未知错误')); })
+    .finally(function() { setUsageRefreshLoading(btn, false); });
+}
+
 function renderKeys() {
   var container = document.getElementById('key-list-container');
   var empty = document.getElementById('key-empty');
@@ -213,7 +334,7 @@ function renderKeys() {
   if (!_keysData.length) { container.innerHTML=''; empty.classList.remove('hidden'); pagination.classList.add('hidden'); return; }
   empty.classList.add('hidden');
 
-  var html = '<div class="grid grid-cols-1 xl:grid-cols-2 gap-3">';
+  var html = '<div data-key-grid class="grid grid-cols-1 xl:grid-cols-2 gap-3">';
   var start = (_keyCurrentPage - 1) * _keyPageSize;
   var end = start + _keyPageSize;
   _keysData.slice(start, end).forEach(function(k){
@@ -241,44 +362,8 @@ function renderKeys() {
       latencyText = '<span class="'+latencyClass+' text-xs">'+_fmtLatency(avgLatency)+'</span>';
     }
 
-    // 用量数据显示（放在按钮行下面）—— 前端执行 extractor 解析 raw_response
-    var usageData = k.usage_data;
-    var usageInfoLine = '';
-    if (k.usage_query_interval_m > 0 && usageData && typeof usageData === 'object') {
-      var extracted = usageData.extracted;
-      // 如果后端存储了原始响应，前端用 extractor 实时解析展示
-      if (usageData.raw_response && k.usage_query_script) {
-        var extractorStr = _getExtractorFromScript(k.usage_query_script);
-        if (extractorStr) {
-          var fe = _evalExtractor(extractorStr, usageData.raw_response);
-          if (fe) extracted = fe;
-        }
-      }
-      if (extracted && typeof extracted === 'object') {
-        var parts = [];
-        if (extracted.remaining !== undefined && extracted.remaining !== null) {
-          parts.push('剩余: ' + _fmtQuota(extracted.remaining) + (extracted.unit ? ' ' + extracted.unit : ''));
-        }
-        if (extracted.used !== undefined && extracted.used !== null) {
-          parts.push('已用: ' + _fmtQuota(extracted.used) + (extracted.unit ? ' ' + extracted.unit : ''));
-        }
-        if (extracted.total !== undefined && extracted.total !== null) {
-          parts.push('总额: ' + _fmtQuota(extracted.total) + (extracted.unit ? ' ' + extracted.unit : ''));
-        }
-        if (extracted.planName) {
-          parts.push(extracted.planName);
-        }
-        if (extracted.isValid === false) {
-          parts.push('\u26A0\uFE0F ' + (extracted.invalidMessage || '\u5957\u9910\u5DF2\u5931\u6548'));
-          usageInfoLine = '<div class="px-4 pb-1"><span class="text-red-400 text-xs">' + parts.join(', ') + '</span></div>';
-        } else if (parts.length > 0) {
-          usageInfoLine = '<div class="px-4 pb-1"><span class="text-emerald-400 text-xs">' + parts.join(', ') + '</span></div>';
-        }
-      }
-      if (!usageInfoLine && (usageData.ok === false || usageData.error)) {
-        usageInfoLine = '<div class="px-4 pb-1"><span class="text-red-400 text-xs" title="' + esc(String(usageData.error || '')).replace(/"/g, '&quot;') + '">\u7528\u91CF\u67E5\u8BE2\u5931\u8D25</span></div>';
-      }
-    }
+    // 用量 / 余额行（含手动刷新按钮）—— 前端执行 extractor 解析 raw_response
+    var usageInfoLine = k.usage_query_interval_m > 0 ? usageLineHtml(k) : '';
 
     html += '<div class="border border-border rounded-lg bg-surface-light/50 overflow-hidden min-w-0">'+
       '<div class="flex items-center justify-between px-4 py-3 flex-wrap gap-2">'+
@@ -389,6 +474,11 @@ function clampModelTags(root, force) {
       waitingForLayout = true;
       return;
     }
+    // 同一宽度 + 同一批标签已经量过就不再重来：这一步要先「全部展开」才能量换行，
+    // 反复做会让卡片高度来回跳（样式表晚到的那一轮尤其明显）
+    var sig = Math.round(box.clientWidth) + 'x' + chips.length;
+    if (!force && box.getAttribute('data-clamp-sig') === sig) return;
+    box.setAttribute('data-clamp-sig', sig);
     chips.forEach(function(chip) { chip.classList.remove('hidden'); });
     moreBtn.classList.add('hidden');
     var first = chips[0];
@@ -858,6 +948,14 @@ document.addEventListener('DOMContentLoaded', function() {
   loadProviders();
   loadKeys();
 
+  /* 卡片上的余额 / 用量刷新：事件委托，列表重建后无需重新绑定 */
+  document.addEventListener('click', function(e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-usage-refresh]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    refreshKeyUsage(btn.getAttribute('data-usage-refresh'), btn);
+  });
+
   /* 页面重新可见时自动刷新 Key 列表 */
   document.addEventListener('visibilitychange', function() {
     if (!document.hidden) loadKeys();
@@ -868,7 +966,7 @@ document.addEventListener('DOMContentLoaded', function() {
   var reclampModels = function() {
     var container = document.getElementById('key-list-container');
     if (!container) return;
-    clampModelTags(container);
+    clampModelTags(container, true);   // 宽度/字体就绪这类显式重算：强制量一次
     scheduleClampSettle();
   };
   window.addEventListener('resize', function() {
