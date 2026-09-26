@@ -30,7 +30,7 @@ if (!customElements.get('akm-switch')) {
       this.className = (this.getAttribute('host-class') || 'inline-flex items-center gap-2 cursor-pointer select-none switch-off').trim();
       this.innerHTML = '' +
         (label ? '<span class="' + labelClass + '">' + this.escape(label) + '</span>' : '') +
-        '<div class="switch-track bg-gray-600 flex items-center"><div class="switch-thumb bg-white"></div></div>';
+        '<div class="switch-track bg-switch-off flex items-center"><div class="switch-thumb bg-white"></div></div>';
       this.setAttribute('role', 'switch');
       this.setAttribute('tabindex', this.disabled ? '-1' : '0');
     }
@@ -57,7 +57,7 @@ if (!customElements.get('akm-switch')) {
       var track = this.querySelector('.switch-track');
       if (track) {
         track.classList.toggle('bg-indigo-600', this.checked);
-        track.classList.toggle('bg-gray-600', !this.checked);
+        track.classList.toggle('bg-switch-off', !this.checked);
       }
     }
 
@@ -103,7 +103,7 @@ if (!customElements.get('akm-pagination')) {
       }
       this.classList.remove('hidden');
       var disabledClass = 'text-gray-600 cursor-default';
-      var activeClass = 'text-gray-400 hover:text-white hover:bg-surface-light cursor-pointer';
+      var activeClass = 'text-gray-400 hover:text-strong hover:bg-surface-light cursor-pointer';
       var html = '';
       html += this._button('首页', 1, currentPage === 1, disabledClass, activeClass);
       html += this._button('上一页', currentPage - 1, currentPage === 1, disabledClass, activeClass);
@@ -318,10 +318,10 @@ if (!customElements.get('akm-modal')) {
           '<div class="relative bg-surface-light border border-border rounded-lg w-full ' + width + ' shadow-2xl ' + panelClass + '" style="animation: slideUp 0.2s ease">' +
             '<div class="flex items-center justify-between px-4 py-3 border-b border-border">' +
               '<div class="min-w-0">' +
-                '<h3 data-title class="text-sm font-semibold text-white"></h3>' +
+                '<h3 data-title class="text-sm font-semibold text-strong"></h3>' +
                 '<p data-subtitle class="text-xs text-gray-500 mt-1 hidden"></p>' +
               '</div>' +
-              '<button type="button" data-close class="text-gray-400 hover:text-white transition-colors cursor-pointer">' +
+              '<button type="button" data-close class="text-gray-400 hover:text-strong transition-colors cursor-pointer">' +
                 '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>' +
               '</button>' +
             '</div>' +
@@ -395,8 +395,8 @@ if (!customElements.get('akm-drawer')) {
         '<div data-overlay class="hidden fixed inset-0 z-40 bg-black/50"></div>' +
         '<div data-panel class="hidden fixed top-0 right-0 z-50 h-full w-full ' + width + ' bg-surface-light border-l border-border shadow-2xl flex flex-col overflow-hidden" style="transform:translateX(100%); transition: transform 0.25s ease">' +
           '<div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">' +
-            '<h3 data-title class="text-sm font-semibold text-white"></h3>' +
-            '<button type="button" data-close class="text-gray-400 hover:text-white transition-colors cursor-pointer">' +
+            '<h3 data-title class="text-sm font-semibold text-strong"></h3>' +
+            '<button type="button" data-close class="text-gray-400 hover:text-strong transition-colors cursor-pointer">' +
               '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>' +
             '</button>' +
           '</div>' +
@@ -471,8 +471,8 @@ if (!customElements.get('akm-tooltip')) {
         tip.style.cssText =
           'position:fixed;z-index:9999;display:none;pointer-events:none;' +
           'max-width:320px;padding:8px 10px;font-size:11px;line-height:1.7;' +
-          'white-space:pre-line;text-align:left;color:#d1d5db;' +
-          'background:#111827;border:1px solid #374151;border-radius:6px;' +
+          'white-space:pre-line;text-align:left;color:rgb(var(--c-tooltip-text));' +
+          'background:rgb(var(--c-tooltip-bg));border:1px solid rgb(var(--c-tooltip-border));border-radius:6px;' +
           'box-shadow:0 8px 24px rgba(0,0,0,.4);';
         document.body.appendChild(tip);
         this._tipEl = tip;
@@ -516,8 +516,8 @@ function akmFloatingTip() {
       el.style.cssText =
         'position:fixed;z-index:9999;display:none;pointer-events:none;' +
         'max-width:300px;padding:8px 10px;font-size:11px;line-height:1.7;' +
-        'white-space:pre-line;text-align:left;color:#d1d5db;' +
-        'background:#111827;border:1px solid #374151;border-radius:6px;' +
+        'white-space:pre-line;text-align:left;color:rgb(var(--c-tooltip-text));' +
+        'background:rgb(var(--c-tooltip-bg));border:1px solid rgb(var(--c-tooltip-border));border-radius:6px;' +
         'box-shadow:0 8px 24px rgba(0,0,0,.4);';
       document.body.appendChild(el);
     }
@@ -809,7 +809,7 @@ if (!customElements.get('akm-line-chart')) {
       var gridAxis = leftAxes[0] || rightAxes[0] || axisList[0];
       for (var t = 0; t <= 4; t++) {
         var gy = padTop + innerH * t / 4;
-        svg += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1) + '" x2="' + (padLeft + innerW) + '" y2="' + gy.toFixed(1) + '" stroke="#33334d" stroke-width="1"' + (t === 4 ? '' : ' stroke-dasharray="3 4"') + '/>';
+        svg += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1) + '" x2="' + (padLeft + innerW) + '" y2="' + gy.toFixed(1) + '" class="akm-chart-grid" stroke-width="1"' + (t === 4 ? '' : ' stroke-dasharray="3 4"') + '/>';
       }
       var drawAxisTicks = function(ax, side, idx) {
         var x = side === 'left' ? padLeft - 6 - idx * colW : padLeft + innerW + 8 + idx * colW;
@@ -850,7 +850,7 @@ if (!customElements.get('akm-line-chart')) {
       if (showDots) {
         series.forEach(function(s) {
           s.values.forEach(function(v, i) {
-            svg += '<circle data-dot="' + i + '" cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v, s.axisRef).toFixed(1) + '" r="3" fill="#1e1e2e" stroke="' + s.color + '" stroke-width="2"/>';
+            svg += '<circle data-dot="' + i + '" cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v, s.axisRef).toFixed(1) + '" r="3" class="akm-chart-dot" stroke="' + s.color + '" stroke-width="2"/>';
           });
         });
       }
@@ -864,7 +864,7 @@ if (!customElements.get('akm-line-chart')) {
       var step = Math.max(1, Math.ceil(count / 8));
       labels.forEach(function(label, i) {
         if (i % step !== 0 && i !== count - 1) return;
-        svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (padTop + innerH + 16) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + escape(label) + '</text>';
+        svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (padTop + innerH + 16) + '" text-anchor="middle" font-size="10" class="akm-chart-tick">' + escape(label) + '</text>';
       });
       // 图例（顶部一行，色点 + 名称）
       if (legendOn) {
@@ -874,13 +874,13 @@ if (!customElements.get('akm-line-chart')) {
           var textW = 0;
           for (var ci = 0; ci < s.label.length; ci++) textW += s.label.charCodeAt(ci) > 0x2e80 ? 10.5 : 6;
           svg += '<circle cx="' + (lx + 4).toFixed(1) + '" cy="12" r="3.5" fill="' + s.color + '"/>';
-          svg += '<text x="' + (lx + 13).toFixed(1) + '" y="15.5" font-size="10" fill="#9ca3af">' + escape(s.label) + '</text>';
+          svg += '<text x="' + (lx + 13).toFixed(1) + '" y="15.5" font-size="10" class="akm-chart-legend">' + escape(s.label) + '</text>';
           lx += 13 + textW + 16;
         });
       }
       // 全 0 时在绘图区中央给出空态文案
       if (!hasAny) {
-        svg += '<text x="' + (padLeft + innerW / 2).toFixed(1) + '" y="' + (padTop + innerH / 2 + 4).toFixed(1) + '" text-anchor="middle" font-size="11" fill="#6b7280">' + escape(emptyText) + '</text>';
+        svg += '<text x="' + (padLeft + innerW / 2).toFixed(1) + '" y="' + (padTop + innerH / 2 + 4).toFixed(1) + '" text-anchor="middle" font-size="11" class="akm-chart-tick">' + escape(emptyText) + '</text>';
       }
       svg += '</svg>';
       this.innerHTML = svg;
@@ -989,8 +989,8 @@ if (!customElements.get('akm-line-chart')) {
       for (var t = 0; t <= 4; t++) {
         var gy = padTop + innerH * t / 4;
         var gv = niceMax * (1 - t / 4);
-        svg += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1) + '" x2="' + (padLeft + innerW) + '" y2="' + gy.toFixed(1) + '" stroke="#33334d" stroke-width="1"' + (t === 4 ? '' : ' stroke-dasharray="3 4"') + '/>';
-        svg += '<text x="' + (padLeft - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="10" fill="#6b7280">' + escape(tickLabel(gv)) + '</text>';
+        svg += '<line x1="' + padLeft + '" y1="' + gy.toFixed(1) + '" x2="' + (padLeft + innerW) + '" y2="' + gy.toFixed(1) + '" class="akm-chart-grid" stroke-width="1"' + (t === 4 ? '' : ' stroke-dasharray="3 4"') + '/>';
+        svg += '<text x="' + (padLeft - 6) + '" y="' + (gy + 3).toFixed(1) + '" text-anchor="end" font-size="10" class="akm-chart-tick">' + escape(tickLabel(gv)) + '</text>';
       }
       // 面积 + 折线
       var linePoints = values.map(function(v, i) { return xAt(i).toFixed(1) + ',' + yAt(v).toFixed(1); });
@@ -1001,7 +1001,7 @@ if (!customElements.get('akm-line-chart')) {
       values.forEach(function(v, i) {
         var tip = hasDetails ? '' : '<title>' + escape(labels[i]) + ': ' + v + unit + '</title>';
         if (showDots) {
-          svg += '<circle data-dot="' + i + '" cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v).toFixed(1) + '" r="3" fill="#1e1e2e" stroke="' + color + '" stroke-width="2">' + tip + '</circle>';
+          svg += '<circle data-dot="' + i + '" cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v).toFixed(1) + '" r="3" class="akm-chart-dot" stroke="' + color + '" stroke-width="2">' + tip + '</circle>';
         } else {
           svg += '<circle cx="' + xAt(i).toFixed(1) + '" cy="' + yAt(v).toFixed(1) + '" r="6" fill="transparent">' + tip + '</circle>';
         }
@@ -1018,11 +1018,11 @@ if (!customElements.get('akm-line-chart')) {
       var step = Math.max(1, Math.ceil(count / 8));
       labels.forEach(function(label, i) {
         if (i % step !== 0 && i !== count - 1) return;
-        svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (padTop + innerH + 16) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + escape(label) + '</text>';
+        svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (padTop + innerH + 16) + '" text-anchor="middle" font-size="10" class="akm-chart-tick">' + escape(label) + '</text>';
       });
       // 全 0 时在绘图区中央给出空态文案
       if (maxValue <= 0) {
-        svg += '<text x="' + (padLeft + innerW / 2).toFixed(1) + '" y="' + (padTop + innerH / 2 + 4).toFixed(1) + '" text-anchor="middle" font-size="11" fill="#6b7280">' + escape(emptyText) + '</text>';
+        svg += '<text x="' + (padLeft + innerW / 2).toFixed(1) + '" y="' + (padTop + innerH / 2 + 4).toFixed(1) + '" text-anchor="middle" font-size="11" class="akm-chart-tick">' + escape(emptyText) + '</text>';
       }
       svg += '</svg>';
       this.innerHTML = svg;
@@ -1152,8 +1152,8 @@ if (!customElements.get('akm-donut-chart')) {
           + ' transform="rotate(-90 ' + cx + ' ' + cy + ')"/>';
       });
       var centerLabel = config.centerLabel || '总计';
-      var center = '<text data-center-label x="' + cx + '" y="' + (cy - 3) + '" text-anchor="middle" font-size="10" fill="#6b7280">' + escape(centerLabel) + '</text>'
-        + '<text data-center-value x="' + cx + '" y="' + (cy + 14) + '" text-anchor="middle" font-size="13" font-weight="600" fill="#e5e7eb">' + escape(format(total) + unit) + '</text>';
+      var center = '<text data-center-label x="' + cx + '" y="' + (cy - 3) + '" text-anchor="middle" font-size="10" class="akm-chart-center-label">' + escape(centerLabel) + '</text>'
+        + '<text data-center-value x="' + cx + '" y="' + (cy + 14) + '" text-anchor="middle" font-size="13" font-weight="600" class="akm-chart-center-value">' + escape(format(total) + unit) + '</text>';
 
       var legend = slices.map(function(item, i) {
         return '<div data-legend="' + i + '" class="flex items-center gap-2 px-1.5 py-1 rounded cursor-default">'
@@ -1318,8 +1318,8 @@ if (!customElements.get('akm-donut-chart')) {
         card.className = 'akm-notif-card';
         card.style.cssText =
           'pointer-events:auto;display:flex;flex-direction:column;gap:6px;' +
-          'background:#111827;border:1px solid #374151;border-radius:8px;' +
-          'padding:10px 12px 11px;font-size:12px;line-height:1.6;color:#e5e7eb;' +
+          'background:rgb(var(--c-tooltip-bg));border:1px solid rgb(var(--c-tooltip-border));border-radius:8px;' +
+          'padding:10px 12px 11px;font-size:12px;line-height:1.6;color:rgb(var(--c-tooltip-text));' +
           'box-shadow:0 8px 24px rgba(0,0,0,.45);animation:akmNotifIn .18s ease;';
         card.dataset.type = cfg.type || 'info';
 
@@ -1327,14 +1327,14 @@ if (!customElements.get('akm-donut-chart')) {
         head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
         var title = document.createElement('div');
         title.setAttribute('data-notif-title', '');
-        title.style.cssText = 'font-weight:600;font-size:12px;color:#f9fafb;word-break:break-all;';
+        title.style.cssText = 'font-weight:600;font-size:12px;color:rgb(var(--c-tooltip-title));word-break:break-all;';
         title.textContent = cfg.title || '';
         var closeBtn = document.createElement('button');
         closeBtn.type = 'button';
         closeBtn.textContent = '×';
         closeBtn.style.cssText =
           'flex:none;width:18px;height:18px;display:flex;align-items:center;justify-content:center;' +
-          'color:#9ca3af;background:transparent;border:none;cursor:pointer;' +
+          'color:rgb(var(--c-tooltip-muted));background:transparent;border:none;cursor:pointer;' +
           'font-size:14px;line-height:1;padding:0;border-radius:4px;';
         closeBtn.addEventListener('click', function() { this._removeCard(card); }.bind(this));
         head.appendChild(title);
@@ -1342,14 +1342,14 @@ if (!customElements.get('akm-donut-chart')) {
 
         var msg = document.createElement('div');
         msg.setAttribute('data-notif-message', '');
-        msg.style.cssText = 'color:#9ca3af;white-space:pre-line;word-break:break-word;';
+        msg.style.cssText = 'color:rgb(var(--c-tooltip-muted));white-space:pre-line;word-break:break-word;';
         msg.textContent = cfg.message || '';
 
         // 进度条：progress 缺省时隐藏
         var bar = document.createElement('div');
         bar.setAttribute('data-notif-bar', '');
         bar.style.cssText =
-          'height:3px;border-radius:9999px;background:#374151;overflow:hidden;' +
+          'height:3px;border-radius:9999px;background:rgb(var(--c-tooltip-border));overflow:hidden;' +
           (cfg.progress == null ? 'display:none;' : '');
         var fill = document.createElement('div');
         fill.style.cssText = 'height:100%;width:0%;transition:width .2s ease;background:#6366f1;';

@@ -72,7 +72,7 @@
   <input type="hidden" id="usage-alias" value="">
   <div class="flex items-center justify-between">
     <label class="text-sm text-gray-300">启用用量查询</label>
-    <button id="usage-toggle" type="button" onclick="toggleUsageEnabled()" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors bg-gray-600 cursor-pointer">
+    <button id="usage-toggle" type="button" onclick="toggleUsageEnabled()" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors bg-switch-off cursor-pointer">
       <span id="usage-toggle-dot" class="inline-block h-4 w-4 translate-x-1 transform rounded-full bg-white transition-transform"></span>
     </button>
   </div>
@@ -778,13 +778,13 @@ function _usageToggleState(enabled) {
   var dot = document.getElementById('usage-toggle-dot');
   if (!toggle || !dot) return;
   if (enabled) {
-    toggle.classList.remove('bg-gray-600');
+    toggle.classList.remove('bg-switch-off');
     toggle.classList.add('bg-indigo-600');
     dot.classList.remove('translate-x-1');
     dot.classList.add('translate-x-6');
   } else {
     toggle.classList.remove('bg-indigo-600');
-    toggle.classList.add('bg-gray-600');
+    toggle.classList.add('bg-switch-off');
     dot.classList.remove('translate-x-6');
     dot.classList.add('translate-x-1');
   }

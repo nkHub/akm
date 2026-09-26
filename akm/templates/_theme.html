@@ -1,0 +1,30 @@
+<script>
+/* 主题切换：跟随系统 / 浅色 / 深色。选择存 localStorage（akm.theme），
+   data-theme 与 dark class 的落地在 _layout.html 的首屏脚本里，这里只负责按钮与回写。 */
+(function() {
+  var T = window.__akmTheme;
+  var tabs = document.getElementById('theme-tabs');
+  if (!T || !tabs || typeof tabs.setOptions !== 'function') return;
+
+  var OPTIONS = [
+    { value: 'system', label: '跟随系统', icon: T.icons.system, title: '主题：跟随系统' },
+    { value: 'light',  label: '浅色',     icon: T.icons.light,  title: '主题：浅色' },
+    { value: 'dark',   label: '深色',     icon: T.icons.dark,   title: '主题：深色' }
+  ];
+
+  function render() {
+    tabs.setOptions(OPTIONS, T.get(), 'setAkmTheme');
+  }
+
+  window.setAkmTheme = function(value) {
+    T.set(value);
+    try { localStorage.setItem(T.key, T.get()); } catch (e) {}
+    T.apply();
+    render();
+  };
+
+  // 跟随系统时，系统外观变化后按钮选中态不用变（选中的仍是 system），
+  // 但解析出的实际主题由 _layout.html 里的监听负责切。
+  render();
+})();
+</script>

@@ -84,6 +84,30 @@
   - 样式约定：使用 Shadow DOM；`.md` 内已收敛 markdown 标题（`h1`~`h6` ≤ 1.15em）、代码块/引用/表格底色与边框、长单词 `overflow-wrap:anywhere`。注意：**对话框气泡字号与 markdown 样式均在此组件内维护**，页面侧勿再引入全局 markdown 样式，避免双重控制。
   - 来源：独立于 `akm-ui.js`，随日志页单独 `<script>` 引入。
 
+## 布局稳定性约定（避免刷新抖动）
+
+骨架屏/异步内容最容易踩的坑是「先按 A 高度画一遍，数据回来换成 B 高度，整页被顶一下」。当前沉淀的规则：
+
+- `akm-range-tabs` 在调用 `setOptions()` 之前是空元素，宿主 `akm-range-tabs` 用 CSS 固定 `min-height: 30px`（`_styles.html`）先占住一行：否则 JS 跑起来时容器从 0 长到 30px，会把同页下方内容整体顶下去（例如统计页「时间范围」那一行）。
+- 骨架屏必须与真实内容**逐块等高**，包括：卡片表头高度（真实表头里含 30px 的分段按钮，骨架屏用等高的占位块）、按条件出现/隐藏的整块（如统计页「每日用量」只在 7d/30d 出现，骨架屏要有同样条件才出现的占位）、以及服务端就已渲染好的静态块（如插件首页卡片区，应放在数据容器之外立即显示）。
+- 骨架屏里的文字占位建议直接用「透明文字的骨架条」（`class="skeleton text-transparent text-xs"` + 真实文案）：这样窄窗口下文字换行时，骨架高度与真实高度仍然一致；固定宽度（`w-12` 之类）在换行场景下会对不上。
+- 需要在首次绘制前就确定的状态（例如「每日用量」占位显示与否取决于 localStorage 里的天数），要在该元素之后紧跟一段内联 `<script>` 就地处理，不要等到 `DOMContentLoaded`/数据回调里再改，否则会发生在首屏之后，用户能看见跳变。
+- 自定义元素初始化（`data-ready`）前布局与渲染后不一致时，宿主侧先 `visibility: hidden`（如 `.plugin-cards-masonry > akm-plugin-card:not([data-ready])`），避免先以原始槽内容出现再跳一下。
+
+## 主题与配色 token
+
+管理台有两套主题：深色（默认，即原有配色）与浅色，由 `<html>` 上的 `data-theme` 决定，用户在右上角切换（存在 `localStorage` 的 `akm.theme`，可为 `dark` / `light` / `system`）。
+
+- token 定义在 `akm/templates/_styles.html`：`html { --c-* }` 是深色，`html[data-theme="light"] { --c-* }` 覆盖浅色。值写成 `R G B` 三段空格分隔（例如 `--c-surface: 30 30 46;`），Tailwind 侧配合 `rgb(var(--c-surface) / <alpha-value>)` 使用。
+- tailwind.config（`akm/templates/_layout.html`）把 `surface` / `surface-light` / `surface-hover` / `border` / `border-light` / `strong` / `switch-off` / `gray-200`~`gray-600` 以及各强调色的**文字档**（如 `indigo-400`、`red-400`、`amber-400`、`indigo-950` 这类淡底档）映射到 token；强调色的实心按钮档（`*-500` / `*-600`）两套主题共用，仍配 `text-white`。
+- 写新页面/组件时的约定：
+  1. 落在 surface 上的标题、正文用 `text-strong` / `text-gray-200`~`text-gray-600`，**不要**用 `text-white`（那只留给实心强调色按钮上的文字）。
+  2. 背景、边框用 `bg-surface` / `bg-surface-light` / `bg-surface-hover` / `border-border` / `border-border-light`，不要写死 hex。
+  3. 开关未打开用 `bg-switch-off`（不要用 `bg-gray-600`，浅色下那个档位是给暗淡文字用的）。
+  4. 组件内部的 SVG（图表网格线、刻度文字、图例、数据点圆环）用 `_styles.html` 里的 `.akm-chart-*` 类，不要在内联属性里写死颜色；序列色属于强调色，可以继续内联（如 `#818cf8`）。
+  5. 浮层（tooltip / 通知卡）用 `rgb(var(--c-tooltip-bg))` 一类 token；Shadow DOM 组件（`akm-json-viewer` / `akm-chat-viewer`）直接引用 `var(--c-*)`，CSS 变量会继承进 Shadow DOM，并带一份深色兜底值以便脱离管理台单独使用时也能看。
+  6. 不需要 `dark:` 变体：主题切换只换 token 值，模板与组件里不应出现 `dark:` 前缀类。
+
 ## 使用原则
 
 1. 组件只负责 UI 壳和基础交互，不承载具体业务请求。

@@ -10,16 +10,22 @@
 <!-- 骨架屏 -->
 <div id="dashboard-skeleton">
   <div id="skeleton-stats" class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-    <div id="sk-cost" class="hidden bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-12 mb-3"></div><div class="skeleton h-7 w-20"></div></div>
-    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-12 mb-3"></div><div class="skeleton h-7 w-20"></div></div>
-    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
-    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
-    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-14 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
-    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton h-3 w-20 mb-3"></div><div class="skeleton h-7 w-24"></div></div>
+    <div id="sk-cost" class="hidden bg-surface-light border border-border rounded-lg p-4"><div class="skeleton text-transparent text-xs mb-1 select-none">总费用</div><div class="skeleton h-8 w-20"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton text-transparent text-xs mb-1 select-none">总请求</div><div class="skeleton h-8 w-20"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton text-transparent text-xs mb-1 select-none">总 Token</div><div class="skeleton h-8 w-24"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton text-transparent text-xs mb-1 select-none">输入 Token</div><div class="skeleton h-8 w-24"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton text-transparent text-xs mb-1 select-none">输出 Token</div><div class="skeleton h-8 w-24"></div></div>
+    <div class="bg-surface-light border border-border rounded-lg p-4"><div class="skeleton text-transparent text-xs mb-1 select-none">缓存命中 Token</div><div class="skeleton h-8 w-24"></div></div>
   </div>
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
     <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
+      <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+        <div class="skeleton text-transparent text-xs font-medium shrink-0 select-none">按 Key</div>
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="skeleton h-[30px] w-[181px] rounded"></div>
+          <div class="skeleton h-[30px] w-[86px] rounded"></div>
+        </div>
+      </div>
       <div class="p-4" style="height:260px">
         <div class="skeleton h-2.5 w-24"></div>
         <div class="flex items-center gap-4 mt-4">
@@ -31,7 +37,13 @@
       </div>
     </div>
     <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
+      <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+        <div class="skeleton text-transparent text-xs font-medium shrink-0 select-none">按模型</div>
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="skeleton h-[30px] w-[181px] rounded"></div>
+          <div class="skeleton h-[30px] w-[86px] rounded"></div>
+        </div>
+      </div>
       <div class="p-4" style="height:260px">
         <div class="skeleton h-2.5 w-24"></div>
         <div class="flex items-center gap-4 mt-4">
@@ -45,7 +57,13 @@
   </div>
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
     <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-12"></div></div>
+      <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
+        <div class="skeleton text-transparent text-xs font-medium shrink-0 select-none">按来源</div>
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="skeleton h-[30px] w-[181px] rounded"></div>
+          <div class="skeleton h-[30px] w-[86px] rounded"></div>
+        </div>
+      </div>
       <div class="p-4" style="height:260px">
         <div class="skeleton h-2.5 w-24"></div>
         <div class="flex items-center gap-4 mt-4">
@@ -57,10 +75,33 @@
       </div>
     </div>
     <div class="bg-surface-light border border-border rounded-lg overflow-hidden">
-      <div class="px-4 py-3 border-b border-border"><div class="skeleton h-3 w-16"></div></div>
+      <!-- 头结构与真实「报错趋势」卡一致（真实侧是 shrink-0 单行不换行）：左侧 标题+指标按钮 固定不缩，右侧摘要可缩 -->
+      <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3 shrink-0">
+        <div class="flex items-center gap-3 shrink-0">
+          <div class="skeleton text-transparent text-xs font-medium w-16 shrink-0 select-none">报错趋势</div>
+          <div class="skeleton h-[30px] w-[230px] rounded"></div>
+        </div>
+        <div class="skeleton h-4 w-[150px] min-w-0 rounded"></div>
+      </div>
       <div class="p-4" style="height:260px"><div class="skeleton h-full w-full"></div></div>
     </div>
   </div>
+  <div id="daily-skeleton" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
+    <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
+      <div class="skeleton text-transparent text-xs font-medium shrink-0 select-none">每日用量</div>
+    </div>
+    <div class="p-4" style="height:260px"><div class="skeleton h-full w-full"></div></div>
+  </div>
+  <script>
+  /* 必须在解析到这里时就定好显隐（早于首次绘制），天数存在 localStorage（键与页面 JS 里的
+     DASHBOARD_DAYS_KEY 一致）；页面 JS 的 syncDailySkeleton() 负责之后切换天数时的同步。 */
+  (function() {
+    var days = 1;
+    try { days = parseInt(localStorage.getItem('akm_dashboard_days') || '1', 10); } catch (e) {}
+    if (days !== 1 && days !== 7 && days !== 30) days = 1;
+    if (days > 1) document.getElementById('daily-skeleton').classList.remove('hidden');
+  })();
+  </script>
 </div>
 
 <!-- 真实内容（初始隐藏） -->
@@ -72,7 +113,7 @@
   </div>
   <div class="bg-surface-light border border-border rounded-lg p-4">
     <div class="text-xs text-gray-500 mb-1">总请求</div>
-    <div id="stat-requests" class="text-2xl font-semibold text-white token-number">-</div>
+    <div id="stat-requests" class="text-2xl font-semibold text-strong token-number">-</div>
   </div>
   <div class="bg-surface-light border border-border rounded-lg p-4">
     <div class="text-xs text-gray-500 mb-1">总 Token</div>
@@ -178,9 +219,10 @@
     <akm-line-chart id="daily-chart" class="w-full"></akm-line-chart>
   </div>
 </div>
-<!-- 插件首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件卡片，宿主统一渲染；无卡片时为空串） -->
-{{ plugin_cards_html }}
 </div>
+<!-- 插件首页卡片区（通用插槽：启用且实现 dashboard_card() 的插件卡片，宿主统一渲染；无卡片时为空串）
+     注意：这块是服务端静态渲染，放在 #dashboard-content 之外立即显示，避免统计数据回来后整块往下顶 -->
+{{ plugin_cards_html }}
 {% endblock %}
 
 {% block extra_js %}
@@ -607,9 +649,17 @@ function saveDaysFilter() {
   } catch (e) {}
 }
 
+// 骨架屏里的「每日用量」占位必须和真实区块同规则出现/隐藏（只有 7d / 30d 有），
+// 否则骨架屏会正好比真实内容矮一整块，数据回来时整页往下顶。
+function syncDailySkeleton() {
+  var el = document.getElementById('daily-skeleton');
+  if (el) el.classList.toggle('hidden', _currentDays <= 1);
+}
+
 function switchDays(d) {
   _currentDays = d;
   saveDaysFilter();
+  syncDailySkeleton();
   var tabs = document.getElementById('dashboard-days');
   if (tabs && typeof tabs.setOptions === 'function') {
     tabs.setOptions([

@@ -8,35 +8,35 @@
     <div class="grid grid-cols-2 gap-4">
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">启动时打开管理台</h4>
+          <h4 class="text-sm font-semibold text-strong">启动时打开管理台</h4>
           <p class="text-xs text-gray-500 mt-0.5">菜单栏应用启动后自动在浏览器打开管理页面</p>
         </div>
         <akm-switch id="cfg-auto-open" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">开机自启动</h4>
+          <h4 class="text-sm font-semibold text-strong">开机自启动</h4>
           <p class="text-xs text-gray-500 mt-0.5">登录系统时自动启动 AKM（仅打包后的 .app 生效）</p>
         </div>
         <akm-switch id="cfg-launch-login" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">菜单栏显示用量</h4>
+          <h4 class="text-sm font-semibold text-strong">菜单栏显示用量</h4>
           <p class="text-xs text-gray-500 mt-0.5">在菜单栏图标旁交替显示今日 Token 用量和费用</p>
         </div>
         <akm-switch id="cfg-menu-usage" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">自动更新</h4>
+          <h4 class="text-sm font-semibold text-strong">自动更新</h4>
           <p class="text-xs text-gray-500 mt-0.5">发现新版本后自动下载并重启安装（关闭后需通过菜单栏「检查更新」手动确认）</p>
         </div>
         <akm-switch id="cfg-auto-update" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card align="start">
         <div>
-          <h4 class="text-sm font-semibold text-white">服务端口</h4>
+          <h4 class="text-sm font-semibold text-strong">服务端口</h4>
           <p class="text-xs text-gray-500 mt-0.5">修改后需在菜单栏「重启服务」生效</p>
         </div>
         <div slot="actions" class="flex flex-col items-end shrink-0">
@@ -50,7 +50,7 @@
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">重启服务</h4>
+          <h4 class="text-sm font-semibold text-strong">重启服务</h4>
           <p class="text-xs text-gray-500 mt-0.5">重新启动 AKM 内置服务，端口修改后需重启生效</p>
         </div>
         <button slot="actions" onclick="restartServer()"
@@ -60,7 +60,7 @@
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">关闭应用</h4>
+          <h4 class="text-sm font-semibold text-strong">关闭应用</h4>
           <p class="text-xs text-gray-500 mt-0.5">完全退出 AKM 菜单栏应用</p>
         </div>
         <button slot="actions" onclick="shutdownServer()"
@@ -77,7 +77,7 @@
     <div class="grid grid-cols-2 gap-4">
       <akm-settings-card align="start">
         <div>
-          <h4 class="text-sm font-semibold text-white">日志保留天数</h4>
+          <h4 class="text-sm font-semibold text-strong">日志保留天数</h4>
           <p class="text-xs text-gray-500 mt-0.5">超过天数的审计日志将被自动清理</p>
         </div>
         <div slot="actions" class="flex flex-col items-end shrink-0">
@@ -92,7 +92,7 @@
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">日志体积控制</h4>
+          <h4 class="text-sm font-semibold text-strong">日志体积控制</h4>
           <p class="text-xs text-gray-500 mt-0.5">关闭后不存储请求/响应原文，token 统计不受影响</p>
         </div>
         <div slot="actions" class="flex items-center gap-4 shrink-0">
@@ -102,21 +102,21 @@
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">更新包缓存清理</h4>
+          <h4 class="text-sm font-semibold text-strong">更新包缓存清理</h4>
           <p class="text-xs text-gray-500 mt-0.5">启动或唤醒时自动删除历史更新包与旧版本备份，只保留最新更新包与回滚备份</p>
         </div>
         <akm-switch id="cfg-update-cleanup" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">文本日志自动轮转</h4>
+          <h4 class="text-sm font-semibold text-strong">文本日志自动轮转</h4>
           <p class="text-xs text-gray-500 mt-0.5">error.log、keys.log 等文本日志超过阈值后转存为 .1（保留一代），不涉及会话与知识库数据</p>
         </div>
         <akm-switch id="cfg-text-log-rotation" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card align="start">
         <div>
-          <h4 class="text-sm font-semibold text-white">清空日志</h4>
+          <h4 class="text-sm font-semibold text-strong">清空日志</h4>
           <p class="text-xs text-gray-500 mt-0.5">
             <span id="log-stats">加载中...</span>
           </p>
@@ -131,7 +131,7 @@
       </akm-settings-card>
       <akm-settings-card align="start">
         <div>
-          <h4 class="text-sm font-semibold text-white">JSON 渲染阈值</h4>
+          <h4 class="text-sm font-semibold text-strong">JSON 渲染阈值</h4>
           <p class="text-xs text-gray-500 mt-0.5">超过阈值时停止渲染并提示下载原始数据（单位：字符）</p>
         </div>
         <div slot="actions" class="flex flex-col items-end shrink-0">
@@ -152,7 +152,7 @@
     <div class="bg-surface-light border border-border rounded-lg p-4">
       <div class="flex items-center justify-between mb-3">
         <div>
-          <h4 class="text-sm font-semibold text-white">供应商代理管理</h4>
+          <h4 class="text-sm font-semibold text-strong">供应商代理管理</h4>
           <p class="text-xs text-gray-500 mt-0.5">自定义供应商的默认 base_url、认证头和协议能力</p>
         </div>
         <button onclick="openAgentModal()" class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer font-medium">+ 添加</button>
@@ -169,7 +169,7 @@
     <div class="grid grid-cols-1 gap-4">
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">启用费用估算</h4>
+          <h4 class="text-sm font-semibold text-strong">启用费用估算</h4>
           <p class="text-xs text-gray-500 mt-0.5">开启后首页「总请求」左侧显示总费用，每日用量增加费用列。按本地单价表估算，不能替代供应商账单。</p>
         </div>
         <akm-switch id="cfg-cost-stats" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
@@ -177,7 +177,7 @@
       <div class="bg-surface-light border border-border rounded-lg p-4">
         <div class="flex items-start justify-between gap-4 mb-3">
           <div>
-            <h4 class="text-sm font-semibold text-white">模型单价表</h4>
+            <h4 class="text-sm font-semibold text-strong">模型单价表</h4>
             <p class="text-xs text-gray-500 mt-0.5">每行 <code class="text-indigo-300">model=输入/输入缓存/输出</code>（每 1M tokens，固定美元）。支持 <code class="text-indigo-300">#</code> 注释与尾部 <code class="text-indigo-300">*</code> 通配。</p>
           </div>
           <button onclick="saveCostPricing()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer shrink-0">保存单价表</button>
@@ -196,14 +196,14 @@
     <div class="grid grid-cols-1 gap-4">
       <akm-settings-card>
         <div>
-          <h4 class="text-sm font-semibold text-white">启用出站代理</h4>
+          <h4 class="text-sm font-semibold text-strong">启用出站代理</h4>
           <p class="text-xs text-gray-500 mt-0.5">仅影响 AKM 访问上游供应商的请求（转发与连通性测试），不影响本机其它软件。</p>
         </div>
         <akm-switch id="cfg-http-proxy" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <akm-settings-card align="start">
         <div>
-          <h4 class="text-sm font-semibold text-white">代理地址</h4>
+          <h4 class="text-sm font-semibold text-strong">代理地址</h4>
           <p class="text-xs text-gray-500 mt-0.5">支持 <code class="text-indigo-300">http://</code> / <code class="text-indigo-300">https://</code> / <code class="text-indigo-300">socks5://</code>；也可写 <code class="text-indigo-300">host:port</code>（自动补 http://）。SOCKS 需环境具备 socksio。</p>
         </div>
         <div slot="actions" class="flex flex-col items-stretch shrink-0 w-full min-w-[28rem] max-w-2xl">
