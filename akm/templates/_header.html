@@ -1,4 +1,7 @@
 <header class="h-14 flex items-center justify-between px-6 border-b border-border bg-surface/80 backdrop-blur shrink-0">
-  <h2 class="text-sm font-semibold text-white">{{ title }}</h2>
-  <span class="text-xs text-gray-500">v{{ version }}</span>
+  <h2 class="text-sm font-semibold text-strong">{{ title }}</h2>
+  <div class="flex items-center gap-3">
+    <akm-range-tabs id="theme-tabs" class="flex items-center gap-1"></akm-range-tabs>
+    <span class="text-xs text-gray-500">v{{ version }}</span>
+  </div>
 </header>

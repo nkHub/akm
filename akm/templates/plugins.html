@@ -660,7 +660,7 @@ function renderMarket() {
     html += '<div class="flex items-start justify-between gap-3">';
     html += '<div class="flex-1 min-w-0">';
     html += '<div class="flex items-center gap-2 mb-1 flex-wrap">';
-    html += '<h4 class="text-sm font-semibold text-white">' + esc(p.name) + '</h4>';
+    html += '<h4 class="text-sm font-semibold text-strong">' + esc(p.name) + '</h4>';
     html += '<span class="text-xs text-gray-500">v' + esc(p.version) + '</span>';
     html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
     if (p.local_source === 'builtin') {
@@ -686,11 +686,11 @@ function renderMarket() {
     pagination.classList.remove('hidden');
     var ph = '<span class="text-xs text-gray-500">共 ' + _marketList.length + ' 个插件</span>';
     ph += '<div class="flex items-center gap-2">';
-    ph += '<button type="button" onclick="marketGo(0)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>首页</button>';
-    ph += '<button type="button" onclick="marketPage(-1)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>上一页</button>';
+    ph += '<button type="button" onclick="marketGo(0)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer"') + '>首页</button>';
+    ph += '<button type="button" onclick="marketPage(-1)" ' + (_marketPage === 0 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer"') + '>上一页</button>';
     ph += '<span class="text-xs text-gray-400">' + (_marketPage + 1) + ' / ' + pages + '</span>';
-    ph += '<button type="button" onclick="marketPage(1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>下一页</button>';
-    ph += '<button type="button" onclick="marketGo(-1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer"') + '>末页</button>';
+    ph += '<button type="button" onclick="marketPage(1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer"') + '>下一页</button>';
+    ph += '<button type="button" onclick="marketGo(-1)" ' + (_marketPage >= pages - 1 ? 'disabled class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-600 cursor-not-allowed"' : 'class="text-xs px-2 py-1 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer"') + '>末页</button>';
     ph += '</div>';
     pagination.innerHTML = ph;
   }
@@ -879,12 +879,12 @@ function renderPluginList(plugins) {
       if (p.converts) {
         var convertText = esc(p.converts.from) + ' → ' + esc(p.converts.to);
         if (p.has_menu && p.enabled) {
-          convertsInfo = '<button type="button" class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer" onclick="window.location.href=\'' + pluginRoute(p.name) + '\'" title="进入插件页面">' + convertText + '</button>';
+          convertsInfo = '<button type="button" class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer" onclick="window.location.href=\'' + pluginRoute(p.name) + '\'" title="进入插件页面">' + convertText + '</button>';
         } else if (p.has_menu) {
           convertsInfo = '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400" title="插件未启用，无法进入页面">' + convertText + '</span>';
         }
       } else if (p.has_menu && p.enabled) {
-        convertsInfo = '<button type="button" class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-300 hover:text-white transition-colors cursor-pointer" onclick="window.location.href=\'' + pluginRoute(p.name) + '\'" title="进入插件页面">打开</button>';
+        convertsInfo = '<button type="button" class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer" onclick="window.location.href=\'' + pluginRoute(p.name) + '\'" title="进入插件页面">打开</button>';
       } else if (p.has_menu) {
         convertsInfo = '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400" title="插件未启用，无法进入页面">打开</span>';
       }
@@ -892,14 +892,14 @@ function renderPluginList(plugins) {
       // 已启用且挂载了站点路径的插件（如 frontend_static_server、agent_chat）
       // 显示跳转箭头，点击在新标签页打开挂载的站点。
       if (p.enabled && p.site_path) {
-        siteLink = '<a href="' + esc(p.site_path) + '" target="_blank" rel="noopener noreferrer" class="inline-flex h-5 w-5 items-center justify-center text-gray-400 hover:text-white transition-colors" title="在新标签页打开站点" aria-label="在新标签页打开站点">&#8599;</a>';
+        siteLink = '<a href="' + esc(p.site_path) + '" target="_blank" rel="noopener noreferrer" class="inline-flex h-5 w-5 items-center justify-center text-gray-400 hover:text-strong transition-colors" title="在新标签页打开站点" aria-label="在新标签页打开站点">&#8599;</a>';
       }
 
       html += '<div class="bg-surface-light border border-border rounded-lg p-4 h-full">';
       html += '<div class="flex items-start justify-between gap-3 h-full">';
       html += '<div class="flex-1 min-w-0">';
       html += '<div class="flex items-center gap-2 mb-1 flex-wrap">';
-      html += '<h4 class="text-sm font-semibold text-white">' + esc(p.name) + '</h4>';
+      html += '<h4 class="text-sm font-semibold text-strong">' + esc(p.name) + '</h4>';
       html += sourceBadge + requiredBadge;
       html += '<span class="text-xs text-gray-500">v' + esc(p.version) + '</span>';
       // 市场版本高于本地第三方插件版本时，在版本号旁显示"更新"按钮
@@ -934,7 +934,7 @@ function renderPluginList(plugins) {
         html += '<span class="text-xs text-gray-500">系统必需</span>';
       } else {
         html += '<label class="flex items-center cursor-pointer select-none switch-' + (p.enabled ? 'on' : 'off') + '" onclick="togglePlugin(\'' + esc(p.name) + '\', ' + p.enabled + ')">';
-        html += '<div class="switch-track ' + (p.enabled ? 'bg-indigo-600' : 'bg-gray-600') + ' flex items-center"><div class="switch-thumb bg-white"></div></div>';
+        html += '<div class="switch-track ' + (p.enabled ? 'bg-indigo-600' : 'bg-switch-off') + ' flex items-center"><div class="switch-thumb bg-white"></div></div>';
         html += '</label>';
       }
       if (!p.builtin) {
