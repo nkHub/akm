@@ -57,6 +57,20 @@ from akm import __version__
 
 如果本次打包需要保留 `markdown_kb` 的 `sqlite-vec` 能力，建议先确认打包所用 Python 的 `sqlite3` 支持 `enable_load_extension()`，并且 `_sqlite3` 实际链接到了 Homebrew SQLite。当前仓库已经把 `sqlite_vec` 加进 `setup.py` 的 `packages/includes`，但运行时是否真的能加载扩展，仍取决于打包前那份 Python 本身的 SQLite 绑定方式。
 
+### 新增模板 / 静态文件必须登记
+
+`setup.py` 的 `DATA_FILES` 是**显式清单**，py2app 不会自动收集：新增（或改名）`akm/templates/*.html`、`akm/static/*` 后，必须把文件加进对应列表，否则打包产物里 `Contents/Resources/templates`（或 `static`）会缺该文件，页面在运行时才报模板缺失。发布前可用下面的命令自查清单与实际目录的差集：
+
+```bash
+python - <<'SELFCHECK'
+import re, os
+src = open("setup.py", encoding="utf-8").read()
+declared = set(re.findall(r'"(akm/(?:templates|static)/[^"]+)"', src))
+real = {f"{d}/{f}" for d in ("akm/templates", "akm/static") for f in os.listdir(d) if os.path.isfile(f"{d}/{f}")}
+print("存在但未登记:", sorted(real - declared))
+SELFCHECK
+```
+
 ### 标准打包命令
 
 ```bash

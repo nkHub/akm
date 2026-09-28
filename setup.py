@@ -24,6 +24,7 @@ DATA_FILES = [
         "akm/templates/_sidebar.html",
         "akm/templates/_header.html",
         "akm/templates/_styles.html",
+        "akm/templates/_theme.html",
         "akm/templates/_toggle_sidebar.html",
         "akm/templates/dashboard.html",
         "akm/templates/logs.html",
