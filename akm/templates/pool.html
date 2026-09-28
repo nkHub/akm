@@ -1,0 +1,508 @@
+{% extends "_layout.html" %}
+{% block content %}
+<div class="space-y-6">
+
+  <!-- 状态总览 -->
+  <section>
+    <div class="flex items-center gap-3 mb-3 flex-wrap">
+      <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">连接池状态</h3>
+      <span id="pool-status-badge" class="text-[11px] px-1.5 py-0.5 rounded border border-border text-gray-500">加载中</span>
+      <span id="pool-status-reasons" class="text-[11px] text-amber-300"></span>
+      <span id="pool-captured-at" class="text-[11px] text-gray-600 ml-auto"></span>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      <div class="bg-surface-light border border-border rounded-lg px-4 py-3">
+        <div class="text-[11px] text-gray-500 mb-1">路由池</div>
+        <div id="pool-metric-pools" class="text-lg font-semibold text-strong">--</div>
+        <div id="pool-metric-pools-sub" class="text-[11px] text-gray-600 mt-1 truncate">上限 --</div>
+      </div>
+      <div class="bg-surface-light border border-border rounded-lg px-4 py-3">
+        <div class="text-[11px] text-gray-500 mb-1">活跃连接</div>
+        <div id="pool-metric-active" class="text-lg font-semibold text-strong">--</div>
+        <div id="pool-metric-active-sub" class="text-[11px] text-gray-600 mt-1 truncate">共 -- 条连接</div>
+      </div>
+      <div class="bg-surface-light border border-border rounded-lg px-4 py-3">
+        <div class="text-[11px] text-gray-500 mb-1">空闲连接</div>
+        <div id="pool-metric-idle" class="text-lg font-semibold text-strong">--</div>
+        <div id="pool-metric-idle-sub" class="text-[11px] text-gray-600 mt-1 truncate">keep-alive 待复用</div>
+      </div>
+      <div class="bg-surface-light border border-border rounded-lg px-4 py-3">
+        <div class="text-[11px] text-gray-500 mb-1">排队请求</div>
+        <div id="pool-metric-waiting" class="text-lg font-semibold text-strong">--</div>
+        <div id="pool-metric-waiting-sub" class="text-[11px] text-gray-600 mt-1 truncate">等待可用连接</div>
+      </div>
+      <div class="bg-surface-light border border-border rounded-lg px-4 py-3">
+        <div class="text-[11px] text-gray-500 mb-1">累计路由请求</div>
+        <div id="pool-metric-requests" class="text-lg font-semibold text-strong">--</div>
+        <div id="pool-metric-requests-sub" class="text-[11px] text-gray-600 mt-1 truncate">本实例累计</div>
+      </div>
+      <div class="bg-surface-light border border-border rounded-lg px-4 py-3">
+        <div class="text-[11px] text-gray-500 mb-1">已回收 / 淘汰</div>
+        <div id="pool-metric-reclaimed" class="text-lg font-semibold text-strong">--</div>
+        <div id="pool-metric-reclaimed-sub" class="text-[11px] text-gray-600 mt-1 truncate">空闲 -- · 上限 -- · 手动 --</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 运维动作 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">运维动作</h3>
+    <div class="bg-surface-light border border-border rounded-lg p-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <button type="button" data-pool-action-btn onclick="poolRefresh(false)"
+                class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">刷新状态</button>
+        <button type="button" data-pool-action-btn onclick="poolAction('close_idle_connections')"
+                class="bg-surface border border-border text-gray-300 hover:text-strong text-xs px-4 py-2 rounded transition-colors cursor-pointer">清理空闲连接</button>
+        <button type="button" data-pool-action-btn onclick="poolAction('evict_idle_pools')"
+                class="bg-surface border border-border text-gray-300 hover:text-strong text-xs px-4 py-2 rounded transition-colors cursor-pointer">回收空闲池</button>
+        <button type="button" data-pool-action-btn onclick="poolConfirmRebuild()"
+                class="bg-red-600 hover:bg-red-500 text-white text-xs px-4 py-2 rounded transition-colors cursor-pointer">重建连接池</button>
+        <div class="ml-auto flex items-center gap-3">
+          <span id="pool-action-msg" class="text-xs text-gray-500"></span>
+          <akm-switch id="pool-auto-refresh" label="自动刷新 (3s)"></akm-switch>
+        </div>
+      </div>
+      <div id="pool-config-line" class="text-[11px] text-gray-600 mt-3 leading-5">正在读取连接池配置...</div>
+    </div>
+  </section>
+
+  <!-- 路由池明细 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+      路由池 (<span id="pool-count">--</span>)
+    </h3>
+    <div id="pool-table-wrap" class="bg-surface-light border border-border rounded-lg overflow-hidden min-h-[168px]">
+      <table class="w-full table-fixed text-xs">
+        <colgroup>
+          <col style="width: 11%">
+          <col style="width: 29%">
+          <col style="width: 29%">
+          <col style="width: 5%">
+          <col style="width: 7%">
+          <col style="width: 9%">
+          <col style="width: 10%">
+        </colgroup>
+        <thead>
+          <tr class="border-b border-border text-left text-gray-500">
+            <th class="px-3 py-2 font-medium whitespace-nowrap">状态</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">路由</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">连接</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">排队</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">已路由</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap">空闲</th>
+            <th class="px-3 py-2 font-medium whitespace-nowrap text-right">操作</th>
+          </tr>
+        </thead>
+        <tbody id="pool-rows">
+          <tr class="border-b border-border">
+            <td class="px-3 py-2"><span class="skeleton text-transparent">繁忙</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">provider / key / model / path</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0 活跃 / 0 空闲 / 0 总</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0s</span></td>
+            <td class="px-3 py-2 text-right"><span class="skeleton text-transparent">关闭</span></td>
+          </tr>
+          <tr class="border-b border-border">
+            <td class="px-3 py-2"><span class="skeleton text-transparent">空闲</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">provider / key / model / path</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0 活跃 / 0 空闲 / 0 总</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0s</span></td>
+            <td class="px-3 py-2 text-right"><span class="skeleton text-transparent">关闭</span></td>
+          </tr>
+          <tr class="border-b border-border">
+            <td class="px-3 py-2"><span class="skeleton text-transparent">空闲</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">provider / key / model / path</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0 活跃 / 0 空闲 / 0 总</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0</span></td>
+            <td class="px-3 py-2"><span class="skeleton text-transparent">0s</span></td>
+            <td class="px-3 py-2 text-right"><span class="skeleton text-transparent">关闭</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <akm-empty-state id="pool-empty" class="hidden bg-surface-light border border-border rounded-lg px-4 py-8 text-center text-xs text-gray-500"
+                     message="当前没有已建立的上游路由池，收到转发请求后会按 provider / key / model / path 懒创建。"></akm-empty-state>
+  </section>
+
+  <!-- 最近运行时事件 -->
+  <section>
+    <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">最近运行时事件</h3>
+    <div id="pool-events" class="bg-surface-light border border-border rounded-lg divide-y divide-border text-xs">
+      <div class="px-4 py-3 text-gray-500">加载中...</div>
+    </div>
+  </section>
+
+</div>
+{% endblock %}
+
+{% block extra_html %}
+<akm-modal id="pool-confirm-modal" title="确认操作" max-width="max-w-md">
+  <div class="px-5 py-4 text-sm text-gray-300 leading-6 whitespace-pre-line" id="pool-confirm-message"></div>
+  <div data-modal-footer>
+    <div class="flex w-full items-center justify-end gap-2">
+      <button type="button" onclick="closePoolConfirm()"
+              class="bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button>
+      <button type="button" id="pool-confirm-ok" onclick="runPoolConfirm()"
+              class="bg-red-600 hover:bg-red-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">确认</button>
+    </div>
+  </div>
+</akm-modal>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// ── 连接池页面：状态总览 / 路由池明细 / 运维动作 ──
+function esc(s) { if (s === null || s === undefined) return ''; return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+var POOL_ACTIONS = {
+  close_idle_connections: '清理空闲连接',
+  evict_idle_pools: '回收空闲池',
+  close_pool: '关闭路由池',
+  rebuild: '重建连接池'
+};
+
+// 聚合状态与单个路由池状态的展示口径（后端 status.level / pool.state 与之对应）
+var POOL_LEVEL_META = {
+  healthy: { text: '正常', cls: 'text-emerald-300 border-emerald-400/30 bg-emerald-400/10' },
+  busy: { text: '繁忙', cls: 'text-indigo-300 border-indigo-400/30 bg-indigo-400/10' },
+  idle: { text: '空闲', cls: 'text-gray-400 border-border bg-surface' },
+  degraded: { text: '异常', cls: 'text-amber-300 border-amber-400/30 bg-amber-400/10' },
+  saturated: { text: '拥塞', cls: 'text-red-300 border-red-400/30 bg-red-400/10' }
+};
+// 单个路由池的展示状态：待回收（空闲超过 idle_ttl 且没有活跃/排队）优先于「空闲/无连接」，
+// 提示下一次请求会把它回收重建。
+var POOL_ROW_META = {
+  busy: { text: '活跃', cls: 'text-indigo-300 border-indigo-400/30 bg-indigo-400/10' },
+  idle: { text: '空闲', cls: 'text-gray-400 border-border bg-surface' },
+  saturated: { text: '排队', cls: 'text-red-300 border-red-400/30 bg-red-400/10' },
+  empty: { text: '无连接', cls: 'text-gray-500 border-border bg-surface' },
+  stale: { text: '待回收', cls: 'text-amber-300 border-amber-400/30 bg-amber-400/10' }
+};
+var POOL_CONN_STATE_TEXT = {
+  active: '使用中',
+  idle: '空闲',
+  connecting: '建连中',
+  failed: '连接失败',
+  expired: '已过期',
+  closed: '已关闭',
+  unknown: '未知'
+};
+
+var _poolAutoTimer = null;
+var _poolBusy = false;
+var _poolPendingAction = null;
+
+function fmtClock(ts) {
+  if (!ts) return '--';
+  var d = new Date(ts * 1000);
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+function fmtSpan(sec) {
+  if (sec === null || sec === undefined || isNaN(sec)) return '--';
+  sec = Math.max(0, Number(sec));
+  if (sec < 60) return Math.round(sec) + 's';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm' + Math.round(sec % 60) + 's';
+  return Math.floor(sec / 3600) + 'h' + Math.floor((sec % 3600) / 60) + 'm';
+}
+
+function setPoolText(id, text) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function setPoolBadge(el, meta) {
+  if (!el) return;
+  el.textContent = meta.text;
+  el.className = 'text-[11px] px-1.5 py-0.5 rounded border ' + meta.cls;
+}
+
+function renderPoolSummary(snap) {
+  var t = (snap && snap.totals) || {};
+  var cfg = (snap && snap.config) || {};
+  var counters = (snap && snap.counters) || {};
+  var status = (snap && snap.status) || {};
+
+  setPoolBadge(document.getElementById('pool-status-badge'), POOL_LEVEL_META[status.level] || POOL_LEVEL_META.healthy);
+  setPoolText('pool-status-reasons', (status.reasons || []).join('；'));
+  setPoolText('pool-captured-at', '采集于 ' + fmtClock(snap && snap.captured_at) + ' · 实例 #' + ((snap && snap.instance_id) || '--'));
+
+  setPoolText('pool-metric-pools', (t.pool_count || 0) + ' / ' + (cfg.max_pools || 0));
+  setPoolText('pool-metric-pools-sub', '上限 ' + (cfg.max_pools || 0) + ' · 占用 ' + Math.round((t.pool_capacity_ratio || 0) * 100) + '%');
+  setPoolText('pool-metric-active', t.active_connections || 0);
+  setPoolText('pool-metric-active-sub', '共 ' + (t.live_connections || 0) + ' 条连接');
+  setPoolText('pool-metric-idle', t.idle_connections || 0);
+  setPoolText('pool-metric-idle-sub', '待回收池 ' + (t.stale_pools || 0));
+  setPoolText('pool-metric-waiting', t.waiting_requests || 0);
+  setPoolText('pool-metric-waiting-sub', (t.connecting_connections || 0) + ' 条建连中 · ' + (t.failed_connections || 0) + ' 条失败');
+  setPoolText('pool-metric-requests', counters.routed_requests || 0);
+  setPoolText('pool-metric-requests-sub', '建池 ' + (counters.pools_created || 0) + ' · 失败 ' + (counters.build_failures || 0));
+  setPoolText('pool-metric-reclaimed', (counters.pools_evicted_idle || 0) + (counters.pools_evicted_lru || 0));
+  setPoolText('pool-metric-reclaimed-sub', '空闲 ' + (counters.pools_evicted_idle || 0) + ' · 上限 ' + (counters.pools_evicted_lru || 0) + ' · 手动 ' + (counters.pools_closed || 0));
+
+  var proxy = (snap && snap.proxy_enabled) ? ('出站代理 ' + (snap.proxy_display || '已启用')) : '出站代理 未启用';
+  setPoolText('pool-config-line', [
+    '单池连接上限 ' + (cfg.max_connections_per_pool || 0),
+    'keep-alive ' + (cfg.max_keepalive_per_pool || 0),
+    '空闲回收 ' + fmtSpan(cfg.idle_ttl_sec) ,
+    '请求超时 ' + fmtSpan(cfg.timeout_sec),
+    '连接超时 ' + fmtSpan(cfg.connect_timeout_sec),
+    proxy,
+    '实例 #' + ((snap && snap.instance_id) || '--') + ' 运行 ' + fmtSpan(snap && snap.uptime_sec)
+  ].join(' · '));
+}
+
+function connectionTooltip(pool) {
+  var lines = [];
+  (pool.connections || []).forEach(function(c) {
+    var parts = [];
+    if (c.origin) parts.push(c.origin);
+    if (c.protocol) parts.push(c.protocol);
+    parts.push(POOL_CONN_STATE_TEXT[c.state] || c.state || '未知');
+    if (c.request_count) parts.push('已发 ' + c.request_count + ' 次');
+    lines.push(parts.join(' · '));
+  });
+  if (!lines.length) lines.push('当前没有保持中的连接');
+  return lines.join('\n');
+}
+
+function renderPoolRows(snap) {
+  var pools = (snap && snap.pools) || [];
+  var tbody = document.getElementById('pool-rows');
+  var wrap = document.getElementById('pool-table-wrap');
+  var empty = document.getElementById('pool-empty');
+  setPoolText('pool-count', pools.length);
+  if (!tbody || !wrap || !empty) return;
+  if (!pools.length) {
+    wrap.classList.add('hidden');
+    empty.classList.remove('hidden');
+    tbody.innerHTML = '';
+    delete tbody.dataset.poolRowsHtml;  // 清掉缓存，避免池恢复后再出现同样的行时被误判为「没变」
+    return;
+  }
+  wrap.classList.remove('hidden');
+  empty.classList.add('hidden');
+
+  var html = '';
+  pools.forEach(function(p) {
+    // 待回收只覆盖「空闲 / 无连接」：活跃或排队的池仍在服务请求，不应被标记成可回收
+    var rowState = (p.stale && p.state !== 'busy' && p.state !== 'saturated') ? 'stale' : p.state;
+    var meta = POOL_ROW_META[rowState] || POOL_ROW_META.empty;
+    var route = esc(p.provider || '--') + ' / ' + esc(p.key_alias || '--');
+    var modelPath = esc(p.model || '--') + ' / ' + esc(p.api_path || '--');
+    // 连接列固定两行：上行「共 N 条」+ 异常标记，下行「活跃 · 空闲」。块状结构不随文字长度
+    // 抖动，窄窗口也不会碎成三四行；逐连接的明细交给右侧 ⓘ 浮层。
+    var connSplit = '活跃 ' + p.active_connections + ' · 空闲 ' + p.idle_connections;
+    var connChips = [];
+    if (p.connecting_connections) connChips.push({ text: p.connecting_connections + ' 建连中', cls: 'text-indigo-300' });
+    if (p.failed_connections) connChips.push({ text: p.failed_connections + ' 失败', cls: 'text-red-300' });
+    if (p.expired_connections) connChips.push({ text: p.expired_connections + ' 过期', cls: 'text-amber-300' });
+
+    html += '<tr class="border-b border-border hover:bg-surface-hover/40">';
+    html += '<td class="px-3 py-2"><span class="inline-block text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap ' + meta.cls + '">' + meta.text + '</span></td>';
+    html += '<td class="px-3 py-2 min-w-0">';
+    html += '<div class="text-gray-300 truncate" title="' + route + '">' + route + '</div>';
+    html += '<div class="text-[11px] text-gray-500 truncate" title="' + modelPath + '">' + modelPath + '</div>';
+    html += '</td>';
+    // 图标作为 flex 子项而不是行内元素：否则它会参与文本行盒，文字换行时被挤到下一行
+    // 独占一行，并把该行行高撑高，与相邻行对不齐。
+    html += '<td class="px-3 py-2"><div class="flex items-start gap-1.5">';
+    html += '<div class="min-w-0 leading-5">';
+    html += '<div class="text-gray-300">共 ' + p.connection_total + ' 条';
+    connChips.forEach(function(chip) {
+      html += ' <span class="text-[11px] whitespace-nowrap ' + chip.cls + '">' + esc(chip.text) + '</span>';
+    });
+    html += '</div>';
+    html += '<div class="text-[11px] text-gray-500 whitespace-nowrap">' + esc(connSplit) + '</div>';
+    html += '</div>';
+    html += '<akm-tooltip class="shrink-0 leading-none" content="' + esc(connectionTooltip(p)) + '"><svg class="block w-3.5 h-3.5 mt-[3px] text-gray-600 hover:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></akm-tooltip>';
+    html += '</div></td>';
+    html += '<td class="px-3 py-2 whitespace-nowrap ' + (p.waiting_requests > 0 ? 'text-red-300' : 'text-gray-500') + '">' + p.waiting_requests + '</td>';
+    html += '<td class="px-3 py-2 whitespace-nowrap text-gray-400">' + p.routed_requests + '</td>';
+    html += '<td class="px-3 py-2 whitespace-nowrap ' + (p.stale ? 'text-amber-300' : 'text-gray-500') + '" title="' + esc('最近使用 ' + fmtClock(p.last_used_at) + ' · 创建于 ' + fmtClock(p.created_at) + (p.stale ? ' · 空闲已超过回收阈值，下次路由会重建' : '')) + '">' + fmtSpan(p.idle_sec) + '</td>';
+    html += '<td class="px-3 py-2 whitespace-nowrap text-right"><button type="button" data-pool-key="' + esc(p.pool_key) + '" onclick="poolConfirmClose(this)" class="text-red-400 hover:text-red-300 cursor-pointer">关闭</button></td>';
+    html += '</tr>';
+  });
+  // 内容没变就不重建 DOM：否则自动刷新会平白销毁宿主节点（悬浮中的 tooltip 随之消失、
+  // 指针下的行被换掉），也让无意义的重排白跑一遍。
+  if (tbody.dataset.poolRowsHtml === html) return;
+  tbody.dataset.poolRowsHtml = html;
+  tbody.innerHTML = html;
+}
+
+function fmtEventPayload(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  var parts = [];
+  Object.keys(payload).forEach(function(key) {
+    var value = payload[key];
+    if (value === null || value === undefined || value === '') return;
+    var text = (typeof value === 'object') ? JSON.stringify(value) : String(value);
+    if (text.length > 60) text = text.slice(0, 60) + '…';
+    parts.push(key + '=' + text);
+  });
+  return parts.join(' · ');
+}
+
+function renderPoolEvents(events) {
+  var host = document.getElementById('pool-events');
+  if (!host) return;
+  if (!events || !events.length) {
+    if (host.dataset.poolEventsHtml === 'empty') return;
+    host.dataset.poolEventsHtml = 'empty';
+    host.innerHTML = '<div class="px-4 py-3 text-gray-500">暂无运行时事件。</div>';
+    return;
+  }
+  var html = '';
+  events.slice().reverse().forEach(function(item) {
+    var name = String(item.event || 'unknown');
+    var isPool = name.indexOf('http_client') === 0;
+    html += '<div class="px-4 py-2 flex items-start gap-3">';
+    html += '<span class="text-gray-600 whitespace-nowrap">' + esc(item.timestamp || '') + '</span>';
+    html += '<span class="' + (isPool ? 'text-indigo-300' : 'text-gray-400') + ' whitespace-nowrap">' + esc(name) + '</span>';
+    html += '<span class="text-gray-500 min-w-0 truncate" title="' + esc(fmtEventPayload(item.payload)) + '">' + esc(fmtEventPayload(item.payload)) + '</span>';
+    html += '</div>';
+  });
+  if (host.dataset.poolEventsHtml === html) return;
+  host.dataset.poolEventsHtml = html;
+  host.innerHTML = html;
+}
+
+function poolSetBusy(busy) {
+  _poolBusy = !!busy;
+  document.querySelectorAll('[data-pool-action-btn]').forEach(function(btn) {
+    btn.disabled = !!busy;
+    btn.classList.toggle('opacity-50', !!busy);
+    btn.classList.toggle('cursor-not-allowed', !!busy);
+  });
+}
+
+function poolMsg(text, isError) {
+  var el = document.getElementById('pool-action-msg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'text-xs ' + (isError ? 'text-red-400' : 'text-emerald-300');
+}
+
+function applyPoolPayload(data) {
+  if (data && data.snapshot) {
+    renderPoolSummary(data.snapshot);
+    renderPoolRows(data.snapshot);
+  }
+  if (data && data.events) renderPoolEvents(data.events);
+}
+
+function poolRefresh(silent) {
+  if (!silent) poolSetBusy(true);
+  return fetch('/api/pool/status')
+    .then(function(r) { return r.json().then(function(d) { return { status: r.status, body: d }; }); })
+    .then(function(res) {
+      if (res.status !== 200 || !res.body || !res.body.ok) {
+        poolMsg((res.body && res.body.error) || '状态获取失败', true);
+        return;
+      }
+      applyPoolPayload(res.body);
+      if (!silent) poolMsg('已刷新（' + fmtClock(res.body.snapshot && res.body.snapshot.captured_at) + '）', false);
+    })
+    .catch(function(e) {
+      poolMsg('状态获取失败: ' + e.message, true);
+    })
+    .then(function() {
+      if (!silent) poolSetBusy(false);
+    });
+}
+
+function poolAction(action, poolKey) {
+  if (_poolBusy) return;
+  poolSetBusy(true);
+  poolMsg((POOL_ACTIONS[action] || action) + '中...', false);
+  fetch('/api/pool/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: action, pool_key: poolKey || '' })
+  }).then(function(r) {
+    return r.json().then(function(d) { return { status: r.status, body: d }; });
+  }).then(function(res) {
+    var body = res.body || {};
+    if (res.status !== 200 || !body.ok) {
+      poolMsg(body.error || '操作失败', true);
+      if (window.akmNotify) window.akmNotify({ type: 'error', title: (POOL_ACTIONS[action] || action) + '失败', message: body.error || '未知错误' });
+      poolRefresh(true);
+      return;
+    }
+    applyPoolPayload(body);
+    var text = body.message || ((POOL_ACTIONS[action] || action) + '完成');
+    poolMsg(text, false);
+    if (window.akmNotify) window.akmNotify({ type: 'success', title: POOL_ACTIONS[action] || action, message: text });
+  }).catch(function(e) {
+    poolMsg('操作失败: ' + e.message, true);
+  }).then(function() {
+    poolSetBusy(false);
+  });
+}
+
+function openPoolConfirm(title, message, action, poolKey) {
+  var modal = document.getElementById('pool-confirm-modal');
+  var msg = document.getElementById('pool-confirm-message');
+  if (!modal || !msg) return;
+  _poolPendingAction = { action: action, poolKey: poolKey || '' };
+  modal.setTitle(title);
+  msg.textContent = message;
+  modal.open();
+}
+
+function closePoolConfirm() {
+  var modal = document.getElementById('pool-confirm-modal');
+  if (modal) modal.close();
+  _poolPendingAction = null;
+}
+
+function runPoolConfirm() {
+  var pending = _poolPendingAction;
+  closePoolConfirm();
+  if (pending) poolAction(pending.action, pending.poolKey);
+}
+
+function poolConfirmRebuild() {
+  openPoolConfirm(
+    '重建连接池',
+    '将关闭当前全部上游路由池并按最新配置重新创建；使用旧池的在途请求（含流式响应）会被中断，下一次请求会重新建连。确认继续？',
+    'rebuild'
+  );
+}
+
+function poolConfirmClose(btn) {
+  var key = btn.getAttribute('data-pool-key') || '';
+  openPoolConfirm(
+    '关闭路由池',
+    '将关闭该路由池及其全部连接，下一次请求会重新建立：\n' + key + '\n确认继续？',
+    'close_pool',
+    key
+  );
+}
+
+function setPoolAutoRefresh(on) {
+  if (_poolAutoTimer) {
+    clearInterval(_poolAutoTimer);
+    _poolAutoTimer = null;
+  }
+  if (on) {
+    _poolAutoTimer = setInterval(function() { poolRefresh(true); }, 3000);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  poolRefresh(true);
+  var sw = document.getElementById('pool-auto-refresh');
+  if (sw) {
+    sw.addEventListener('change', function(event) {
+      setPoolAutoRefresh(!!(event.detail && event.detail.checked));
+    });
+  }
+});
+</script>
+{% endblock %}

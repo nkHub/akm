@@ -9,6 +9,7 @@
   - 常用属性：`label`、`host-class`
   - 常用方法：`setChecked(boolean)`、`setDisabled(boolean)`
   - 对外事件：`change`
+  - 使用方：设置页各类开关、连接池页「自动刷新 (3s)」（`change` 的 `detail.checked` 控制 `setInterval` 起停）
 
 - `akm-range-tabs`
   - 用途：时间范围或分段按钮切换
@@ -24,6 +25,7 @@
 - `akm-empty-state`
   - 用途：统一空态文案
   - 常用属性：`message`
+  - 使用方：Key 管理页、审计日志页、连接池页（`#pool-empty`，样式由外层 class 提供）
 
 - `akm-settings-card`
   - 用途：设置页左右布局卡片壳
@@ -35,6 +37,7 @@
   - 常用属性：`title`、`max-width`、`body-class`、`panel-class`
   - 常用方法：`open()`、`close()`、`setTitle(text)`、`setSubtitle(text)`
   - 约定：底部操作区用 `data-modal-footer`
+  - 使用方：连接池页「重建连接池 / 关闭路由池」确认弹窗（页面保留 `_poolPendingAction`，确认按钮再发起 `POST /api/pool/action`）
   - 约定：内容可能超长时加 `panel-class="max-h-[85vh] flex flex-col"` 与 `body-class="... overflow-y-auto flex-1 min-h-0"`，让弹窗整体限高、内容区内部滚动，标题栏与底部操作区保持固定（模型列表、用量查询配置、插件配置等弹窗均用此写法）
 
 - `akm-drawer`
@@ -45,7 +48,10 @@
 - `akm-tooltip`
   - 用途：包裹任意触发行内元素（如信息图标），hover 时在页面级显示多行说明浮层
   - 常用属性：`content`（提示文本，支持 `\n` 换行）
-  - 约定：浮层为 fixed 定位挂载在 `body` 下，避免被表格等容器的 `overflow` 裁剪；组件以 `inline-block` 行内展示，不影响宿主行高
+  - 约定：浮层为 fixed 定位挂载在 `body` 下，避免被表格等容器的 `overflow` 裁剪
+  - 生命周期：`disconnectedCallback` 会收起浮层并把挂到 `body` 的节点摘掉。定时重渲染的列表（如连接池页每 3s 刷新表格）必须依赖这一点：宿主节点被 `innerHTML` 整体替换时 `mouseleave` 不会再触发，否则浮层会永久留在页面上、并随每次重建不断堆积节点
+  - 触发元素不要写成行内元素参与文本行盒：`inline-block` 的图标会撑高所在行，文字一换行还会被挤到下一行独占一行。重渲染单元格里应把触发元素作为 flex 子项（`flex items-start` + 触发元素 `shrink-0`，图标再给 `block`），行高才稳定（连接池页连接列即此写法）
+  - 使用方：统计页费用 ⓘ、连接池页连接明细（`content` 由 JS 用 `\n` 拼出每条连接的源站 / 协议 / 状态 / 已发请求数；拼装前先 `esc()` 转义，换行保留在属性值里）
 
 - `akm-line-chart`
   - 用途：通用折线图壳组件（内联 SVG，不引入第三方图表库），如统计页「报错趋势」
@@ -93,6 +99,7 @@
 - 骨架屏里的文字占位建议直接用「透明文字的骨架条」（`class="skeleton text-transparent text-xs"` + 真实文案）：这样窄窗口下文字换行时，骨架高度与真实高度仍然一致；固定宽度（`w-12` 之类）在换行场景下会对不上。
 - 需要在首次绘制前就确定的状态（例如「每日用量」占位显示与否取决于 localStorage 里的天数），要在该元素之后紧跟一段内联 `<script>` 就地处理，不要等到 `DOMContentLoaded`/数据回调里再改，否则会发生在首屏之后，用户能看见跳变。
 - 自定义元素初始化（`data-ready`）前布局与渲染后不一致时，宿主侧先 `visibility: hidden`（如 `.plugin-cards-masonry > akm-plugin-card:not([data-ready])`），避免先以原始槽内容出现再跳一下。
+- 定时重渲染的表格/列表要按内容去重：生成 HTML 后与上一次相同就直接返回，不要无条件 `innerHTML = ...`。否则每次轮询都会重建整块 DOM，指针下的行被换掉、悬浮中的浮层被销毁，无意义的重排也会白跑（连接池页 `renderPoolRows` / `renderPoolEvents` 用 `dataset.*Html` 做这项比对；空态分支要顺手清掉缓存标记，避免池/数据恢复后被误判成「没变」而不渲染）。
 
 ## 主题与配色 token
 

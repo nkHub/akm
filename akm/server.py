@@ -953,15 +953,21 @@ def _build_http_client_pool_manager() -> HttpClientPoolManager:
     )
 
 
-async def _recreate_http_client_pool(app: FastAPI, reason: str) -> bool:
-    """软重建隔离 http_client 池，并通过锁避免并发请求重复执行该操作。"""
+async def _recreate_http_client_pool(app: FastAPI, reason: str, *, force: bool = False) -> bool:
+    """软重建隔离 http_client 池，并通过锁避免并发请求重复执行该操作。
+
+    force=True 供管理台「连接池」页面的手动重建与配置变更使用：跳过
+    `should_recreate_http_client()` 的「上游连续失败次数」门槛（该计数由
+    `record_http_client_recreated()` 在每次重建后清零）。它不是时限冷却，
+    重建后上游仍连续失败时会再次自动触发。
+    """
     lock = getattr(app.state, "http_client_lock", None)
     monitor = _get_health_monitor(app)
     if lock is None:
         lock = asyncio.Lock()
         app.state.http_client_lock = lock
     async with lock:
-        if monitor is not None and not monitor.should_recreate_http_client():
+        if not force and monitor is not None and not monitor.should_recreate_http_client():
             return False
         old_client = getattr(app.state, "http_client", None)
         new_client = _build_http_client_pool_manager()
@@ -1026,6 +1032,111 @@ async def debug_runtime_history(limit: int = Query(default=50, ge=1, le=200)):
     if monitor is None:
         return {"total_buffered": 0, "limit": limit, "events": []}
     return monitor.recent_events_payload(limit=limit)
+
+
+def _get_route_pool(app: FastAPI) -> HttpClientPoolManager | None:
+    """取当前按路由隔离的连接池管理器；未就绪或类型不符时返回 None。"""
+    pool = getattr(app.state, "http_client", None)
+    if pool is None or getattr(pool, "is_route_pool", False) is not True:
+        return None
+    return pool
+
+
+def _build_pool_snapshot(app: FastAPI) -> dict | None:
+    """构建连接池状态快照；管理器不可用时返回 None。"""
+    pool = _get_route_pool(app)
+    if pool is None:
+        return None
+    snapshot = pool.snapshot()
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _pool_recent_events(app: FastAPI, limit: int = 20) -> list[dict]:
+    """取最近运行时事件，供连接池页面展示操作/自愈轨迹。
+
+    注意：这里不做按来源过滤 —— 连接池事件（`http_client.*`）之外的审计队列、
+    DB 探针、健康状态变化等事件同样会返回，页面按事件名前缀着色区分。
+    """
+    monitor = _get_health_monitor(app)
+    if monitor is None:
+        return []
+    payload = monitor.recent_events_payload(limit=limit)
+    events = payload.get("events") if isinstance(payload, dict) else None
+    return list(events or [])
+
+
+@app.get("/api/pool/status")
+async def api_pool_status():
+    """连接池状态：聚合指标 + 每个上游路由池的实时连接与排队明细。"""
+    snapshot = _build_pool_snapshot(app)
+    if snapshot is None:
+        return JSONResponse(status_code=503, content={"ok": False, "error": "HTTP 连接池未就绪"})
+    return {"ok": True, "snapshot": snapshot, "events": _pool_recent_events(app)}
+
+
+@app.post("/api/pool/action")
+async def api_pool_action(request: Request):
+    """连接池运维动作：清理空闲连接 / 回收空闲池 / 关闭单个池 / 重建连接池。
+
+    每次动作后返回最新快照，前端无需再补一次请求即可刷新页面。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "请求体必须是 JSON 对象"})
+    action = str(body.get("action") or "").strip()
+    allowed = {"close_idle_connections", "evict_idle_pools", "close_pool", "rebuild"}
+    if action not in allowed:
+        return JSONResponse(status_code=400, content={"ok": False, "error": f"不支持的动作: {action or '(空)'}"})
+
+    pool = _get_route_pool(app)
+    if pool is None and action != "rebuild":
+        return JSONResponse(status_code=503, content={"ok": False, "error": "HTTP 连接池未就绪"})
+
+    result: dict = {}
+    message = ""
+    try:
+        if action == "close_idle_connections":
+            result = await pool.close_idle_connections()
+            message = (
+                f"已关闭 {result.get('closed_connections', 0)} 条空闲连接"
+                f"（涉及 {result.get('affected_pools', 0)} 个路由池）"
+            )
+        elif action == "evict_idle_pools":
+            result = await pool.evict_idle_pools()
+            message = f"已回收 {result.get('evicted_pools', 0)} 个空闲路由池"
+        elif action == "close_pool":
+            pool_key = str(body.get("pool_key") or "").strip()
+            if not pool_key:
+                return JSONResponse(status_code=400, content={"ok": False, "error": "缺少 pool_key"})
+            closed = await pool.close_pool(pool_key)
+            result = {"pool_key": pool_key, "closed": closed}
+            message = "已关闭该路由池" if closed else "该路由池已不存在"
+        else:  # rebuild
+            recreated = await _recreate_http_client_pool(
+                app, "admin.pool_rebuild", force=True
+            )
+            result = {"recreated": bool(recreated)}
+            message = "连接池已重建" if recreated else "连接池重建未生效（实例未就绪）"
+    except Exception as exc:
+        write_error_log(
+            source="server.pool_action",
+            error=f"连接池操作失败({action}): {exc}",
+            traceback_str=traceback.format_exc(),
+        )
+        return JSONResponse(status_code=500, content={"ok": False, "error": f"操作失败: {exc}"})
+
+    snapshot = _build_pool_snapshot(app)
+    return {
+        "ok": True,
+        "action": action,
+        "result": result,
+        "message": message,
+        "snapshot": snapshot,
+        "events": _pool_recent_events(app),
+    }
 
 
 @app.get("/api/version")
@@ -2426,24 +2537,10 @@ async def api_save_config(request: Request):
     )
     recreated = False
     if pool_config_changed:
-        # 强制绕过 should_recreate 冷却：代理或连接池变更必须立刻换池
-        lock = getattr(request.app.state, "http_client_lock", None)
-        if lock is None:
-            lock = asyncio.Lock()
-            request.app.state.http_client_lock = lock
-        async with lock:
-            old_client = getattr(request.app.state, "http_client", None)
-            new_client = _build_http_client_pool_manager()
-            request.app.state.http_client = new_client
-            if old_client is not None:
-                try:
-                    await old_client.aclose()
-                except Exception:
-                    pass
-            monitor = _get_health_monitor(request.app)
-            if monitor is not None:
-                monitor.record_http_client_recreated("config.pool_settings_changed")
-            recreated = True
+        # 代理或连接池变更必须立刻换池，故 force=True 绕过自动触发门槛
+        recreated = await _recreate_http_client_pool(
+            request.app, "config.pool_settings_changed", force=True
+        )
     return {"ok": True, "http_client_recreated": recreated}
 
 
@@ -2695,6 +2792,12 @@ async def keys_page(request: Request):
 async def settings_page(request: Request):
     """设置页面"""
     return HTMLResponse(_render_template("settings.html", title="设置", active="settings"))
+
+
+@app.get("/pool")
+async def pool_page(request: Request):
+    """连接池状态页面：展示实时连接分布，并提供清理 / 回收 / 重建动作。"""
+    return HTMLResponse(_render_template("pool.html", title="连接池", active="pool"))
 
 
 @app.get("/")

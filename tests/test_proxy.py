@@ -111,6 +111,217 @@ async def test_http_client_pool_manager_lazily_isolates_route_clients():
         await pool.aclose()
 
 
+class _FakeConnection:
+    """最小 httpcore 连接替身，供连接池清理逻辑做无网络单测。"""
+
+    def __init__(self, state: str):
+        self._state = state
+        self._connection = object()  # 非 None 表示已建连（区别于建连中）
+        self._connect_failed = False
+        self.closed = False
+
+    def is_closed(self):
+        return self._state == "closed"
+
+    def has_expired(self):
+        return False
+
+    def is_idle(self):
+        return self._state == "idle"
+
+    def info(self):
+        return "https://fake-upstream:443, HTTP/1.1, %s, Request Count: 3" % self._state.upper()
+
+    async def aclose(self):
+        self.closed = True
+
+
+class _FakeRequest:
+    """最小 httpcore 请求替身：`is_queued()` 表示它还在排队等可用连接。"""
+
+    def __init__(self, queued: bool = True):
+        self._queued = queued
+
+    def is_queued(self):
+        return self._queued
+
+
+class _FakePool:
+    """最小 httpcore 连接池替身，暴露 connections / _requests 供探测。"""
+
+    def __init__(self, connections, requests=None):
+        self._connections = list(connections)
+        self._requests = list(requests or [])
+
+    @property
+    def connections(self):
+        return list(self._connections)
+
+
+class _FakeTransport:
+    def __init__(self, pool):
+        self._pool = pool
+
+
+class _FakePoolClient:
+    """带 _transport._pool 结构的假 client，用于让 _pool_object 能取到连接池。"""
+
+    def __init__(self, pool):
+        self._transport = _FakeTransport(pool)
+
+    async def aclose(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_snapshot_reports_routes_and_counters():
+    """快照应给出聚合指标、配置与逐路由池的命中统计。"""
+    pool = HttpClientPoolManager(max_pools=3, idle_ttl_sec=30)
+    try:
+        await pool.get_client(provider="deepseek", key_alias="gs", model="m", api_path="chat/completions")
+        await pool.get_client(provider="deepseek", key_alias="gs", model="m", api_path="chat/completions")
+        await pool.get_client(provider="openai", key_alias="pro", model="g", api_path="responses")
+
+        snap = pool.snapshot()
+        assert snap["totals"]["pool_count"] == 2
+        assert snap["totals"]["routed_requests"] == 3
+        assert snap["config"]["max_pools"] == 3
+        assert snap["counters"]["pools_created"] == 2
+        assert snap["status"]["level"] in {"healthy", "busy", "idle", "degraded", "saturated"}
+
+        routes = {item["pool_key"]: item for item in snap["pools"]}
+        hot = routes["deepseek:gs:m:chat/completions"]
+        assert hot["routed_requests"] == 2
+        assert hot["provider"] == "deepseek"
+        assert hot["key_alias"] == "gs"
+        # 未真正发请求时池内没有 TCP 连接，但池条目仍然可见
+        assert hot["connection_total"] == 0
+        assert hot["state"] == "empty"
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_snapshot_counts_only_queued_requests(monkeypatch):
+    """排队请求只统计 is_queued() 为真的，并把该池与聚合状态标成 saturated。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    try:
+        await pool.get_client(provider="deepseek", key_alias="gs", model="m", api_path="chat/completions")
+        fake_pool = _FakePool(
+            [_FakeConnection("idle")],
+            requests=[_FakeRequest(queued=True), _FakeRequest(queued=True), _FakeRequest(queued=False)],
+        )
+        monkeypatch.setattr("akm.http_client_pool._pool_object", lambda client: fake_pool)
+
+        snap = pool.snapshot()
+        row = snap["pools"][0]
+        assert row["waiting_requests"] == 2
+        assert row["state"] == "saturated"
+        assert snap["totals"]["waiting_requests"] == 2
+        assert snap["status"]["level"] == "saturated"
+        assert any("等待可用连接" in reason for reason in snap["status"]["reasons"])
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_snapshot_counts_lru_evictions():
+    """超过池上限时按 LRU 淘汰，并在计数器中留痕。"""
+    pool = HttpClientPoolManager(max_pools=2)
+    try:
+        await pool.get_client(provider="p1", key_alias="k", model="m", api_path="a")
+        await pool.get_client(provider="p2", key_alias="k", model="m", api_path="a")
+        await pool.get_client(provider="p3", key_alias="k", model="m", api_path="a")
+
+        snap = pool.snapshot()
+        assert snap["totals"]["pool_count"] == 2
+        assert snap["counters"]["pools_evicted_lru"] == 1
+        assert snap["counters"]["pools_created"] == 3
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_evict_idle_pools_only_reclaims_expired():
+    """回收动作只关闭空闲超时的路由池，未超时的保持原样。"""
+    pool = HttpClientPoolManager(max_pools=4, idle_ttl_sec=120)
+    try:
+        await pool.get_client(provider="stale", key_alias="k", model="m", api_path="a")
+        await pool.get_client(provider="fresh", key_alias="k", model="m", api_path="a")
+        for key, entry in pool._entries.items():
+            if key.startswith("stale"):
+                entry.last_used_at = entry.last_used_at - 3600
+
+        result = await pool.evict_idle_pools()
+        assert result["evicted_pools"] == 1
+        remaining = [item["pool_key"] for item in pool.snapshot()["pools"]]
+        assert remaining and all(item.startswith("fresh") for item in remaining)
+        assert pool.stats()["pools_evicted_idle"] == 1
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_close_pool_removes_single_route():
+    """按 pool_key 关闭单个路由池，重复关闭返回未命中。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    try:
+        await pool.get_client(provider="deepseek", key_alias="gs", model="m", api_path="chat/completions")
+        pool_key = pool.snapshot()["pools"][0]["pool_key"]
+
+        assert await pool.close_pool(pool_key) is True
+        assert await pool.close_pool(pool_key) is False
+        assert pool.stats()["pool_count"] == 0
+        assert pool.stats()["pools_closed"] == 1
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_close_idle_connections_keeps_active(monkeypatch):
+    """清理空闲连接只关闭 idle 连接，使用中的连接与池条目都保留。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    try:
+        await pool.get_client(provider="p", key_alias="k", model="m", api_path="a")
+        idle_conn = _FakeConnection("idle")
+        active_conn = _FakeConnection("active")
+        fake_pool = _FakePool([idle_conn, active_conn])
+        monkeypatch.setattr("akm.http_client_pool._pool_object", lambda client: fake_pool)
+
+        result = await pool.close_idle_connections()
+        assert result == {"closed_connections": 1, "affected_pools": 1}
+        assert idle_conn.closed is True
+        assert active_conn.closed is False
+        assert fake_pool._connections == [active_conn]
+        assert pool.stats()["connections_closed"] == 1
+
+        snap = pool.snapshot()
+        assert snap["pools"][0]["connection_total"] == 1
+        assert snap["pools"][0]["active_connections"] == 1
+        assert snap["totals"]["active_connections"] == 1
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_build_failure_is_counted(monkeypatch):
+    """client 构造失败要计入 build_failures 并保留最近错误，便于页面展示。"""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bad proxy url")
+
+    monkeypatch.setattr("akm.http_client_pool.httpx.AsyncClient", boom)
+    pool = HttpClientPoolManager()
+    try:
+        assert await pool.get_client(provider="p", key_alias="k", model="m", api_path="a") is None
+        assert pool.stats()["build_failures"] == 1
+        snap = pool.snapshot()
+        assert snap["counters"]["build_failures"] == 1
+        assert "bad proxy url" in snap["counters"]["last_build_error"]
+    finally:
+        await pool.aclose()
+
+
 @pytest.mark.asyncio
 async def test_forward_uses_route_scoped_client_after_key_selection(monkeypatch):
     """forward_request 应在 key 与上游协议确定后，按最终路由取隔离 client。"""

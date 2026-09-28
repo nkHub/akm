@@ -8,6 +8,7 @@
 2. 涉及更新管理相关内容时，必须同步更新 `docs/release-guide.md`。
 3. 涉及插件更新相关内容时，必须同步更新 `docs/design/plugin-system.md`。
 4. 涉及组件更新相关内容时，必须同步更新 `docs/design/web-components.md`。
+5. 版本变更说明统一写在 `docs/logs.md`（新版本追加在最上方）：README 只保留「当前版本 + 一句话摘要 + 链接」，`docs/release-guide.md` 只保留版本号/打包口径，不要把历史版本段落堆回这两个文件。
 
 ## 执行要求
 
