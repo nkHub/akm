@@ -758,6 +758,16 @@ fetch('/api/plugin-metas')
     });
 ```
 
+### 9.3 插件页主题跟随（前端约定）
+
+管理台支持主题切换（浅色 / 深色 / 跟随系统，见 `docs/design/web-components.md` 的「主题与配色 token」）。插件自己的前端页面跑在 `/plugins/{name}` 的 iframe 里，**不继承**父页面的 CSS 变量，因此需要插件页自己跟随。当前 `markdown_kb` 已按下面的约定实现，其它插件可按同样方式接入：
+
+1. **同一份主题值**：插件页与管理台同源，直接读同一个本地存储键 `localStorage['akm.theme']`（取值 `dark` / `light` / `system`，缺失按 `dark`），无需新增接口。
+2. **首次绘制前落地**：在插件页 `<head>` 的内联脚本里解析并写 `document.documentElement.dataset.theme`（`system` 时按 `prefers-color-scheme` 解析，并监听其 `change`），避免先按深色画一遍再跳浅色。
+3. **两套 token**：插件页自带 CSS 变量（`:root` 深色默认 + `html[data-theme="light"]` 覆盖），页面里不写死颜色；建议语义档位与管理台保持一致（浅色下强调色/语义色压到 600~700 档，淡底用 100~300 档或降低透明度的同色）。
+4. **切换即时同步**：管理台切换主题时，`window.__akmTheme.apply()` 会广播 `akm:theme` 事件，`plugin_host.html` 监听后在 iframe 的 `load` 与主题变化时各发一次 `postMessage({ type: 'akm:theme', theme })`；插件页据此更新。同源 `storage` 事件是第二条通道（覆盖 iframe 不在宿主页监听范围内的场景）。
+5. **不改宿主壳**：插件页只负责自己那块内容的配色，外层卡片、圆角、边框仍由 `plugin_host.html` 用管理台 token 渲染。
+
 ## 十、插件开发示例
 
 ### 10.1 有菜单插件：模型映射（操作数据库）
