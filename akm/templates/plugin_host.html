@@ -4,6 +4,7 @@
 <div class="h-full min-h-0">
   <div class="h-full min-h-[72vh] rounded-lg border border-border overflow-hidden bg-surface-light shadow-sm">
     <iframe
+      id="plugin-frame"
       src="{{ plugin_iframe_src }}"
       title="{{ plugin_title }}"
       class="w-full h-full border-0 bg-transparent"
@@ -12,4 +13,21 @@
     ></iframe>
   </div>
 </div>
+<script>
+  /* 插件前端在 iframe 内，主题由它自己按 localStorage['akm.theme'] 决定；
+     这里在加载完成与管理台切换主题时再主动通知一次，保证即时同步（同源 localStorage 之外的通道）。 */
+  (function() {
+    var frame = document.getElementById('plugin-frame');
+    function pushTheme() {
+      if (!frame || !frame.contentWindow) return;
+      var theme = (window.__akmTheme && window.__akmTheme.get()) || 'dark';
+      try {
+        frame.contentWindow.postMessage({ type: 'akm:theme', theme: theme }, window.location.origin);
+      } catch (e) {}
+    }
+    if (frame) frame.addEventListener('load', pushTheme);
+    window.addEventListener('akm:theme', pushTheme);
+    pushTheme();
+  })();
+</script>
 {% endblock %}

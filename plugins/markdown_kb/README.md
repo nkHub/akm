@@ -210,6 +210,16 @@ flowchart LR
 
 这些示例默认指向当前仓库的源码虚拟环境 `/.venv/bin/python`。
 
+## 前端与主题
+
+插件测试页（`views/index.html`，由管理台 `/plugins/markdown_kb` 以 iframe 内嵌）**跟随管理台主题**：
+
+- 配色全部走 CSS 变量 token：`--bg` / `--panel` / `--panel-soft` / `--panel-soft-2` / `--text` / `--muted` / `--line` / `--accent` / `--danger` / `--success` / `--warning`（各带 `-soft` 淡底档）与 `--danger-text`。`:root` 是深色默认值（与管理台深色 token 同值，深色下观感不变），`html[data-theme="light"]` 覆盖为浅色档（页面浅灰、卡片纯白、强调色与语义色压到 600~700 档）。
+- 主题值来源与管理台同一个本地存储键 `akm.theme`（同源，直接可读，默认深色）；`<head>` 里的脚本在首次绘制前把 `data-theme` 落到 `<html>` 上，不会先闪深色。`akm.theme = system` 时按 `prefers-color-scheme` 解析，并监听其变化。
+- 三种同步通道：管理台切换主题（同源其它文档写 localStorage，iframe 收到 `storage` 事件）、宿主页 `postMessage({ type: 'akm:theme', theme })`（`plugin_host.html` 在 iframe 加载完成与管理台主题变化时各发一次）、跟随系统时的系统外观变化。
+
+新增界面元素时请沿用上面的变量，不要写死颜色，否则浅色下会出现不可读的深色块。
+
 ## 测试页 Workspace 范围
 
 测试页会基于当前文件列表渲染去重后的 "Workspace 范围" 下拉。默认不选时继续按请求 `workspace_root / working_directory` 检索"公共文档 + 当前工作域文档"；显式选中某个 workspace 时只保留"公共文档 + 该 workspace 文档"。`POST /api/markdown-kb/query` 与 `POST /api/markdown-kb/ask` 也支持从请求体显式接收 `workspace_root / working_directory`。知识库本身已有文档、但当前工作区范围没有任何文档时，`query` 返回 HTTP 200 与空 `hits`，表示查询有效但没有可用资料；只有知识库整体为空或请求参数无效时才返回错误。

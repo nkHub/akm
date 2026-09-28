@@ -43,6 +43,10 @@ try {
       root.classList.toggle('dark', resolved === 'dark');
       root.classList.toggle('light', resolved === 'light');
       root.style.colorScheme = resolved;
+      // 广播给同页的监听者（插件宿主页据此通知 iframe 内的插件前端）
+      try {
+        window.dispatchEvent(new CustomEvent('akm:theme', { detail: { theme: stored, resolved: resolved } }));
+      } catch (e) {}
     }
   };
   window.__akmTheme.apply();

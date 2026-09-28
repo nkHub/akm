@@ -193,7 +193,7 @@ akm-menubar
   </tbody>
 </table>
 
-管理台支持**主题切换**：右上角三个图标按钮分别是「跟随系统 / 浅色 / 深色」，默认深色（也就是原来的配色，深色下所有色值未变），选择存在 `localStorage` 的 `akm.theme`，切换即时生效、刷新后保持；「跟随系统」会随系统的浅色/深色偏好实时切换。实现是两套 CSS 变量 token（`akm/templates/_styles.html` 里的 `html` 与 `html[data-theme="light"]`），再由 `akm/templates/_layout.html` 的 tailwind.config 把 `surface` / `border` / `gray-*` / 各强调色的文字档映射到这些 token，因此模板里不出现 `dark:` 变体，后续新增页面只要沿用同一套类名就自动跟随主题；首屏前会在 `<head>` 里先把 `data-theme` 落到 `<html>` 上，避免闪一下深色。注意：`/` 根路径的 Ecology 启动页（`akm/static/index.html`）与插件自带的前端页面不在管理台布局内，不跟随该主题。
+管理台支持**主题切换**：右上角三个图标按钮分别是「跟随系统 / 浅色 / 深色」，默认深色（也就是原来的配色，深色下所有色值未变），选择存在 `localStorage` 的 `akm.theme`，切换即时生效、刷新后保持；「跟随系统」会随系统的浅色/深色偏好实时切换。实现是两套 CSS 变量 token（`akm/templates/_styles.html` 里的 `html` 与 `html[data-theme="light"]`），再由 `akm/templates/_layout.html` 的 tailwind.config 把 `surface` / `border` / `gray-*` / 各强调色的文字档映射到这些 token，因此模板里不出现 `dark:` 变体，后续新增页面只要沿用同一套类名就自动跟随主题；首屏前会在 `<head>` 里先把 `data-theme` 落到 `<html>` 上，避免闪一下深色。注意：`/` 根路径的 Ecology 启动页（`akm/static/index.html`）与插件自带的前端页面不在管理台布局内，需要各自接入——`markdown_kb`（知识库页）已跟随：插件页自带一套与管理台同档位的 CSS 变量（`:root` 深色 + `html[data-theme="light"]`），直接读同一个 `akm.theme` 键并在首屏前落到 `<html>` 上，管理台切换主题时通过 `postMessage` 与同源 `storage` 事件即时同步（接入约定见 `docs/design/plugin-system.md` 的「插件页主题跟随」）；其余插件前端仍使用各自配色。
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉、设置卡片和折线图（`akm-line-chart`）、环形图（`akm-donut-chart`）等基础壳组件，供后续页面复用。
 
