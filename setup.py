@@ -30,6 +30,7 @@ DATA_FILES = [
         "akm/templates/logs.html",
         "akm/templates/keys.html",
         "akm/templates/settings.html",
+        "akm/templates/pool.html",
         "akm/templates/about.html",
         "akm/templates/plugins.html",
         "akm/templates/plugin_host.html",

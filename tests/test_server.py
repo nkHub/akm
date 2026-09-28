@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from akm.audit import AuditLogQueue, write_log, list_logs
 from akm.db import get_connection, init_db, get_keys_log_path, get_db_path
 from akm.health import HealthMonitor
+from akm.http_client_pool import HttpClientPoolManager
 from akm.key_pool import get_key
 from akm.plugins.context import RequestContext
 from akm.server import app, lifespan, _build_runtime_debug_payload, _default_image_generation_model, _image_supported_models_from_config
@@ -1495,6 +1496,145 @@ async def test_debug_runtime_history_returns_recent_monitor_events():
     assert "audit.queue.dropped" in event_names
     assert "db.probe.failed" in event_names
     assert "health.status.changed" in event_names
+
+
+@pytest.mark.asyncio
+async def test_pool_status_endpoint_exposes_snapshot_and_events():
+    """连接池状态端点应返回聚合指标、路由池明细与运行时事件列表。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    prev_pool = getattr(app.state, "http_client", None)
+    prev_monitor = getattr(app.state, "health_monitor", None)
+    app.state.http_client = pool
+    app.state.health_monitor = HealthMonitor()
+    try:
+        await pool.get_client(provider="deepseek", key_alias="gs", model="m", api_path="chat/completions")
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/pool/status")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert "events" in body
+        snap = body["snapshot"]
+        assert snap["totals"]["pool_count"] == 1
+        assert snap["config"]["max_pools"] == 4
+        assert snap["status"]["level"] in {"healthy", "busy", "idle", "degraded", "saturated"}
+        assert snap["pools"][0]["provider"] == "deepseek"
+        assert snap["pools"][0]["api_path"] == "chat/completions"
+    finally:
+        await pool.aclose()
+        app.state.http_client = prev_pool
+        app.state.health_monitor = prev_monitor
+
+
+@pytest.mark.asyncio
+async def test_pool_status_endpoint_reports_unready_pool():
+    """连接池未就绪（非路由池）时状态端点返回 503 而不是 500。"""
+    prev_pool = getattr(app.state, "http_client", None)
+    app.state.http_client = None
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/pool/status")
+        assert resp.status_code == 503
+        assert resp.json()["ok"] is False
+    finally:
+        app.state.http_client = prev_pool
+
+
+@pytest.mark.asyncio
+async def test_pool_action_endpoint_supports_cleanup_and_single_pool_close():
+    """动作端点应支持清理空闲连接、按 pool_key 关闭单个池，并拒绝未知动作。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    prev_pool = getattr(app.state, "http_client", None)
+    prev_monitor = getattr(app.state, "health_monitor", None)
+    app.state.http_client = pool
+    app.state.health_monitor = HealthMonitor()
+    try:
+        await pool.get_client(provider="deepseek", key_alias="gs", model="m", api_path="chat/completions")
+        pool_key = pool.snapshot()["pools"][0]["pool_key"]
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            cleanup = await client.post("/api/pool/action", json={"action": "close_idle_connections"})
+            evict = await client.post("/api/pool/action", json={"action": "evict_idle_pools"})
+            closed = await client.post("/api/pool/action", json={"action": "close_pool", "pool_key": pool_key})
+            missing_key = await client.post("/api/pool/action", json={"action": "close_pool"})
+            unknown = await client.post("/api/pool/action", json={"action": "nope"})
+
+        assert cleanup.status_code == 200
+        assert cleanup.json()["ok"] is True
+        assert cleanup.json()["snapshot"]["totals"]["pool_count"] == 1
+        assert evict.status_code == 200
+        assert evict.json()["result"]["evicted_pools"] == 0
+
+        assert closed.status_code == 200
+        assert closed.json()["result"]["closed"] is True
+        assert closed.json()["snapshot"]["totals"]["pool_count"] == 0
+        # 关闭之后同一 pool_key 再次关闭应如实反馈未命中
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            again = await client.post("/api/pool/action", json={"action": "close_pool", "pool_key": pool_key})
+        assert again.json()["result"]["closed"] is False
+
+        assert missing_key.status_code == 400
+        assert unknown.status_code == 400
+    finally:
+        await pool.aclose()
+        app.state.http_client = prev_pool
+        app.state.health_monitor = prev_monitor
+
+
+@pytest.mark.asyncio
+async def test_pool_action_rebuild_replaces_manager_without_failure_gate():
+    """手动重建不受「上游连续失败」门槛限制，直接换池并记录事件。"""
+    old_pool = HttpClientPoolManager(max_pools=4)
+    monitor = HealthMonitor()
+    prev_pool = getattr(app.state, "http_client", None)
+    prev_monitor = getattr(app.state, "health_monitor", None)
+    prev_lock = getattr(app.state, "http_client_lock", None)
+    app.state.http_client = old_pool
+    app.state.health_monitor = monitor
+    app.state.http_client_lock = asyncio.Lock()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/pool/action", json={"action": "rebuild"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["result"]["recreated"] is True
+        assert app.state.http_client is not old_pool
+        assert monitor.http_client_recreate_count == 1
+        assert body["snapshot"]["instance_id"] == app.state.http_client.instance_id
+        event_names = [item["event"] for item in body["events"]]
+        assert "http_client.recreated" in event_names
+    finally:
+        new_pool = getattr(app.state, "http_client", None)
+        if new_pool is not None and new_pool is not old_pool:
+            await new_pool.aclose()
+        await old_pool.aclose()
+        app.state.http_client = prev_pool
+        app.state.health_monitor = prev_monitor
+        app.state.http_client_lock = prev_lock
+
+
+@pytest.mark.asyncio
+async def test_pool_page_renders_admin_shell_with_actions():
+    """连接池页面应走管理台统一布局，并带上侧边栏入口与前后端接口。"""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/pool")
+
+    assert resp.status_code == 200
+    html = resp.text
+    assert "连接池" in html
+    assert 'href="/pool"' in html
+    assert "/api/pool/status" in html
+    assert "/api/pool/action" in html
+    assert "重建连接池" in html
+    assert "清理空闲连接" in html
 
 
 @pytest.mark.asyncio

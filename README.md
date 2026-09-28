@@ -2,13 +2,9 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-AKM v0.1.49：管理台新增**主题切换**——右上角三个按钮「跟随系统 / 浅色 / 深色」，**默认深色且不随系统外观变化**（只有显式点「跟随系统」才会跟随 `prefers-color-scheme`），选择记在浏览器 `localStorage['akm.theme']`、刷新后保持，「跟随系统」时系统外观变化实时生效。配色改为两套 CSS 变量 token（`_styles.html` 里的 `html` 与 `html[data-theme="light"]`），再由 `tailwind.config` 映射成 `rgb(var(--c-x) / <alpha-value>)`，因此模板与组件里不再需要任何 `dark:` 变体，新页面沿用 `surface` / `surface-light` / `border` / `text-strong` 这套类名即自动跟随主题；图表中性色（网格线 / 刻度 / 图例 / 数据点）、浮层、开关、JSON 视图与对话视图（Shadow DOM，CSS 变量会继承进去并带深色兜底值）同步适配，曲线序列色与实心强调色按钮保持原色。`data-theme` 由 `<head>` 内联脚本在首次绘制前落到 `<html>`，不会先闪一下再切换。同时修复刷新时的界面抖动：浅色下侧边栏导航 hover 变白字（上一轮把落在此类表面上的 `text-white` 改为 `text-strong` 时，导航项类名里的 Jinja 条件分支被整条误判成强调色底，6 项全部漏改）；统计页骨架屏与真实内容不等高（图表卡骨架表头比真实表头矮 18px、7d/30d 缺「每日用量」占位少 327px、插件卡片区要等统计数据回来才显示少 199px），以及「时间范围」那一行（`akm-range-tabs` 在 `setOptions` 之前高度为 0，JS 跑起来后长到 30px，把下方内容整体顶 14px）——现在骨架与真实内容逐块等高（1500 / 1300 / 1200 / 1024 四种宽度实测差均为 0），首屏之后不再有任何位移。
+当前版本 **v0.1.50**：管理台新增「连接池」页（`/pool`），实时展示上游路由池的连接 / 排队 / 淘汰等状态，并支持清理空闲连接、回收空闲池、关闭单个路由池与重建连接池。
 
-AKM v0.1.48：统计页新增**按来源分组**与**趋势折线图（报错次数 / 成功率 / P95 延迟）**。来源标签由新模块 `akm/request_source.py` 统一推导（`x-akm-source` 内部标记优先，其次 User-Agent 关键词，兜底 UA 产品名，无法识别归入「其他」），审计页「来源」列与统计页「按来源」共用同一套规则；`GET /api/stats` 新增 `by_source`（与 `by_key`/`by_model` 同结构的 Token/请求/费用分桶）与 `errors`（失败请求时序：days=1 按今天每小时 24 点，7/30 天按自然日分桶；失败口径为 status 非 2xx，含没有 key_alias 的选 Key/前置失败；每个时间点附 `top_errors` —— 该时段前 3 条高频报错，以及同口径的请求量 / 成功率 / 延迟分位数），`GET /api/logs` 新增 `source_label` 派生字段；管理台通用组件新增 `akm-line-chart`（内联 SVG 折线图，宽度自适应容器、支持 `fill` 垂直拉伸到父容器高度并按 `maxHeight` 封顶，支持 `format` 自定义提示数值、`details` 附加行自定义悬浮浮层），统计页在其上渲染趋势（卡片内用 `akm-range-tabs` 在 报错次数 / 成功率 / P95 延迟 之间切换，不重新请求接口；趋势卡片体固定 260px 高（与左侧「按来源」卡片一致），图表在盒内垂直拉伸填满、上限 260px），数据点悬浮可看该时段前几条报错或样本量；按 Key / 按模型 / 按来源三张卡片同样可用 `akm-range-tabs` 在**「表 / 图」之间切换（默认图）**，图视图为新增的 `akm-donut-chart` 环形图（Top 6 + 「其他」合并、指标可在 请求 / Token / 费用 间切换、悬浮扇区或图例即显示该行数值与占比，费用开启时浮层直接给出与表格 ⓘ 相同的费用拆解），三张卡片体固定 260px 高、表格按每页 6 行分页（复用 `akm-pagination`，不再有卡片内滚动条），因此三表等高、切换视图不跳高度。
-
-AKM v0.1.47：新增本地数据目录自动维护。服务启动与系统唤醒恢复时执行一次维护（`akm.cleanup.run_auto_maintenance`），含三步互相独立的动作：① 按 `log_retention_days` 清理过期审计日志并 VACUUM（始终执行）；② **更新包缓存清理**（`update_cache_cleanup`，默认开启）——`~/.akm/updates/` 只保留最新更新包与一个可回滚的旧版本 `.app` 备份，其余历史包与旧备份自动删除，10 分钟内修改过的文件视为更新进行中而跳过；③ **文本日志轮转**（`text_log_rotation`，默认关闭）——`error.log`、`keys.log`、`wake_recovery.log`、`plugin.launch.log` 等根目录 append-only 日志超过 `log_file_max_mb` 后转存 `.1` 并保留一代。维护只处理 AKM 自己产生的派生数据，不触碰 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
-
-AKM v0.1.46：修复上游转发 HTTP client 的 TLS 信任库构造缺陷——不再依赖 `certifi` 解包到临时目录的 `cacert.pem`（该临时文件被系统清理后会抛 `FileNotFoundError`，表现为审计日志成片「无法创建到上游的 HTTP 客户端」），改由 `build_upstream_ssl_context()` 显式按 `SSL_CERT_FILE`（打包 `.app` 自带 CA）→ `certifi` → 系统默认三级取用；同时静默自动更新改为**避让进行中的转发请求**，检测到在途请求/流式响应时推迟下载、替换前等待请求排空再重启，避免更新掐断请求。
+版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
 macOS 构建在资源后处理完成后重新进行 ad-hoc 签名并校验，校验失败时阻止生成发布包；该签名不等同于 Apple 公证。
 
@@ -187,6 +183,10 @@ akm-menubar
       <td>分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关与模型单价表、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除）</td>
     </tr>
     <tr>
+      <td style="white-space: nowrap;">连接池</td>
+      <td>上游连接池实时状态（`/pool`）：聚合指标卡片（路由池数量/上限与占用率、活跃 / 空闲 / 建连中 / 失败 / 过期连接、排队请求、累计路由请求、已回收/淘汰/手动关池计数）、当前配置与实例运行时长、聚合状态徽章（正常 / 繁忙 / 空闲 / 异常 / 拥塞，拥塞=有请求在排队或池数量已达上限），以及逐路由池明细表（`provider / key / model / path`、状态徽章、连接分类与逐条连接的源站/协议/状态/已发请求数悬浮、排队数、已路由请求数、空闲时长与「待回收」标记）；运维动作：刷新状态、清理空闲连接（只关空闲 keep-alive、保留路由池）、回收空闲池（按空闲 TTL 立刻回收）、重建连接池（强制换池，确认弹窗）、逐池「关闭」、3 秒自动刷新开关；操作结果同时以行内提示与右上角通知反馈，并展示最近运行时事件（连接池重建、审计队列丢弃、DB 探针失败、健康状态变化）</td>
+    </tr>
+    <tr>
       <td style="white-space: nowrap;">关于</td>
       <td>版本与功能简介（展示内置插件能力）</td>
     </tr>
@@ -310,7 +310,7 @@ AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的
 | `http_client_idle_ttl_sec` | `120` | 路由池空闲超过此秒数后自动关闭回收 |
 | `http_client_connect_timeout_sec` | `10` | TCP 连接建立的超时秒数 |
 
-修改保存后立即重建连接池，可通过 `/debug/runtime` 查看当前池数量与单池连接上限的实时值。
+修改保存后立即重建连接池；连接池的实时状态（池数量、单池连接上限、逐池连接与排队明细）可在管理台「连接池」页（`/pool`）查看，也可通过 `/api/pool/status` 或 `/debug/runtime` 读取。
 
 ### 转发与重试
 
@@ -391,6 +391,8 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | GET | `/health/detail` | 详细健康状态：返回聚合状态、原因和关键运行时指标 |
 | GET | `/debug/runtime` | 运行时诊断快照：返回进程 RSS、线程数、fd 数、审计队列和健康监护状态；审计队列会额外暴露 `stopped` / `worker_alive` 便于排查“服务存活但日志拒收” |
 | GET | `/debug/runtime/history` | 最近运行时事件环形缓冲：返回连接池重建、审计队列丢弃、DB 探针失败、健康状态变化等事件 |
+| GET | `/api/pool/status` | 连接池状态快照：聚合指标（池数量/上限、活跃/空闲/建连中/失败/过期连接、排队请求、累计路由请求、淘汰与失败计数）、配置、实例 id/运行时长、状态等级（`healthy`/`busy`/`idle`/`degraded`/`saturated`）与逐路由池明细（含每条连接与排队数），并附带最近运行时事件；连接池未就绪时返回 503 |
+| POST | `/api/pool/action` | 连接池运维动作：`{"action":"close_idle_connections"}` 只关空闲 keep-alive 连接、`{"action":"evict_idle_pools"}` 按空闲 TTL 回收路由池、`{"action":"close_pool","pool_key":"..."}` 关闭单个路由池、`{"action":"rebuild"}` 强制重建连接池（复用最新配置）；返回 `message`、最新 `snapshot` 与 `events` |
 | GET | `/api/keys` | Key 列表（脱敏，附带最近 10 次成功请求平均延迟、已同步的提供商模型列表、用量查询结果） |
 | POST | `/api/keys` | 添加 Key |
 | PUT | `/api/keys/{alias}` | 编辑 Key |
@@ -499,7 +501,7 @@ Key 选择分两阶段：优先精确匹配当前 model 的 Key（按优先级�
 - `gc_counts`
 - `open_fds`（当前平台支持时）
 - 审计队列状态与最近错误（含 `stopped`、`worker_alive`）
-- `http_client.pool_count`、`max_pools` 与单池连接上限
+- `http_client.pool_count`、`max_pools` 与单池连接上限，以及实例 id、启动时间、累计计数（已路由请求 / 建池 / 空闲回收 / LRU 淘汰 / 手动关池 / 关连接 / 建池失败）
 
 `/debug/runtime/history` 会保留最近一段运行时事件（环形缓冲），当前覆盖：
 

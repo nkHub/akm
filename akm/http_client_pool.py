@@ -2,10 +2,13 @@
 
 import asyncio
 import os
+import re
 import ssl
 import time
 import traceback
+import uuid
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -53,10 +56,125 @@ def build_upstream_ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+# 解析 httpcore 连接的 info() 文本（形如 "https://host:443, HTTP/1.1, IDLE, Request Count: 9"）。
+_HTTP_INFO_PROTOCOL = re.compile(r"(HTTP/\d(?:\.\d)?)")
+_HTTP_INFO_REQUEST_COUNT = re.compile(r"Request Count:\s*(\d+)")
+
+# 连接状态分类的稳定顺序与中文标签（快照与页面共用同一套口径）
+_CONNECTION_STATE_KEYS = ("active", "idle", "connecting", "failed", "expired", "closed", "unknown")
+
+
 @dataclass
 class _PoolEntry:
     client: httpx.AsyncClient
     last_used_at: float
+    created_at: float
+    pool_key: str
+    provider: str
+    key_alias: str
+    model: str
+    api_path: str
+    routed_requests: int = 0
+
+
+def _pool_object(client) -> object | None:
+    """取出 httpx client 底层的 httpcore 连接池；取不到时返回 None。
+
+    连接池详情页要展示「真正活着」的 TCP 连接、并支持只关空闲连接，因此这里
+    访问 httpx 的私有传输对象。所有调用点都做了兜底：拿不到就退化为只展示 AKM
+    侧统计，绝不影响转发链路。
+    """
+    transport = getattr(client, "_transport", None)
+    pool = getattr(transport, "_pool", None)
+    return pool if pool is not None else None
+
+
+def _pool_connections(pool) -> list:
+    """返回池内连接对象列表；池已关闭或对象异常时返回空列表。"""
+    try:
+        conns = getattr(pool, "connections", None)
+        return list(conns) if conns is not None else []
+    except Exception:
+        return []
+
+
+def _probe_connection(conn) -> dict:
+    """把单个 httpcore 连接归类成一个可展示的状态条目。"""
+    info = ""
+    try:
+        info = str(conn.info() or "")
+    except Exception:
+        info = ""
+
+    state = "unknown"
+    try:
+        inner = getattr(conn, "_connection", None)
+        if inner is None:
+            # 尚未建连：区分「正在连接」与「连接失败」
+            state = "failed" if getattr(conn, "_connect_failed", False) else "connecting"
+        elif conn.is_closed():
+            state = "closed"
+        elif conn.has_expired():
+            state = "expired"
+        elif conn.is_idle():
+            state = "idle"
+        else:
+            state = "active"
+    except Exception:
+        state = "unknown"
+
+    origin = ""
+    raw_origin = getattr(conn, "_origin", None)
+    if raw_origin is not None:
+        try:
+            origin = str(raw_origin)
+        except Exception:
+            origin = ""
+    if not origin and info:
+        origin = info.split(",", 1)[0].strip().strip("'\"")
+
+    protocol = ""
+    match = _HTTP_INFO_PROTOCOL.search(info)
+    if match:
+        protocol = match.group(1)
+
+    request_count = 0
+    match = _HTTP_INFO_REQUEST_COUNT.search(info)
+    if match:
+        try:
+            request_count = int(match.group(1))
+        except ValueError:
+            request_count = 0
+
+    return {
+        "state": state,
+        "origin": origin,
+        "protocol": protocol,
+        "request_count": request_count,
+        "info": info,
+    }
+
+
+def _probe_pool(pool) -> dict:
+    """统计一个 httpcore 连接池的实时连接分布与排队请求数。"""
+    connections = [_probe_connection(conn) for conn in _pool_connections(pool)]
+    counts = {key: 0 for key in _CONNECTION_STATE_KEYS}
+    for item in connections:
+        state = item.get("state") or "unknown"
+        counts[state if state in counts else "unknown"] += 1
+    counts["total"] = len(connections)
+
+    waiting = 0
+    pending = getattr(pool, "_requests", None)
+    if isinstance(pending, list):
+        for request in list(pending):
+            try:
+                if request.is_queued():
+                    waiting += 1
+            except Exception:
+                continue
+
+    return {"counts": counts, "waiting": waiting, "connections": connections}
 
 
 class HttpClientPoolManager:
@@ -93,6 +211,18 @@ class HttpClientPoolManager:
         self._entries: dict[str, _PoolEntry] = {}
         self._lock = asyncio.Lock()
 
+        # ── 页面/诊断用累计统计（只增不减，池重建后随新实例归零）──
+        self.instance_id = uuid.uuid4().hex[:8]
+        self.created_at = time.time()
+        self.routed_requests_total = 0
+        self.pools_created_total = 0
+        self.pools_evicted_idle_total = 0
+        self.pools_evicted_lru_total = 0
+        self.pools_closed_total = 0
+        self.connections_closed_total = 0
+        self.build_failures_total = 0
+        self.last_build_error = ""
+
     def _pool_key(self, provider: str, key_alias: str, model: str, api_path: str) -> str:
         parts = [provider, key_alias, model, api_path]
         return ":".join(str(part or "unknown").strip() or "unknown" for part in parts)
@@ -125,12 +255,16 @@ class HttpClientPoolManager:
         entry = self._entries.get(pool_key)
         if entry is not None:
             entry.last_used_at = now
+            entry.routed_requests += 1
+            self.routed_requests_total += 1
             return entry.client
 
         async with self._lock:
             entry = self._entries.get(pool_key)
             if entry is not None:
                 entry.last_used_at = now
+                entry.routed_requests += 1
+                self.routed_requests_total += 1
                 return entry.client
             await self._cleanup_locked(now)
             try:
@@ -140,6 +274,8 @@ class HttpClientPoolManager:
                 # 无效代理 URL 等）不能让异常击穿整个转发链路变成 500：记入 error.log
                 # 后返回 None，由调用方按“该 Key 上游不可用”降级处理（记录尝试并切换
                 # 下一个 Key / 走通配符兜底），与网络层失败同等对待。
+                self.build_failures_total += 1
+                self.last_build_error = str(exc)
                 write_error_log(
                     source="http_client_pool.get_client",
                     error=f"创建上游 HTTP client 失败: {exc}",
@@ -147,7 +283,19 @@ class HttpClientPoolManager:
                     extra={"provider": provider, "key_alias": key_alias, "model": model, "api_path": api_path},
                 )
                 return None
-            self._entries[pool_key] = _PoolEntry(client=client, last_used_at=now)
+            self._entries[pool_key] = _PoolEntry(
+                client=client,
+                last_used_at=now,
+                created_at=now,
+                pool_key=pool_key,
+                provider=str(provider or ""),
+                key_alias=str(key_alias or ""),
+                model=str(model or ""),
+                api_path=str(api_path or ""),
+                routed_requests=1,
+            )
+            self.pools_created_total += 1
+            self.routed_requests_total += 1
             return client
 
     async def _cleanup_locked(self, now: float) -> None:
@@ -159,12 +307,251 @@ class HttpClientPoolManager:
         for key in stale_keys:
             entry = self._entries.pop(key, None)
             if entry is not None:
+                self.pools_evicted_idle_total += 1
                 await entry.client.aclose()
 
         while len(self._entries) >= self.max_pools:
             oldest_key = min(self._entries, key=lambda key: self._entries[key].last_used_at)
             entry = self._entries.pop(oldest_key)
+            self.pools_evicted_lru_total += 1
             await entry.client.aclose()
+
+    async def close_idle_connections(self) -> dict:
+        """关闭各路由池里处于空闲状态的 TCP 连接，但保留路由池本身。
+
+        页面上的「清理空闲连接」：不改变路由与池数量，只把 keep-alive 空闲连接
+        立刻释放（等价于把自动回收提前触发一次）。若底层连接对象不可见（测试里
+        的假 client、httpx 版本变化），静默跳过而不是报错。
+        """
+        closed = 0
+        affected = 0
+        for entry in list(self._entries.values()):
+            pool = _pool_object(entry.client)
+            if pool is None:
+                continue
+            count = await self._close_idle_in_pool(pool)
+            if count:
+                closed += count
+                affected += 1
+        self.connections_closed_total += closed
+        return {"closed_connections": closed, "affected_pools": affected}
+
+    async def _close_idle_in_pool(self, pool) -> int:
+        """关闭单个 httpcore 池中的空闲连接，返回实际关闭数量。"""
+        idle = [conn for conn in _pool_connections(pool) if _probe_connection(conn).get("state") == "idle"]
+        if not idle:
+            return 0
+        # 同步从池的连接表里摘除，避免关闭后仍占用 max_connections 名额；
+        # httpcore 自身的 _assign_requests_to_connections 只清理已摘除/已关闭的连接。
+        tracked = getattr(pool, "_connections", None)
+        if isinstance(tracked, list):
+            for conn in idle:
+                try:
+                    tracked.remove(conn)
+                except ValueError:
+                    pass
+        closed = 0
+        for conn in idle:
+            try:
+                await conn.aclose()
+                closed += 1
+            except Exception:
+                continue
+        return closed
+
+    async def close_pool(self, pool_key: str) -> bool:
+        """按 pool_key 关闭单个路由池，返回是否命中。"""
+        async with self._lock:
+            entry = self._entries.pop(str(pool_key or ""), None)
+        if entry is None:
+            return False
+        self.pools_closed_total += 1
+        try:
+            await entry.client.aclose()
+        except Exception:
+            pass
+        return True
+
+    async def evict_idle_pools(self) -> dict:
+        """立刻回收空闲时长已超过 idle_ttl_sec 的路由池。"""
+        now = time.time()
+        async with self._lock:
+            stale_keys = [
+                key
+                for key, entry in self._entries.items()
+                if now - entry.last_used_at >= self.idle_ttl_sec
+            ]
+            entries = [self._entries.pop(key) for key in stale_keys]
+            self.pools_evicted_idle_total += len(entries)
+        for entry in entries:
+            try:
+                await entry.client.aclose()
+            except Exception:
+                continue
+        return {"evicted_pools": len(entries), "max_pools": self.max_pools}
+
+    def _proxy_display(self) -> str:
+        """返回不含账号密码的代理展示串，避免把凭据暴露到页面。"""
+        if not self.proxy_url:
+            return ""
+        try:
+            parts = urlsplit(self.proxy_url)
+            host = parts.hostname or ""
+            if not host:
+                return parts.scheme or ""
+            port = f":{parts.port}" if parts.port else ""
+            return f"{parts.scheme}://{host}{port}"
+        except Exception:
+            return ""
+
+    def stats(self) -> dict:
+        """轻量聚合统计（不探测底层连接），供 /debug/runtime 与页面摘要复用。"""
+        return {
+            "instance_id": self.instance_id,
+            "started_at": self.created_at,
+            "pool_count": len(self._entries),
+            "max_pools": self.max_pools,
+            "idle_ttl_sec": self.idle_ttl_sec,
+            "max_connections_per_pool": self.max_connections,
+            "max_keepalive_per_pool": self.max_keepalive_connections,
+            "timeout_sec": self.timeout_sec,
+            "connect_timeout_sec": self.connect_timeout_sec,
+            # 仅暴露是否启用，避免把带账号密码的代理 URL 打进调试接口
+            "proxy_enabled": bool(self.proxy_url),
+            "routed_requests": self.routed_requests_total,
+            "pools_created": self.pools_created_total,
+            "pools_evicted_idle": self.pools_evicted_idle_total,
+            "pools_evicted_lru": self.pools_evicted_lru_total,
+            "pools_closed": self.pools_closed_total,
+            "connections_closed": self.connections_closed_total,
+            "build_failures": self.build_failures_total,
+        }
+
+    def snapshot(self) -> dict:
+        """构建连接池状态快照：聚合指标 + 每个路由池的实时连接明细。
+
+        会读取 httpx/httpcore 底层的真实连接状态（活跃 / 空闲 / 建连中 / 失败 /
+        已过期）与排队请求数，因此比 stats() 重一些，仅供诊断接口与连接池页面
+        调用，不在转发链路上执行。
+        """
+        now = time.time()
+        pools: list[dict] = []
+        totals = {
+            "pool_count": 0,
+            "live_connections": 0,
+            "active_connections": 0,
+            "idle_connections": 0,
+            "connecting_connections": 0,
+            "failed_connections": 0,
+            "expired_connections": 0,
+            "waiting_requests": 0,
+            "routed_requests": 0,
+            "stale_pools": 0,
+        }
+
+        for pool_key, entry in list(self._entries.items()):
+            pool = _pool_object(entry.client)
+            if pool is not None:
+                probe = _probe_pool(pool)
+            else:
+                probe = {"counts": {key: 0 for key in _CONNECTION_STATE_KEYS} | {"total": 0}, "waiting": 0, "connections": []}
+            counts = probe["counts"]
+            idle_sec = max(0.0, now - entry.last_used_at)
+            stale = idle_sec >= self.idle_ttl_sec
+
+            if probe["waiting"] > 0:
+                state = "saturated"
+            elif counts["active"] > 0:
+                state = "busy"
+            elif counts["total"] > 0:
+                state = "idle"
+            else:
+                state = "empty"
+
+            totals["pool_count"] += 1
+            totals["live_connections"] += counts["total"]
+            totals["active_connections"] += counts["active"]
+            totals["idle_connections"] += counts["idle"]
+            totals["connecting_connections"] += counts["connecting"]
+            totals["failed_connections"] += counts["failed"]
+            totals["expired_connections"] += counts["expired"]
+            totals["waiting_requests"] += probe["waiting"]
+            totals["routed_requests"] += entry.routed_requests
+            totals["stale_pools"] += 1 if stale else 0
+
+            pools.append({
+                "pool_key": pool_key,
+                "provider": entry.provider,
+                "key_alias": entry.key_alias,
+                "model": entry.model,
+                "api_path": entry.api_path,
+                "state": state,
+                "created_at": entry.created_at,
+                "last_used_at": entry.last_used_at,
+                "idle_sec": round(idle_sec, 3),
+                "stale": stale,
+                "routed_requests": entry.routed_requests,
+                "connection_total": counts["total"],
+                "active_connections": counts["active"],
+                "idle_connections": counts["idle"],
+                "connecting_connections": counts["connecting"],
+                "failed_connections": counts["failed"],
+                "expired_connections": counts["expired"],
+                "unknown_connections": counts["unknown"],
+                "waiting_requests": probe["waiting"],
+                "max_connections": self.max_connections,
+                "connections": probe["connections"][: self.max_connections],
+            })
+
+        # 最近使用优先，便于页面默认把热路由排在前面
+        pools.sort(key=lambda item: item["last_used_at"], reverse=True)
+        totals["pool_capacity_ratio"] = round(totals["pool_count"] / self.max_pools, 4)
+
+        reasons: list[str] = []
+        level = "healthy"
+        if totals["waiting_requests"] > 0:
+            level = "saturated"
+            reasons.append(f"{totals['waiting_requests']} 个请求正在等待可用连接")
+        elif totals["pool_count"] >= self.max_pools:
+            level = "saturated"
+            reasons.append("路由池数量已达上限，新建路由会触发 LRU 淘汰")
+        elif totals["failed_connections"] > 0:
+            level = "degraded"
+            reasons.append(f"{totals['failed_connections']} 条连接建立失败")
+        elif totals["active_connections"] > 0:
+            level = "busy"
+        elif totals["pool_count"] == 0:
+            level = "idle"
+
+        return {
+            "captured_at": now,
+            "instance_id": self.instance_id,
+            "started_at": self.created_at,
+            "uptime_sec": round(max(0.0, now - self.created_at), 3),
+            "proxy_enabled": bool(self.proxy_url),
+            "proxy_display": self._proxy_display(),
+            "config": {
+                "max_pools": self.max_pools,
+                "max_connections_per_pool": self.max_connections,
+                "max_keepalive_per_pool": self.max_keepalive_connections,
+                "idle_ttl_sec": self.idle_ttl_sec,
+                "timeout_sec": self.timeout_sec,
+                "connect_timeout_sec": self.connect_timeout_sec,
+            },
+            "status": {"level": level, "reasons": reasons},
+            "totals": totals,
+            "counters": {
+                "routed_requests": self.routed_requests_total,
+                "pools_created": self.pools_created_total,
+                "pools_evicted_idle": self.pools_evicted_idle_total,
+                "pools_evicted_lru": self.pools_evicted_lru_total,
+                "pools_closed": self.pools_closed_total,
+                "connections_closed": self.connections_closed_total,
+                "build_failures": self.build_failures_total,
+                "last_build_error": self.last_build_error,
+            },
+            "pools": pools,
+        }
 
     async def aclose(self) -> None:
         async with self._lock:
@@ -172,14 +559,3 @@ class HttpClientPoolManager:
             self._entries.clear()
         for entry in entries:
             await entry.client.aclose()
-
-    def stats(self) -> dict:
-        return {
-            "pool_count": len(self._entries),
-            "max_pools": self.max_pools,
-            "idle_ttl_sec": self.idle_ttl_sec,
-            "max_connections_per_pool": self.max_connections,
-            "max_keepalive_per_pool": self.max_keepalive_connections,
-            # 仅暴露是否启用，避免把带账号密码的代理 URL 打进调试接口
-            "proxy_enabled": bool(self.proxy_url),
-        }

@@ -2,11 +2,9 @@
 
 ## 一、版本号统一
 
-AKM v0.1.49 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版为管理台界面改进：新增主题切换（跟随系统 / 浅色 / 深色，**默认深色**，选择存浏览器本地存储），配色改为 CSS 变量 token + `tailwind.config` 映射（模板与组件不再使用 `dark:` 变体），并修复浅色下侧边栏 hover 文字不可读、统计页骨架屏与真实内容不等高导致的首屏抖动；该改动不涉及更新管理流程本身（GitHub Release 检查 / 自动更新 / 更新包缓存策略均未变），版本号仍需按本节规则保持一致。
+各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.50**。
 
-AKM v0.1.48 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版为统计页增强：新增 `akm/request_source.py` 统一推导审计日志来源标签（`x-akm-source` 优先，其次 User-Agent 关键词，兜底 UA 产品名，无法识别归入「其他」），审计页「来源」列与统计页「按来源」共用同一规则；`GET /api/stats` 新增 `by_source` 分桶（与 `by_key`/`by_model` 同结构）与 `errors` 失败请求时序（days=1 按今天每小时 24 点，7/30 天按自然日；失败口径 status 非 2xx，且不排除无 key_alias 的选 Key/前置失败），`GET /api/logs` 新增 `source_label` 派生字段；管理台通用组件新增 `akm-line-chart`（内联 SVG 折线图，`ResizeObserver` 自适应宽度）与 `akm-donut-chart`（内联 SVG 环形图，图例/扇区可悬浮看明细，超过 6 片自动并为「其他」），统计页用前者渲染「报错趋势」、用后者渲染按 Key/模型/来源三张图的占比；统计页三张表支持「表 / 图」切换（默认图），每张卡片的指标（Token/请求/费用）与视图互相独立、按卡持久化到本地存储；表格改由 `akm-pagination` 分页（每页 6 行）而非卡片内滚动，卡片体固定 260px、三表等高且切换视图不跳高度；「报错趋势」卡片标题定宽 4rem 以避免切换指标（报错趋势/成功率/P95 延迟）时 tab 位移抖动，成功率摘要不再显示 `(成功/总数)` 计数。Key 管理页的模型标签最多展示 2 行，超出部分收进尾部「查看全部 (N)」按钮并在弹窗中列出完整模型列表（可点击复制）；该收敛在渲染后按量到的真实宽度分几轮进行，样式未就绪或卡片不可见时保持现状并稍后重算，避免误展开。该改动不涉及更新管理流程本身，版本号仍需按本节规则保持一致。
-
-AKM v0.1.47 同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的本项目版本。本版新增**本地数据目录自动维护**：新增 `akm/cleanup.py`，以 `run_auto_maintenance()` 作为统一入口，在服务启动（`akm/server.py` lifespan）与系统唤醒恢复（`akm/menubar.py`，后台线程）时各执行一次，三步互相独立、任一步失败不影响其余——① 按 `log_retention_days` 清理过期审计日志并 VACUUM（沿用既有行为，始终执行）；② 更新包缓存清理（`update_cache_cleanup`，默认开启）：`~/.akm/updates/` 与 `updates/backups/` 合起来只保留最新一个 zip，`backups/` 只保留最新一份与本版本对应的旧 `.app` 备份（回滚点），10 分钟内修改过的文件视为进行中的更新而跳过；③ 文本日志轮转（`text_log_rotation`，默认关闭，阈值 `log_file_max_mb`）：数据目录根下的 append-only `*.log` 超阈值转存 `.1` 并保留一代，不递归因此不进入会话/知识库/插件目录。设置页「日志与存储」新增上述两个开关，均为向后兼容的可选行为。
+发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中）；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
 
@@ -59,7 +57,7 @@ from akm import __version__
 
 ### 新增模板 / 静态文件必须登记
 
-`setup.py` 的 `DATA_FILES` 是**显式清单**，py2app 不会自动收集：新增（或改名）`akm/templates/*.html`、`akm/static/*` 后，必须把文件加进对应列表，否则打包产物里 `Contents/Resources/templates`（或 `static`）会缺该文件，页面在运行时才报模板缺失。发布前可用下面的命令自查清单与实际目录的差集：
+`setup.py` 的 `DATA_FILES` 是**显式清单**，py2app 不会自动收集：新增（或改名）`akm/templates/*.html`、`akm/static/*` 后，必须把文件加进对应列表，否则打包产物里 `Contents/Resources/templates`（或 `static`）会缺该文件，页面在运行时才报模板缺失。发布前可用下面的命令自查清单与实际目录的差集（输出里如果只剩 `.DS_Store`，说明登记是完整的）：
 
 ```bash
 python - <<'SELFCHECK'
@@ -383,7 +381,8 @@ gh release create "$TAG" "$DMG" "$ZIP" --title "$TAG" --generate-notes
 
 - [ ] `akm/__init__.py` 与 `pyproject.toml` 版本号已更新并保持一致
 - [ ] 功能开发完成，本地测试通过
-- [ ] 已检查并同步文档：`README.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`
+- [ ] 已检查并同步文档：`README.md`；版本变更追加到 `docs/logs.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`；如涉及组件同步 `docs/design/web-components.md`
+- [ ] 新增的模板 / 静态文件已登记进 `setup.py` 的 `DATA_FILES`（用「二、打包流程」里的差集脚本自查，脚本会顺带列出 `.DS_Store`，那是无害噪音）
 - [ ] 清理构建缓存：`rm -rf build dist`
 - [ ] 执行打包命令
 - [ ] 验证 `.app` 可正常启动

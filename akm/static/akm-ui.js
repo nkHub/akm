@@ -464,6 +464,17 @@ if (!customElements.get('akm-tooltip')) {
       this.addEventListener('mouseleave', function() { self.hide(); });
     }
 
+    // 宿主被移除时（例如表格整体重渲染）mouseleave 不会再触发，浮层会永久留在页面上；
+    // 且每个实例都会往 body 挂一个浮层节点，重建型的列表会不断堆积。
+    // 这里主动收起并从 body 摘除浮层，保证浮层生命周期不超过它的宿主。
+    disconnectedCallback() {
+      this.hide();
+      if (this._tipEl && this._tipEl.parentNode) {
+        this._tipEl.parentNode.removeChild(this._tipEl);
+      }
+      this._tipEl = null;
+    }
+
     // 惰性创建页面级 fixed 浮层：挂在 body 下，避免被表格等容器的 overflow 裁剪
     _tip() {
       if (!this._tipEl) {
