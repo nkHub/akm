@@ -356,6 +356,8 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `~/.akm` 会在服务启动和系统唤醒恢复时执行一次本地数据维护（`akm.cleanup.run_auto_maintenance`），三步互相独立、任一步失败不影响其余：① 按 `log_retention_days` 清理过期审计日志并回收 SQLite 空间（始终执行）；② 清理 `~/.akm/updates/` 下的历史更新包与旧版本 `.app` 备份，只留最新更新包与一个回滚备份（受 `update_cache_cleanup` 控制，默认开启，正在下载/替换的文件有 10 分钟宽限期）；③ 轮转数据目录根下的 append-only 文本日志（受 `text_log_rotation` 控制，默认关闭，阈值 `log_file_max_mb`）。维护只处理 AKM 自己产生的派生数据，不会删除 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
 
+用于解密 `akm.db` 中 `api_key` 的主密钥单独存放在 `~/.akm/secret.key`（不写库、不进日志，维护流程也不触碰）。**它是已存 Key 的唯一解密凭据，文件丢失后已存 `api_key` 不可恢复**，需要迁移或换机时请先用 `GET /api/keys/export` 导出明文备份。该文件的位置、权限现状与分档加固方案（权限自愈、密钥与数据目录解耦、macOS Keychain、主密钥轮换）见 [docs/design/key-custody.md](docs/design/key-custody.md)；加固方案尚未实施，当前实现即上述单文件形式。
+
 ## 本地智能体接入指引
 
 如果需要给本地智能体接入图片能力，优先使用仓库内置的 `skills/akm-image-local/SKILL.md`。这个 skill 的定位是让图片生成与编辑统一走本地 AKM 服务，而不是继续依赖单独的图片 MCP 网关；它已经约定了默认模型、尺寸、质量和提示词组织方式，适合直接复用到智能体工作流中。
