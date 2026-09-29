@@ -41,3 +41,47 @@ def akm_isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
     # 清除进程级加密器缓存，保证每例用隔离后的路径重新加载
     monkeypatch.setattr(crypto, "_cipher", None)
+    monkeypatch.setattr(crypto, "_last_source", "")
+    monkeypatch.setattr(crypto, "_last_notes", [])
+    # 强制文件后端 + 清掉可能存在的环境覆盖，避免测试读到开发机上的真实密钥文件或 macOS 钥匙串条目
+    monkeypatch.setenv("AKM_SECRET_BACKEND", "file")
+    monkeypatch.delenv("AKM_SECRET_KEY", raising=False)
+    monkeypatch.delenv("AKM_SECRET_FILE", raising=False)
+    # 告警去重集合逐例重置，保证告警断言可重复
+    import akm.secret_store as secret_store
+
+    monkeypatch.setattr(secret_store, "_warned", set())
+
+    # 安全护栏：默认禁止测试触碰真实 macOS 钥匙串（避免弹系统授权框 / 读到真实密钥）。
+    # 需要钥匙串行为的用例请使用 fake_keychain 夹具覆盖。
+    def _forbid_real_keychain():
+        raise RuntimeError("测试禁止访问真实钥匙串，请使用 fake_keychain 夹具")
+
+    monkeypatch.setattr(secret_store, "_get_bridge", _forbid_real_keychain)
+
+
+@pytest.fixture
+def fake_keychain(monkeypatch):
+    """把钥匙串后端替换为内存实现，返回该假 bridge（``.items`` 为 account→value）。"""
+    import akm.secret_store as secret_store
+
+    class _FakeBridge:
+        def __init__(self):
+            self.items: dict[str, bytes] = {}
+
+        def read(self, account):
+            return self.items.get(account)
+
+        def write(self, account, value):
+            self.items[account] = value
+
+        def delete(self, account):
+            return self.items.pop(account, None) is not None
+
+        def accounts(self):
+            return list(self.items)
+
+    bridge = _FakeBridge()
+    monkeypatch.setattr(secret_store, "_get_bridge", lambda: bridge)
+    monkeypatch.setattr(secret_store, "keychain_supported", lambda: True)
+    return bridge
