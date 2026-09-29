@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from akm.cli import main
 from akm.config import load_config
 from akm.db import get_connection, init_db
-from akm.key_pool import add_key
+from akm.key_pool import add_key, get_key
 from akm.audit import write_log
 
 
@@ -579,3 +579,121 @@ def test_image_edit_reports_missing_file(monkeypatch):
 
     assert result.exit_code != 0
     assert "文件不存在: missing.png" in result.output
+
+
+# ── akm secret：主密钥托管 ─────────────────────────────────
+
+def test_secret_status_json_reports_backend_and_paths(monkeypatch):
+    """secret status --json 输出后端、路径与权限，供脚本与排障读取"""
+    tmpdir = _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+
+    result = CliRunner().invoke(main, ["secret", "status", "--json"])
+
+    assert result.exit_code == 0, result.output
+    info = json.loads(result.output)
+    assert info["configured_backend"] == "file"
+    assert info["files"]["primary"]["path"] == str(Path(tmpdir) / "secret.key")
+    assert info["files"]["primary"]["mode"] == "0o600"
+    assert info["files"]["primary_dir_mode"] == "0o700"
+
+
+def test_secret_status_human_output(monkeypatch):
+    """人类可读输出包含关键字段（不含 --json 时的默认格式）"""
+    _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+
+    result = CliRunner().invoke(main, ["secret", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "配置后端      : file" in result.output
+    assert "主密钥文件    :" in result.output
+    assert "权限 0o600" in result.output
+
+
+def test_secret_rotate_reencrypts_stored_keys(monkeypatch):
+    """akm secret rotate：轮换主密钥后存量 api_key 仍能正确读出"""
+    _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+    add_key("cli-rot", "openai", "sk-cli-rot", base_url="https://example.com/v1")
+
+    result = CliRunner().invoke(main, ["secret", "rotate"])
+
+    assert result.exit_code == 0, result.output
+    assert "主密钥已轮换" in result.output
+    assert "已重新加密存量 api_key" in result.output
+    assert get_key("cli-rot")["api_key"] == "sk-cli-rot"
+
+
+def test_secret_rotate_no_reencrypt_keeps_ciphertext(monkeypatch):
+    """--no-reencrypt 只换密钥：存量密文不变，但仍可由历史密钥解出"""
+    _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+    add_key("cli-rot2", "openai", "sk-cli-rot2", base_url="https://example.com/v1")
+    conn = get_connection()
+    before = conn.execute("SELECT api_key FROM keys WHERE alias = 'cli-rot2'").fetchone()[0]
+    conn.close()
+
+    result = CliRunner().invoke(main, ["secret", "rotate", "--no-reencrypt"])
+
+    assert result.exit_code == 0, result.output
+    assert "已跳过重新加密存量 api_key" in result.output
+    conn = get_connection()
+    after = conn.execute("SELECT api_key FROM keys WHERE alias = 'cli-rot2'").fetchone()[0]
+    conn.close()
+    assert after == before
+    assert get_key("cli-rot2")["api_key"] == "sk-cli-rot2"
+
+
+def test_secret_purge_file_refuses_without_keychain_copy(monkeypatch, fake_keychain):
+    """没有钥匙串副本时拒绝删除明文文件（防止把唯一解密凭据删掉）"""
+    _setup_tmp_env(monkeypatch)
+
+    result = CliRunner().invoke(main, ["secret", "purge-file", "--yes"])
+
+    assert result.exit_code != 0
+    assert "拒绝清理" in result.output
+
+
+def test_secret_migrate_to_keychain_writes_config_and_keeps_file(monkeypatch, fake_keychain):
+    """迁移到钥匙串：写入条目、保留明文文件，并把 secret_backend 写进配置"""
+    import akm.config as config_module
+    import akm.secret_store as secret_store
+    from akm import crypto
+
+    tmpdir = _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+    saved: dict = {}
+    monkeypatch.setattr(config_module, "save_config", lambda data: saved.update(data))
+
+    crypto._load_cipher()   # 先生成一把文件密钥
+    key_path = Path(tmpdir) / "secret.key"
+    assert key_path.exists()
+
+    result = CliRunner().invoke(main, ["secret", "migrate", "--to", "keychain"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_keychain.items[secret_store.KEYCHAIN_ACCOUNT] == key_path.read_bytes().strip()
+    assert key_path.exists()
+    assert saved["secret_backend"] == "keychain"
+    assert "已写入配置" in result.output
+
+
+def test_secret_migrate_rejects_unsupported_backend(monkeypatch):
+    """目标后端非法时直接报错"""
+    _setup_tmp_env(monkeypatch)
+
+    result = CliRunner().invoke(main, ["secret", "migrate", "--to", "nonsense"])
+
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output or "不支持的密钥后端" in result.output

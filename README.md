@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.50**：管理台新增「连接池」页（`/pool`），实时展示上游路由池的连接 / 排队 / 淘汰等状态，并支持清理空闲连接、回收空闲池、关闭单个路由池与重建连接池。
+当前版本 **v0.1.51**：主密钥托管加固——密钥文件权限收紧到 `0600`（目录 `0700`）并在读取时自愈，主密钥移出数据目录（`~/Library/Application Support/AKM/secret.key`，旧位置存在时自动迁移且保留原文件），新增 `akm secret status / migrate / rotate / purge-file`（轮换会重新加密存量 `api_key`），并可选改用 macOS 钥匙串存放。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -112,7 +112,13 @@ akm plugin config get <名称> [键] # 读取插件配置
 akm plugin config set <名称> <键> <值> # 修改插件配置
 
 # 自检
-akm doctor                    # 检查配置 / 数据库 / 插件 / 服务状态
+akm doctor                    # 检查配置 / 数据库 / 插件 / 服务状态（含主密钥托管状态）
+
+# 主密钥
+akm secret status             # 查看主密钥来源、文件路径与权限（--json / --probe）
+akm secret migrate --to keychain # 迁移到 macOS 钥匙串（默认保留明文文件，可 --purge-file）
+akm secret rotate             # 轮换主密钥并用新密钥重新加密存量 api_key
+akm secret purge-file         # 校验通过后删除明文密钥文件
 ```
 
 ## 自定义 MCP 脚本
@@ -260,6 +266,7 @@ akm-menubar
 | `update_cache_cleanup` | `true` | 自动清理 `~/.akm/updates/` 历史更新包与旧版本 `.app` 备份，只保留最新更新包与回滚备份（启动与唤醒时执行；仅显式设为 `false` 才关闭） |
 | `text_log_rotation` | `false` | 自动轮转数据目录根下的 append-only 文本日志（`error.log`、`keys.log`、`wake_recovery.log`、`plugin.launch.log` 等），超过阈值转存为 `.1` 并保留一代；默认关闭，需显式设为 `true` 开启 |
 | `log_file_max_mb` | `5` | 单个文本日志的轮转阈值（MB），仅在上一条开启时生效 |
+| `secret_backend` | `file` | 主密钥存放后端：`file`（默认，`~/Library/Application Support/AKM/secret.key`，0600）/ `keychain`（macOS 钥匙串，入口是 `akm secret migrate --to keychain`）。默认保持文件后端，是因为打包应用自更新换签名后钥匙串读取可能弹一次系统授权框；完整取舍与恢复方式见 [docs/design/key-custody.md](docs/design/key-custody.md) |
 | `stream_capture_max_bytes` | `262144` | 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB） |
 | `json_viewer_max_text_length` | `600000` | JSON 查看器超长文本阈值（超过后仅允许下载原文） |
 
@@ -356,7 +363,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `~/.akm` 会在服务启动和系统唤醒恢复时执行一次本地数据维护（`akm.cleanup.run_auto_maintenance`），三步互相独立、任一步失败不影响其余：① 按 `log_retention_days` 清理过期审计日志并回收 SQLite 空间（始终执行）；② 清理 `~/.akm/updates/` 下的历史更新包与旧版本 `.app` 备份，只留最新更新包与一个回滚备份（受 `update_cache_cleanup` 控制，默认开启，正在下载/替换的文件有 10 分钟宽限期）；③ 轮转数据目录根下的 append-only 文本日志（受 `text_log_rotation` 控制，默认关闭，阈值 `log_file_max_mb`）。维护只处理 AKM 自己产生的派生数据，不会删除 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
 
-用于解密 `akm.db` 中 `api_key` 的主密钥单独存放在 `~/.akm/secret.key`（不写库、不进日志，维护流程也不触碰）。**它是已存 Key 的唯一解密凭据，文件丢失后已存 `api_key` 不可恢复**，需要迁移或换机时请先用 `GET /api/keys/export` 导出明文备份。该文件的位置、权限现状与分档加固方案（权限自愈、密钥与数据目录解耦、macOS Keychain、主密钥轮换）见 [docs/design/key-custody.md](docs/design/key-custody.md)；加固方案尚未实施，当前实现即上述单文件形式。
+用于解密 `akm.db` 中 `api_key` 的主密钥默认存放在 `~/Library/Application Support/AKM/secret.key`（目录 0700、文件 0600，创建时即按该权限落盘，读取时发现权限过宽会自动收紧并告警）；老版本存放在 `~/.akm/secret.key` 的密钥会在首次读取时**复制**到新路径完成迁移，**原文件保留**以便回滚。密钥有历史密钥机制：`akm secret rotate` 后新密文用新密钥，旧密文由历史密钥解开，并把库里存量 `api_key` 重新加密（单事务提交，解不开的行单独上报而不会阻塞整次轮换）。可选的 macOS 钥匙串后端（`secret_backend=keychain`）与「明文文件与钥匙串不一致时拒绝清理」等安全语义见 [docs/design/key-custody.md](docs/design/key-custody.md)。**它是已存 Key 的唯一解密凭据，且不参与日志与清理流程；文件丢失后已存 `api_key` 不可恢复**，需要迁移或换机时请先用 `GET /api/keys/export` 导出明文备份。
 
 ## 本地智能体接入指引
 

@@ -14,6 +14,7 @@ DEFAULTS = {
     "update_cache_cleanup": True,  # 自动清理 updates/ 历史更新包与旧版本备份（只保留最新 zip 与回滚备份），默认开启
     "text_log_rotation": False,  # 自动轮转数据目录根下的 append-only 文本日志（error.log / keys.log 等），默认关闭
     "log_file_max_mb": 5,      # 单个文本日志的轮转阈值（MB），超过后转存为 .1 并保留一代
+    "secret_backend": "file",  # 主密钥存放后端：file（默认，0600 文件）/ keychain（macOS 钥匙串），见 docs/design/key-custody.md
     "server_port": 8800,       # 默认服务端口
     "log_request_body": False,  # 是否记录请求体（含完整对话内容，占用空间大）；关闭时客户端请求头与上游请求头快照（client_request_headers / upstream_request_headers 两列）同样不落库，但 request_headers（轻量白名单源信息，用于来源/徽章展示）始终记录
     "log_response_body": False, # 是否记录响应体（占用空间大，关闭不影响统计）
@@ -232,6 +233,10 @@ def load_config() -> dict:
     merged["update_cache_cleanup"] = merged.get("update_cache_cleanup") is not False
     merged["text_log_rotation"] = merged.get("text_log_rotation") is True
     merged["log_file_max_mb"] = max(1, _safe_int(merged.get("log_file_max_mb"), 5))
+    # 主密钥存放后端：只认 file / keychain，其余（含空值）一律回退 file
+    merged["secret_backend"] = (
+        merged.get("secret_backend") if merged.get("secret_backend") in ("file", "keychain") else "file"
+    )
     # 连接池参数：确保为合理整数，防止配置异常导致连接池初始化失败
     merged["http_client_max_connections"] = max(1, int(merged.get("http_client_max_connections", 8) or 8))
     merged["http_client_max_keepalive"] = max(0, int(merged.get("http_client_max_keepalive", 2) or 2))
@@ -302,6 +307,10 @@ def save_config(data: dict) -> None:
     current["update_cache_cleanup"] = current.get("update_cache_cleanup") is not False
     current["text_log_rotation"] = current.get("text_log_rotation") is True
     current["log_file_max_mb"] = max(1, _safe_int(current.get("log_file_max_mb"), 5))
+    # 主密钥存放后端：与 load_config 同一套取值校验，非法值回退 file
+    current["secret_backend"] = (
+        current.get("secret_backend") if current.get("secret_backend") in ("file", "keychain") else "file"
+    )
     # 连接池参数：确保为合理整数/浮点，防止配置异常导致连接池初始化失败
     current["http_client_max_connections"] = max(1, int(current.get("http_client_max_connections", 8) or 8))
     current["http_client_max_keepalive"] = max(0, int(current.get("http_client_max_keepalive", 2) or 2))

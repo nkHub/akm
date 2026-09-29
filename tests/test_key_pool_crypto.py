@@ -4,7 +4,8 @@
 1. 与 cryptography.fernet 的参考向量互通（本文件向量由 cryptography 预生成，保证格式兼容）；
 2. 自身加解密往返一致；
 3. 令牌被篡改或结构非法时抛 InvalidToken；
-4. secret.key 密钥文件复用：首次生成后可复读，且用固定密钥可加解密。
+4. 主密钥文件复用：首次生成后可复读，且用固定密钥可加解密；
+5. 主密钥轮换 + 存量 api_key 重新加密（P3，见 docs/design/key-custody.md）。
 """
 
 import base64
@@ -13,6 +14,8 @@ import pytest
 
 from akm import crypto
 from akm.crypto import InvalidToken, _MiniFernet
+from akm.db import get_connection, init_db
+from akm.key_pool import add_key, get_key, reencrypt_all_keys
 
 
 # ── 参考向量：由 cryptography.fernet 预生成（密钥为 32 字节 'K'） ──
@@ -73,7 +76,7 @@ def test_mini_fernet_rejects_invalid_token_structure():
         f.decrypt(bytes(token))
 
 
-def test_load_cipher_prefers_keychain(tmp_path, monkeypatch):
+def test_load_cipher_prefers_existing_key_file(tmp_path, monkeypatch):
     """本地 secret.key 存在时直接使用，不重复生成"""
     key = _MiniFernet.generate_key()
     key_path = tmp_path / "secret.key"
@@ -91,8 +94,8 @@ def test_load_cipher_prefers_keychain(tmp_path, monkeypatch):
     assert c1.decrypt(token) == b"keep-me"
 
 
-def test_load_cipher_migrates_fallback_file_to_keychain(tmp_path, monkeypatch):
-    """本地 secret.key 存在时直接使用（无 Keychain 依赖）。"""
+def test_load_cipher_reuses_existing_file_key(tmp_path, monkeypatch):
+    """本地 secret.key 存在时直接使用（不依赖钥匙串）。"""
     file_key = _MiniFernet.generate_key()
     key_path = tmp_path / "secret.key"
     key_path.write_bytes(file_key)
@@ -121,7 +124,7 @@ def test_load_cipher_generates_and_saves_new_key(tmp_path, monkeypatch):
     assert c1.decrypt(token) == b"fresh"
 
 
-def test_load_cipher_uses_memory_key_when_keychain_unavailable(tmp_path, monkeypatch):
+def test_load_cipher_uses_file_backend_when_key_missing(tmp_path, monkeypatch):
     """本地 secret.key 写入正常场景：生成并写盘，加解密可用。"""
     monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path))
     monkeypatch.setattr(crypto, "_cipher", None)
@@ -176,3 +179,78 @@ def test_encrypt_decrypt_helpers_roundtrip(tmp_path, monkeypatch):
     assert blob != "sk-live-938275"
     monkeypatch.setattr(crypto, "_cipher", None)
     assert crypto._decrypt(blob) == "sk-live-938275"
+
+
+# ── P3：主密钥轮换 + 存量 api_key 重新加密 ─────────────────
+
+def _prepare_db():
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+
+
+def test_reencrypt_all_keys_keeps_plaintext_readable_after_rotate(tmp_path, monkeypatch):
+    """轮换 + 重新加密后：库里密文变了，但读出来仍是同一份明文"""
+    _prepare_db()
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path / "keydir"))
+    monkeypatch.setattr(crypto, "_cipher", None)
+    add_key("rot-a", "openai", "sk-rotate-me", base_url="https://example.com/v1")
+
+    conn = get_connection()
+    stored_before = conn.execute("SELECT api_key FROM keys WHERE alias = 'rot-a'").fetchone()[0]
+    conn.close()
+
+    crypto.rotate()
+    stats = reencrypt_all_keys()
+
+    conn = get_connection()
+    stored_after = conn.execute("SELECT api_key FROM keys WHERE alias = 'rot-a'").fetchone()[0]
+    conn.close()
+
+    assert stats["reencrypted"] >= 1
+    assert stored_after != stored_before          # 确实用新密钥重新加密了
+    assert get_key("rot-a")["api_key"] == "sk-rotate-me"
+
+
+def test_reencrypt_all_keys_is_idempotent_and_skips_empty_values(tmp_path, monkeypatch):
+    """重复执行安全；字面空 api_key（用户未填写/历史数据）不参与重新加密"""
+    _prepare_db()
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path / "keydir"))
+    monkeypatch.setattr(crypto, "_cipher", None)
+    add_key("rot-b", "openai", "sk-b", base_url="https://example.com/v1")
+    add_key("rot-empty", "openai", "placeholder", base_url="https://example.com/v1")
+    # 造出"字面空值"的历史形态（add_key 会把空串也加密成令牌）
+    conn = get_connection()
+    conn.execute("UPDATE keys SET api_key = '' WHERE alias = 'rot-empty'")
+    conn.commit()
+    conn.close()
+
+    first = reencrypt_all_keys()
+    second = reencrypt_all_keys()
+
+    assert first["reencrypted"] == second["reencrypted"]
+    assert second["skipped"] >= 1
+    assert get_key("rot-b")["api_key"] == "sk-b"
+    assert get_key("rot-empty")["api_key"] == ""
+
+
+def test_reencrypt_all_keys_survives_missing_previous_key(tmp_path, monkeypatch):
+    """未保留历史密钥时：该行上报为 undecryptable，密文保持原样，不阻塞其余行"""
+    _prepare_db()
+    monkeypatch.setattr(crypto, "SECRET_DIR", str(tmp_path / "keydir"))
+    monkeypatch.setattr(crypto, "_cipher", None)
+    add_key("rot-c", "openai", "sk-c", base_url="https://example.com/v1")
+
+    conn = get_connection()
+    stored_before = conn.execute("SELECT api_key FROM keys WHERE alias = 'rot-c'").fetchone()[0]
+    conn.close()
+
+    crypto.rotate(keep_previous=False)
+
+    stats = reencrypt_all_keys()
+
+    assert "rot-c" in stats["undecryptable"]
+    conn = get_connection()
+    stored_after = conn.execute("SELECT api_key FROM keys WHERE alias = 'rot-c'").fetchone()[0]
+    conn.close()
+    assert stored_after == stored_before   # 解不开的行原样保留，不被清空或覆盖

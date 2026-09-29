@@ -2,9 +2,9 @@
 
 ## 一、版本号统一
 
-各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.50**。
+各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.51**。
 
-发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中）；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
+发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中，无新增模板 / 静态文件）；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
 
@@ -382,7 +382,7 @@ gh release create "$TAG" "$DMG" "$ZIP" --title "$TAG" --generate-notes
 - [ ] `akm/__init__.py` 与 `pyproject.toml` 版本号已更新并保持一致
 - [ ] 功能开发完成，本地测试通过
 - [ ] 已检查并同步文档：`README.md`；版本变更追加到 `docs/logs.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`；如涉及组件同步 `docs/design/web-components.md`
-- [ ] 新增的模板 / 静态文件已登记进 `setup.py` 的 `DATA_FILES`（用「二、打包流程」里的差集脚本自查，脚本会顺带列出 `.DS_Store`，那是无害噪音）
+- [ ] 新增的模板 / 静态文件已登记进 `setup.py` 的 `DATA_FILES`（用「二、打包流程」里的差集脚本自查，脚本会顺带列出 `.DS_Store`，那是无害噪音）；新增的核心运行时模块已登记进 `setup.py` 的 `includes`
 - [ ] 清理构建缓存：`rm -rf build dist`
 - [ ] 执行打包命令
 - [ ] 验证 `.app` 可正常启动

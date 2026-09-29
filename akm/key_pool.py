@@ -6,7 +6,7 @@ import json
 from akm.db import get_connection
 from akm.agent import AGENT_REGISTRY
 from akm.config import load_config
-from akm.crypto import _decrypt, _encrypt
+from akm.crypto import InvalidToken, _decrypt, _encrypt
 
 # ── 用量查询默认脚本 ─────────────────────────────────────────
 # 按供应商提供不同的默认脚本，extractor 返回字段由各供应商脚本决定
@@ -347,6 +347,48 @@ def set_api_key(alias: str, api_key: str) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def reencrypt_all_keys() -> dict:
+    """用当前主密钥重新加密所有 ``api_key``（主密钥轮换后调用）。
+
+    语义：
+
+    - 解密走密钥环（当前 + 历史密钥），加密只用当前密钥；
+    - 单事务提交，失败整体回滚，不会留下"一半新一半旧"；
+    - 空值（用户尚未填写 key）原样跳过，不参与重新加密；
+    - 单行解不开（例如历史密钥已丢弃、或该行来自另一把密钥）只跳过该行并在结果里
+      ``undecryptable`` 上报，不阻塞其余 Key 的轮换——一行坏数据不该让整次轮换失败。
+
+    轮换后即使这一步失败，旧密文仍可由历史密钥解开，因此可安全重试。
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT alias, api_key FROM keys").fetchall()
+        updates: list[tuple[str, str]] = []
+        skipped = 0
+        undecryptable: list[str] = []
+        for row in rows:
+            alias, stored = row["alias"], row["api_key"] or ""
+            if not stored:
+                skipped += 1
+                continue
+            try:
+                plain = _decrypt(stored)
+            except InvalidToken:
+                undecryptable.append(alias)
+                continue
+            updates.append((_encrypt(plain), alias))
+        with conn:
+            conn.executemany("UPDATE keys SET api_key = ? WHERE alias = ?", updates)
+    finally:
+        conn.close()
+    return {
+        "total": len(rows),
+        "reencrypted": len(updates),
+        "skipped": skipped,
+        "undecryptable": undecryptable,
+    }
 
 
 def set_status(alias: str, status: str) -> None:

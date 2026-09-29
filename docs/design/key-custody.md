@@ -1,7 +1,7 @@
 # 主密钥保管（`secret.key`）现状评估与加固方案
 
-> 状态：**方案评估，未实施**。本文只做现状评估与候选方案设计，动手前先定「第 9 节 待决策项」。
-> 相关实现：[akm/crypto.py](../../akm/crypto.py)（加密层）、[akm/key_pool.py](../../akm/key_pool.py)（调用方）、[akm/cleanup.py](../../akm/cleanup.py)（数据目录维护）。
+> 状态：**P0 / P1 / P3 已实施，P2 已实现但默认关闭**（v0.1.51）。实施结果与真机验证结论见第 10 节，开工前的原始评估保留在第 1–9 节。
+> 相关实现：[akm/secret_store.py](../../akm/secret_store.py)（存放后端与权限）、[akm/crypto.py](../../akm/crypto.py)（加解密 + 托管编排）、[akm/key_pool.py](../../akm/key_pool.py)（轮换后的存量重加密）、[akm/cli.py](../../akm/cli.py)（`akm secret` 命令组）、[akm/cleanup.py](../../akm/cleanup.py)（数据目录维护）。
 
 ## 1. 背景
 
@@ -155,12 +155,52 @@ P0 是**纯收益、无 UX 影响、无迁移风险**的一档，解决第 4 节
 
 ## 9. 待决策项
 
-1. P1 的新默认路径：`~/Library/Application Support/AKM/`，还是保持 `~/.akm` 只做权限收紧（跨平台与迁移成本权衡）？
-2. P2 是否做？若做，选 A（Keychain 真 ACL + 可能的授权弹框）还是暂缓？需要一次**打包环境实测**：py2app 应用写入的条目在自更新/重新签名后是否仍免弹框。
-3. P3 是否需要 CLI 轮换入口，还是仅预留"多密钥读取"能力？
-4. 是否在 README 与设置页补"主密钥丢失 = 已存 Key 不可恢复，可用 `GET /api/keys/export` 做明文备份"的提示？
+1. P1 的新默认路径：`~/Library/Application Support/AKM/`，还是保持 `~/.akm` 只做权限收紧（跨平台与迁移成本权衡）？→ **已定：新路径**（非 macOS 回退 `~/.config/akm`）。
+2. P2 是否做？若做，选 A（Keychain 真 ACL + 可能的授权弹框）还是暂缓？需要一次**打包环境实测**：py2app 应用写入的条目在自更新/重新签名后是否仍免弹框。→ **已定：实现但默认关闭**，见第 10.2 节。
+3. P3 是否需要 CLI 轮换入口，还是仅预留"多密钥读取"能力？→ **已定：提供 `akm secret rotate`**，并重新加密存量。
+4. 是否在 README 与设置页补"主密钥丢失 = 已存 Key 不可恢复，可用 `GET /api/keys/export` 做明文备份"的提示？→ **README 已补**；设置页未做（见 10.4 遗留项）。
 
-## 附录 A：实测证据
+## 10. 实施结果（v0.1.51）
+
+### 10.1 已落地的能力
+
+| 档 | 落地内容 | 代码 |
+|---|---|---|
+| P0 | 密钥文件 0600、目录 0700；创建用 `O_CREAT\|O_EXCL` 临时文件 + `os.replace` 原子落盘（无权限竞态、无半截文件）；读取时对已存在的过宽权限**自愈并告警**；`chmod` 失败只告警不阻断 | `akm/secret_store.py`（`harden_file` / `harden_dir` / `_write_secret_file`） |
+| P1 | 默认路径改 `~/Library/Application Support/AKM/secret.key`（非 macOS 为 `~/.config/akm`）；`AKM_SECRET_DIR` / `AKM_SECRET_FILE` / `AKM_SECRET_KEY` 三个环境覆盖；遗留路径（数据目录下的 `secret.key`）**复制**迁移、**保留原文件**；主路径不可写时继续用遗留密钥 | `akm/crypto.py`（`_read_or_create_keys` / `_get_legacy_secret_path`） |
+| P2 | macOS 钥匙串后端（ctypes 直连 Security.framework 的 legacy keychain）；`akm secret migrate --to keychain`；回读校验；`--purge-file` / `akm secret purge-file` 需校验通过才删文件；默认后端仍是 `file` | `akm/secret_store.py`（`_KeychainBridge` 等）、`akm/crypto.py`（`migrate_backend` / `purge_file_keys`） |
+| P3 | 密钥环（当前 + 历史）；`akm secret rotate` 轮换并重新加密存量 `api_key`（单事务；解不开的行单独上报为 `undecryptable`，不阻塞整次轮换）；默认保留 1 个历史密钥，`--drop-previous` 可丢弃 | `akm/crypto.py`（`_KeyRing` / `rotate`）、`akm/key_pool.py`（`reencrypt_all_keys`） |
+| 观测 | `akm secret status`（含 `--json` / `--probe`）、`akm doctor` 增加 `master-key` 检查、`config.json` 新增 `secret_backend` | `akm/cli.py`、`akm/config.py` |
+
+### 10.2 P2 的技术验证结论（真机实测，非推断）
+
+| 路线 | 实测结果 |
+|---|---|
+| Data Protection Keychain（`kSecUseDataProtectionKeychain`） | `SecItemAdd` 返回 **-34018 errSecMissingEntitlement**：未签名/无 entitlement 的进程不可用（与 keyring 走同一套 API 的结果一致），**因此不采用** |
+| Legacy Keychain（本文档采用的路线） | 增 / 改 / 查 / 删全部成功、**无需授权弹框**；条目 ACL 归属创建它的应用，其他进程读取需要用户授权——这是相对 0600 文件的真实增益（同用户任意进程读文件是静默的） |
+
+真机全链路验证（独立 service 名，跑完自删）：文件密钥 0600 → 迁移到钥匙串（明文文件保留）→ **把文件挪走后仅靠钥匙串即可解密、且不会重新落明文** → `purge-file` 校验通过后删除文件 → 再次加载仍可解密 → 清理测试条目后无残留。
+
+**仍默认关闭的原因**：应用二进制变化（自更新重新签名）后，legacy keychain 的 ACL 可能触发一次系统授权框；这一点只能在**打包且签名后的 .app** 上验证，本轮无法覆盖。关闭状态下行为与老版本一致（文件后端），不会给现有用户带来任何弹框风险。
+
+### 10.3 真机验证中发现并修复的缺陷（重要）
+
+**场景**：钥匙串里是密钥 A（例如另一台机器/上一次迁移的残留），磁盘明文文件里是密钥 B。
+
+**原实现的问题**：`purge-file` 只校验"当前内存中的密钥在钥匙串里"，不校验"要删的文件里到底是哪把密钥"，于是会**把 B 删掉**——而 B 可能才是解密现有数据所用的密钥。
+
+**修复**：清理前用 `secret_store.file_key_entries()` 逐个比对，**只要有一个文件的内容不在当前密钥环里就拒绝清理**并列出文件名；同时在加载阶段检测"钥匙串与明文文件不一致"并给出显式告警（不再静默以钥匙串为准）。对应回归测试：`tests/test_secret_store.py::test_purge_refuses_when_file_key_differs_from_keychain`。
+
+这条缺陷是"先真机跑一遍完整链路"才暴露出来的，也说明 **P2 的清理动作必须保留 `--purge-file` 这种显式开关，而不能在迁移时顺手删除明文文件**。
+
+### 10.4 遗留项（未做，按需再议）
+
+1. **打包环境实测** legacy keychain 在自更新/重新签名后的弹框行为；这也是把 `secret_backend` 默认值改成 `keychain` 的前置条件。
+2. **设置页 UI**：`secret_backend` 目前只能通过 `akm config set` / `akm secret migrate` 配置，管理台设置页尚未加开关。
+3. 密钥环当前只保留 1 个历史密钥；如需解开更早的备份，可调大 `secret_store.MAX_PREVIOUS`。
+4. 附录 B 的关联风险（明文导出接口、插件同进程、更新包无签名校验）**均未改动**，仍是整体安全水位的主要短板。
+
+## 附录 A：实测证据（实施前）
 
 ```bash
 $ stat -f "%Sp %z %N" ~/.akm ~/.akm/secret.key ~/.akm/secret.key.zip
@@ -173,7 +213,9 @@ drwxr-x--- nk staff /Users/nk
 drwxr-xr-x root admin /Users
 ```
 
-代码位置：[crypto.py:26](../../akm/crypto.py#L26)（`SECRET_DIR`）、[crypto.py:32](../../akm/crypto.py#L32)（`_get_secret_path`）、[crypto.py:131-139](../../akm/crypto.py#L131-L139)（读/写）、[crypto.py:119-142](../../akm/crypto.py#L119-L142)（`_load_cipher`）、[cleanup.py:109](../../akm/cleanup.py#L109)（副本保留规则）。
+实施前的代码位置（现已迁移到 `akm/secret_store.py`）：`crypto.py:26`（`SECRET_DIR`）、`crypto.py:32`（`_get_secret_path`）、`crypto.py:131-139`（读/写）、`crypto.py:119-142`（`_load_cipher`）、[cleanup.py:109](../../akm/cleanup.py#L109)（副本保留规则）。
+
+实施后（同一台机器）：`~/.akm` 已是 `drwx------`、`~/.akm/secret.key` 已是 `-rw-------`（读取时自愈），新的主密钥位置与历史密钥在 `akm secret status` 中可见。**用户手工备份的 `~/.akm/secret.key.zip` 未被任何流程读取、打包或删除。**
 
 ## 附录 B：关联风险（超出本方案范围，但影响整体安全水位）
 
@@ -182,6 +224,5 @@ drwxr-xr-x root admin /Users
 | 明文导出接口无鉴权 | [server.py:1382](../../akm/server.py#L1382) | `GET /api/keys/export` 返回完整 `api_key`，localhost 任意进程可调 |
 | 插件同进程任意代码 | [plugin_manager.py:273](../../akm/plugins/plugin_manager.py#L273) | 可读密钥文件、也可直接用进程内 `_cipher` |
 | 更新包无签名校验 | [menubar.py:544 起](../../akm/menubar.py#L544) | 仅 TLS + 资产名匹配，能替换 `.app` |
-| 密钥丢失不可恢复 | `crypto.py` | 无恢复设计；明文导出是唯一救生通道，值得写进 README |
 
-排序建议：若目标是"真实防护等级"，**插件隔离与更新包签名校验的优先级高于主密钥存放位置**；P0 因为成本极低、收益明确，可以先做。
+排序建议：若目标是"真实防护等级"，**插件隔离与更新包签名校验的优先级高于主密钥存放位置**；P0 因为成本极低、收益明确，已完成。

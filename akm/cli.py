@@ -297,6 +297,24 @@ def _run_doctor_checks() -> list[tuple[str, str, str]]:
     port = int(cfg.get("server_port", config_module.DEFAULTS["server_port"]))
     service_ok, service_status = _get_service_health(f"http://127.0.0.1:{port}")
     checks.append(("OK" if service_ok else "WARN", "service", service_status))
+
+    # 主密钥保管状态：加载失败意味着所有 api_key 都无法解密，必须报 FAIL
+    try:
+        from akm import crypto
+
+        crypto._load_cipher()
+        status = crypto.custody_status()
+        primary = status["files"]["primary"]
+        checks.append((
+            "OK",
+            "master-key",
+            f"来源 {status['last_source'] or '未知'}，文件 {primary['path']}"
+            f"（{'存在' if primary['exists'] else '不存在'} {primary['mode'] or '-'}）",
+        ))
+        for note in status["last_notes"]:
+            checks.append(("WARN" if "不一致" in note else "OK", "master-key", note))
+    except Exception as exc:  # noqa: BLE001 — 自检不抛异常，如实报告
+        checks.append(("FAIL", "master-key", f"主密钥不可用，已存 api_key 将无法解密: {exc}"))
     return checks
 
 
@@ -441,6 +459,149 @@ def config_set(key, value):
     parsed = _parse_config_value(value, cfg[key])
     config_module.save_config({key: parsed})
     click.echo(f"配置已更新: {key}={_format_config_value(parsed)}")
+
+
+@main.group()
+def secret():
+    """主密钥托管：查看状态、迁移后端、轮换主密钥
+
+    主密钥用于解密 akm.db 里的 api_key，默认存放在
+    ~/Library/Application Support/AKM/secret.key（0600）。后端、权限、
+    迁移与轮换的完整说明见 docs/design/key-custody.md。"""
+    pass
+
+
+@secret.command("status")
+@click.option("--probe", is_flag=True, help="额外做一次钥匙串可用性自检（写入并删除一个探针条目）")
+@click.option("--json", "as_json", is_flag=True, help="以 JSON 输出，便于脚本读取")
+def secret_status(probe, as_json):
+    """查看主密钥来源、文件权限与钥匙串状态"""
+    from akm import crypto
+
+    try:
+        crypto._load_cipher()   # 先加载主密钥（首次运行会生成），保证报告与实际生效状态一致
+        info = crypto.custody_status(probe=probe)
+    except crypto.SecretStoreError as exc:
+        raise click.ClickException(str(exc))
+
+    if as_json:
+        click.echo(json.dumps(info, ensure_ascii=False, indent=2))
+        return
+
+    files = info["files"]
+    keychain = info["keychain"]
+    click.echo(f"配置后端      : {info['configured_backend']}")
+    click.echo(f"默认目录      : {info['default_dir']}")
+    if info["env_inline"]:
+        click.echo("环境覆盖      : AKM_SECRET_KEY（内联密钥，只读，不落盘）")
+    if info["env_file"]:
+        click.echo(f"环境覆盖      : AKM_SECRET_FILE={info['env_file']}")
+    click.echo(f"最近来源      : {info['last_source'] or '（本进程尚未加载过主密钥）'}")
+    click.echo(f"内存密钥数    : {info['loaded_keys']}（1=仅当前；大于 1=含历史密钥）")
+
+    primary = files["primary"]
+    mode = primary["mode"] or "-"
+    exists = "存在" if primary["exists"] else "不存在"
+    click.echo(f"主密钥文件    : {primary['path']}（{exists}，权限 {mode}）")
+    if primary["previous"]:
+        click.echo(f"历史密钥文件  : {primary['previous']} 个（用于解开轮换前的存量密文）")
+    click.echo(f"主密钥目录    : {files['primary_dir']}（权限 {files['primary_dir_mode'] or '-'}）")
+    legacy = files["legacy"]
+    if legacy["path"]:
+        if legacy["exists"]:
+            click.echo(f"遗留路径      : {legacy['path']}（存在，权限 {legacy['mode']}；迁移后保留）")
+        else:
+            click.echo(f"遗留路径      : {legacy['path']}（不存在）")
+    if not keychain["supported"]:
+        click.echo("钥匙串        : 当前平台不支持（仅 macOS）")
+    else:
+        accounts = keychain["accounts"]
+        click.echo(f"钥匙串        : 服务 {keychain['service']}，条目 {len(accounts)} 个"
+                   + (f"（{'、'.join(accounts)}）" if accounts else ""))
+        if keychain["note"]:
+            click.echo(f"               {keychain['note']}")
+        if probe:
+            probe_info = info.get("keychain_probe", {})
+            click.echo(f"钥匙串自检    : {'可用' if probe_info.get('ok') else '不可用'} — {probe_info.get('message', '')}")
+    for note in info["last_notes"]:
+        click.echo(f"提示          : {note}")
+
+
+@secret.command("migrate")
+@click.option("--to", "target", type=click.Choice(["file", "keychain"]), required=True,
+              help="目标后端：file=本地 0600 文件；keychain=macOS 钥匙串")
+@click.option("--purge-file", is_flag=True,
+              help="迁移到钥匙串并回读校验通过后，删除明文密钥文件（默认保留）")
+@click.option("--no-update-config", is_flag=True, help="不自动把 secret_backend 写入 config.json")
+def secret_migrate(target, purge_file, no_update_config):
+    """把主密钥迁移到指定后端（默认保留原文件，可回滚）"""
+    from akm import crypto
+
+    try:
+        result = crypto.migrate_backend(target, purge_file=purge_file)
+    except crypto.SecretStoreError as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo(f"迁移完成：{result['source']} → {result['target']}")
+    for action in result["actions"]:
+        click.echo(f"  · {action}")
+    if no_update_config:
+        click.echo(f"  · 已跳过写配置，需手动执行: akm config set secret_backend {target}")
+    else:
+        config_module.save_config({"secret_backend": target})
+        click.echo(f"  · 已写入配置 secret_backend={target}")
+
+
+@secret.command("rotate")
+@click.option("--drop-previous", is_flag=True,
+              help="不保留旧密钥；默认保留，以便解开轮换前的存量密文")
+@click.option("--no-reencrypt", is_flag=True, help="只换主密钥，不重新加密数据库中的存量 api_key")
+def secret_rotate(drop_previous, no_reencrypt):
+    """轮换主密钥，并用新密钥重新加密数据库中的 api_key"""
+    from akm import crypto
+    from akm.key_pool import reencrypt_all_keys
+
+    try:
+        info = crypto.rotate(keep_previous=not drop_previous)
+    except crypto.SecretStoreError as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo(f"主密钥已轮换（轮换前来源：{info['previous_source']}）")
+    for target in info["targets"]:
+        click.echo(f"  · 写入 {target}")
+    if info["previous_kept"]:
+        click.echo("  · 已保留旧密钥用于解密存量密文（可用 akm secret status 查看）")
+    else:
+        click.echo("  · 未保留旧密钥：轮换前的存量密文将无法解开")
+
+    if no_reencrypt:
+        click.echo("已跳过重新加密存量 api_key（--no-reencrypt）")
+        return
+    stats = reencrypt_all_keys()
+    click.echo(
+        f"已重新加密存量 api_key：{stats['reencrypted']}/{stats['total']}"
+        f"（跳过空值 {stats['skipped']}）"
+    )
+
+
+@secret.command("purge-file")
+@click.option("--yes", is_flag=True, help="跳过交互确认")
+def secret_purge_file(yes):
+    """删除明文密钥文件（需先在钥匙串中校验到同一把主密钥）"""
+    from akm import crypto
+
+    if not yes:
+        click.confirm(
+            "将删除明文主密钥文件（只删主密钥，不动数据目录里的其他文件）。确认继续？",
+            abort=True,
+        )
+    try:
+        result = crypto.purge_file_keys()
+    except crypto.SecretStoreError as exc:
+        raise click.ClickException(str(exc))
+    click.echo(f"已删除 {len(result['removed'])} 个明文密钥文件（校验来源：{result['verified_by']}）")
+    for path in result["removed"]:
+        click.echo(f"  · {path}")
 
 
 @main.group()
