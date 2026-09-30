@@ -2,11 +2,11 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.51**：主密钥托管加固——密钥文件权限收紧到 `0600`（目录 `0700`）并在读取时自愈，主密钥移出数据目录（`~/Library/Application Support/AKM/secret.key`，旧位置存在时自动迁移且保留原文件），新增 `akm secret status / migrate / rotate / purge-file`（轮换会重新加密存量 `api_key`），并可选改用 macOS 钥匙串存放。
+当前版本 **v0.1.52**：打包签名可固化——默认用本机自签证书（`scripts/make_signing_cert.sh`，幂等创建/复用）签名，`Info.plist` 补上桌面/文稿/下载目录用途声明，找不到可用身份时回退 ad-hoc 并打印告警；由于签名身份只绑定 bundle id 与证书、不随产物内容变化，重建与自动更新后 macOS 的目录授权不再反复弹窗，点过一次「允许」即长期有效。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
-macOS 构建在资源后处理完成后重新进行 ad-hoc 签名并校验，校验失败时阻止生成发布包；该签名不等同于 Apple 公证。
+macOS 构建在资源后处理完成后使用稳定签名身份重新签名并校验，校验失败时阻止生成发布包；没有可用身份时回退 ad-hoc 并打印告警。该自签身份不等同于 Developer ID 签名或 Apple 公证。
 
 ## 安装
 
@@ -32,6 +32,9 @@ mv pyproject.toml pyproject.toml.bak
 python setup.py py2app
 mv pyproject.toml.bak pyproject.toml
 
+# 推荐：先创建/复用一个稳定签名身份（幂等；已存在则只校验，不重建）
+./scripts/make_signing_cert.sh
+
 # 推荐：使用脚本打包（自动处理 pyproject 备份恢复）
 ./scripts/build_app.sh
 
@@ -44,6 +47,8 @@ python setup.py py2app
 ```
 
 应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。
+
+打包签名：`scripts/build_app.sh` 按 `AKM_SIGN_IDENTITY` 环境变量 → 本机自签证书「AKM Local Signing」→ ad-hoc 的顺序选取签名身份，回退 ad-hoc 时会打印告警。自签证书用 `scripts/make_signing_cert.sh` 创建（幂等：已存在且有效只做校验，同名但缺信任只补信任，都不重建），证书与私钥默认在 `~/Library/Application Support/AKM/signing`（目录 `0700`、私钥与 `.p12` 为 `0600`），**不在仓库内**，请随 `~/.akm` 一并备份。固定身份的原因：ad-hoc 签名的指定要求（designated requirement）是 cdhash，每次重建都被 macOS 当成「新 App」，于是「访问桌面/文稿/下载」这类授权会反复弹窗；同一张证书的指定要求只绑定 bundle id 与证书，重建与自动更新后身份不变，用户点过一次「允许」即长期有效。应用访问这些目录的原因是插件工作区可能位于其中（例如知识库绑定的项目就在桌面上），用途声明见 `setup.py` 里的 `NSDesktopFolderUsageDescription` 等字段。
 
 打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后下载 zip、解压替换并自动重启（静默更新会避让进行中的转发请求，检测到在途请求/流式响应时每隔 30 秒重试、替换前等待请求排空最长 300 秒再重启）；菜单栏「检查更新」可手动检查，有更新时在自定义弹窗内展示可滚动 Release Note，确认后同一弹窗实时显示下载/安装进度，下载期间右侧按钮变「取消更新」可中断并重试，无更新则弹窗提示已是最新；检查失败（如 GitHub 匿名限流 403）会如实提示「检查更新失败」，不会误报「已是最新」。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -268,7 +273,7 @@ akm-menubar
 | `update_cache_cleanup` | `true` | 自动清理 `~/.akm/updates/` 历史更新包与旧版本 `.app` 备份，只保留最新更新包与回滚备份（启动与唤醒时执行；仅显式设为 `false` 才关闭） |
 | `text_log_rotation` | `false` | 自动轮转数据目录根下的 append-only 文本日志（`error.log`、`keys.log`、`wake_recovery.log`、`plugin.launch.log` 等），超过阈值转存为 `.1` 并保留一代；默认关闭，需显式设为 `true` 开启 |
 | `log_file_max_mb` | `5` | 单个文本日志的轮转阈值（MB），仅在上一条开启时生效 |
-| `secret_backend` | `file` | 主密钥存放后端：`file`（默认，`~/Library/Application Support/AKM/secret.key`，0600）/ `keychain`（macOS 钥匙串，入口是 `akm secret migrate --to keychain`）。默认保持文件后端，是因为打包应用自更新换签名后钥匙串读取可能弹一次系统授权框；完整取舍与恢复方式见 [docs/design/key-custody.md](docs/design/key-custody.md) |
+| `secret_backend` | `file` | 主密钥存放后端：`file`（默认，`~/Library/Application Support/AKM/secret.key`，0600）/ `keychain`（macOS 钥匙串，入口是 `akm secret migrate --to keychain`）。默认保持文件后端，是因为钥匙串路线尚未在**签名打包后的 `.app`** 上做过端到端验证（v0.1.52 起构建改用稳定签名身份，身份不再随重建/自更新变化，「换签名导致钥匙串读取弹授权框」这一风险已基本消除，但实测仍是改默认值的前置条件）；完整取舍与恢复方式见 [docs/design/key-custody.md](docs/design/key-custody.md) |
 | `stream_capture_max_bytes` | `262144` | 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB） |
 | `json_viewer_max_text_length` | `600000` | JSON 查看器超长文本阈值（超过后仅允许下载原文） |
 
