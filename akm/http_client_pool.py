@@ -78,15 +78,45 @@ class _PoolEntry:
 
 
 def _pool_object(client) -> object | None:
-    """取出 httpx client 底层的 httpcore 连接池；取不到时返回 None。
-
-    连接池详情页要展示「真正活着」的 TCP 连接、并支持只关空闲连接，因此这里
-    访问 httpx 的私有传输对象。所有调用点都做了兜底：拿不到就退化为只展示 AKM
-    侧统计，绝不影响转发链路。
-    """
+    """取出 httpx client 默认 transport 底层的 httpcore 连接池。"""
     transport = getattr(client, "_transport", None)
     pool = getattr(transport, "_pool", None)
     return pool if pool is not None else None
+
+
+def _pool_objects(client) -> list:
+    """取出 client 默认及代理 mounts 下的 httpcore 连接池，按对象去重。
+
+    显式配置 HTTP 代理时，httpx 会把真实请求 transport 放进 ``_mounts``，
+    ``_transport`` 则通常不会承载出站请求。只检查默认 transport 会让代理模式下
+    的活动连接被误报为「无连接」，也会漏掉空闲连接清理。这里与 ``_pool_object``
+    一样依赖 httpx 私有结构，读取失败时安全退化为空列表。
+    """
+    pools = []
+    seen = set()
+
+    def add_transport(transport):
+        if transport is None:
+            return
+        pool = getattr(transport, "_pool", None)
+        if pool is None or id(pool) in seen:
+            return
+        seen.add(id(pool))
+        pools.append(pool)
+
+    try:
+        # 经统一入口取默认池，便于无代理 client 与旧版探测替身兼容。
+        default_pool = _pool_object(client)
+        if default_pool is not None and id(default_pool) not in seen:
+            seen.add(id(default_pool))
+            pools.append(default_pool)
+        mounts = getattr(client, "_mounts", None)
+        if isinstance(mounts, dict):
+            for transport in mounts.values():
+                add_transport(transport)
+    except Exception:
+        return pools
+    return pools
 
 
 def _pool_connections(pool) -> list:
@@ -174,6 +204,22 @@ def _probe_pool(pool) -> dict:
             except Exception:
                 continue
 
+    return {"counts": counts, "waiting": waiting, "connections": connections}
+
+
+def _probe_pools(pools: list) -> dict:
+    """聚合 client 默认及代理 transport 下的连接池快照。"""
+    counts = {key: 0 for key in _CONNECTION_STATE_KEYS} | {"total": 0}
+    connections = []
+    waiting = 0
+    for pool in pools:
+        probe = _probe_pool(pool)
+        waiting += probe["waiting"]
+        connections.extend(probe["connections"])
+        for item in probe["connections"]:
+            state = item.get("state") or "unknown"
+            counts[state if state in _CONNECTION_STATE_KEYS else "unknown"] += 1
+    counts["total"] = len(connections)
     return {"counts": counts, "waiting": waiting, "connections": connections}
 
 
@@ -326,12 +372,11 @@ class HttpClientPoolManager:
         closed = 0
         affected = 0
         for entry in list(self._entries.values()):
-            pool = _pool_object(entry.client)
-            if pool is None:
-                continue
-            count = await self._close_idle_in_pool(pool)
-            if count:
-                closed += count
+            entry_closed = 0
+            for pool in _pool_objects(entry.client):
+                entry_closed += await self._close_idle_in_pool(pool)
+            if entry_closed:
+                closed += entry_closed
                 affected += 1
         self.connections_closed_total += closed
         return {"closed_connections": closed, "affected_pools": affected}
@@ -450,11 +495,7 @@ class HttpClientPoolManager:
         }
 
         for pool_key, entry in list(self._entries.items()):
-            pool = _pool_object(entry.client)
-            if pool is not None:
-                probe = _probe_pool(pool)
-            else:
-                probe = {"counts": {key: 0 for key in _CONNECTION_STATE_KEYS} | {"total": 0}, "waiting": 0, "connections": []}
+            probe = _probe_pools(_pool_objects(entry.client))
             counts = probe["counts"]
             idle_sec = max(0.0, now - entry.last_used_at)
             stale = idle_sec >= self.idle_ttl_sec

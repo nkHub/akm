@@ -2,9 +2,9 @@
 
 ## 一、版本号统一
 
-各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.53**。
+各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.53**。未发布的连接池代理探测与 Key 连通性测试修复见 [logs.md](logs.md) 顶部；不涉及版本号、打包配置或新增资源登记。
 
-发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 0.1.14，包含已重建的相对路径资源产物）；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
+发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 0.1.14，包含已重建的相对路径资源产物）；未发布连接池代理探测修复只改现有 Python 模块、测试与说明，无新增模板 / 静态文件，不改当前版本号；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新签名并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。签名身份按 `AKM_SIGN_IDENTITY` → 本机自签证书「AKM Local Signing」→ ad-hoc 的顺序选取（证书用 `scripts/make_signing_cert.sh` 幂等创建/复用，材料在 `~/Library/Application Support/AKM/signing`，目录 `0700`、私钥 `0600`，**不进仓库**），回退 ad-hoc 时会打印告警。固定身份的意义：ad-hoc 的指定要求是 cdhash，每次重建都被 macOS 当成新 App，桌面/文稿/下载等目录授权会反复弹窗；同一张证书的指定要求只绑定 bundle id 与证书，重建与自动更新后身份不变，用户授权一次即长期有效。该自签身份不等同于 Developer ID 签名或 Apple 公证。
 

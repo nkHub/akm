@@ -164,10 +164,11 @@ class _FakeTransport:
 
 
 class _FakePoolClient:
-    """带 _transport._pool 结构的假 client，用于让 _pool_object 能取到连接池。"""
+    """带默认 transport 与可选代理 mounts 的假 httpx client。"""
 
-    def __init__(self, pool):
+    def __init__(self, pool, mounts=None):
         self._transport = _FakeTransport(pool)
+        self._mounts = mounts or {}
 
     async def aclose(self):
         return None
@@ -197,6 +198,50 @@ async def test_http_client_pool_snapshot_reports_routes_and_counters():
         # 未真正发请求时池内没有 TCP 连接，但池条目仍然可见
         assert hot["connection_total"] == 0
         assert hot["state"] == "empty"
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_snapshot_includes_proxy_mount_connections(monkeypatch):
+    """显式代理 transport 的连接也必须进入快照，不能被误报成无连接。"""
+    from akm.http_client_pool import _pool_objects
+
+    pool = HttpClientPoolManager(max_pools=4)
+    try:
+        await pool.get_client(provider="openai", key_alias="share", model="gpt", api_path="chat/completions")
+        default_pool = _FakePool([_FakeConnection("idle")])
+        proxy_pool = _FakePool([_FakeConnection("active"), _FakeConnection("idle")])
+        client = _FakePoolClient(default_pool, mounts={"https://": _FakeTransport(proxy_pool)})
+        pool._entries[next(iter(pool._entries))].client = client
+
+        assert _pool_objects(client) == [default_pool, proxy_pool]
+        snap = pool.snapshot()
+        row = snap["pools"][0]
+        assert row["connection_total"] == 3
+        assert row["active_connections"] == 1
+        assert row["idle_connections"] == 2
+        assert snap["totals"]["live_connections"] == 3
+    finally:
+        await pool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_client_pool_close_idle_connections_in_proxy_mount(monkeypatch):
+    """清理空闲连接也应覆盖代理 mounts 中真实使用的连接池。"""
+    pool = HttpClientPoolManager(max_pools=4)
+    try:
+        await pool.get_client(provider="openai", key_alias="share", model="gpt", api_path="chat/completions")
+        default_pool = _FakePool([])
+        idle_conn = _FakeConnection("idle")
+        proxy_pool = _FakePool([idle_conn])
+        client = _FakePoolClient(default_pool, mounts={"https://": _FakeTransport(proxy_pool)})
+        pool._entries[next(iter(pool._entries))].client = client
+
+        result = await pool.close_idle_connections()
+        assert result == {"closed_connections": 1, "affected_pools": 1}
+        assert idle_conn.closed is True
+        assert proxy_pool._connections == []
     finally:
         await pool.aclose()
 
@@ -1449,6 +1494,40 @@ async def test_test_key_connectivity_openai_uses_chat_only(monkeypatch):
     assert result["api_path"] == "chat/completions"
     assert result["attempted_paths"] == ["chat/completions"]
     assert called_urls == ["https://example.com/v1/chat/completions"]
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_uses_configured_outbound_proxy(monkeypatch):
+    """Key 连通性测试必须把已启用的 AKM 出站代理交给 HTTPX。"""
+    captured = {}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.resolve_http_proxy_url", lambda: "http://127.0.0.1:7890")
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await check_key_connectivity({
+        "alias": "share",
+        "provider": "openai",
+        "api_key": "sk-test",
+        "base_url": "https://example.com",
+        "models": "gpt-5.4",
+    })
+
+    assert result["ok"] is True
+    assert captured["proxy"] == "http://127.0.0.1:7890"
+    assert captured["trust_env"] is False
 
 
 @pytest.mark.asyncio
