@@ -54,9 +54,33 @@ else
   echo "WARN: tinyaes.so 未找到，跳过（运行时 import tinyaes 将失败）"
 fi
 
-# py2app 已对应用签名，但后续资源精简和扩展补入会破坏资源封印；
-# 所有打包后处理完成后重新做 ad-hoc 签名，并在校验失败时阻止发布包生成。
-codesign --force --deep --sign - "dist/AI Key Manager.app"
+# py2app 已对应用签名，但后续资源精简和扩展补入会破坏资源封印；所有打包后处理
+# 完成后重新签名，并在校验失败时阻止发布包生成。
+#
+# 签名身份优先级：AKM_SIGN_IDENTITY 环境变量 → 本机自签证书 "AKM Local Signing" →
+# 回退 ad-hoc。ad-hoc 签名的 designated requirement 是 cdhash，每次重建都会变成
+# 「新 App」，macOS 会重新询问桌面/文稿/下载等目录权限；换成同一张证书后，指定
+# 要求只绑定 bundle id 与证书，重建不再改变身份，点过一次「允许」即长期有效。
+# 证书可用 scripts/make_signing_cert.sh 生成（幂等，已存在则复用）。
+SIGN_IDENTITY="${AKM_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  # 先取回身份列表再原地匹配：`security ... | grep -q` 在 set -o pipefail 下可能因
+  # grep 提前退出触发 SIGPIPE，把「有身份」误判成「没身份」而回退 ad-hoc。
+  AVAILABLE_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  if grep -qF '"AKM Local Signing"' <<<"$AVAILABLE_IDENTITIES"; then
+    SIGN_IDENTITY="AKM Local Signing"
+  fi
+fi
+
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  echo "签名身份: $SIGN_IDENTITY"
+  codesign --force --deep --sign "$SIGN_IDENTITY" "dist/AI Key Manager.app"
+else
+  echo "WARN: 未找到稳定签名身份，回退 ad-hoc 签名。" >&2
+  echo "WARN: ad-hoc 的指定要求是 cdhash，每次重建都会被 macOS 当成新 App，目录权限会反复弹窗。" >&2
+  echo "WARN: 如需固化，先运行 scripts/make_signing_cert.sh，或设置 AKM_SIGN_IDENTITY=<身份名>。" >&2
+  codesign --force --deep --sign - "dist/AI Key Manager.app"
+fi
 codesign --verify --deep --strict "dist/AI Key Manager.app"
 
 echo "Build complete: $ROOT_DIR/dist/AI Key Manager.app"

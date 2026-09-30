@@ -60,6 +60,12 @@ OPTIONS = {
         "CFBundleShortVersionString": __version__,
         "LSUIElement": True,  # 菜单栏应用，不显示 Dock 图标
         "NSHighResolutionCapable": True,
+        # 目录用途声明：插件工作区可能位于桌面/文稿/下载等受保护目录（例如知识库
+        # 绑定的项目就在桌面上），缺少声明时系统弹窗只能显示默认文案，无法向用户
+        # 解释访问原因。声明本身不授予权限，仍需用户在弹窗中确认一次。
+        "NSDesktopFolderUsageDescription": "AKM 需要读取你绑定为插件工作区的桌面项目文件（例如知识库索引与项目记忆），仅在你使用相关功能时访问。",
+        "NSDocumentsFolderUsageDescription": "AKM 需要读取你绑定为插件工作区的文稿目录文件，仅在你使用相关功能时访问。",
+        "NSDownloadsFolderUsageDescription": "AKM 需要读取你指定为下载/更新目录的文件（例如自动更新包），仅在你使用相关功能时访问。",
     },
 }
 

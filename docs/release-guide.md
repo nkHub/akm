@@ -2,11 +2,11 @@
 
 ## 一、版本号统一
 
-各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.51**。
+各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.52**。
 
-发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中，无新增模板 / 静态文件）；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
+发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件）；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
 
-`scripts/build_app.sh` 在资源精简和扩展补入后重新进行 ad-hoc 签名，并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。ad-hoc 签名不等同于 Developer ID 签名或 Apple 公证。
+`scripts/build_app.sh` 在资源精简和扩展补入后重新签名并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。签名身份按 `AKM_SIGN_IDENTITY` → 本机自签证书「AKM Local Signing」→ ad-hoc 的顺序选取（证书用 `scripts/make_signing_cert.sh` 幂等创建/复用，材料在 `~/Library/Application Support/AKM/signing`，目录 `0700`、私钥 `0600`，**不进仓库**），回退 ad-hoc 时会打印告警。固定身份的意义：ad-hoc 的指定要求是 cdhash，每次重建都被 macOS 当成新 App，桌面/文稿/下载等目录授权会反复弹窗；同一张证书的指定要求只绑定 bundle id 与证书，重建与自动更新后身份不变，用户授权一次即长期有效。该自签身份不等同于 Developer ID 签名或 Apple 公证。
 
 ### 当前问题
 
@@ -52,6 +52,7 @@ from akm import __version__
 
 - Python 3.12.13
 - macOS（py2app 仅支持 macOS）
+- 推荐先跑一次 `./scripts/make_signing_cert.sh`，让构建使用稳定签名身份；不跑则回退 ad-hoc（仍可构建，但每次重建都会被系统当成新 App，桌面/文稿/下载等目录授权会反复弹窗）
 
 如果本次打包需要保留 `markdown_kb` 的 `sqlite-vec` 能力，建议先确认打包所用 Python 的 `sqlite3` 支持 `enable_load_extension()`，并且 `_sqlite3` 实际链接到了 Homebrew SQLite。当前仓库已经把 `sqlite_vec` 加进 `setup.py` 的 `packages/includes`，但运行时是否真的能加载扩展，仍取决于打包前那份 Python 本身的 SQLite 绑定方式。
 
@@ -384,6 +385,7 @@ gh release create "$TAG" "$DMG" "$ZIP" --title "$TAG" --generate-notes
 - [ ] 已检查并同步文档：`README.md`；版本变更追加到 `docs/logs.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`；如涉及组件同步 `docs/design/web-components.md`
 - [ ] 新增的模板 / 静态文件已登记进 `setup.py` 的 `DATA_FILES`（用「二、打包流程」里的差集脚本自查，脚本会顺带列出 `.DS_Store`，那是无害噪音）；新增的核心运行时模块已登记进 `setup.py` 的 `includes`
 - [ ] 清理构建缓存：`rm -rf build dist`
+- [ ] 已确认签名身份：`./scripts/make_signing_cert.sh` 提示复用既有证书（或显式设置 `AKM_SIGN_IDENTITY`），打包日志里没有 ad-hoc 回退告警
 - [ ] 执行打包命令
 - [ ] 验证 `.app` 可正常启动
 - [ ] 创建分发包（zip / DMG）
