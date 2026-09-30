@@ -3,6 +3,8 @@
 import json
 import logging
 import asyncio
+import hashlib
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -1875,3 +1877,190 @@ async def test_data_filter_dashboard_card_keeps_stats_without_recent(tmp_path):
     recent = stats.get("recent") or []
     assert recent[0]["type"] == "guard_block"
     assert recent[1]["type"] == "masked_request"
+
+
+def _match_log_records(tmp_path) -> list:
+    """读取命中明细日志（matches.jsonl）为记录列表。"""
+    path = tmp_path / "matches.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line.strip()]
+
+
+def _match_log_plugin(tmp_path, logger_name: str, **config) -> DataFilterGuard:
+    """构造注入了 name / 数据目录的插件实例（挂载与正式运行一致）。"""
+    plugin = DataFilterGuard()
+    plugin.logger = logging.getLogger(logger_name)
+    plugin.name = "data_filter_guard"
+    plugin._data_root = tmp_path
+    plugin.config = {
+        "enabled": True,
+        "sensitive_fields": "api_key",
+        "regex_rules": "",
+        "request_text_paths": "",
+        **config,
+    }
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_data_filter_match_log_redacted_records_metadata_without_plaintext(tmp_path):
+    """默认 redacted 档：逐条记录命中元信息与占位符，但不落任何敏感明文。"""
+    plugin = _match_log_plugin(
+        tmp_path,
+        "test.data_filter_guard.match_log",
+        keyword_rules="MYTOKEN",
+        request_text_paths="messages[].content",
+    )
+    await plugin.on_load()
+
+    secret = "sk-live-abcdefghijklmnopqrstuvwxyz"
+    ctx = _ctx(
+        {
+            "api_key": secret,
+            "messages": [{"role": "user", "content": f"token MYTOKEN / {secret}"}],
+        },
+        api_path="chat/completions",
+    )
+    masked = await plugin.on_request(ctx)
+    assert masked is not None
+
+    log_path = tmp_path / "matches.jsonl"
+    assert log_path.exists()
+    # 明细日志与 stats.json 同目录，文件权限 0600
+    assert oct(log_path.stat().st_mode)[-3:] == "600"
+    raw = log_path.read_text("utf-8")
+    assert secret not in raw
+    assert "MYTOKEN" not in raw
+
+    records = _match_log_records(tmp_path)
+    assert {record["event"] for record in records} == {"mask"}
+    assert {record["rule"] for record in records} == {"field", "keyword"}
+
+    field_record = next(record for record in records if record["rule"] == "field")
+    assert field_record["tag"] == "api_key"
+    assert field_record["path"] == "api_key"
+    assert field_record["placeholder"] == masked["api_key"]
+    assert field_record["original_len"] == len(secret)
+    assert field_record["original_sha256_8"] == hashlib.sha256(secret.encode("utf-8")).hexdigest()[:8]
+    assert field_record["original_preview"] == secret[:2] + "…" + secret[-2:]
+    assert "original" not in field_record
+    # 时间戳可解析且带时区
+    assert datetime.fromisoformat(field_record["ts"]).tzinfo is not None
+
+    keyword_record = next(record for record in records if record["rule"] == "keyword")
+    assert keyword_record["path"] == "messages[0].content"
+
+
+@pytest.mark.asyncio
+async def test_data_filter_match_log_full_mode_records_plaintext_and_rotates(tmp_path):
+    """full 档才落明文；超过单文件上限时滚动为 matches.jsonl.1。"""
+    plugin = _match_log_plugin(
+        tmp_path,
+        "test.data_filter_guard.match_log_full",
+        match_log="full",
+        match_log_max_bytes=300,
+    )
+    await plugin.on_load()
+
+    for idx in range(6):
+        await plugin.on_request(_ctx({"api_key": f"sk-rotation-secret-{idx:03d}-abcdef"}))
+
+    log_path = tmp_path / "matches.jsonl"
+    rotated = tmp_path / "matches.jsonl.1"
+    assert log_path.exists() and rotated.exists()
+    merged = log_path.read_text("utf-8") + rotated.read_text("utf-8")
+    assert "sk-rotation-secret-" in merged
+    assert '"original"' in merged
+
+
+@pytest.mark.asyncio
+async def test_data_filter_match_log_off_and_unnamed_instance_write_nothing(tmp_path):
+    """off 档不写；未注入 name 的实例即使 redacted 也不落盘；非法档位回退 redacted。"""
+    plugin = _match_log_plugin(tmp_path, "test.data_filter_guard.match_log_off", match_log="off")
+    await plugin.on_load()
+    await plugin.on_request(_ctx({"api_key": "sk-off-mode-secret-value"}))
+    assert not (tmp_path / "matches.jsonl").exists()
+
+    bare = DataFilterGuard()
+    bare.logger = logging.getLogger("test.data_filter_guard.match_log_bare")
+    bare._data_root = tmp_path
+    bare.config = {
+        "enabled": True,
+        "sensitive_fields": "api_key",
+        "regex_rules": "",
+        "request_text_paths": "",
+    }
+    await bare.on_load()
+    await bare.on_request(_ctx({"api_key": "sk-bare-secret-value"}))
+    assert not (tmp_path / "matches.jsonl").exists()
+
+    fallback_root = tmp_path / "fallback"
+    fallback = _match_log_plugin(
+        fallback_root, "test.data_filter_guard.match_log_fallback", match_log="verbose"
+    )
+    await fallback.on_load()
+    await fallback.on_request(_ctx({"api_key": "sk-fallback-secret-value"}))
+    fallback_log = fallback_root / "matches.jsonl"
+    assert fallback_log.exists()
+    assert "sk-fallback-secret-value" not in fallback_log.read_text("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_data_filter_match_log_records_restore_and_remaining_placeholder(tmp_path):
+    """响应侧逐条留痕：精确还原记 restore=true，仍残留的占位符记 restore_miss。"""
+    plugin = _match_log_plugin(
+        tmp_path, "test.data_filter_guard.match_log_restore", enable_response_guard=False
+    )
+    await plugin.on_load()
+
+    secret = "sk-restore-secret-abcdefghij"
+    ctx = _ctx({"api_key": secret}, api_path="chat/completions")
+    await plugin.on_request(ctx)
+    reverse_map = ctx.bag_get("data_filter_guard.reverse_map")
+    placeholder = next(iter(reverse_map))
+    leftover = "<AKM-SEC:unknown_tag@99:abcdef/>"
+    ctx.response = {
+        "stream": False,
+        "api_path": "chat/completions",
+        "response_body": json.dumps(
+            {"choices": [{"message": {"content": f"{placeholder} {leftover}"}}]}
+        ),
+    }
+    await plugin.on_response(ctx)
+
+    records = _match_log_records(tmp_path)
+    restore_records = [record for record in records if record["event"] == "restore"]
+    miss_records = [record for record in records if record["event"] == "restore_miss"]
+    assert [record["placeholder"] for record in restore_records] == [placeholder]
+    assert restore_records[0]["restored"] is True
+    assert restore_records[0]["tag"] == "api_key"
+    assert restore_records[0]["original_sha256_8"] == hashlib.sha256(
+        secret.encode("utf-8")
+    ).hexdigest()[:8]
+    assert [record["placeholder"] for record in miss_records] == [leftover]
+    assert miss_records[0]["restored"] is False
+    assert miss_records[0]["reason"] == "placeholder_left_in_response"
+
+
+@pytest.mark.asyncio
+async def test_data_filter_match_log_map_unavailable_records_tags(tmp_path):
+    """响应含占位符但 reverse_map 不可用时，按 tag 记一条 restore_miss。"""
+    plugin = _match_log_plugin(
+        tmp_path, "test.data_filter_guard.match_log_no_map", enable_response_guard=False
+    )
+    await plugin.on_load()
+
+    ctx = _ctx({"messages": [{"role": "user", "content": "hi"}]}, api_path="chat/completions")
+    ctx.response = {
+        "stream": False,
+        "api_path": "chat/completions",
+        "response_body": '{"choices":[{"message":{"content":"<AKM-SEC:api_key@1:aaaaaa/>"}}]}',
+    }
+    await plugin.on_response(ctx)
+
+    records = _match_log_records(tmp_path)
+    assert len(records) == 1
+    assert records[0]["event"] == "restore_miss"
+    assert records[0]["tag"] == "api_key"
+    assert records[0]["reason"].startswith("map_unavailable")
