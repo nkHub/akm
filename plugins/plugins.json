@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-28T12:05:23+0800",
+  "generated_at": "2026-09-30T15:16:27+0800",
   "plugins": {
     "agent-tools": {
       "version": "0.1.5",
@@ -38,13 +38,13 @@
       "size": 4823
     },
     "data_filter_guard": {
-      "version": "0.1.5",
-      "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录（管理台首页卡片展示）",
+      "version": "0.1.6",
+      "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录（管理台首页卡片展示）与逐条命中明细日志（默认掩码预览，不落明文）",
       "category": "filter",
       "has_menu": false,
-      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/data_filter_guard-0.1.5.zip",
-      "sha256": "35f5572d8fbd64826dca6d0763c5769aa998a964e5caadcd637d00347ca42430",
-      "size": 29097
+      "zip_url": "https://github.com/nkHub/akm/releases/download/plugin-market/data_filter_guard-0.1.6.zip",
+      "sha256": "c082fd1a109098881297a09e22505247a314304a06447301a4d1b617d785641e",
+      "size": 33852
     },
     "error_handler": {
       "version": "0.1.1",
