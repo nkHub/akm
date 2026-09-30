@@ -24,6 +24,13 @@ def _isolate(tmp_path, monkeypatch, subdir="keydir"):
     return target
 
 
+def secret_store_key_blob(key: bytes, payload: bytes) -> bytes:
+    """用指定主密钥加密一段明文（用于断言"确实用的是这把密钥"）"""
+    from akm.crypto import _MiniFernet
+
+    return _MiniFernet(key).encrypt(payload)
+
+
 # ── P0：权限加固 ────────────────────────────────────────────
 
 def test_new_key_file_is_0600_and_dir_is_0700(tmp_path, monkeypatch):
@@ -325,6 +332,53 @@ def test_migrate_to_keychain_with_purge_removes_matching_file(tmp_path, monkeypa
     assert fake_keychain.items[secret_store.KEYCHAIN_ACCOUNT] == key
     assert not path.exists()
     assert any("已删除明文密钥文件" in action for action in result["actions"])
+
+
+def test_missing_file_falls_back_to_keychain_instead_of_generating_new_key(
+    tmp_path, monkeypatch, fake_keychain
+):
+    """文件后端下明文文件缺失时，先用钥匙串里的同一把密钥兜底，而不是生成新密钥。
+
+    生成新密钥是唯一不可逆的动作（已存 api_key 会永久不可解），这条兜底覆盖
+    "文件被误删 / 迁移到钥匙串后配置被改回 file" 这类会把用户数据锁死的路径。
+    """
+    key = secret_store.generate_key()
+    fake_keychain.items[secret_store.KEYCHAIN_ACCOUNT] = key
+    monkeypatch.setenv("AKM_SECRET_BACKEND", "file")
+    key_dir = _isolate(tmp_path, monkeypatch)
+
+    cipher = crypto._load_cipher()
+
+    assert cipher.key_count == 1
+    assert cipher.decrypt(secret_store_key_blob(key, b"kept")) == b"kept"
+    assert not (key_dir / secret_store.SECRET_FILE_NAME).exists(), "兜底不应重新落盘明文"
+    assert any("钥匙串" in note and "未找到明文密钥文件" in note for note in crypto._last_notes)
+
+
+def test_missing_file_without_keychain_still_generates_new_key(tmp_path, monkeypatch, fake_keychain):
+    """钥匙串里也没有条目时，仍然按老行为生成新主密钥（首次安装路径不受影响）"""
+    monkeypatch.setenv("AKM_SECRET_BACKEND", "file")
+    key_dir = _isolate(tmp_path, monkeypatch)
+
+    crypto._load_cipher()
+
+    assert (key_dir / secret_store.SECRET_FILE_NAME).exists()
+
+
+def test_purge_refuses_while_backend_is_still_file(tmp_path, monkeypatch, fake_keychain):
+    """配置仍是 file 时拒绝清理明文文件——即使钥匙串里有同一把密钥"""
+    key = secret_store.generate_key()
+    key_dir = _isolate(tmp_path, monkeypatch)
+    key_dir.mkdir()
+    path = key_dir / secret_store.SECRET_FILE_NAME
+    path.write_bytes(key)
+    fake_keychain.items[secret_store.KEYCHAIN_ACCOUNT] = key
+
+    with pytest.raises(SecretStoreError) as excinfo:
+        crypto.purge_file_keys()
+
+    assert "secret_backend" in str(excinfo.value)
+    assert path.exists()
 
 
 def test_keychain_backend_reads_from_keychain_without_file(tmp_path, monkeypatch, fake_keychain):

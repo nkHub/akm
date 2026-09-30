@@ -90,6 +90,21 @@ def _local_service_base_url() -> str:
     return f"http://127.0.0.1:{port}"
 
 
+def _service_running_note() -> str:
+    """服务在运行时提示：它进程内缓存着旧主密钥，主密钥操作后需要重启才生效。"""
+    try:
+        alive, _ = _get_service_health(_local_service_base_url())
+    except Exception:  # noqa: BLE001 — 探测失败不应影响主密钥操作
+        return ""
+    if not alive:
+        return ""
+    return (
+        "服务当前正在运行，其进程内仍是旧主密钥：请在本操作后重启服务。"
+        "重启前不要丢弃历史密钥（--drop-previous）、也不要删除明文密钥文件，"
+        "否则运行中的服务在此之后新加密的 Key 将无法解密"
+    )
+
+
 def _format_non_json_service_error(resp: httpx.Response, action: str) -> str:
     """把非 JSON 错误响应压缩成一行，便于直接在终端定位上游问题。
 
@@ -537,6 +552,10 @@ def secret_migrate(target, purge_file, no_update_config):
     """把主密钥迁移到指定后端（默认保留原文件，可回滚）"""
     from akm import crypto
 
+    running_note = _service_running_note()
+    if running_note:
+        click.echo(f"注意：{running_note}")
+
     try:
         result = crypto.migrate_backend(target, purge_file=purge_file)
     except crypto.SecretStoreError as exc:
@@ -561,6 +580,10 @@ def secret_rotate(drop_previous, no_reencrypt):
     from akm import crypto
     from akm.key_pool import reencrypt_all_keys
 
+    running_note = _service_running_note()
+    if running_note:
+        click.echo(f"注意：{running_note}")
+
     try:
         info = crypto.rotate(keep_previous=not drop_previous)
     except crypto.SecretStoreError as exc:
@@ -582,6 +605,11 @@ def secret_rotate(drop_previous, no_reencrypt):
         f"已重新加密存量 api_key：{stats['reencrypted']}/{stats['total']}"
         f"（跳过空值 {stats['skipped']}）"
     )
+    if stats["undecryptable"]:
+        click.echo(
+            "  · 注意：以下 Key 的密文用当前密钥环解不开，已原样保留（未重新加密）："
+            + "、".join(stats["undecryptable"])
+        )
 
 
 @secret.command("purge-file")
