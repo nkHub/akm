@@ -1392,3 +1392,380 @@ async def test_run_audit_records_attempts(monkeypatch):
     assert "429" in attempts_json
     assert "k1" in attempts_json
     assert "rate limited" in attempts_json
+
+
+# ───────────────────────── 客户端工具执行协议 ─────────────────────────
+# 约定：请求 tools 里带 x-akm-client-tool: true 的未注册工具由客户端本地执行；
+# 服务端只负责下发调用（流式 client_tool_call 事件 / 非流式 client_tool_call 字段），
+# 客户端把执行结果作为 tool 消息追加进 messages 后续跑。
+
+def _client_tool(name: str) -> dict:
+    """构造一个客户端工具声明（未注册 + x-akm-client-tool 标记）。"""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "客户端本地执行的工具",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        "x-akm-client-tool": True,
+    }
+
+
+def _client_tool_call_body(name: str, arguments: str = "{}") -> str:
+    """构造「模型调用了某个工具」的非流式上游响应体。"""
+    return json.dumps({
+        "choices": [{
+            "message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }],
+            }
+        }]
+    })
+
+
+@pytest.mark.asyncio
+async def test_run_hands_declared_client_tool_back_to_client(monkeypatch):
+    """声明为客户端工具时服务端不执行，返回 client_tool_call 等待客户端执行。"""
+    # 名字故意不在 ToolRegistry 里：若没走客户端分支会落入「未找到工具」。
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"status_code": 200, "body": _client_tool_call_body("ui_list_sessions")}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run(
+        [{"role": "user", "content": "看看历史会话"}],
+        tools=[_client_tool("ui_list_sessions")],
+    )
+
+    assert result.ok is True
+    assert result.client_tool_call == {
+        "tool_call_id": "call_1",
+        "name": "ui_list_sessions",
+        "arguments": {},
+    }
+    # 只跑一轮就中断，不继续编排
+    assert result.turns == 1
+    assert len(calls) == 1
+    # 工具结果记录等待客户端执行的状态，供续跑时模型感知
+    tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+    assert json.loads(tool_msgs[0]["content"])["status"] == "awaiting_client"
+    # messages 里带上了本轮 assistant tool_calls，客户端可直接追加 tool 结果续跑
+    assert any(m.get("tool_calls") for m in result.messages)
+
+
+@pytest.mark.asyncio
+async def test_run_resumes_after_client_tool_result(monkeypatch):
+    """客户端追加 tool 结果续跑时不再下发同一个调用，模型直接继续回答。"""
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        if len(calls) == 1:
+            return {"status_code": 200, "body": _client_tool_call_body("ui_list_sessions")}
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"你昨天聊过两个会话"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    declared = [_client_tool("ui_list_sessions")]
+
+    first = await loop.run([{"role": "user", "content": "看看历史会话"}], tools=declared)
+    resumed = await loop.run(
+        [
+            *first.messages,
+            {"role": "tool", "tool_call_id": "call_1", "content": '{"sessions":[{"name":"a"}]}'},
+        ],
+        tools=declared,
+    )
+
+    # 续跑时模型已能拿到客户端结果，直接给出最终回复，不再要求客户端执行
+    assert resumed.client_tool_call is None
+    assert resumed.final_message["content"] == "你昨天聊过两个会话"
+    assert resumed.turns == 1
+
+
+@pytest.mark.asyncio
+async def test_run_stream_emits_client_tool_call_event(monkeypatch):
+    """流式路径应下发 client_tool_call 事件（含 messages 快照）后结束，不再继续编排。"""
+    response = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "ui_list_sessions", "arguments": "{}"}}]}}]}),
+        "data: [DONE]\n\n",
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    events = _events([
+        item async for item in loop.run_stream(
+            [{"role": "user", "content": "看看历史会话"}],
+            tools=[_client_tool("ui_list_sessions")],
+        )
+    ])
+
+    assert [event["event"] for event in events] == [
+        "turn_start", "tool_call", "tool_result", "client_tool_call",
+    ]
+    payload = events[-1]["data"]
+    assert payload["tool_call_id"] == "call_1"
+    assert payload["name"] == "ui_list_sessions"
+    assert payload["arguments"] == {}
+    assert payload["turns"] == 1
+    # 事件携带完整 messages 快照，客户端追加 tool 结果后可原样续跑
+    assert any(m.get("tool_calls") for m in payload["messages"])
+    assert response.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_server_registered_tool_wins_over_client_flag(monkeypatch, caplog):
+    """同名规则：服务端已注册的工具优先，客户端标记被忽略并记警告。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    executed = []
+
+    async def fake_handler(**kwargs):
+        executed.append(kwargs)
+        return '{"source":"server"}'
+
+    registry.register(ToolDef("akm_read_file", "服务端读文件", {"type": "object"}, fake_handler))
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"status_code": 200, "body": _client_tool_call_body("akm_read_file", '{"path":"a.txt"}')}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    shadowed = _client_tool("akm_read_file")
+    with caplog.at_level("WARNING"):
+        result = await loop.run([{"role": "user", "content": "读文件"}], tools=[shadowed])
+
+    # 服务端 handler 被真正执行，而不是把调用交回客户端
+    assert result.client_tool_call is None
+    assert executed and executed[0].get("path") == "a.txt"
+    assert not any(m.get("role") == "tool" and "awaiting_client" in str(m.get("content")) for m in result.messages)
+    # 客户端标记被忽略并留下警告，便于排查「为什么没走客户端」
+    assert any("同名" in record.message for record in caplog.records)
+    # 下发上游的工具定义用服务端 schema，且不带客户端标记字段
+    assert calls[0]["tools"][0]["function"]["description"] == "服务端读文件"
+    assert "x-akm-client-tool" not in calls[0]["tools"][0]
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_unmarked_unregistered_tool_is_rejected(monkeypatch):
+    """未注册又没打客户端标记的工具不会被误判成客户端工具，按未授权处理。"""
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"status_code": 200, "body": _client_tool_call_body("ui_unknown_tool")}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    result = await loop.run(
+        [{"role": "user", "content": "hi"}],
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "ui_unknown_tool",
+                "description": "忘了打客户端标记",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
+    )
+
+    assert result.client_tool_call is None
+    tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+    assert json.loads(tool_msgs[0]["content"])["error"] == "工具未获本次请求授权: ui_unknown_tool"
+
+
+@pytest.mark.asyncio
+async def test_run_strips_client_flag_but_keeps_declaration(monkeypatch):
+    """客户端工具声明会剥掉标记字段后下发上游，避免未知字段触怒严格校验的供应商。"""
+    calls = []
+    response = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "好的"}}]})])
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"stream": True, "response": response, "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    async for _ in loop.run_stream(
+        [{"role": "user", "content": "hi"}],
+        tools=[_client_tool("ui_list_sessions")],
+    ):
+        pass
+
+    upstream_tools = calls[0]["tools"]
+    assert [t["function"]["name"] for t in upstream_tools if t.get("function", {}).get("name") == "ui_list_sessions"]
+    declared = next(t for t in upstream_tools if t["function"]["name"] == "ui_list_sessions")
+    assert "x-akm-client-tool" not in declared
+
+
+@pytest.mark.asyncio
+async def test_run_client_tools_field_keeps_default_injection(monkeypatch):
+    """顶层 client_tools 与 tools 独立：只声明客户端工具不会改变服务端默认注入策略。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    registry.register(ToolDef("akm_get_time", "服务器时间", {"type": "object"}, lambda: "12:00"))
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(body)
+        return {"status_code": 200, "body": _client_tool_call_body("ui_list_sessions")}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    result = await loop.run(
+        [{"role": "user", "content": "看看历史会话"}],
+        client_tools=[{
+            "type": "function",
+            "function": {
+                "name": "ui_list_sessions",
+                "description": "列出浏览器本地会话",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
+    )
+
+    # 未传 tools：服务端默认注入策略照旧（akm_get_time 这类默认工具仍下发）
+    names = [t["function"]["name"] for t in calls[0]["tools"]]
+    assert "akm_get_time" in names
+    # 客户端工具同时下发，且调用被交回客户端
+    assert "ui_list_sessions" in names
+    assert result.client_tool_call is not None
+    assert result.client_tool_call["name"] == "ui_list_sessions"
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_client_tools_field_shadowed_by_registered_tool(monkeypatch, caplog):
+    """client_tools 里与服务端已注册工具同名的声明同样按「服务端优先」处理。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    registry.register(ToolDef("akm_get_time", "服务器时间", {"type": "object"}, lambda: "12:00"))
+
+    async def forward(*_args, **_kwargs):
+        return {"status_code": 200, "body": '{"choices":[{"message":{"content":"ok"}}]}'}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    with caplog.at_level("WARNING"):
+        await loop.run(
+            [{"role": "user", "content": "hi"}],
+            client_tools=[_client_tool("akm_get_time")],
+        )
+
+    assert any("同名" in record.message for record in caplog.records)
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_stream_never_creates_agent_sessions(monkeypatch, tmp_path):
+    """Agent 请求不再创建/写入服务端会话目录。"""
+    import akm.config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", str(tmp_path / ".akm"))
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / ".akm" / "config.json"))
+
+    def _final_response():
+        return FakeStreamResponse(200, [
+            _sse({"choices": [{"delta": {"content": "done"}}]}),
+            "data: [DONE]\n\n",
+        ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": _final_response(), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+    async for _ in loop.run_stream([{"role": "user", "content": "hi"}]):
+        pass
+
+    assert not (tmp_path / ".akm" / "agent_sessions").exists()
+
+
+# ── agent_max_turns：每次请求实时读配置，改配置即生效（不需要重启） ──
+
+def test_effective_max_turns_reads_config_live(monkeypatch):
+    """轮次上限随配置实时变化，而不是构造期缓存一份。
+
+    这条是「配置项没生效」的回归测试：chat 前端曾在请求里硬编码 max_turns
+    覆盖服务端配置，配合构造期缓存会让人改了配置却毫无效果。
+    """
+    import akm.agent_runtime.loop as loop_module
+
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+
+    monkeypatch.setattr(loop_module, "load_config", lambda: {"agent_max_turns": 200})
+    assert loop._effective_max_turns() == 200
+
+    # 不重建 AgentLoop，仅改配置 → 下次调用即生效
+    monkeypatch.setattr(loop_module, "load_config", lambda: {"agent_max_turns": 400})
+    assert loop._effective_max_turns() == 400
+
+
+def test_effective_max_turns_clamps_and_falls_back(monkeypatch):
+    """越界与非法值：夹到 [1, 2000]，非法值回退默认 200。"""
+    import akm.agent_runtime.loop as loop_module
+
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
+
+    monkeypatch.setattr(loop_module, "load_config", lambda: {"agent_max_turns": 10 ** 9})
+    assert loop._effective_max_turns() == 2000
+
+    monkeypatch.setattr(loop_module, "load_config", lambda: {"agent_max_turns": 0})
+    assert loop._effective_max_turns() == 1, "0 会被夹到下线 1"
+
+    monkeypatch.setattr(loop_module, "load_config", lambda: {"agent_max_turns": "abc"})
+    assert loop._effective_max_turns() == 200
+
+    monkeypatch.setattr(loop_module, "load_config", lambda: {})
+    assert loop._effective_max_turns() == 200
+
+
+@pytest.mark.asyncio
+async def test_run_stream_uses_configured_max_turns(monkeypatch):
+    """请求未传 max_turns 时用配置值：配置 2 轮时第 3 轮不会发生，且报错带上限。"""
+    import akm.agent_runtime.loop as loop_module
+
+    monkeypatch.setattr(loop_module, "load_config", lambda: {"agent_max_turns": 2})
+
+    def _tool_call_response():
+        return FakeStreamResponse(200, [
+            _sse({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_1",
+                "function": {"name": "echo_tool", "arguments": "{}"},
+            }]}}]}),
+            "data: [DONE]\n\n",
+        ])
+
+    async def forward(*_args, **_kwargs):
+        return {"stream": True, "response": _tool_call_response(), "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    registry = ToolRegistry()
+
+    async def _echo(**_kwargs):
+        return "ok"
+
+    registry.register(ToolDef(name="echo_tool", description="echo", parameters={}, handler=_echo))
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+
+    events = []
+    async for chunk in loop.run_stream([{"role": "user", "content": "hi"}]):
+        events.append(chunk)
+
+    joined = "".join(events)
+    assert "达到最大轮次限制 (2)" in joined, joined[-400:]

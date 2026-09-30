@@ -34,7 +34,7 @@ drwxr-xr-x        -    ~/.akm
 
 - 密钥文件 **0644**、目录 **0755**。家目录 `/Users/nk` 是 `drwxr-x---`，group 为 `staff` —— macOS 本地账号默认都在 `staff` 组，因此**同机其他本地账号可以遍历并读取该文件**。
 - 同一目录下存在 `secret.key.zip`，内含同一把 46 字节密钥（用户手工备份）。这不是程序产物，但它与密钥同放、同样无保护。
-- 对照：同一仓库的 [agent_runtime/sessions.py:74](../../akm/agent_runtime/sessions.py#L74)、[agent_runtime/tools.py:387](../../akm/agent_runtime/tools.py#L387)、[agent_runtime/router.py:121](../../akm/agent_runtime/router.py#L121) 都已经显式使用 `mode=0o700`。**`secret.key` 是唯一没做权限收紧的敏感文件**，更像漏改而非有意设计。
+- 对照：同一仓库的 [agent_runtime/tools.py:387](../../akm/agent_runtime/tools.py#L387)、[agent_runtime/router.py:121](../../akm/agent_runtime/router.py#L121) 都已经显式使用 `mode=0o700`。**`secret.key` 是唯一没做权限收紧的敏感文件**，更像漏改而非有意设计。
 
 ### 2.3 密码学实现（无问题，不在本方案改动范围）
 

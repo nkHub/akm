@@ -493,61 +493,27 @@ def test_builtin_list_plugins_graceful_without_manager():
     assert _handlers(app)["akm_list_plugins"]() == []
 
 
-def test_builtin_sessions_list_and_load(monkeypatch):
-    """会话列表返回元信息；加载按会话名读取最近消息，非法名被拒绝。"""
-    fake_sessions = [
-        {"name": "20260805-142301", "created_at": "2026-08-05T14:23:01", "updated_at": "2026-08-05T14:30:12", "message_count": 3, "model": "gpt-4o"},
-    ]
-
-    class FakeStore:
-        def __init__(self, base_dir=None):
-            pass
-
-        def list(self):
-            return fake_sessions
-
-        def load(self, name):
-            if name == "20260805-142301":
-                return {
-                    "name": name,
-                    "model": "gpt-4o",
-                    "created_at": "2026-08-05T14:23:01",
-                    "updated_at": "2026-08-05T14:30:12",
-                    "messages": [
-                        {"role": "user", "content": "旧消息"},
-                        {"role": "assistant", "content": "回复1"},
-                        {"role": "user", "content": "最近问题"},
-                    ],
-                }
-            return None
-
-    monkeypatch.setattr("akm.agent_runtime.sessions.SessionStore", FakeStore)
-    app = SimpleNamespace(state=SimpleNamespace())
-    handlers = _handlers(app)
-
-    listed = handlers["akm_list_sessions"]()
-    assert listed == fake_sessions
-    assert "content" not in listed[0]
-
-    loaded = handlers["akm_load_session"](name="20260805-142301", limit=2)
-    assert loaded["message_count"] == 3
-    assert [m["content"] for m in loaded["messages"]] == ["回复1", "最近问题"]
-
-    missing = handlers["akm_load_session"](name="nope")
-    assert missing["error"]
-
-    bad = handlers["akm_load_session"](name="../evil")
-    assert bad["error"]
-
-
 def test_builtin_readonly_tools_register():
-    """配置、插件、会话读取工具均应注册，名称符合内置工具前缀。"""
+    """配置、插件等只读调试工具应注册，名称符合内置工具前缀。"""
     app = SimpleNamespace(state=SimpleNamespace())
     tools = {tool.name: tool for tool in build_builtin_tools(app)}
 
-    for name in ("akm_get_config", "akm_list_plugins", "akm_list_sessions", "akm_load_session"):
+    for name in ("akm_get_config", "akm_list_plugins"):
         assert name in tools
-    assert tools["akm_load_session"].parameters["required"] == ["name"]
+
+
+def test_builtin_session_tools_are_not_registered():
+    """会话历史工具不再作为服务端内置工具注册。
+
+    历史数据的权威副本在客户端浏览器（IndexedDB），服务端磁盘快照只是旧副本。
+    两套工具并存时模型会挑名字更眼熟的 akm_load_session 而读到旧数据，因此
+    服务端这两个工具被整体移除；会话目录/自动落盘/自动清理仍然保留。
+    """
+    app = SimpleNamespace(state=SimpleNamespace())
+    names = {tool.name for tool in build_builtin_tools(app)}
+
+    assert "akm_list_sessions" not in names
+    assert "akm_load_session" not in names
 
 
 def test_builtin_task_tools_register():

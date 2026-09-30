@@ -89,10 +89,36 @@ def test_save_roundtrip_keeps_nested_config(isolated_config):
 def test_load_defaults_when_file_missing(isolated_config):
     """配置文件不存在时返回默认值，且不出现嵌套键。"""
     cfg_loaded = cfg.load_config()
-    assert cfg_loaded["agent_max_turns"] == 100
+    assert cfg_loaded["agent_max_turns"] == 200
+    assert "agent_session_auto_save" not in cfg_loaded
+    assert "agent_session_retention_days" not in cfg_loaded
+    assert "agent_session_max_files" not in cfg_loaded
     assert cfg_loaded["agent_subagent_enabled"] is True
     assert cfg_loaded["agent_subagent_max_depth"] == 1
     assert "agent_config" not in cfg_loaded
+
+
+def test_load_config_discards_legacy_agent_session_keys(isolated_config):
+    """旧配置中的服务端会话持久化键被丢弃，不会继续暴露或保存。"""
+    (isolated_config / "config.json").write_text(
+        json.dumps({"agent_config": {
+            "agent_session_auto_save": True,
+            "agent_session_retention_days": 3,
+            "agent_session_max_files": 200,
+            "agent_max_turns": 100,
+        }}),
+        encoding="utf-8",
+    )
+    loaded = cfg.load_config()
+    assert loaded["agent_max_turns"] == 100
+    for key in ("agent_session_auto_save", "agent_session_retention_days", "agent_session_max_files"):
+        assert key not in loaded
+
+    cfg.save_config({"agent_max_turns": 101})
+    saved = json.loads((isolated_config / "config.json").read_text(encoding="utf-8"))
+    assert "agent_session_auto_save" not in saved.get("agent_config", {})
+    assert "agent_session_retention_days" not in saved.get("agent_config", {})
+    assert "agent_session_max_files" not in saved.get("agent_config", {})
 
 
 def test_subagent_config_loads_from_nested_agent_config(isolated_config):

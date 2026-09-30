@@ -276,6 +276,15 @@ async def _parse_agent_body(request: Request) -> tuple[dict[str, Any], JSONRespo
         except (TypeError, json.JSONDecodeError):
             return {}, JSONResponse(status_code=400, content={"detail": "tools 必须是合法的 JSON 字符串"})
 
+    # 客户端工具声明：与 tools 独立的字段，可单独声明由客户端本地执行的工具。
+    client_tools = None
+    client_tools_raw = form.get("client_tools")
+    if client_tools_raw:
+        try:
+            client_tools = json.loads(str(client_tools_raw))
+        except (TypeError, json.JSONDecodeError):
+            return {}, JSONResponse(status_code=400, content={"detail": "client_tools 必须是合法的 JSON 字符串"})
+
     tool_options = None
     tool_options_raw = form.get("tool_options")
     if tool_options_raw:
@@ -290,14 +299,50 @@ async def _parse_agent_body(request: Request) -> tuple[dict[str, Any], JSONRespo
         "messages": messages,
         "tools": tools if isinstance(tools, list) else None,
         "tool_options": tool_options if isinstance(tool_options, dict) else None,
+        "client_tools": client_tools if isinstance(client_tools, list) else None,
         "instructions": str(form.get("instructions", "") or ""),
         "api_path": str(form.get("api_path", "chat/completions") or "chat/completions"),
         "stream": stream_raw in ("1", "true", "yes", "on"),
         "max_turns": form.get("max_turns"),
         "workspace_root": str(form.get("workspace_root", "") or ""),
-        "session_id": str(form.get("session_id", "") or ""),
     }
     return body, None
+
+
+@router.get("/v1/agent/config")
+@router.get("/agent/config")
+async def agent_config(request: Request):
+    """返回 /v1/agent 当前生效的运行期限额，供客户端发现配置、不要在本地硬编码。
+
+    客户端此前把轮次上限写死在请求体里（max_turns），会在服务端改
+    ``agent_max_turns`` 后被悄悄覆盖，导致「配置项没生效」。客户端应当读取本端点，
+    或干脆不传 max_turns 让服务端用配置值。
+
+    返回的是本次请求时刻的实际取值（AgentLoop 每次请求实时读配置）。
+    """
+    auth_error = await _check_agent_auth(request)
+    if auth_error is not None:
+        return auth_error
+
+    from akm.config import load_config
+
+    config = load_config()
+    try:
+        max_turns = max(1, min(2000, int(config.get("agent_max_turns", 200) or 200)))
+    except (TypeError, ValueError):
+        max_turns = 200
+    try:
+        max_context_tokens = max(0, int(config.get("agent_max_context_tokens", 272000) or 272000))
+    except (TypeError, ValueError):
+        max_context_tokens = 272000
+
+    return {
+        "ok": True,
+        "max_turns": max_turns,
+        "max_context_tokens": max_context_tokens,
+        # 说明字段：客户端传 max_turns=0 或不传时即使用 max_turns 的值。
+        "max_turns_hint": "请求体 max_turns <= 0 或不传时使用该上限",
+    }
 
 
 @router.post("/v1/agent")
@@ -323,6 +368,9 @@ async def agent(request: Request):
     model = str(body.get("model", "") or "")
     tools = body.get("tools")
     tool_options = body.get("tool_options")
+    # 客户端工具声明：由客户端本地执行的工具（服务端不注册 handler，只负责把调用
+    # 交回客户端）。与 tools 独立，避免客户端声明自己的工具时影响服务端工具注入策略。
+    client_tools = body.get("client_tools")
     instructions = str(body.get("instructions", "") or "")
     if not instructions:
         # 客户端未提供指令时回填 config.json 的默认系统指令（agent_default_instructions）
@@ -330,9 +378,6 @@ async def agent(request: Request):
     api_path = str(body.get("api_path", "chat/completions") or "chat/completions")
     stream = bool(body.get("stream", False))
     workspace_root = str(body.get("workspace_root", "") or "")
-    # 会话 ID：可选。客户端传了就在同一会话文件上做增量合并（避免同一逻辑
-    # 会话被保存成多个内容重叠的独立文件），留空则每次请求新建独立会话文件。
-    session_id = str(body.get("session_id", "") or "")
     # 回填的默认指令包含 {AKM_SOURCE_DIR} 等占位符，注入前替换为运行时实际路径
     instructions = _render_default_instructions(instructions, workspace_root)
     try:
@@ -362,11 +407,11 @@ async def agent(request: Request):
         "model": model,
         "tools": tools if isinstance(tools, list) else None,
         "tool_options": tool_options if isinstance(tool_options, dict) else None,
+        "client_tools": client_tools if isinstance(client_tools, list) else None,
         "instructions": instructions,
         "max_turns": max_turns,
         "api_path": api_path,
         "workspace_root": workspace_root,
-        "session_id": session_id,
         "source": "chat",
     }
     if stream:
@@ -379,8 +424,7 @@ async def agent(request: Request):
     depth_token = set_request_subagent_depth(subagent_depth)
     model_token = set_request_agent_model(model)
     try:
-        # 非流式 run() 不接受 session_id 参数，去掉避免 TypeError
-        result = await agent_loop.run(messages, **{k: v for k, v in options.items() if k != "session_id"})
+        result = await agent_loop.run(messages, **options)
     finally:
         reset_request_agent_model(model_token)
         reset_request_subagent_depth(depth_token)

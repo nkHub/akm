@@ -50,7 +50,7 @@ DEFAULTS = {
     # Agent Loop
     "agent_enabled": True,               # Agent 总开关：关闭后不初始化 Agent Loop、不注册 /v1/agent 与 /agent 路由、不注入 Agent 内置工具（默认开启，仅显式设 false 关闭）
     "flow_enabled": True,                # Flow 工作流总开关：关闭后不初始化 WorkflowEngine、不注册 /v1/flow 路由、不注入 akm_flow_* 工具（默认开启，仅显式设 false 关闭）
-    "agent_max_turns": 100,              # Agent Loop 最大迭代轮次，防止工具调用无限循环
+    "agent_max_turns": 200,              # Agent Loop 最大迭代轮次，防止工具调用无限循环（客户端可在请求体传 max_turns 覆盖本次；服务端每次请求实时读取，改配置即生效）
     "agent_max_context_tokens": 272000, # Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史（0 表示不压缩）
     "agent_keep_recent_messages": 10,   # Agent Loop 压缩上下文时保留的最近消息条数（工具调用配对消息会自动完整保留）
     "agent_context_warning_ratio": 0.8, # Agent Loop 上下文占用量超上限该比例时，SSE 下发 context_warning 事件（0 关闭）
@@ -82,7 +82,6 @@ DEFAULTS = {
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
         "独立公式用 \\[...\\]；公式内容请直接给出，不要用代码块包裹。"
     ),  # Agent 默认系统指令（客户端未传 instructions 时使用）
-    "agent_session_auto_save": True,    # /v1/agent 会话是否自动落盘到 ~/.akm/agent_sessions/（默认开启：请求结束自动保存完整对话历史，供 akm_load_session/akm_list_sessions 串联回顾使用；设为 false 可保持无状态不写磁盘）
     "tavily_api_key": "",               # Tavily 联网搜索 API Key（Agent 内置 tavily_search 工具使用）
     # Key 管理
     "rate_limit_cooldown_sec": 60,      # 限流冷却秒数，被 429 后多久恢复可用
@@ -128,7 +127,6 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_tool_retry_max_retries",
     "agent_api_token",
     "agent_default_instructions",
-    "agent_session_auto_save",
     "tavily_api_key",
 ]
 
@@ -213,15 +211,19 @@ def load_config() -> dict:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
         data = {}
-    # 合并默认值
+    # 合并默认值；已移除的会话落盘开关从旧 config.json 中丢弃，不再暴露到设置页/API。
     merged = dict(DEFAULTS)
     merged.update(data)
+    for _obsolete_key in ("agent_session_auto_save", "agent_session_retention_days", "agent_session_max_files"):
+        merged.pop(_obsolete_key, None)
     # 兼容 config.json 的 agent_config 嵌套归组：展开到顶层（嵌套值优先于顶层旧键）
     _agent_group = data.get("agent_config") if isinstance(data, dict) else None
     if isinstance(_agent_group, dict):
         for _key in AGENT_GROUP_KEYS:
             if _key in _agent_group:
                 merged[_key] = _agent_group[_key]
+        for _obsolete_key in ("agent_session_auto_save", "agent_session_retention_days", "agent_session_max_files"):
+            _agent_group.pop(_obsolete_key, None)
     # 内存层保持扁平，不把嵌套 agent_config 留在顶层
     merged.pop("agent_config", None)
     merged["cost_pricing_table"] = _normalize_cost_pricing_table(merged["cost_pricing_table"])
@@ -255,7 +257,7 @@ def load_config() -> dict:
     # 总开关：默认开启，仅显式设 false 才关闭（布尔归一化，防止配置为字符串/数字时误判）
     merged["agent_enabled"] = merged.get("agent_enabled") is not False
     merged["flow_enabled"] = merged.get("flow_enabled") is not False
-    merged["agent_max_turns"] = max(1, _safe_int(merged.get("agent_max_turns"), 100))
+    merged["agent_max_turns"] = max(1, min(2000, _safe_int(merged.get("agent_max_turns"), 200)))
     merged["agent_max_context_tokens"] = max(0, _safe_int(merged.get("agent_max_context_tokens"), 272000))
     merged["agent_keep_recent_messages"] = max(2, _safe_int(merged.get("agent_keep_recent_messages"), 10))
     merged["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(merged.get("agent_context_warning_ratio"), 0.8)))
@@ -291,6 +293,9 @@ def save_config(data: dict) -> None:
     # 先把调用方可能传入的 agent_config 嵌套对象展开进顶层，再走统一归一化，
     # 避免嵌套的 agent 配置在后续 update/打包中丢失。
     data = dict(data)
+    obsolete_session_keys = {"agent_session_auto_save", "agent_session_retention_days", "agent_session_max_files"}
+    for key in obsolete_session_keys:
+        data.pop(key, None)
     _agent_group = data.pop("agent_config", None)
     if isinstance(_agent_group, dict):
         for _key in AGENT_GROUP_KEYS:
@@ -299,6 +304,8 @@ def save_config(data: dict) -> None:
                 data[_key] = _agent_group[_key]
     current = load_config()
     current.update(data)
+    for key in ("agent_session_auto_save", "agent_session_retention_days", "agent_session_max_files"):
+        current.pop(key, None)
     current["http_proxy_enabled"] = current.get("http_proxy_enabled") is True
     current["http_proxy_url"] = normalize_http_proxy_url(current.get("http_proxy_url", ""))
     # macOS 原生功能：自动更新默认开启，仅显式设为 false 才关闭
@@ -327,7 +334,7 @@ def save_config(data: dict) -> None:
     # Agent Loop
     current["agent_enabled"] = current.get("agent_enabled") is not False
     current["flow_enabled"] = current.get("flow_enabled") is not False
-    current["agent_max_turns"] = max(1, _safe_int(current.get("agent_max_turns"), 100))
+    current["agent_max_turns"] = max(1, min(2000, _safe_int(current.get("agent_max_turns"), 200)))
     current["agent_max_context_tokens"] = max(0, _safe_int(current.get("agent_max_context_tokens"), 272000))
     current["agent_keep_recent_messages"] = max(2, _safe_int(current.get("agent_keep_recent_messages"), 10))
     current["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(current.get("agent_context_warning_ratio"), 0.8)))
