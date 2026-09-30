@@ -1,5 +1,11 @@
 # 版本变更记录
 
+## 未发布
+
+修复显式出站代理模式下连接池页面只探测默认 HTTPX transport、漏掉 `_mounts` 实际代理连接池而持续显示「无连接」的问题；状态快照、排队请求统计与「清理空闲连接」现在都覆盖默认池及代理 mounts。`/api/keys/{alias}/test` 的 Key 连通性测试使用同一 AKM 显式出站代理配置（不读取环境代理），并补充回归测试验证代理 URL 传入 HTTPX。README 已同步连接池代理观测口径。覆盖：`tests/test_proxy.py` 全部 64 项、连接池 API 的 4 项。
+
+本次仅修复连接池状态观测与连通性测试的代理路径，不改发版版本号或打包口径。
+
 本文件归档 AKM 各版本的功能与修复说明（从 `README.md` 与 `docs/release-guide.md` 中原有的版本段落迁移而来，起自 v0.1.46）。更早版本请查阅 Git 历史或 GitHub Releases。
 
 约定：
