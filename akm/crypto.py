@@ -192,6 +192,28 @@ class _KeyRing:
 
 # ── 主密钥加载与托管 ────────────────────────────────────────
 
+def _try_keychain_fallback(notes: list[str]) -> "secret_store.KeyMaterial | None":
+    """文件后端下没有明文密钥文件时，尝试用钥匙串里的同一把密钥兜底。
+
+    生成新主密钥是本模块**唯一不可逆**的动作（会让已存 ``api_key`` 永久无法解密），
+    因此在生成之前先找一遍钥匙串：用户手工删掉/误清文件、迁移到钥匙串后又把配置改回
+    ``file`` 时，仍能照常启动而不是悄悄换一把新密钥。
+    """
+    if not secret_store.keychain_supported():
+        return None
+    try:
+        material = secret_store.keychain_read()
+    except Exception as exc:  # noqa: BLE001 — 兜底查询失败不应影响正常流程
+        logger.warning("[crypto] 明文密钥文件缺失，读取钥匙串兜底失败: %s", exc)
+        notes.append(f"未找到明文密钥文件，钥匙串兜底读取失败：{exc}")
+        return None
+    if material and material.keys:
+        logger.warning("[crypto] 明文密钥文件缺失，已改用钥匙串中的主密钥")
+        notes.append("未找到明文密钥文件，已改用钥匙串中的同一把主密钥（未重新落盘）")
+        return material
+    return None
+
+
 def _read_or_create_keys() -> tuple[list[bytes], str, list[str]]:
     """按既定顺序读取主密钥材料，必要时迁移或生成。返回 ``(密钥列表, 来源, 动作说明)``。"""
     inline = (os.environ.get("AKM_SECRET_KEY") or "").strip()
@@ -235,6 +257,11 @@ def _read_or_create_keys() -> tuple[list[bytes], str, list[str]]:
     material = secret_store.read_file_keys(primary, legacy)
     if material:
         return material.keys, material.source, notes + material.notes
+
+    # 2.5) 安全网：明文文件缺失时先找钥匙串，避免"文件被误删 → 生成新密钥 → 数据永久不可解"
+    fallback = _try_keychain_fallback(notes)
+    if fallback is not None:
+        return fallback.keys, fallback.source, notes
 
     # 3) 生成新密钥（只在确认"哪里都没有密钥"之后）
     new_key = secret_store.generate_key()
@@ -424,6 +451,13 @@ def purge_file_keys() -> dict:
     """删除明文密钥文件（仅在非文件来源已持有同一把密钥时允许）。"""
     keys, source, _ = _read_or_create_keys()
     current = keys[0]
+
+    if secret_store.effective_backend() != secret_store.BACKEND_KEYCHAIN:
+        raise SecretStoreError(
+            "拒绝清理：当前 secret_backend 仍为 file，明文文件正是配置内的密钥来源。"
+            "请先执行 `akm secret migrate --to keychain`（会同时写入配置），"
+            "确认应用能正常启动后再清理"
+        )
 
     verified_by = ""
     if secret_store.keychain_supported():

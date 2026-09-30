@@ -171,6 +171,7 @@ P0 是**纯收益、无 UX 影响、无迁移风险**的一档，解决第 4 节
 | P2 | macOS 钥匙串后端（ctypes 直连 Security.framework 的 legacy keychain）；`akm secret migrate --to keychain`；回读校验；`--purge-file` / `akm secret purge-file` 需校验通过才删文件；默认后端仍是 `file` | `akm/secret_store.py`（`_KeychainBridge` 等）、`akm/crypto.py`（`migrate_backend` / `purge_file_keys`） |
 | P3 | 密钥环（当前 + 历史）；`akm secret rotate` 轮换并重新加密存量 `api_key`（单事务；解不开的行单独上报为 `undecryptable`，不阻塞整次轮换）；默认保留 1 个历史密钥，`--drop-previous` 可丢弃 | `akm/crypto.py`（`_KeyRing` / `rotate`）、`akm/key_pool.py`（`reencrypt_all_keys`） |
 | 观测 | `akm secret status`（含 `--json` / `--probe`）、`akm doctor` 增加 `master-key` 检查、`config.json` 新增 `secret_backend` | `akm/cli.py`、`akm/config.py` |
+| 安全网 | 明文文件缺失时先用钥匙串里的同一把密钥兜底（生成新密钥是唯一不可逆动作）；`purge-file` 要求 `secret_backend` 已是 `keychain` 且文件内容与密钥环逐一比对一致；`rotate` / `migrate` 检测到服务在运行时提示重启 | `akm/crypto.py`（`_try_keychain_fallback` / `purge_file_keys`）、`akm/cli.py`（`_service_running_note`） |
 
 ### 10.2 P2 的技术验证结论（真机实测，非推断）
 
@@ -193,7 +194,16 @@ P0 是**纯收益、无 UX 影响、无迁移风险**的一档，解决第 4 节
 
 这条缺陷是"先真机跑一遍完整链路"才暴露出来的，也说明 **P2 的清理动作必须保留 `--purge-file` 这种显式开关，而不能在迁移时顺手删除明文文件**。
 
-### 10.4 遗留项（未做，按需再议）
+### 10.4 另外两处"会把用户数据锁死"的路径（已加防护）
+
+| 路径 | 原来的行为 | 现在的行为 |
+|---|---|---|
+| 明文文件被误删 / 迁移到钥匙串后把配置改回 `file`，而钥匙串里还有同一把密钥 | 读不到文件 → **生成新主密钥** → 已存 `api_key` 永久不可解 | 生成之前先用钥匙串兜底：`_try_keychain_fallback()` 取到同一把密钥就继续用（不重新落盘）；只有确实找不到任何来源才生成 |
+| 配置仍是 `secret_backend=file` 时执行 `akm secret purge-file` | 只要钥匙串里有同一把密钥就删文件；之后以 `file` 后端启动会因为文件不存在而生成新密钥 | `purge-file` 先要求 `secret_backend` 已切到 `keychain`（迁移命令会同时写配置），再逐个比对文件内容是否属于当前密钥环，条件不满足一律拒绝 |
+
+另外，`akm secret rotate` / `akm secret migrate` 会探测本地服务：**服务在运行时它进程内仍是旧主密钥**，此时轮换后新写入的 Key 会用旧密钥加密（历史密钥保留期间仍可解密），因此命令会提示先重启服务，并明确"重启前不要 `--drop-previous`、也不要删明文文件"。
+
+### 10.5 遗留项（未做，按需再议）
 
 1. **打包环境实测** legacy keychain 在自更新/重新签名后的弹框行为；这也是把 `secret_backend` 默认值改成 `keychain` 的前置条件。
 2. **设置页 UI**：`secret_backend` 目前只能通过 `akm config set` / `akm secret migrate` 配置，管理台设置页尚未加开关。

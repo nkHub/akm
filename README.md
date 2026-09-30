@@ -118,8 +118,10 @@ akm doctor                    # 检查配置 / 数据库 / 插件 / 服务状态
 akm secret status             # 查看主密钥来源、文件路径与权限（--json / --probe）
 akm secret migrate --to keychain # 迁移到 macOS 钥匙串（默认保留明文文件，可 --purge-file）
 akm secret rotate             # 轮换主密钥并用新密钥重新加密存量 api_key
-akm secret purge-file         # 校验通过后删除明文密钥文件
+akm secret purge-file         # 删除明文密钥文件（要求 secret_backend=keychain 且内容校验一致）
 ```
+
+> `akm secret rotate` / `migrate` 在检测到本地服务正在运行时会提示先重启服务：运行中的进程仍持有旧主密钥，重启前不要丢弃历史密钥或删除明文文件。
 
 ## 自定义 MCP 脚本
 
@@ -363,7 +365,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 
 `~/.akm` 会在服务启动和系统唤醒恢复时执行一次本地数据维护（`akm.cleanup.run_auto_maintenance`），三步互相独立、任一步失败不影响其余：① 按 `log_retention_days` 清理过期审计日志并回收 SQLite 空间（始终执行）；② 清理 `~/.akm/updates/` 下的历史更新包与旧版本 `.app` 备份，只留最新更新包与一个回滚备份（受 `update_cache_cleanup` 控制，默认开启，正在下载/替换的文件有 10 分钟宽限期）；③ 轮转数据目录根下的 append-only 文本日志（受 `text_log_rotation` 控制，默认关闭，阈值 `log_file_max_mb`）。维护只处理 AKM 自己产生的派生数据，不会删除 `config.json`、`secret.key`、`akm.db`、`plugins/`、`agent_sessions/`、`markdown_kb/` 等用户数据与插件目录；设置页「日志与存储」提供两个开关。
 
-用于解密 `akm.db` 中 `api_key` 的主密钥默认存放在 `~/Library/Application Support/AKM/secret.key`（目录 0700、文件 0600，创建时即按该权限落盘，读取时发现权限过宽会自动收紧并告警）；老版本存放在 `~/.akm/secret.key` 的密钥会在首次读取时**复制**到新路径完成迁移，**原文件保留**以便回滚。密钥有历史密钥机制：`akm secret rotate` 后新密文用新密钥，旧密文由历史密钥解开，并把库里存量 `api_key` 重新加密（单事务提交，解不开的行单独上报而不会阻塞整次轮换）。可选的 macOS 钥匙串后端（`secret_backend=keychain`）与「明文文件与钥匙串不一致时拒绝清理」等安全语义见 [docs/design/key-custody.md](docs/design/key-custody.md)。**它是已存 Key 的唯一解密凭据，且不参与日志与清理流程；文件丢失后已存 `api_key` 不可恢复**，需要迁移或换机时请先用 `GET /api/keys/export` 导出明文备份。
+用于解密 `akm.db` 中 `api_key` 的主密钥默认存放在 `~/Library/Application Support/AKM/secret.key`（目录 0700、文件 0600，创建时即按该权限落盘，读取时发现权限过宽会自动收紧并告警）；老版本存放在 `~/.akm/secret.key` 的密钥会在首次读取时**复制**到新路径完成迁移，**原文件保留**以便回滚。密钥有历史密钥机制：`akm secret rotate` 后新密文用新密钥，旧密文由历史密钥解开，并把库里存量 `api_key` 重新加密（单事务提交，解不开的行单独列出而不会阻塞整次轮换）。**生成新主密钥是唯一不可逆的动作**（会让已存 `api_key` 永久不可解），因此明文文件缺失时会先用 macOS 钥匙串里的同一把密钥兜底，确实找不到任何来源才会生成新的；清理明文文件同样要求 `secret_backend` 已切到 `keychain`、且磁盘上每个密钥文件的内容都与当前密钥环逐一比对一致，否则直接拒绝。轮换与迁移在服务运行时会提示先重启服务（运行中的进程仍持有旧密钥）。可选的 macOS 钥匙串后端（`secret_backend=keychain`）与上述安全语义见 [docs/design/key-custody.md](docs/design/key-custody.md)。**它是已存 Key 的唯一解密凭据，且不参与日志与清理流程；文件丢失后已存 `api_key` 不可恢复**，需要迁移或换机时请先用 `GET /api/keys/export` 导出明文备份。
 
 ## 本地智能体接入指引
 

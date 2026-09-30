@@ -663,6 +663,44 @@ def test_secret_purge_file_refuses_without_keychain_copy(monkeypatch, fake_keych
     assert "拒绝清理" in result.output
 
 
+def test_secret_rotate_warns_when_service_is_running(monkeypatch):
+    """服务在运行时轮换：提示进程内仍是旧密钥、需要重启，避免误丢历史密钥"""
+    import akm.cli as cli_module
+
+    _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+    monkeypatch.setattr(cli_module, "_get_service_health", lambda base_url: (True, "运行中 (200)"))
+
+    result = CliRunner().invoke(main, ["secret", "rotate"])
+
+    assert result.exit_code == 0, result.output
+    assert "注意：" in result.output
+    assert "重启服务" in result.output
+
+
+def test_secret_rotate_reports_undecryptable_keys(monkeypatch):
+    """有解不开的行时明确列出，不静默跳过"""
+    import akm.key_pool as key_pool_module
+
+    _setup_tmp_env(monkeypatch)
+    conn = get_connection()
+    init_db(conn)
+    conn.close()
+    monkeypatch.setattr(
+        key_pool_module,
+        "reencrypt_all_keys",
+        lambda: {"total": 3, "reencrypted": 2, "skipped": 0, "undecryptable": ["broken-key"]},
+    )
+
+    result = CliRunner().invoke(main, ["secret", "rotate"])
+
+    assert result.exit_code == 0, result.output
+    assert "broken-key" in result.output
+    assert "已原样保留" in result.output
+
+
 def test_secret_migrate_to_keychain_writes_config_and_keeps_file(monkeypatch, fake_keychain):
     """迁移到钥匙串：写入条目、保留明文文件，并把 secret_backend 写进配置"""
     import akm.config as config_module
