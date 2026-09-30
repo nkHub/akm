@@ -123,18 +123,22 @@ def test_rotate_text_logs_ignores_small_files_and_subdirs(akm_tmp_home):
 
 
 def test_run_auto_maintenance_defaults_turn_on_update_cache_only(akm_tmp_home, monkeypatch):
-    """默认配置：更新包清理执行，文本日志轮转不执行。"""
+    """默认配置：更新包清理执行，旧 Agent 会话目录也会被永久删除。"""
     now = time.time()
     updates = akm_tmp_home / "updates"
     _write(updates / "AI Key Manager-0.0.1-1.zip", mtime=now - 3000)
     _write(updates / "AI Key Manager-0.0.2-2.zip", mtime=now - 2000)
     big_log = _write(akm_tmp_home / "error.log", b"a" * 4096)
+    sessions = akm_tmp_home / "agent_sessions"
+    _write(sessions / "2026-01-01" / "old.json", b"stale")
 
     monkeypatch.setattr(cfg, "get", lambda key, default=None: cfg.DEFAULTS.get(key, default))
 
     result = cleanup.run_auto_maintenance()
 
     assert result["update_cache"] is not None
+    assert result["agent_sessions"]["deleted"] is True
+    assert not sessions.exists()
     assert result["text_logs"] is None
     assert big_log.exists()
 
@@ -161,6 +165,7 @@ def test_run_auto_maintenance_respects_switches(akm_tmp_home, monkeypatch):
 
     assert result["update_cache"] is None
     assert stale_zip.exists()
+    assert result["agent_sessions"] is None, "更新包缓存清理关闭时不碰旧会话目录"
     assert result["text_logs"] is not None
 
 

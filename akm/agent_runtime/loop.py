@@ -47,6 +47,13 @@ _CHAT_OPTIONAL_TOOLS: frozenset[str] = frozenset(
 # 拦截处理。默认模式下随内置工具注入；白名单模式下需客户端显式声明。
 # 交互澄清工具 akm_ask_user 在默认注入（未传 tools）与白名单注入（传了
 # tools）时都可用，只有显式传空数组 [] 时才会被排除。
+# 客户端工具标记：调用方在工具声明上加 "x-akm-client-tool": true，表示该工具
+# 由客户端本地执行（服务端不注册 handler，只负责把调用交回客户端）。标记只写在
+# 请求体里，注入上游前会被剥掉，避免未知字段影响第三方 API 的严格校验。
+# 同名规则见 AgentLoop._plan_tools：服务端已注册的工具优先。
+_CLIENT_TOOL_FLAG: str = "x-akm-client-tool"
+
+
 _AGENT_ASK_USER_TOOL: str = "akm_ask_user"
 _AGENT_CONTEXT_TOOLS: list[dict] = [
     {
@@ -113,6 +120,15 @@ _AGENT_CONTEXT_TOOLS: list[dict] = [
 ]
 
 # Agent Loop 最大迭代次数，防止工具调用无限循环（可通过 config.json 覆盖）
+
+
+def _strip_client_tool_flag(declared: dict) -> dict:
+    """去掉工具声明里的客户端标记，其余字段原样保留。
+
+    标记只用于服务端识别执行方，不应随工具定义发给上游 LLM（部分供应商对
+    tools 里的未知字段做严格校验会直接报 400）。
+    """
+    return {key: value for key, value in declared.items() if key != _CLIENT_TOOL_FLAG}
 
 
 class ToolDef:
@@ -411,6 +427,7 @@ class AgentResult:
         usage: dict | None = None,
         compacted: int = 0,
         ask_user: dict | None = None,
+        client_tool_call: dict | None = None,
     ):
         self.ok = ok
         self.final_message = final_message or {}
@@ -420,6 +437,7 @@ class AgentResult:
         self.usage = usage or {}
         self.compacted = compacted  # 本次运行中上下文被压缩的次数
         self.ask_user = ask_user  # 非空表示 AI 需要向用户澄清提问（见 akm_ask_user）
+        self.client_tool_call = client_tool_call  # 非空表示本次轮次等待客户端执行该工具
 
     def to_dict(self) -> dict:
         """转为可序列化的 dict"""
@@ -432,6 +450,7 @@ class AgentResult:
             "usage": self.usage,
             "compacted": self.compacted,
             "ask_user": self.ask_user,
+            "client_tool_call": self.client_tool_call,
         }
 
 
@@ -724,7 +743,11 @@ class AgentLoop:
         self._http_client = http_client
         self._plugin_manager = plugin_manager
         self._tool_registry = tool_registry or ToolRegistry.instance()
-        self._max_turns = max(1, int(load_config().get("agent_max_turns", 100) or 100))
+        # 构造期读一次作为实例默认值；真正生效的轮次上限在每次请求开始时用
+        # _effective_max_turns() 实时读取配置，这样界面上改了 agent_max_turns
+        # 下一次请求就生效，不必重启服务（与 max_context_tokens 等构造期缓存项不同，
+        # 轮次上限改完不生效会让人以为配置没写对）。
+        self._max_turns = self._effective_max_turns()
         self._max_context_tokens = max(
              0, int(load_config().get("agent_max_context_tokens", 272000) or 272000)
         )
@@ -741,10 +764,6 @@ class AgentLoop:
         self._max_tool_calls = max(
             1, int(load_config().get("agent_max_tool_calls", 30) or 30)
         )
-        # /v1/agent 会话自动落盘开关（默认开启）：流式请求结束时把完整对话历史
-        # 保存到 ~/.akm/agent_sessions/，供 akm_load_session / akm_list_sessions
-        # 串联回顾使用；设为 false 时保持无状态，不写磁盘。
-        self._session_auto_save = bool(load_config().get("agent_session_auto_save", True))
         self._audit_submitter = audit_submitter
 
     async def _try_audit(
@@ -1073,6 +1092,163 @@ class AgentLoop:
 
         return None, working_messages, compacted_count
 
+    def _effective_max_turns(self) -> int:
+        """本次请求生效的 Agent Loop 轮次上限。
+
+        实时读配置（而非只用构造期缓存），使界面/`config.json` 改动立即生效；
+        夹到 [1, 2000] 与 config.py 的归一化保持一致，非法值回退默认 200。
+        """
+        raw = load_config().get("agent_max_turns")
+        # 注意不能用 `raw or 200`：0 是合法输入（应夹到下限 1），
+        # 而 `or` 会把它当成缺省值替换掉。只有 None 才算缺省。
+        if raw is None:
+            raw = 200
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 200
+        return max(1, min(2000, value))
+
+    def _plan_tools(
+        self,
+        tools: list[dict] | None,
+        tool_options: dict | None,
+        client_tools: list[dict] | None = None,
+    ) -> tuple[list[dict], set[str], set[str], set[str]]:
+        """规划本次请求实际下发给模型的工具，并区分服务端/客户端工具。
+
+        工具注入策略：调用方显式传 ``tools`` 时只注入调用方声明的工具（未声明的
+        内置工具不注入，LLM 不会自主调用）；显式传空数组 ``[]`` 表示不注入任何工具；
+        未传 ``tools``（None）时注入除 ``_DEFAULT_EXCLUDED_TOOLS``（联网搜索、图片
+        生成/编辑）外的全部内置工具。Chat 可传 ``tool_options``（search/image）切换
+        搜索和图片生成/编辑；读图与普通工具始终以服务端当前注册状态为准，前端无需
+        维护工具 schema。上下文管理框架工具始终注入，除非显式传空数组 ``[]``。
+
+        客户端工具由客户端本地执行，不进服务端 ToolRegistry：服务端只负责把它下发给
+        模型，并在模型调用时把调用交回客户端（见 ``client_tool_call`` 事件）。两种声明
+        方式等价：
+
+        - 请求顶层 ``client_tools``：推荐用法。与 ``tools`` 相互独立，因此客户端只声明
+          自己要执行的工具即可，不会因为传了 ``tools`` 而丢掉服务端的默认注入策略。
+        - ``tools`` 里带 ``"x-akm-client-tool": true`` 的声明：适合客户端本来就要自己
+          列全部工具的场景。
+
+        **同名规则：服务端已注册的工具优先**——名字命中 ToolRegistry 的声明一律按
+        服务端工具处理，客户端标记被忽略并记警告，避免客户端静默替换服务端实现，
+        保证审计日志里的工具名始终代表真实执行方。客户端工具名一律进授权名单，
+        否则模型伪造一个未声明的名字即可触发客户端执行。
+
+        Args:
+            tools: 客户端声明的工具列表（OpenAI function calling 格式），None 表示未声明。
+            tool_options: Chat 轻量工具开关（search/image），仅在未传 tools 时生效。
+            client_tools: 客户端要本地执行的工具声明，与 tools 独立、按同一规则合并。
+
+        Returns:
+            ``(deduped_tools, allowed_tool_names, client_tool_names,
+            unregistered_tool_names)``：去重后的工具定义、本次请求的执行授权名单、
+            由客户端执行的工具名集合、未注册且未打客户端标记的工具名集合（用于
+            在模型试图调用时给出可操作的报错）。
+        """
+        registered_tools = self._tool_registry.list_tools()
+        registered_names = {
+            (tool.get("function", {}) or {}).get("name", "") for tool in registered_tools
+        }
+        client_tool_names: set[str] = set()
+        # 未注册又没打客户端标记的声明：名字不可执行（既不进授权名单，也不会被
+        # 误当作客户端工具），只用于识别模型是否试图调用它，从而给出可操作的报错。
+        unregistered_tool_names: set[str] = set()
+        if tools is not None:
+            all_tools = []
+            for declared in tools:
+                if not isinstance(declared, dict):
+                    continue
+                name = (declared.get("function", {}) or {}).get("name", "")
+                registered = self._tool_registry.get_definition(name)
+                if registered is not None:
+                    # 内置/插件已注册工具必须使用服务端 schema，不能由客户端伪造
+                    # 同名参数描述误导模型，再由本地 handler 按另一份契约执行。
+                    if declared.get(_CLIENT_TOOL_FLAG):
+                        logger.warning(
+                            "[AgentLoop] 客户端工具声明 %s 与服务端已注册工具同名，"
+                            "按服务端工具执行（客户端标记被忽略）",
+                            name,
+                        )
+                    all_tools.append(registered.to_openai())
+                    continue
+                if name and declared.get(_CLIENT_TOOL_FLAG):
+                    # 客户端工具：服务端不注册 handler，但名字进授权名单，否则
+                    # 模型伪造一个未声明的名字即可触发客户端执行。
+                    client_tool_names.add(name)
+                    all_tools.append(_strip_client_tool_flag(declared))
+                else:
+                    # 保持原有的只读安全默认：仅凭客户端声明不能凭空授权一个服务端
+                    # 执行的名字。合法用途应打客户端标记，或由服务端注册。
+                    if name:
+                        unregistered_tool_names.add(name)
+                    all_tools.append(declared)
+            if all_tools:
+                all_tools.extend(_AGENT_CONTEXT_TOOLS)
+        elif isinstance(tool_options, dict):
+            search_enabled = bool(tool_options.get("search", False))
+            image_enabled = bool(tool_options.get("image", False))
+            all_tools = []
+            for tool in registered_tools:
+                name = (tool.get("function", {}) or {}).get("name", "")
+                if name in _CHAT_OPTIONAL_TOOLS:
+                    if name == "tavily_search" and not search_enabled:
+                        continue
+                    if name != "tavily_search" and not image_enabled:
+                        continue
+                all_tools.append(tool)
+            all_tools.extend(_AGENT_CONTEXT_TOOLS)
+        else:
+            all_tools = [
+                t
+                for t in registered_tools
+                if (t.get("function", {}) or {}).get("name", "")
+                not in _DEFAULT_EXCLUDED_TOOLS
+            ]
+            all_tools.extend(_AGENT_CONTEXT_TOOLS)
+
+        # 顶层 client_tools：与 tools 相互独立的客户端工具声明，在上述任一注入策略
+        # 之下都追加，保证「只声明自己的客户端工具」不会顺带改变服务端工具注入行为。
+        for declared in client_tools or []:
+            if not isinstance(declared, dict):
+                continue
+            name = (declared.get("function", {}) or {}).get("name", "")
+            if not name:
+                continue
+            if self._tool_registry.get_definition(name) is not None:
+                logger.warning(
+                    "[AgentLoop] 客户端工具 %s 与服务端已注册工具同名，"
+                    "按服务端工具执行（客户端声明被忽略）",
+                    name,
+                )
+                continue
+            client_tool_names.add(name)
+            all_tools.append(_strip_client_tool_flag(declared))
+
+        # 按 function name 去重；已注册的同名工具在构建 all_tools 时已被服务端
+        # schema 替换，客户端只能声明授权，不能覆盖服务端参数契约。
+        seen_names: set[str] = set()
+        deduped_tools: list[dict] = []
+        for t in all_tools:
+            name = (t.get("function", {}) or {}).get("name", "")
+            if name and name not in seen_names:
+                seen_names.add(name)
+                deduped_tools.append(t)
+        # 工具定义同时也是本次请求的执行授权名单。不能只控制发给模型的
+        # tools 字段，否则模型仍可伪造一个未声明的 tool_call 触发客户端执行。
+        # 未注册且未打客户端标记的声明不进名单：只传 schema 拿不到执行权，
+        # 维持「服务端只读安全默认」，避免客户端凭空授权一个不存在的服务端工具。
+        # 框架工具（akm_ask_user / akm_context_status / akm_compact_context）不注册在
+        # ToolRegistry，由 AgentLoop 内联处理，必须与已注册工具、客户端工具并列可执行。
+        framework_names = {
+            (tool.get("function", {}) or {}).get("name", "") for tool in _AGENT_CONTEXT_TOOLS
+        }
+        executable_names = set(registered_names) | client_tool_names | framework_names
+        return deduped_tools, seen_names & executable_names, client_tool_names, unregistered_tool_names
+
     async def _execute_registered_tool(self, tc_name: str, tc_args: dict, workspace_root: str) -> str:
         """执行注册在 ToolRegistry 中的普通工具，期间注入请求级工作区覆盖。
 
@@ -1115,6 +1291,7 @@ class AgentLoop:
         model: str = "",
         tools: list[dict] | None = None,
         tool_options: dict | None = None,
+        client_tools: list[dict] | None = None,
         instructions: str = "",
         max_turns: int = 0,
         api_path: str = "chat/completions",
@@ -1139,7 +1316,7 @@ class AgentLoop:
         """
         from akm.proxy import forward_request
 
-        _max_turns = max_turns if max_turns > 0 else self._max_turns
+        _max_turns = max_turns if max_turns > 0 else self._effective_max_turns()
 
         # 准备 messages，如有 instructions 则注入为 system 消息
         working_messages: list[dict] = list(messages or [])
@@ -1159,52 +1336,12 @@ class AgentLoop:
         # 普通工具始终以服务端当前注册状态为准，前端无需维护工具 schema。
         # 上下文管理框架工具（akm_context_status / akm_compact_context）始终注入，
         # 除非显式传空数组 []；非空白名单时也追加，保证 AI 主动压缩能力可用。
-        registered_tools = self._tool_registry.list_tools()
-        if tools is not None:
-            all_tools = []
-            for declared in tools:
-                if not isinstance(declared, dict):
-                    continue
-                name = (declared.get("function", {}) or {}).get("name", "")
-                registered = self._tool_registry.get_definition(name)
-                # 内置/插件已注册工具必须使用服务端 schema，不能由客户端伪造
-                # 同名参数描述误导模型，再由本地 handler 按另一份契约执行。
-                all_tools.append(registered.to_openai() if registered is not None else declared)
-            if all_tools:
-                all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        elif isinstance(tool_options, dict):
-            search_enabled = bool(tool_options.get("search", False))
-            image_enabled = bool(tool_options.get("image", False))
-            all_tools = []
-            for tool in registered_tools:
-                name = (tool.get("function", {}) or {}).get("name", "")
-                if name in _CHAT_OPTIONAL_TOOLS:
-                    if name == "tavily_search" and not search_enabled:
-                        continue
-                    if name != "tavily_search" and not image_enabled:
-                        continue
-                all_tools.append(tool)
-            all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        else:
-            all_tools = [
-                t
-                for t in registered_tools
-                if (t.get("function", {}) or {}).get("name", "")
-                not in _DEFAULT_EXCLUDED_TOOLS
-            ]
-            all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        # 按 function name 去重；已注册的同名工具在构建 all_tools 时已被服务端
-        # schema 替换，客户端只能声明授权，不能覆盖服务端参数契约。
-        seen_names: set[str] = set()
-        deduped_tools: list[dict] = []
-        for t in all_tools:
-            name = (t.get("function", {}) or {}).get("name", "")
-            if name and name not in seen_names:
-                seen_names.add(name)
-                deduped_tools.append(t)
-        # 工具定义同时也是本次请求的执行授权名单。不能只控制发给模型的
-        # tools 字段，否则模型仍可伪造一个未声明的 tool_call 触发注册处理器。
-        allowed_tool_names = seen_names
+        (
+            deduped_tools,
+            allowed_tool_names,
+            client_tool_names,
+            unregistered_tool_names,
+        ) = self._plan_tools(tools, tool_options, client_tools)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
@@ -1340,6 +1477,9 @@ class AgentLoop:
             # akm_ask_user 触发时记录需要向用户澄清的内容（question/options/multiple），
             # 非 None 表示中断编排
             ask_user_data: dict | None = None
+            # 客户端工具被调用时记录本次等待的调用（tool_call_id/name/arguments），
+            # 非 None 表示中断编排、把调用交回客户端执行
+            client_tool_data: dict | None = None
             for tc in tool_calls:
                 tc_id = tc["id"]
                 tc_name = tc["name"]
@@ -1372,6 +1512,35 @@ class AgentLoop:
                         {"error": f"工具未获本次请求授权: {tc_name}"},
                         ensure_ascii=False,
                     )
+                elif tc_name in unregistered_tool_names:
+                    # 声明了但既没注册也没打客户端标记：给出可操作的报错，而不是
+                    # 让它掉进 ToolRegistry 的「未找到工具」这种无法定位原因的提示。
+                    tool_call_count += 1
+                    tool_result = json.dumps(
+                        {
+                            "error": (
+                                f"工具未获本次请求授权: {tc_name}"
+                                "（该工具既未在服务端注册，也未声明为客户端工具；"
+                                "如需由客户端本地执行，请在工具声明上加 "
+                                '"x-akm-client-tool": true）'
+                            )
+                        },
+                        ensure_ascii=False,
+                    )
+                elif tc_name in client_tool_names:
+                    # 客户端工具：服务端不执行，把调用交回客户端本地执行。与
+                    # akm_ask_user 一样中断本轮编排，避免模型在同一轮里连续
+                    # 依赖一个还没有结果的调用。
+                    tool_call_count += 1
+                    client_tool_data = {
+                        "tool_call_id": tc_id,
+                        "name": tc_name,
+                        "arguments": tc_args,
+                    }
+                    tool_result = json.dumps({
+                        "status": "awaiting_client",
+                        "name": tc_name,
+                    }, ensure_ascii=False)
                 elif tc_name == _AGENT_ASK_USER_TOOL:
                     # akm_ask_user：AI 需要向用户澄清提问。中断本轮编排，把问题
                     # 及候选选项原样记入工具结果，返回给客户端等待用户回答后继续。
@@ -1421,13 +1590,33 @@ class AgentLoop:
                     len(tool_result),
                 )
 
-                # 已触发 akm_ask_user：不再执行本轮的其余工具调用
-                if ask_user_data is not None:
+                # 已触发 akm_ask_user / 客户端工具：不再执行本轮的其余工具调用
+                if ask_user_data is not None or client_tool_data is not None:
                     break
 
             # assistant 消息中包含所有 tool_calls，tool 结果紧跟其后
             working_messages.append(assistant_msg)
             working_messages.extend(tool_results)
+
+            # 客户端工具：中断编排并返回，等待客户端本地执行后把 tool 结果追加入
+            # messages 再重新请求以继续。返回的 messages 已含本轮 assistant
+            # tool_calls 与已由服务端执行完的 tool 结果，客户端只需追加待执行
+            # 工具的 tool 结果消息即可续跑（与 ask_user 的续跑约定一致）。
+            if client_tool_data is not None:
+                logger.info(
+                    "[AgentLoop] 交回客户端执行工具（turn=%d）: %s",
+                    turn,
+                    client_tool_data["name"],
+                )
+                return AgentResult(
+                    ok=True,
+                    final_message={"role": "assistant", "content": ""},
+                    messages=working_messages,
+                    turns=turn,
+                    usage=total_usage,
+                    compacted=compacted_count,
+                    client_tool_call=client_tool_data,
+                )
 
             # AI 需要向用户澄清：中断编排并返回，等待客户端把用户回答追加入
             # messages 后重新请求以继续。final_message 即模型想问的问题。
@@ -1481,11 +1670,11 @@ class AgentLoop:
         model: str = "",
         tools: list[dict] | None = None,
         tool_options: dict | None = None,
+        client_tools: list[dict] | None = None,
         instructions: str = "",
         max_turns: int = 0,
         api_path: str = "chat/completions",
         workspace_root: str = "",
-        session_id: str = "",
         cancel_check: Callable[[], bool] | None = None,
         source: str = "chat",
     ) -> AsyncGenerator[str, None]:
@@ -1509,6 +1698,10 @@ class AgentLoop:
         - ``ask_user``        — AI 需要向用户澄清提问（调用 akm_ask_user），data 含 question /
                                 messages / turns / usage；随后本轮结束，等待客户端把用户回答
                                 追加入 messages 后重新请求以继续
+        - ``client_tool_call``— 模型调用了客户端工具（请求 tools 里带 ``x-akm-client-tool``
+                                标记的声明），data 含 tool_call_id / name / arguments / messages /
+                                turns / usage；随后本轮结束，等待客户端本地执行后把 tool 结果
+                                追加入 messages 重新请求以继续
         - ``cancelled``       — 手动中断（客户端通过 AbortController 取消流式请求，或
                                 cancel_check 回调返回 True），data 含 turns / usage；随后生成器退出
         - ``final``           — Agent 完成，含 final_message / usage / turns
@@ -1528,9 +1721,6 @@ class AgentLoop:
 
         Args:
             与 ``run()`` 相同。
-            session_id: 可选会话 ID。传入时复用同名会话文件做增量合并（按消息
-                        内容去重追加），同一多轮对话只保留一份完整历史；留空则
-                        每次请求新建一个独立会话文件（默认行为）。
             cancel_check: 可选回调，返回 True 表示本次请求应被中断。
 
         Yields:
@@ -1538,7 +1728,7 @@ class AgentLoop:
         """
         from akm.proxy import forward_request
 
-        _max_turns = max_turns if max_turns > 0 else self._max_turns
+        _max_turns = max_turns if max_turns > 0 else self._effective_max_turns()
 
         working_messages: list[dict] = list(messages or [])
         if instructions and working_messages:
@@ -1549,52 +1739,14 @@ class AgentLoop:
             else:
                 working_messages.insert(0, {"role": "system", "content": instructions})
 
-        # 工具注入策略：调用方显式传 tools 时只注入调用方声明的工具
-        # （未声明的内置工具不注入）；显式传空数组 [] 表示不注入任何工具；
-        # Chat 可传 tool_options（search/image）切换搜索和图片生成/编辑；读图与
-        # 普通工具始终以服务端当前注册状态为准。未传 tools（None）时注入除 _DEFAULT_EXCLUDED_TOOLS（联网搜索、图片生成/编辑）
-        # 外的全部内置工具。上下文管理框架工具始终注入，除非显式传空数组 []。
-        registered_tools = self._tool_registry.list_tools()
-        if tools is not None:
-            all_tools = []
-            for declared in tools:
-                if not isinstance(declared, dict):
-                    continue
-                name = (declared.get("function", {}) or {}).get("name", "")
-                registered = self._tool_registry.get_definition(name)
-                all_tools.append(registered.to_openai() if registered is not None else declared)
-            if all_tools:
-                all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        elif isinstance(tool_options, dict):
-            search_enabled = bool(tool_options.get("search", False))
-            image_enabled = bool(tool_options.get("image", False))
-            all_tools = []
-            for tool in registered_tools:
-                name = (tool.get("function", {}) or {}).get("name", "")
-                if name in _CHAT_OPTIONAL_TOOLS:
-                    if name == "tavily_search" and not search_enabled:
-                        continue
-                    if name != "tavily_search" and not image_enabled:
-                        continue
-                all_tools.append(tool)
-            all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        else:
-            all_tools = [
-                t
-                for t in registered_tools
-                if (t.get("function", {}) or {}).get("name", "")
-                not in _DEFAULT_EXCLUDED_TOOLS
-            ]
-            all_tools.extend(_AGENT_CONTEXT_TOOLS)
-        seen_names: set[str] = set()
-        deduped_tools: list[dict] = []
-        for t in all_tools:
-            name = (t.get("function", {}) or {}).get("name", "")
-            if name and name not in seen_names:
-                seen_names.add(name)
-                deduped_tools.append(t)
-        # 与非流式路径保持一致：未注入的工具绝不能仅凭模型返回的名称执行。
-        allowed_tool_names = seen_names
+        # 工具注入策略与非流式路径共用 _plan_tools：白名单声明、tool_options
+        # 开关、客户端工具标记与「服务端同名工具优先」的判定只有一份实现。
+        (
+            deduped_tools,
+            allowed_tool_names,
+            client_tool_names,
+            unregistered_tool_names,
+        ) = self._plan_tools(tools, tool_options, client_tools)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
@@ -1785,52 +1937,6 @@ class AgentLoop:
                 if reasoning_content:
                     final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
-                # 自动保存会话到磁盘：默认开启（agent_session_auto_save=true），
-                # /v1/agent 请求结束后自动保存到 ~/.akm/agent_sessions/，供
-                # akm_load_session 工具或客户端回顾恢复对话；设为 false 则跳过。
-                # 保存失败不阻塞主流程（目录权限等问题不会导致请求异常）。
-                if self._session_auto_save:
-                    try:
-                        from akm.agent_runtime.sessions import SessionStore
-
-                        _store = SessionStore()
-                        # 传了 session_id 时复用同名会话文件做增量合并：先读取
-                        # 磁盘上已有的完整历史作为基线，再按消息内容去重追加
-                        # 本次新增消息，避免同一逻辑会话被保存成多个内容重叠
-                        # 的独立文件；未传 session_id 时维持原有行为，每次请求
-                        # 新建一个独立会话文件。
-                        _session_id = str(session_id or "").strip()
-                        if _session_id:
-                            existing = _store.load(_session_id) or {}
-                            merged = list(existing.get("messages") or [])
-                            seen = {
-                                json.dumps(m, ensure_ascii=False, default=str)
-                                for m in merged
-                            }
-                            for m in working_messages:
-                                key = json.dumps(m, ensure_ascii=False, default=str)
-                                if key not in seen:
-                                    seen.add(key)
-                                    merged.append(m)
-                            _store.save({
-                                "name": _session_id,
-                                "model": model,
-                                "messages": merged,
-                                "workspace_root": workspace_root,
-                                "api_path": api_path,
-                                "instructions": instructions,
-                            })
-                        else:
-                            _store.save({
-                                "name": _store.next_name(),
-                                "model": model,
-                                "messages": working_messages,
-                                "workspace_root": workspace_root,
-                                "api_path": api_path,
-                                "instructions": instructions,
-                            })
-                    except Exception:
-                        pass
                 # 自然停顿点：本轮输出（final_message 已入列）完整，即将下发 final。
                 # 客户端若在回复中途输入了引导消息，可在此打断当前流、携带完整
                 # working_messages 快照续跑，避免半截残话或不必要的后续轮次。
@@ -1864,6 +1970,9 @@ class AgentLoop:
             # akm_ask_user 触发时记录需要向用户澄清的内容（question/options/multiple），
             # 非 None 表示中断编排
             ask_user_data: dict | None = None
+            # 客户端工具被调用时记录本次等待的调用（tool_call_id/name/arguments），
+            # 非 None 表示中断编排、下发 client_tool_call 事件交回客户端执行
+            client_tool_data: dict | None = None
             for tc in tool_calls:
                 tc_id = tc["id"]
                 tc_name = tc["name"]
@@ -1914,6 +2023,34 @@ class AgentLoop:
                         "status": "awaiting_user",
                         **ask_user_data,
                     }, ensure_ascii=False)
+                elif tc_name in unregistered_tool_names:
+                    # 声明了但既没注册也没打客户端标记：给出可操作的报错，而不是
+                    # 让它掉进 ToolRegistry 的「未找到工具」这种无法定位原因的提示。
+                    tool_call_count += 1
+                    tool_result = json.dumps(
+                        {
+                            "error": (
+                                f"工具未获本次请求授权: {tc_name}"
+                                "（该工具既未在服务端注册，也未声明为客户端工具；"
+                                "如需由客户端本地执行，请在工具声明上加 "
+                                '"x-akm-client-tool": true）'
+                            )
+                        },
+                        ensure_ascii=False,
+                    )
+                elif tc_name in client_tool_names:
+                    # 客户端工具：服务端不执行，下发 client_tool_call 事件把调用
+                    # 交回客户端本地执行，本轮编排就此中断（与 ask_user 同构）。
+                    tool_call_count += 1
+                    client_tool_data = {
+                        "tool_call_id": tc_id,
+                        "name": tc_name,
+                        "arguments": tc_args,
+                    }
+                    tool_result = json.dumps({
+                        "status": "awaiting_client",
+                        "name": tc_name,
+                    }, ensure_ascii=False)
                 else:
                     tool_call_count += 1
                     # ── 工具执行前检查取消：客户端已停止时不再执行工具 ──
@@ -1949,12 +2086,30 @@ class AgentLoop:
                     "content": tool_result,
                 })
 
-                # 已触发 akm_ask_user：不再执行本轮的其余工具调用
-                if ask_user_data is not None:
+                # 已触发 akm_ask_user / 客户端工具：不再执行本轮的其余工具调用
+                if ask_user_data is not None or client_tool_data is not None:
                     break
 
             working_messages.append(assistant_msg)
             working_messages.extend(tool_result_msgs)
+
+            # 客户端工具：下发 client_tool_call 事件并结束本轮，等待客户端把执行
+            # 结果作为 tool 消息追加入 messages 后重新请求以继续（携带
+            # working_messages 供续跑）。
+            if client_tool_data is not None:
+                logger.info(
+                    "[AgentLoop] 交回客户端执行工具（turn=%d）: %s",
+                    turn,
+                    client_tool_data["name"],
+                )
+                yield _sse_event("client_tool_call", {
+                    **client_tool_data,
+                    "messages": working_messages,
+                    "turns": turn,
+                    "usage": total_usage,
+                    "compacted": compacted_count,
+                })
+                return
 
             # AI 需要向用户澄清：下发 ask_user 事件并结束本轮，等待客户端把用户
             # 回答追加入 messages 后重新请求以继续（携带 working_messages 供续跑）。

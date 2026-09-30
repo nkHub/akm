@@ -743,3 +743,117 @@ async def test_compact_endpoint_501_when_loop_unsupported():
         )
     assert resp.status_code == 501
     assert "不支持手动压缩" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_agent_passes_client_tools_for_json_and_multipart_requests():
+    """客户端工具声明应原样转交 Loop，JSON 与 multipart 两种请求体都支持。"""
+    loop = app.state.agent_loop
+    client_tools = [{
+        "type": "function",
+        "function": {
+            "name": "ui_list_sessions",
+            "description": "列出浏览器本地会话",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        json_resp = await client.post(
+            "/v1/agent",
+            json={
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "client_tools": client_tools,
+            },
+        )
+        multipart_resp = await client.post(
+            "/v1/agent",
+            data={
+                "model": "gpt-4o",
+                "messages": json.dumps([{"role": "user", "content": "hi"}]),
+                "client_tools": json.dumps(client_tools),
+            },
+            files=[("files", ("note.txt", "hello", "text/plain"))],
+        )
+
+    assert json_resp.status_code == 200
+    assert multipart_resp.status_code == 200
+    assert loop.calls[0]["options"]["client_tools"] == client_tools
+    assert loop.calls[1]["options"]["client_tools"] == client_tools
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_invalid_client_tools_json_in_multipart():
+    """multipart 里 client_tools 不是合法 JSON 字符串时应返回 400，而不是静默忽略。"""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/agent",
+            data={
+                "messages": json.dumps([{"role": "user", "content": "hi"}]),
+                "client_tools": "{not json",
+            },
+            files=[("files", ("note.txt", "hello", "text/plain"))],
+        )
+    assert resp.status_code == 400
+    assert "client_tools" in resp.text
+
+
+# ── GET /v1/agent/config：客户端发现运行期限额，避免在前端硬编码 ──
+
+@pytest.mark.asyncio
+async def test_agent_config_reports_effective_limits(monkeypatch):
+    """返回当前生效的轮次/上下文上限，供客户端读取而不是写死。"""
+    import akm.config as cfg
+
+    monkeypatch.setattr(
+        cfg, "load_config",
+        lambda: {"agent_max_turns": 250, "agent_max_context_tokens": 123456},
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/agent/config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["max_turns"] == 250
+    assert payload["max_context_tokens"] == 123456
+    # 说明字段：客户端传 0/不传即沿用服务端上限
+    assert "max_turns" in payload["max_turns_hint"]
+
+
+@pytest.mark.asyncio
+async def test_agent_config_clamps_and_tolerates_broken_values(monkeypatch):
+    """配置写坏/越界时回退并夹紧，不把异常抛给客户端。"""
+    import akm.config as cfg
+
+    monkeypatch.setattr(
+        cfg, "load_config",
+        lambda: {"agent_max_turns": "abc", "agent_max_context_tokens": None},
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        payload = (await client.get("/v1/agent/config")).json()
+
+    assert payload["max_turns"] == 200
+    assert payload["max_context_tokens"] == 272000
+
+    monkeypatch.setattr(
+        cfg, "load_config",
+        lambda: {"agent_max_turns": 10 ** 9, "agent_max_context_tokens": -5},
+    )
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        payload = (await client.get("/v1/agent/config")).json()
+
+    assert payload["max_turns"] == 2000, "轮次上限应夹到 2000"
+    assert payload["max_context_tokens"] == 0, "负数 token 上限归零"
+
+
+@pytest.mark.asyncio
+async def test_agent_config_also_mounted_on_agent_prefix():
+    """/agent/config 与 /v1/agent/config 同源（与其它 agent 端点一致）。"""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get("/agent/config")).status_code == 200

@@ -1,4 +1,4 @@
-"""本地数据目录自动维护 — 更新包缓存清理与文本日志轮转。
+"""本地数据目录自动维护 — 更新包缓存、旧 Agent 会话目录与文本日志轮转。
 
 `~/.akm` 会随使用持续累积可回收内容，历史上只有审计日志有保留策略
 （`akm.audit.auto_cleanup_logs` 按 `log_retention_days` 清理），其余全靠用户手动删：
@@ -10,11 +10,10 @@
 本模块提供 ``run_auto_maintenance()`` 作为统一维护入口，在服务启动与系统唤醒恢复时调用：
 
 - 审计日志清理：始终执行（沿用既有行为与配置）；
-- 更新包缓存清理：受 ``update_cache_cleanup`` 开关控制，默认开启；
+- 更新包缓存清理：受 ``update_cache_cleanup`` 开关控制，默认开启；在此清理开启时同时检查并永久删除旧 Agent 会话目录；
 - 文本日志轮转：受 ``text_log_rotation`` 开关控制，默认关闭。
 
-两个开关都只处理 AKM 自己产生的派生数据：不会触碰 ``config.json`` / ``secret.key`` /
-``akm.db`` / ``plugins/`` / ``agent_sessions/`` / ``markdown_kb/`` 等用户数据与插件目录。
+维护入口不会触碰 ``config.json`` / ``secret.key`` / ``akm.db`` / ``plugins/`` / ``markdown_kb/`` 等用户数据与插件目录。
 """
 
 import logging
@@ -205,7 +204,7 @@ def log_rotation_targets() -> list[str]:
     """返回参与轮转的日志：数据目录直属的 ``*.log``（不递归）。
 
     只处理 AKM 自己写在数据目录根下的 append-only 日志，因此不会进入
-    ``agent_sessions/``、``markdown_kb/``、``plugins/`` 等用户或插件目录。
+    ``markdown_kb/``、``plugins/`` 等用户或插件目录。
     """
     root = akm_home()
     if not os.path.isdir(root):
@@ -280,7 +279,7 @@ def run_auto_maintenance() -> dict:
     """
     from akm.config import get as config_get
 
-    result: dict = {"audit_logs": False, "update_cache": None, "text_logs": None}
+    result: dict = {"audit_logs": False, "update_cache": None, "agent_sessions": None, "text_logs": None}
 
     # 审计日志：沿用既有行为，始终执行（受 log_retention_days 控制）
     try:
@@ -296,6 +295,20 @@ def run_auto_maintenance() -> dict:
             result["update_cache"] = cleanup_update_cache()
         except Exception as exc:
             logger.warning("更新包缓存清理失败: %s", exc)
+
+        # 旧 Agent 历史残留：与更新包缓存清理同开关执行。会话历史已迁移到浏览器
+        # IndexedDB，旧目录不再有用途；若存在就永久删除，不留备份。
+        try:
+            sessions_path = os.path.join(akm_home(), "agent_sessions")
+            if os.path.lexists(sessions_path):
+                size = _path_size(sessions_path)
+                _remove_path(sessions_path)
+                result["agent_sessions"] = {"deleted": True, "freed_bytes": size}
+            else:
+                result["agent_sessions"] = {"deleted": False, "freed_bytes": 0}
+        except Exception as exc:
+            logger.warning("清理旧 Agent 会话目录失败: %s", exc)
+            result["agent_sessions"] = {"deleted": False, "error": str(exc)}
 
     # B. 文本日志轮转：默认关闭，仅显式设为 true 才开启
     if config_get("text_log_rotation", False) is True:

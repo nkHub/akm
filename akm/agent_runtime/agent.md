@@ -4,7 +4,7 @@
 
 每次 LLM 调用通过 `proxy.forward_request` 透传，自动复用 Key 选择、协议转换、重试等所有现有能力。
 
-Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、`sessions.py` 负责会话持久化（`/v1/agent` 请求结束自动落盘到 `~/.akm/agent_sessions/*.json`，供 `akm_load_session` / `akm_list_sessions` 工具及客户端回顾使用；设置 `agent_session_auto_save=false` 可关闭，保持无状态不写磁盘）。
+Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py` 负责多轮编排、`tools.py` 提供内置只读调试工具与工作区文件工具、`service.py` 负责服务启动时的初始化、会话历史仅由聊天客户端保存在浏览器 IndexedDB；服务端 Agent 不再落盘会话历史。
 
 服务启动后会自动为每次 Agent 请求注入以下只读 AKM 调试工具与工作区文件工具。它们仅作用于 `/v1/agent` 和 `/agent`，不会进入常规转发端点（如 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`）。工作区文件工具（`akm_read_file` 等）需在 config.json 配置 `agent_workspace_root` 才会注册，写工具与 shell 工具默认不注册（见「工作区文件工具」章节）。客户端显式声明同名已注册工具时，服务端会保留客户端的授权意图，但始终使用服务端工具定义，避免参数契约不一致：
 
@@ -18,8 +18,6 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_get_time` | 获取服务器当前时间，返回本地 ISO 时间、UTC 时间、UNIX 时间戳与时区 |
 | `akm_get_config` | 读取 AKM 运行配置；密钥类字段（`agent_api_token`、`tavily_api_key`）不做明文透出，仅标记是否已配置 |
 | `akm_list_plugins` | 列出已加载插件的非敏感摘要：名称、版本、分类、描述、是否内置、是否启用与来源 |
-| `akm_list_sessions` | 列出历史 Agent 会话的元信息（会话名、创建/更新时间、消息数、模型），不含消息正文，按更新时间倒序 |
-| `akm_load_session` | 读取历史 Agent 会话的最近若干条消息（`limit` 1-100，默认 20），用于回顾之前会话的上下文 |
 | `akm_list_tasks` | 列出已配置的定时任务（akm 后台任务系统，见「定时任务」章节）：任务 id、名称、类型、间隔、启用状态与执行时间；可用 `task_type` / `enabled=1` 过滤 |
 | `akm_create_task` | 创建一条定时任务（见「定时任务」章节）：`agent_call` 类型需 `payload.messages`（周期调用 Agent Loop 跑一轮对话），`usage_query` 类型需 `payload.alias`；`interval_sec` 为循环间隔秒数，0（默认）表示单次执行后自动禁用 |
 | `akm_delete_task` | 按 `akm_list_tasks` 返回的 `task_id` 删除一条定时任务，返回是否删除成功 |
@@ -70,7 +68,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 |--------|--------|------|
 | `agent_enabled` | `true` | Agent 总开关：设为 `false` 后服务启动时不初始化 Agent Loop、不注册 `/v1/agent` 与 `/agent` 路由、不注入任何 Agent 内置工具；`/v1/tasks` 的 `agent_call` 任务会因此跳过执行（默认开启，仅显式设 `false` 关闭） |
 | `flow_enabled` | `true` | Flow 工作流总开关：设为 `false` 后服务启动时不初始化 WorkflowEngine、不注册 `/v1/flow` 路由、不注入 `akm_flow_*` 工具（默认开启，仅显式设 `false` 关闭） |
-| `agent_max_turns` | `100` | Agent Loop 最大迭代轮次，防止工具调用无限循环 |
+| `agent_max_turns` | `200` | Agent Loop 最大迭代轮次，防止工具调用无限循环。**每次请求实时读取**，改配置下一次请求即生效、无需重启；夹紧到 `[1, 2000]`。请求体传 `max_turns > 0` 可覆盖本次（传 `0` 或不传即用本项）；客户端应读取 `GET /v1/agent/config` 或干脆不传，不要把上限写死在客户端里 |
 | `agent_max_context_tokens` | `272000` | Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史；`0` 表示关闭自动压缩 |
 | `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
@@ -98,7 +96,6 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
 | `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 `Authorization: Bearer <token>` 或 `X-Agent-Token` |
 | `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
-| `agent_session_auto_save` | `true` | 是否把 `/v1/agent` 会话自动落盘到 `~/.akm/agent_sessions/`，默认开启（请求结束时自动保存完整对话历史，供 `akm_load_session` / `akm_list_sessions` 串联回顾使用）；设为 `false` 则保持无状态、不写磁盘 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
 
 ## 请求格式
@@ -143,7 +140,6 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `max_turns` | int | 否 | 最大迭代轮次（默认 20），防止工具调用无限循环 |
 | `stream` | bool | 否 | 是否 SSE 流式返回（默认 `false`）；思考与正文均实时以 `reasoning_delta` / `model_delta` 推送，工具调用事件按上游输出顺序穿插，`final` 收尾（详见「SSE 流式事件」） |
 | `workspace_root` | string | 否 | 本次请求的工作区根目录（绝对路径），只能指定为全局 `agent_workspace_root` 的子目录；不传或传空字符串时使用全局配置 |
-| `session_id` | string | 否 | 会话 ID（可选，需配合 `stream=true` 使用）。传入时自动落盘会复用同名会话文件做**增量合并**：以磁盘上已有历史为基线，按消息内容去重追加本次新增消息，同一逻辑对话只保留一份完整历史，不会重复保存多个内容重叠的独立文件；不传则每次请求新建一个独立会话文件（默认行为） |
 
 ## 上下文压缩
 
@@ -154,6 +150,17 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 3. **客户端手动压缩**：`POST /v1/agent/compact` 由客户端主动触发同款压缩（等价于 `akm_compact_context` 的 `force` 模式）。请求体为 JSON 对象，需携带 `messages`（当前对话工作消息列表，格式同 `/v1/agent`），可选 `model`（摘要用模型）与 `api_path`（默认 `chat/completions`）。鉴权规则与 `/v1/agent` 一致。响应：`{"ok":true,"messages":[<摘要 system 消息 + 保留的最近消息>],"summary":"<摘要文本>","removed_count":N,"before_count":N,"after_count":N,"estimated_tokens":N}`；`messages[0]` 为「以下是对较早对话历史的摘要：…」形式的 system 消息，客户端可将摘要渲染成提示卡片并把早期消息替换掉；参数不合法返回 400，Agent Loop 未初始化返回 503，版本不支持返回 501。
 
 压缩只作用于早期历史，最近消息与所有工具调用配对始终完整保留；`final` / `error` / `context_warning` 事件的 `compacted` 字段表示本次运行累计压缩次数。
+
+## 运行时配置发现
+
+`GET /v1/agent/config`（同 `GET /agent/config`）返回本次请求时刻生效的限额，供客户端发现而不是写死在本地：
+
+```json
+{"ok": true, "max_turns": 200, "max_context_tokens": 272000,
+ "max_turns_hint": "请求体 max_turns <= 0 或不传时使用该上限"}
+```
+
+鉴权规则与 `/v1/agent` 一致；配置写坏或越界时回退并夹紧（轮次 `[1,2000]`、token 上限归零），不把异常抛给客户端。存在的理由是个真实回归：内置聊天界面曾在请求体里硬编码 `max_turns: 50`，把服务端 `agent_max_turns` 配置悄悄覆盖掉，改配置完全不生效。
 
 ## 交互式澄清提问
 
@@ -182,6 +189,54 @@ curl -s http://127.0.0.1:8788/v1/agent \
   -H 'Content-Type: application/json' \
   -d '{"messages":[<上轮返回的 messages>...,{"role":"user","content":"北京"}]}'
 ```
+
+## 客户端工具执行
+
+有些能力的数据或句柄只存在于客户端本地（浏览器 IndexedDB / localStorage、编辑器当前缓冲区、桌面应用窗口等），服务端进程无法读取。这类工具不必在服务端写 Python，可由客户端声明 + 客户端执行，服务端只负责编排：
+
+- 客户端在请求里声明工具（**推荐**用顶层 `client_tools` 字段，与 `tools` 相互独立；也可把声明放进 `tools` 并加 `"x-akm-client-tool": true`）。两种方式等价，独立字段的好处是「只声明自己的客户端工具」不会因为传了 `tools` 而丢掉服务端的默认工具注入策略。
+- 服务端把这些工具一并下发给模型（标记字段会在注入上游前剥掉，避免未知字段被严格校验的供应商拒绝），但**不注册 handler**。
+- 模型调用客户端工具时，本轮编排中断，把调用交回客户端（流式 `client_tool_call` 事件 / 非流式 `client_tool_call` 字段）。
+- 客户端本地执行后，把结果作为 `role: "tool"` 消息追加到服务端返回的 `messages` 之后重新请求，同一轮 Agent 从该结果继续。
+
+**同名规则：服务端已注册的工具优先。** 名字命中 `ToolRegistry` 的声明一律按服务端工具处理，客户端标记被忽略并记警告——避免客户端静默替换服务端实现，保证审计日志里的工具名始终代表真实执行方。客户端要实现与内置工具同名的能力，请另起名字（例如会话历史工具用 `ui_list_sessions` 而不是 `akm_list_sessions`）。
+
+**授权**：客户端工具名一律进本次请求的执行授权名单（否则模型伪造一个未声明的名字即可触发客户端执行）；而未注册又没打客户端标记的声明**不进**名单——仅凭客户端声明拿不到执行权，维持「服务端只读」的安全默认，模型若调用它只会拿到一条带修复提示的 `工具未获本次请求授权` 结果。
+
+- **非流式**：响应体额外返回 `client_tool_call` 字段（`{"tool_call_id": "...", "name": "...", "arguments": {...}}`），`messages` 已含本轮 assistant 的 `tool_calls` 与已由服务端执行完的 `tool` 结果，客户端只需追加待执行工具的 `tool` 结果。
+- **流式**（`stream: true`）：在 `turn_start` / `tool_call` / `tool_result` 事件之后下发 `client_tool_call` 事件（`data` 含 `tool_call_id` / `name` / `arguments` / `messages` / `turns` / `usage`），随后本轮结束，不再下发 `final` 与 `turn_pause`。
+
+```jsonc
+// 请求：声明一个由浏览器执行的客户端工具
+{
+  "messages": [{"role": "user", "content": "我昨天聊过什么？"}],
+  "client_tools": [{
+    "type": "function",
+    "function": {
+      "name": "ui_list_sessions",
+      "description": "列出浏览器本地的历史会话",
+      "parameters": {"type": "object", "properties": {}}
+    }
+  }]
+}
+
+// 流式事件：模型调用了它 → 交回客户端执行
+// data: {"event":"client_tool_call","data":{"tool_call_id":"call_1","name":"ui_list_sessions","arguments":{},"messages":[...]}}
+
+// 续跑：把本地执行结果作为 tool 消息追加（tool_call_id 必须与事件一致）
+{
+  "messages": [/* 上一步返回的 messages */, {"role": "tool", "tool_call_id": "call_1", "content": "{\"sessions\":[...]}"}],
+  "client_tools": [/* 同上，声明需保持一致 */]
+}
+```
+
+内置聊天界面（`agent_chat` 插件）即用该机制实现会话历史查询：它以 `ui_list_sessions` / `ui_load_session` 两个客户端工具读取浏览器 IndexedDB 里的会话，服务端因此不再需要把同一批对话落一份 JSON 到磁盘。
+
+### 会话历史工具已移除
+
+服务端原先注册的 `akm_list_sessions` / `akm_load_session`（读 `~/.akm/agent_sessions/` 磁盘快照）**已整体移除**。原因是一个实测到的真实故障：两套会话工具并存时，模型会挑名字更眼熟的 `akm_load_session`，于是读到的不是用户当前正在聊的那份历史，而是服务端落盘的旧快照——协议接上了、数据却是错的。历史数据的权威副本在客户端浏览器（IndexedDB），因此服务端不再提供这套工具。
+
+服务端不再保存 Agent 对话历史，也不注册任何读取磁盘会话的工具。历史只保存在聊天客户端的浏览器 IndexedDB 中。旧版遗留的 `~/.akm/agent_sessions/` 不再有用途：由本地数据维护入口在更新包缓存清理开启时一并检查；目录存在就**永久删除**，不保留备份。该删除在服务启动/系统唤醒维护时执行，不发生在每次聊天请求中。
 
 ## 文件上传
 
@@ -411,6 +466,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
 | `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
 | `ask_user` | AI 调用 `akm_ask_user` 向用户澄清提问，本轮中断；`data` 含 `question` / `options` / `multiple`（`options` 为空数组表示自由文本回答，非空则单选或多选）/ `messages`（含本轮调用与 `awaiting_user` 结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端展示问题与选择控件、用户回答后携带 messages 续跑 |
+| `client_tool_call` | 模型调用了客户端工具（请求 `client_tools` 或带 `x-akm-client-tool` 标记的 `tools` 声明），本轮中断；`data` 含 `tool_call_id` / `name` / `arguments` / `messages`（已含本轮 `tool_calls` 与已执行完的服务端工具结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端本地执行后把 `role: "tool"` 结果追加入 messages 续跑（见「客户端工具执行」） |
 | `turn_pause` | 自然停顿点：当前轮 LLM 输出（正文/思考）已完整收尾，`data` 含 `turn` / `messages`（当前工作上下文快照，供客户端在回复中途插入引导后续跑）/ `usage` / `compacted`。客户端若要在回复途中打断换方向或补充内容，可在此事件后中断请求并携带快照续跑，避免半截残话；无插入需求时忽略即可（`ask_user` 等待回答与 `tool_retry` 自愈重试路径不触发） |
 | `cancelled` | 手动中断（客户端通过 AbortController 取消流式请求断开连接，服务端主动检测到断连），`data` 含 `turns` / `usage` / `compacted`；随后流结束，不再下发 `final` |
 | `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |

@@ -1856,35 +1856,6 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             for item in items
         ]
 
-    def list_sessions() -> list[dict[str, Any]]:
-        """列出历史 Agent 会话的元信息（不含消息正文），按更新时间倒序。"""
-        from akm.agent_runtime.sessions import SessionStore
-        return SessionStore().list()
-
-    def load_session(name: str, limit: int = 20) -> dict[str, Any]:
-        """读取历史 Agent 会话的最近消息，用于回顾上下文。"""
-        import os as _os
-        if not name or name != _os.path.basename(name) or name in (".", ".."):
-            return {"error": f"非法的会话名: {name!r}"}
-        from akm.agent_runtime.sessions import SessionStore
-        session = SessionStore().load(name)
-        if session is None:
-            return {"error": f"会话不存在: {name}"}
-        try:
-            limit_n = int(limit)
-        except (TypeError, ValueError):
-            limit_n = 20
-        limit_n = max(1, min(limit_n, 100))
-        messages = session.get("messages") or []
-        return {
-            "name": session.get("name", ""),
-            "model": session.get("model", ""),
-            "created_at": session.get("created_at", ""),
-            "updated_at": session.get("updated_at", ""),
-            "message_count": len(messages),
-            "messages": messages[-limit_n:],
-        }
-
     def list_tasks_tool(
         task_type: str = "",
         enabled: str = "",
@@ -2750,25 +2721,6 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             "列出 AKM 已加载插件的非敏感摘要：名称、版本、分类、描述、是否内置、是否启用与来源",
             empty_object,
             list_plugins,
-        ),
-        ToolDef(
-            "akm_list_sessions",
-            "列出历史 Agent 会话的元信息（会话名、创建/更新时间、消息数、模型），不含消息正文，按更新时间倒序",
-            empty_object,
-            list_sessions,
-        ),
-        ToolDef(
-            "akm_load_session",
-            "读取历史 Agent 会话的最近若干条消息，用于回顾之前会话的上下文",
-            {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "会话名（来自 akm_list_sessions 的 name 字段）"},
-                    "limit": {"type": "integer", "description": "返回最近的消息条数，1 到 100，默认 20"},
-                },
-                "required": ["name"],
-            },
-            load_session,
         ),
         ToolDef(
             "akm_list_logs",
