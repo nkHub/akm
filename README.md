@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.53**：`/v1/agent` 新增客户端工具执行协议，`agent_chat` 将会话历史存于浏览器 IndexedDB；服务端会话历史工具与自动落盘已移除，更新包缓存清理开启时会永久清除旧版遗留目录。修复 `agent_max_turns` 配置生效问题并新增配置发现 API。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.54**：连接池页在开启出站代理时会统计代理 transport 里的真实连接，不再一直显示「无连接」；Key 连通性测试同样走 AKM 配置的出站代理。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
