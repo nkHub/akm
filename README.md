@@ -557,7 +557,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `header_toolkit` | filter | | 可选客户端请求头变换：读取客户端原始请求头，按规则重命名/补缺/加前后缀后写上游（`from_header` 支持逗号分隔候选源顺序优先；需内核 `client_headers` 透传） |
 | `budget_gate` | filter | | 可选预算闸门：按全局/模型/用户累计估算费用，超预算阻断新请求 |
 | `fallback_router` | handler | | 可选模型降级：指定错误后切到备用模型并重新选 Key |
-| `data_filter_guard` | filter/post | | 可选请求脱敏（正则含原代码敏感规则）与响应安全拦截（流式字段级滑动窗口） |
+| `data_filter_guard` | filter/post | | 可选请求脱敏（正则含原代码敏感规则）与响应安全拦截（流式字段级滑动窗口）；命中/换回逐条明细日志（`match_log`，默认只写掩码预览不落明文） |
 | `webhook_notifier` | post | | 可选异步 Webhook / 原生 App 告警：上游失败、安全事件与慢请求去重通知 |
 | `prompt_profiles` | filter | | 可选提示词配置集：按模型、接口和客户端叠加注入提示词 |
 | `tool_policy_guard` | filter | | 可选工具策略：限制工具名称和客户端续接中的危险参数 |

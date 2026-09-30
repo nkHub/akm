@@ -26,6 +26,7 @@
 from akm.plugins import PluginBase
 import hashlib
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,14 @@ _STATS_COUNTER_KEYS = (
     "guard_mask",
     "guard_block",
 )
+# 命中明细日志：``~/.akm/data_filter_guard/matches.jsonl``，一行一条命中/还原记录。
+# 档位 off=不写；redacted=写元信息 + 掩码预览（不落明文）；full=额外落明文原文。
+# 与 stats.json 的分工：stats 只存聚合数字（长期累计、首页卡片），matches.jsonl 存
+# 逐条明细（时间/规则/字段路径/占位符/原文长度与指纹/是否换回），受单文件上限滚动约束。
+_MATCH_LOG_MODES = ("off", "redacted", "full")
+_MATCH_LOG_FILENAME = "matches.jsonl"
+_MATCH_LOG_DEFAULT_MODE = "redacted"
+_MATCH_LOG_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 # 从 ``<AKM-SEC:tag@seq:hash/>`` 占位符中提取 tag（字段名/规则标签），用于聚合展示
 _PLACEHOLDER_TAG_RE = re.compile(
     r"^<AKM-SEC:([A-Za-z0-9_.-]{1,48})@\d+:[0-9a-fA-F]{6}/>$"
@@ -178,11 +187,15 @@ class Plugin(PluginBase):
             variants.append(u_lt.replace("/", r"\/"))
         return variants
 
-    def _make_placeholder(self, tag: str, original: str) -> str:
+    def _make_placeholder(
+        self, tag: str, original: str, *, rule: str = "", path: str = ""
+    ) -> str:
         """生成 ``<AKM-SEC:tag@seq:hash/>`` 占位符并建立反向映射。
 
         序号保证同 tag / 同内容指纹下也不会互相覆盖；短 hash 仅便于日志辨认，
         并作为响应侧宽松还原的辅助索引。
+
+        ``rule`` / ``path`` 只用于命中明细日志（field / keyword / regex + 字段路径）。
         """
         self._reverse_seq += 1
         safe_tag = self._safe_placeholder_tag(tag)
@@ -191,6 +204,15 @@ class Plugin(PluginBase):
         self._reverse_map[placeholder] = original
         # 同指纹后写覆盖：同一敏感值多次命中时还原到同一原文即可
         self._reverse_by_fingerprint[fprint] = original
+        self._log_match(
+            "mask",
+            rule=rule,
+            tag=safe_tag,
+            path=path,
+            placeholder=placeholder,
+            seq=self._reverse_seq,
+            original=original,
+        )
         return placeholder
 
     def _reverse_map_summary(self, reverse_map: dict | None) -> str:
@@ -209,6 +231,7 @@ class Plugin(PluginBase):
         reverse_map: dict | None = None,
         *,
         log: bool = True,
+        details: dict | None = None,
     ) -> tuple[str, bool]:
         """扫描 ``<AKM-SEC:`` 前缀做反向替换。可传入请求级 map 支持并发隔离。
 
@@ -219,6 +242,10 @@ class Plugin(PluginBase):
         4. 模型轻微改写 tag/空白后，仍带相同 6 位指纹的宽松匹配。
 
         ``log=False`` 用于流式中间片段：避免每个无前缀 chunk 刷诊断日志。
+
+        ``details``（可选）用于回填本次还原的逐条结果，供命中明细日志使用：
+        ``restored`` 精确还原的占位符、``loose_hits`` / ``loose_misses`` 宽松命中与
+        未命中计数、``remaining`` 还原后仍残留在文本里的占位符。
         """
         rmap = reverse_map if reverse_map is not None else self._reverse_map
         # 先把 ``\\u003cAKM-SEC:...`` 规范成字面 ``<AKM-SEC:...``，后续路径统一
@@ -247,12 +274,15 @@ class Plugin(PluginBase):
 
         changed = False
         exact_hits = 0
+        restored_placeholders: list[str] = []
         for placeholder, original in rmap.items():
             for variant in self._placeholder_variants(placeholder):
                 if variant in text:
                     text = text.replace(variant, original)
                     changed = True
                     exact_hits += 1
+                    if placeholder not in restored_placeholders:
+                        restored_placeholders.append(placeholder)
             # normalize 之后字面 key 是主路径；再扫一遍防 residual unicode 变体
             # （variants 已含 unicode 形态，此处仅保证 normalize 后字面能命中）
 
@@ -305,6 +335,14 @@ class Plugin(PluginBase):
                     "[data_filter_guard] 换回残留占位符: snippet=%r",
                     snippet,
                 )
+        if details is not None:
+            # 逐条还原结果回填给命中明细日志；remaining 含模型改写后仍未被还原的占位符
+            details["restored"] = list(restored_placeholders)
+            details["loose_hits"] = loose_hits
+            details["loose_misses"] = loose_misses
+            details["remaining"] = [
+                m.group(0) for m in _PLACEHOLDER_LOOSE_RE.finditer(text or "")
+            ]
         return text, changed
 
     def is_reverse_map_active(self, reverse_map: dict | None = None) -> bool:
@@ -943,10 +981,11 @@ class Plugin(PluginBase):
                 return True
         return False
 
-    def _apply_text_rules(self, text: str) -> str:
+    def _apply_text_rules(self, text: str, path: str = "") -> str:
         """依次应用关键词和正则替换规则，统一用可逆占位符。
 
         正则替换会跳过已生成的 ``<AKM-SEC:.../>`` 片段，避免二次匹配嵌套破坏映射。
+        ``path`` 仅透传给命中明细日志，标识命中发生在哪个请求文本路径。
         """
         new_text = text
         for source, tag in self._keyword_rules:
@@ -954,7 +993,7 @@ class Plugin(PluginBase):
                 # 已是占位符本体时不再替换
                 if source.startswith(_REVERSE_PREFIX) and source.endswith(_REVERSE_SUFFIX):
                     continue
-                placeholder = self._make_placeholder(tag, source)
+                placeholder = self._make_placeholder(tag, source, rule="keyword", path=path)
                 new_text = new_text.replace(source, placeholder)
         for pattern, tag in self._regex_rules:
             def _repl(m, t=tag):
@@ -969,16 +1008,16 @@ class Plugin(PluginBase):
                     right = new_text.find(_REVERSE_SUFFIX, left)
                     if right >= 0 and left <= start <= right + len(_REVERSE_SUFFIX):
                         return matched
-                return self._make_placeholder(t, matched)
+                return self._make_placeholder(t, matched, rule="regex", path=path)
             new_text = pattern.sub(_repl, new_text)
         return new_text
 
-    def _apply_request_text_guards(self, text: str) -> tuple[str, bool]:
+    def _apply_request_text_guards(self, text: str, path: str = "") -> tuple[str, bool]:
         """对请求字符串执行关键词/正则可逆替换（由 ``request_text_paths`` 门控）。
 
         原代码敏感规则已并入默认 ``regex_rules``，统一走可逆占位符 + reverse_map 换回。
         """
-        new_text = self._apply_text_rules(text)
+        new_text = self._apply_text_rules(text, path=path)
         return new_text, new_text != text
 
     @staticmethod
@@ -1008,7 +1047,9 @@ class Plugin(PluginBase):
                     # 敏感字段名命中 → 整个字段值替换为可逆占位符（与关键词/正则一致）
                     # 非字符串先序列化为文本再映射，保证响应侧能按占位符还原明文
                     original = self._sensitive_value_to_text(raw_val)
-                    result[raw_key] = self._make_placeholder(key, original)
+                    result[raw_key] = self._make_placeholder(
+                        key, original, rule="field", path=current_path
+                    )
                     changed = True
                     continue
                 new_val, sub_changed = self._mask_and_filter(raw_val, current_path)
@@ -1031,7 +1072,7 @@ class Plugin(PluginBase):
             # 关键词/正则（含原代码敏感默认规则）由 request_text_paths 统一门控
             if not self._path_matches(path, self._request_text_paths):
                 return value, False
-            return self._apply_request_text_guards(value)
+            return self._apply_request_text_guards(value, path=path)
 
         return value, False
 
@@ -1158,6 +1199,162 @@ class Plugin(PluginBase):
             del recent[: len(recent) - _STATS_RECENT_LIMIT]
         stats["updated_at"] = self._now_iso()
         self._save_stats()
+
+    # ── 命中明细日志（matches.jsonl，逐条记录命中/还原）──────────
+
+    def _match_log_mode(self) -> str:
+        """当前明细日志档位；配置缺失或非法时回退 redacted。"""
+        raw = str((self.config or {}).get("match_log", _MATCH_LOG_DEFAULT_MODE) or "")
+        mode = raw.strip().lower()
+        return mode if mode in _MATCH_LOG_MODES else _MATCH_LOG_DEFAULT_MODE
+
+    def _match_log_max_bytes(self) -> int:
+        """明细日志单文件上限（字节），非法值回退默认。"""
+        try:
+            value = int(
+                (self.config or {}).get("match_log_max_bytes", _MATCH_LOG_DEFAULT_MAX_BYTES)
+            )
+        except Exception:
+            value = _MATCH_LOG_DEFAULT_MAX_BYTES
+        return value if value > 0 else _MATCH_LOG_DEFAULT_MAX_BYTES
+
+    def _match_log_path(self) -> Path:
+        """明细日志路径：~/.akm/<插件名>/matches.jsonl。"""
+        root = getattr(self, "_data_root", None)
+        if root is None:
+            root = Path.home() / ".akm" / self.name
+            self._data_root = root
+        return Path(root) / _MATCH_LOG_FILENAME
+
+    @staticmethod
+    def _match_preview(original: str) -> str:
+        """redacted 档的掩码预览：只留首尾各 2 个字符，短值整串打码。"""
+        text = str(original or "")
+        if not text:
+            return ""
+        if len(text) <= 8:
+            return "·" * len(text)
+        return f"{text[:2]}…{text[-2:]}"
+
+    def _log_match(
+        self,
+        event: str,
+        *,
+        rule: str = "",
+        tag: str = "",
+        path: str = "",
+        placeholder: str = "",
+        seq: int = 0,
+        original: str | None = None,
+        restored: bool | None = None,
+        reason: str = "",
+    ) -> None:
+        """写一行命中明细；属旁路功能，任何异常都不影响转发主链路。
+
+        redacted 档只落原文长度 + SHA-256 前 8 位 + 掩码预览；full 档额外落明文。
+        """
+        # 未注入 name（单元测试/直接实例化）不落盘，避免污染用户目录
+        if not self.name:
+            return
+        mode = self._match_log_mode()
+        if mode == "off":
+            return
+        try:
+            record: dict = {"ts": self._now_iso(), "event": event}
+            if rule:
+                record["rule"] = rule
+            if tag:
+                record["tag"] = tag
+            if path:
+                record["path"] = path
+            if placeholder:
+                record["placeholder"] = placeholder
+            if seq:
+                record["seq"] = int(seq)
+            if original is not None:
+                text = str(original)
+                record["original_len"] = len(text)
+                record["original_sha256_8"] = hashlib.sha256(
+                    text.encode("utf-8")
+                ).hexdigest()[:8]
+                if mode == "full":
+                    record["original"] = text
+                else:
+                    record["original_preview"] = self._match_preview(text)
+            if restored is not None:
+                record["restored"] = bool(restored)
+            if reason:
+                record["reason"] = reason
+            self._append_match_log(record)
+        except Exception as exc:
+            # 只在首次失败时提示一次，避免刷日志；写日志失败不能影响脱敏与转发
+            if not getattr(self, "_match_log_warned", False):
+                self._match_log_warned = True
+                self._diag("warning", "[data_filter_guard] 命中明细日志写入失败: %s", exc)
+
+    def _append_match_log(self, record: dict) -> None:
+        """追加一行 JSONL；文件 0600、目录 0700，超上限滚动为 matches.jsonl.1。"""
+        path = self._match_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path.parent, 0o700)
+        except Exception:
+            pass
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        try:
+            limit = self._match_log_max_bytes()
+            if path.exists() and path.stat().st_size + len(line.encode("utf-8")) > limit:
+                rotated = path.with_name(path.name + ".1")
+                rotated.unlink(missing_ok=True)
+                path.replace(rotated)
+        except Exception:
+            pass
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _tag_of_placeholder(placeholder: str) -> str:
+        """从占位符解析 tag，解析不到返回空串。"""
+        match = _PLACEHOLDER_TAG_RE.match(str(placeholder or ""))
+        return match.group(1) if match else ""
+
+    def _log_restore_details(
+        self, details: dict, reverse_map: dict, *, path: str = ""
+    ) -> None:
+        """把一次响应还原的逐条结果写进明细日志：命中记 restore，残留记 restore_miss。"""
+        if self._match_log_mode() == "off":
+            return
+        for placeholder in details.get("restored") or []:
+            self._log_match(
+                "restore",
+                path=path,
+                placeholder=placeholder,
+                tag=self._tag_of_placeholder(placeholder),
+                original=reverse_map.get(placeholder),
+                restored=True,
+            )
+        if details.get("loose_hits"):
+            # 宽松命中：模型改写了占位符，已按内容指纹换回，无精确占位符可比对
+            self._log_match(
+                "restore",
+                path=path,
+                restored=True,
+                reason=f"loose_fingerprint_hits={int(details['loose_hits'])}",
+            )
+        for placeholder in details.get("remaining") or []:
+            self._log_match(
+                "restore_miss",
+                path=path,
+                placeholder=placeholder,
+                tag=self._tag_of_placeholder(placeholder),
+                original=reverse_map.get(placeholder),
+                restored=False,
+                reason="placeholder_left_in_response",
+            )
 
     def _event_path(self, ctx) -> str:
         """从 ctx/response 提取可读入口路径（如 chat/completions），取不到返回空串。"""
@@ -1473,14 +1670,18 @@ class Plugin(PluginBase):
             body_len,
             has_prefix,
         )
+        event_path = self._event_path(ctx)
         if body_is_str and response_body and isinstance(rev_map, dict) and rev_map:
-            restored, reverted = self._reverse_replace(response_body, reverse_map=rev_map)
+            details: dict = {}
+            restored, reverted = self._reverse_replace(
+                response_body, reverse_map=rev_map, details=details
+            )
             if reverted:
                 response = dict(response)
                 response["response_body"] = restored
                 self._diag("info", "[data_filter_guard] 响应体已反向还原占位符")
                 # 记录一次占位符还原事件（仅计数，不含还原出的明文）
-                self._record("restored_response", path=self._event_path(ctx))
+                self._record("restored_response", path=event_path)
             else:
                 self._diag(
                     "warning",
@@ -1489,12 +1690,29 @@ class Plugin(PluginBase):
                     is_stream,
                     has_prefix,
                 )
+            # 逐条命中/残留写入明细日志（match_log=off 时不产生任何输出）
+            self._log_restore_details(details, rev_map, path=event_path)
         elif has_prefix and not (isinstance(rev_map, dict) and rev_map):
             self._diag(
                 "warning",
                 "[data_filter_guard] 响应含占位符但 reverse_map 不可用: map_source=%s stream=%s",
                 map_source,
                 is_stream,
+            )
+            # 换回失败要留痕：记下响应里出现过的占位符 tag，便于事后定位
+            missed_tags = sorted(
+                {
+                    self._tag_of_placeholder(m.group(0))
+                    for m in _PLACEHOLDER_LOOSE_RE.finditer(response_body or "")
+                }
+                - {""}
+            )
+            self._log_match(
+                "restore_miss",
+                path=event_path,
+                tag=",".join(missed_tags),
+                restored=False,
+                reason=f"map_unavailable:{map_source}",
             )
 
         # ── 响应安全拦截 ──

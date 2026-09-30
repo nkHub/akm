@@ -1,6 +1,6 @@
 # `data_filter_guard` 插件
 
-数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录，自 v0.1.4 起通过宿主「首页插件卡片」通用插槽（`dashboard_card()` 协议）在管理台首页展示，v0.1.5 起卡片仅保留累计数字、不再展示最近事件明细。
+数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录，自 v0.1.4 起通过宿主「首页插件卡片」通用插槽（`dashboard_card()` 协议）在管理台首页展示，v0.1.5 起卡片仅保留累计数字、不再展示最近事件明细；v0.1.6 起新增**逐条命中明细日志**（`match_log`，默认 `redacted` 档只写掩码预览，不落明文）。
 
 ## 基本信息
 
@@ -31,9 +31,50 @@
 | `response_rule_actions` | text | `(?i)ignore\s+(all\s+)?previous\s+instructions=>warn (?i)reveal\s+(the\s+)?system…` | 按行填写 regex=>warn|mask|block；可对单条规则覆盖全局响应防护模式。默认已合并「提示词注入」模板动作（注入话术多为 warn，dump secrets 为 block）（响应规则动作） |
 | `response_mask_replacement` | string | `[BLOCKED-RISKY-CONTENT]` | 当响应防护模式为 mask 时，用该文本替换命中的危险片段（响应命中替换文本） |
 | `response_block_message` | text | `检测到疑似高风险指令或恶意载荷，已由数据安全插件拦截。` | 命中响应安全规则后，返回给客户端的提示文案（响应拦截提示） |
+| `match_log` | select | `redacted` | 逐条命中明细日志档位：`off` 不写；`redacted` 记录时间/规则/字段路径/占位符/原文长度与指纹/是否换回，原文只留首尾各 2 字符的掩码预览（不落明文）；`full` 额外写入明文原文（等于在本机新增一处明文副本，请自行评估）。落盘 `~/.akm/data_filter_guard/matches.jsonl`（命中明细日志） |
+| `match_log_max_bytes` | number | `2097152` | 明细日志单文件上限；超过后滚动为 `matches.jsonl.1`，只保留一份历史，更早内容被覆盖（明细日志单文件上限） |
 
 ## 运行记录
 
 - 插件启用后，每次实际发生的**请求脱敏**、**响应占位符还原**与**响应拦截**（warn/mask/block）都会累计进运行统计，并在管理台首页「插件卡片」区展示累计数字。v0.1.4 起该展示走宿主通用 `dashboard_card()` 插槽协议（见 `docs/design/plugin-system.md`），插件实现只声明数据、由宿主统一渲染；无任何记录时卡片仍展示（指标为 0），方便首页首见可见。卡片不展示最近事件明细（无跳转入口、看不到被脱敏的具体内容，展示单行事件意义有限），但底层仍累积最近 20 条事件，留作日后详情页 / 审计扩展。
-- 记录落盘在 `~/.akm/data_filter_guard/stats.json`，跨进程重启累计值保留；只记录聚合数字与占位符 tag（如命中字段名/规则标签），**绝不保存敏感明文或占位符原文**。
+- 聚合统计落盘在 `~/.akm/data_filter_guard/stats.json`，跨进程重启累计值保留；只记录聚合数字与占位符 tag（如命中字段名/规则标签），**不保存敏感明文或占位符原文**。
 - 统计随请求自动记录，无独立配置开关；插件未启用/未加载时不产生记录，首页插件卡片区由宿主决定是否整体展示。
+
+## 命中明细日志（v0.1.6 起）
+
+聚合统计只回答「命中过多少次、命中哪些 tag」，定位问题时常需要「这一次具体命中了哪个字段、替换成了什么、响应有没有换回来」。为此新增逐条明细日志，落盘 `~/.akm/data_filter_guard/matches.jsonl`（JSONL，一行一条；文件权限 `0600`、目录 `0700`）。
+
+| 档位 | 行为 |
+|------|------|
+| `off` | 不写明细，仅保留上面的聚合统计 |
+| `redacted`（默认） | 记录时间、事件、规则类型、tag、字段路径、占位符、序号、原文长度、原文 SHA-256 前 8 位，以及原文的掩码预览（首尾各 2 字符，如 `sk…yz`）。**不写明文**，但同一取值跨请求可用指纹关联 |
+| `full` | 在 `redacted` 基础上额外写入 `original` 明文原文。**这等于在本机新增一处明文密钥副本**（文件虽为 `0600`，但同用户下的任意进程可读），与插件「防止敏感数据外发」的目标相冲突，仅建议临时排障时开启 |
+
+记录字段与事件：
+
+| 字段 | 含义 |
+|------|------|
+| `ts` | 本地时区 ISO 时间戳（含偏移，如 `2026-09-30T15:12:03+08:00`） |
+| `event` | `mask` 请求侧脱敏；`restore` 响应侧成功换回；`restore_miss` 未换回（含原因） |
+| `rule` | `field` 敏感字段名 / `keyword` 关键词 / `regex` 正则 |
+| `tag` | 命中的字段名或规则标签（与聚合统计的 tag 口径一致） |
+| `path` | 命中发生的位置，如 `api_key`、`messages[0].tool_calls[0].function.arguments` |
+| `placeholder` | 生成/还原的占位符本体（`<AKM-SEC:tag@seq:hash/>`，不是明文） |
+| `seq` | 同一次请求内的占位符序号 |
+| `original_len` / `original_sha256_8` | 原文长度与 SHA-256 前 8 位（跨请求关联同一取值） |
+| `original_preview` | `redacted` 档的掩码预览 |
+| `original` | `full` 档才有的明文原文 |
+| `restored` | 仅还原事件：`true` 已换回，`false` 未换回 |
+| `reason` | 未换回原因：`placeholder_left_in_response`（响应里仍有占位符）、`map_unavailable:…`（反向映射不可用）、`loose_fingerprint_hits=N`（模型改写占位符后按指纹宽松换回） |
+
+示例（`redacted` 档）：
+
+```json
+{"ts":"2026-09-30T15:12:03+08:00","event":"mask","rule":"field","tag":"api_key","path":"api_key","placeholder":"<AKM-SEC:api_key@1:9f3c2a/>","seq":1,"original_len":51,"original_sha256_8":"a1b2c3d4","original_preview":"sk…yz"}
+{"ts":"2026-09-30T15:12:04+08:00","event":"restore","path":"chat/completions","placeholder":"<AKM-SEC:api_key@1:9f3c2a/>","tag":"api_key","original_len":51,"original_sha256_8":"a1b2c3d4","original_preview":"sk…yz","restored":true}
+```
+
+- 写入是旁路行为：日志失败只提示一次诊断，不影响脱敏与转发。
+- 流式响应按 chunk 还原，不逐 chunk 写明细（避免刷爆日志）；流式路径的换回情况仍看聚合统计与诊断日志。
+- 单文件超过 `match_log_max_bytes`（默认 2MB）后滚动为 `matches.jsonl.1`，只保留一份历史；按每请求数十条命中的量级，默认约保留最近几百次请求的明细。
+- 明细日志由插件自身维护，不参与宿主的日志轮转开关（`text_log_rotation` 只作用于 `~/.akm` 根目录下的 append-only 文本日志）；需要清理时直接删除该文件即可。

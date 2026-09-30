@@ -1,9 +1,9 @@
 {
   "name": "data_filter_guard",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "has_menu": false,
   "category": "filter",
-  "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录（管理台首页卡片展示）",
+  "description": "数据安全插件：请求脱敏（敏感字段/关键词/正则可逆占位符）、非流式与流式字段级滑动窗口响应高风险内容拦截；内置脱敏/拦截运行记录（管理台首页卡片展示）与逐条命中明细日志（默认掩码预览，不落明文）",
   "builtin": false,
   "default_enabled": false,
   "required": false,
@@ -110,6 +110,21 @@
       "type": "text",
       "default": "检测到疑似高风险指令或恶意载荷，已由数据安全插件拦截。",
       "description": "命中响应安全规则后，返回给客户端的提示文案"
+    },
+    {
+      "key": "match_log",
+      "label": "命中明细日志",
+      "type": "select",
+      "default": "redacted",
+      "options": ["off", "redacted", "full"],
+      "description": "off=不写明细；redacted=记录时间/规则/字段路径/占位符/原文长度与指纹/是否换回，原文只留首尾各 2 字符的掩码预览；full=额外写入明文原文（等于在本机新增一处明文副本，请自行评估）。落盘 ~/.akm/data_filter_guard/matches.jsonl（0600）"
+    },
+    {
+      "key": "match_log_max_bytes",
+      "label": "明细日志单文件上限（字节）",
+      "type": "number",
+      "default": 2097152,
+      "description": "命中明细日志超过该字节数时滚动为 matches.jsonl.1（只保留一份历史，更早内容被覆盖）；默认 2MB"
     }
   ]
 }
