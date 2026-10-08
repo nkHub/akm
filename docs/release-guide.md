@@ -192,6 +192,8 @@ updater = SparkleUpdater(
 
 1. 统一版本号来源（`akm/__init__.py`）并确保发布时先升级版本号。
 2. 启动时调用 `releases/latest` 检查最新 tag，并匹配 Release 资产中的 `.zip` 更新包（架构优先，`_pick_zip_download_url`）。
+   - **架构匹配是硬性条件**：`_pick_zip_download_url` 只选文件名含当前机器架构（arm64/x86_64，`aarch64`/`amd64` 归一化）的 zip，**匹配不到就返回空串并放弃自动更新**，绝不退回任意架构的 zip——发布产物是架构绑定的（py2app 只产出构建机的原生架构，当前发布链路只产 arm64 包），装错架构的包会「替换成功、启动即崩」。Intel（x86_64）机器在只有 arm64 资产的 Release 上会走「未提供更新包」提示，需手动处理。
+   - **替换前架构守卫**：下载解压后、替换旧 `.app` 前，`_validate_new_app_arch` 用 `/usr/bin/file` 探测新包主可执行文件的架构；与本机不匹配即中止安装（旧 `.app` 未被移动，原位保留，回滚零成本），通用二进制（universal binary）放行，`file` ���测失败时放行以保持既有行为。该守卫是 2026-09 修复「Intel 设备自��更新 arm64 包后启动失败」的兜底防线，与选包严格化共同生效。
    - **本地更新包缓存保留策略**：下载落在 `~/.akm/updates/`，替换前的旧 `.app` 备份落在 `~/.akm/updates/backups/`。服务启动与系统唤醒恢复时由 `akm.cleanup.cleanup_update_cache` 维护：两层合起来只保留修改时间最新的一个 `.zip`，`backups/` 只保留最新一份 `.app` 备份与当前运行版本对应的备份（回滚点），其余删除；10 分钟内修改过的文件视为进行中的更新而跳过。该行为由 `update_cache_cleanup` 控制，默认开启，用户可在设置页「日志与存储」关闭。
 3. 有更新时（`_handle_update_info`）：
    - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。**静默更新会避让进行中的转发请求**：启动前若检测到在途请求/流式响应（`app.state.health_monitor` 的 `inflight_requests` / `active_streams`），每 30 秒（`AUTO_UPDATE_BUSY_RETRY_SEC`）重试直至服务空闲再开始下载；替换 `.app` 前再次等待请求排空（最长 300 秒，`AUTO_UPDATE_DRAIN_WAIT_SEC`），避免重启掐断请求。手动「立即更新」由用户主动触发，不做等待。
@@ -259,6 +261,7 @@ def check_update():
    - 打开 `https://api.github.com/repos/<owner>/<repo>/releases/latest`。
    - 确认返回的 `tag_name`、`html_url`、`assets`（含 arm64 `.zip`）与刚发布版本一致。
    - 本地启动应用验证菜单栏是否出现更新提示 / 弹窗，以及 zip 更新包能否被正确下载替换。
+   - **架构核对**：上传前确认 zip 内 `.app` 的主可执行架构与文件名后缀一致（`lipo -archs` 或 `file` 核对）；当前发布链路只构建 arm64 包，如未来增加 x86_64 包，两种架构的资产必须成对上传，否则另一架构的设备会提示「未提供更新包」（不会误装）。
 
 6. **插件市场发布（`scripts/publish_plugins.sh`）**
    - 插件市场与 App 更新独立：每个插件打包为 `{name}-{version}.zip` 上传到固定 tag（默认 `plugin-market`），并生成/提交 `plugins/plugins.json` 索引。

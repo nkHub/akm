@@ -166,6 +166,78 @@ def _extract_app(zip_path: str, dest_dir: str) -> str:
     return ""
 
 
+def _current_machine_arch() -> str:
+    """返回当前机器架构标识（小写），用于匹配更新包资产名与架构校验。
+
+    只做名字归一化（aarch64 视同 arm64）；无法识别时返回空串。
+    """
+    arch = (platform.machine() or "").strip().lower()
+    if arch in {"arm64", "aarch64"}:
+        return "arm64"
+    if arch in {"x86_64", "amd64"}:
+        return "x86_64"
+    return arch
+
+
+def _app_binary_archs(app_path: str) -> list:
+    """用 file 探测 .app 主可执行文件的架构列表；探测失败返回空列表。
+
+    通用二进制（universal binary）返回全部包含的架构。探测不到或 file
+    不可用时返回空列表，由调用方决定是否放行，保证校验本身不阻断更新。
+    """
+    macos_dir = os.path.join(app_path, "Contents", "MacOS")
+    exe = ""
+    try:
+        entries = sorted(n for n in os.listdir(macos_dir) if not n.startswith("."))
+    except OSError:
+        return []
+    for name in entries:
+        candidate = os.path.join(macos_dir, name)
+        if os.path.isfile(candidate):
+            exe = candidate
+            break
+    if not exe:
+        return []
+    try:
+        out = subprocess.run(
+            ["/usr/bin/file", "-b", exe],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout or ""
+    except Exception:
+        return []
+    if "universal binary" in out:
+        return ["arm64", "x86_64"]
+    if "arm64" in out or "aarch64" in out:
+        return ["arm64"]
+    if "x86_64" in out or "i386" in out:
+        return ["x86_64"]
+    return []
+
+
+def _validate_new_app_arch(new_app: str) -> str:
+    """校验待安装 .app 的主可执行架构与本机兼容，返回错误文案或空串。
+
+    架构不匹配的更新包一旦替换旧 .app，应用会启动即崩且旧版已不在原位，
+    用户直面「更新后启动失败」。因此这里在替换前硬性拦截；探测失败
+    （file 缺失、bundle 结构异常）时返回空串放行，保持旧有行为不退步。
+    """
+    machine = _current_machine_arch()
+    if not machine:
+        return ""
+    archs = _app_binary_archs(new_app)
+    if not archs:
+        return ""
+    if machine in archs:
+        return ""
+    return (
+        f"更新包架构（{'/'.join(archs)}）与本机（{machine}）不匹配，已中止安装；"
+        "请到 Release 页面手动下载与本机架构一致的安装包"
+    )
+
+
 def _schedule_relaunch(app_path: str) -> None:
     """生成一个延时后 open 新应用的独立脚本并 detached 执行，随后调用方退出当前应用。
 
@@ -389,12 +461,16 @@ class AKMApp(rumps.App):
 
     @staticmethod
     def _pick_zip_download_url(assets: list) -> str:
-        """从 Release 资产中挑选 zip 更新包下载地址。
+        """从 Release 资产中挑选与当前机器架构匹配的 zip 更新包地址。
 
-        匹配规则：优先选择与当前机器架构（arm64/x86_64）匹配且以 .zip 结尾的资产，
-        其次退回任意 .zip 资产；没有任何 zip 时返回空串（表示该版本未提供自动更新包）。
+        匹配规则：优先选择文件名含当前架构（arm64/x86_64）且以 .zip 结尾的资产。
+        匹配不到时返回空串——绝不退回任意架构的 zip：发布产物是架构绑定的
+        （py2app 只产出构建机的原生架构），装错架构的包会「替换成功、启动即崩」，
+        必须让更新流程停在下载前，由用户手动选择正确架构的安装包。
         """
-        arch = platform.machine().lower()
+        arch = _current_machine_arch()
+        if not arch:
+            return ""
         zip_names = [
             a.get("name", "")
             for a in assets
@@ -407,10 +483,6 @@ class AKMApp(rumps.App):
                 for a in assets:
                     if a.get("name") == name:
                         return str(a.get("browser_download_url", "") or "")
-        # 无架构匹配时退回任意 zip，保证通用 Release 也能自动更新
-        for a in assets:
-            if str(a.get("name", "")).lower().endswith(".zip"):
-                return str(a.get("browser_download_url", "") or "")
         return ""
 
     def _safe_notify(self, title: str, message: str) -> None:
@@ -569,6 +641,12 @@ class AKMApp(rumps.App):
             new_app = _extract_app(zip_path, tmp_dir)
             if not new_app or not os.path.isdir(new_app):
                 raise RuntimeError("更新包内容无效，未找到 .app")
+
+            # 2.5 架构守卫：包架构与本机不符时中止，避免「替换后启动即崩」。
+            # 旧 .app 仍未被移动，直接失败即可原位保留。
+            arch_error = _validate_new_app_arch(new_app)
+            if arch_error:
+                raise RuntimeError(arch_error)
 
             # 静默更新：替换 .app 后紧接退出重启，期间若仍有在途请求会被直接掐断，
             # 因此先等请求排空（最长 AUTO_UPDATE_DRAIN_WAIT_SEC 秒）再替换。
