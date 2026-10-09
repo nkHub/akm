@@ -197,7 +197,7 @@ curl -s http://127.0.0.1:8788/v1/agent \
 - 客户端在请求里声明工具（**推荐**用顶层 `client_tools` 字段，与 `tools` 相互独立；也可把声明放进 `tools` 并加 `"x-akm-client-tool": true`）。两种方式等价，独立字段的好处是「只声明自己的客户端工具」不会因为传了 `tools` 而丢掉服务端的默认工具注入策略。
 - 服务端把这些工具一并下发给模型（标记字段会在注入上游前剥掉，避免未知字段被严格校验的供应商拒绝），但**不注册 handler**。
 - 模型调用客户端工具时，本轮编排中断，把调用交回客户端（流式 `client_tool_call` 事件 / 非流式 `client_tool_call` 字段）。
-- 客户端本地执行后，把结果作为 `role: "tool"` 消息追加到服务端返回的 `messages` 之后重新请求，同一轮 Agent 从该结果继续。
+- 客户端本地执行后，按 `tool_call_id` 把结果**回填**进服务端返回的 `messages` 中的占位 tool 消息（内容为 `{"status": "awaiting_client"}`；返回不含占位时才降级为追加）重新请求，同一轮 Agent 从该结果继续。**不要追加新 tool 消息**：返回的 `messages` 末尾已是占位 tool，再追加会产生连续两条 `tool` 消息，被 DeepSeek 等严格校验「`tool` 必须紧跟 assistant `tool_calls`」的上游以 400 拒绝（`Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`）。
 
 **同名规则：服务端已注册的工具优先。** 名字命中 `ToolRegistry` 的声明一律按服务端工具处理，客户端标记被忽略并记警告——避免客户端静默替换服务端实现，保证审计日志里的工具名始终代表真实执行方。客户端要实现与内置工具同名的能力，请另起名字（例如会话历史工具用 `ui_list_sessions` 而不是 `akm_list_sessions`）。
 
@@ -223,9 +223,9 @@ curl -s http://127.0.0.1:8788/v1/agent \
 // 流式事件：模型调用了它 → 交回客户端执行
 // data: {"event":"client_tool_call","data":{"tool_call_id":"call_1","name":"ui_list_sessions","arguments":{},"messages":[...]}}
 
-// 续跑：把本地执行结果作为 tool 消息追加（tool_call_id 必须与事件一致）
+// 续跑：按 tool_call_id 把结果回填进返回 messages 里的占位 tool 消息（勿追加新 tool 消息）
 {
-  "messages": [/* 上一步返回的 messages */, {"role": "tool", "tool_call_id": "call_1", "content": "{\"sessions\":[...]}"}],
+  "messages": [/* 上一步返回的 messages，其中 tool_call_id=call_1 的占位 tool 消息 content 已替换为执行结果 */],
   "client_tools": [/* 同上，声明需保持一致 */]
 }
 ```
@@ -466,7 +466,7 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `tool_result` | 工具执行结果，`data.name` / `data.result` |
 | `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
 | `ask_user` | AI 调用 `akm_ask_user` 向用户澄清提问，本轮中断；`data` 含 `question` / `options` / `multiple`（`options` 为空数组表示自由文本回答，非空则单选或多选）/ `messages`（含本轮调用与 `awaiting_user` 结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端展示问题与选择控件、用户回答后携带 messages 续跑 |
-| `client_tool_call` | 模型调用了客户端工具（请求 `client_tools` 或带 `x-akm-client-tool` 标记的 `tools` 声明），本轮中断；`data` 含 `tool_call_id` / `name` / `arguments` / `messages`（已含本轮 `tool_calls` 与已执行完的服务端工具结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端本地执行后把 `role: "tool"` 结果追加入 messages 续跑（见「客户端工具执行」） |
+| `client_tool_call` | 模型调用了客户端工具（请求 `client_tools` 或带 `x-akm-client-tool` 标记的 `tools` 声明），本轮中断；`data` 含 `tool_call_id` / `name` / `arguments` / `messages`（已含本轮 `tool_calls` 与待执行的占位 tool 消息，供续跑回填）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端本地执行后按 `tool_call_id` 把结果回填进占位 tool 消息（勿追加新 tool 消息，见「客户端工具执行」） |
 | `turn_pause` | 自然停顿点：当前轮 LLM 输出（正文/思考）已完整收尾，`data` 含 `turn` / `messages`（当前工作上下文快照，供客户端在回复中途插入引导后续跑）/ `usage` / `compacted`。客户端若要在回复途中打断换方向或补充内容，可在此事件后中断请求并携带快照续跑，避免半截残话；无插入需求时忽略即可（`ask_user` 等待回答与 `tool_retry` 自愈重试路径不触发） |
 | `cancelled` | 手动中断（客户端通过 AbortController 取消流式请求断开连接，服务端主动检测到断连），`data` 含 `turns` / `usage` / `compacted`；随后流结束，不再下发 `final` |
 | `final` | Agent 完成，含 `data.final_message` / `data.turns` / `data.usage` / `data.compacted` |

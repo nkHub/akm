@@ -41,8 +41,10 @@ AKM `/v1/agent` 的 Web 聊天界面（AetherAI 对话窗口）。构建产物�
 （esbuild + node，26 项断言）。
 
 请求时它们通过顶层 `client_tools` 字段声明（源码见 `src/lib/client-tools.ts`）；模型调用时
-服务端下发 `client_tool_call` 事件，界面在浏览器本地执行后把结果作为 `role: "tool"` 消息
-追加入 `messages` 续跑。
+服务端下发 `client_tool_call` 事件，界面在浏览器本地执行后按 `tool_call_id` 把结果**回填**进
+服务端返回 `messages` 里的占位 tool 消息（`{"status": "awaiting_client"}`）再续跑——不追加新
+`role: "tool"` 消息，否则占位 tool 后紧跟第二条 tool 会被 DeepSeek 等严格校验
+「`tool` 必须紧跟 assistant `tool_calls`」的上游以 400 拒绝。
 
 **对话历史只保存在浏览器 IndexedDB**：服务端不再落盘 Agent 历史，也不注册读取磁盘快照的
 `akm_list_sessions` / `akm_load_session` 工具。两套工具并存曾导致模型选中服务端旧快照而不是
