@@ -1,8 +1,9 @@
 # 版本变更记录
 
 ## 未发布
+`agent_chat` 插件发布 **v0.1.15**：修复客户端工具（`ui_list_sessions` / `ui_load_session`）续跑时被 DeepSeek 以 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'` 拒绝（HTTP 400）的问题。根因是消息拼接协议：服务端 `client_tool_call` 事件下发的 `messages` 末尾已带一条占位 tool 消息（`{"status": "awaiting_client"}`，`tool_call_id` 与本轮调用一致），前端此前在本地执行完工具后又**追加**一条新的 `role: "tool"` 结果消息，导致出现「tool 后紧跟第二条 tool」的结构——DeepSeek 严格校验 tool 消息必须紧跟 assistant 的 `tool_calls`，直接报错（OpenAI 等宽松上游不报错，但结构同样不对）。修复在前端续跑处（chat 项目 `App.tsx`）：按 `tool_call_id` 把真实结果**回填**进占位 tool 消息（一个 tool_call 恰好对应一条 tool 结果），仅在返回不含占位（旧版服务端）时降级为追加。协议文档 `akm/agent_runtime/agent.md` 的「客户端工具执行」、SSE 事件表及 `plugins/agent_chat/README.md`、chat 仓库 `README.md` 的续跑约定已同步改为「回填」口径；服务端 `loop.py` 行为未变。`plugins/agent_chat/dist/` 已重建（`VITE_BASE='./'` 相对路径），`npm run check:history` 26 项断言通过。该修复不改变 AKM 应用版本号、更新管理策略与打包口径，无新增模板 / 静态文件。
 
-修复自动更新在「Release ���有本机架构更新包」时的错误兜底：此前 Intel（x86_64）机器匹配不到 arm64 zip 会退回任意 zip 并静默安装，而发布产物从未提供过 x86_64 包，装错架构的包会导致替换成功、应用启动即崩，且旧版已不在原位（即「不同设备更新后启动失败」）。现在 `_pick_zip_download_url` 严格按当前机器架构（arm64/x86_64，aarch64/amd64 归一化）匹配 zip 资产，匹配不到即返回空串、走「未提供更新包」提示；更新安装流程在替换旧 `.app` 前新增架构守卫（用 `file` 探测新包主可执行文件，通用二进制放行，探测失败不阻断更新），不匹配即中止安装并原位保留旧版。新增回归测试 `tests/test_menubar_update.py`（12 项）。本修复不改变版本号与打包口径，无新增模板 / 静态文件；README 打包与更新说明及 release-guide 方案 C 已同步，插件与 Web 组件文档经检查无需更新。
+修复自动更新在「Release 只有本机架构更新包」时的错误兜底：此前 Intel（x86_64）机器匹配不到 arm64 zip 会退回任意 zip 并静默安装，而发布产物从未提供过 x86_64 包，装错架构的包会导致替换成功、应用启动即崩，且旧版已不在原位（即「不同设备更新后启动失败」）。现在 `_pick_zip_download_url` 严格按当前机器架构（arm64/x86_64，aarch64/amd64 归一化）匹配 zip 资产，匹配不到即返回空串、走「未提供更新包」提示；更新安装流程在替换旧 `.app` 前新增架构守卫（用 `file` 探测新包主可执行文件，通用二进制放行，探测失败不阻断更新），不匹配即中止安装并原位保留旧版。新增回归测试 `tests/test_menubar_update.py`（12 项）。本修复不改变版本号与打包口径，无新增模板 / 静态文件；README 打包与更新说明及 release-guide 方案 C 已同步，插件与 Web 组件文档经检查无需更新。
 
 ## v0.1.54
 

@@ -4,7 +4,7 @@
 
 各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.54**。
 
-发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 0.1.14，包含已重建的相对路径资源产物）；v0.1.54 修复连接池代理探测与 Key 连通性测试的代理路径，只改现有 Python 模块、测试与说明，无新增模板 / 静态文件；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
+发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 0.1.15，包含已重建的相对路径资源产物，续跑改为按 `tool_call_id` 回填占位 tool 消息）；v0.1.54 修复连接池代理探测与 Key 连通性测试的代理路径，只改现有 Python 模块、测试与说明，无新增模板 / 静态文件；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。
 
 `scripts/build_app.sh` 在资源精简和扩展补入后重新签名并执行 `codesign --verify --deep --strict`；校验失败时终止构建，避免发布资源封印失效的应用。签名身份按 `AKM_SIGN_IDENTITY` → 本机自签证书「AKM Local Signing」→ ad-hoc 的顺序选取（证书用 `scripts/make_signing_cert.sh` 幂等创建/复用，材料在 `~/Library/Application Support/AKM/signing`，目录 `0700`、私钥 `0600`，**不进仓库**），回退 ad-hoc 时会打印告警。固定身份的意义：ad-hoc 的指定要求是 cdhash，每次重建都被 macOS 当成新 App，桌面/文稿/下载等目录授权会反复弹窗；同一张证书的指定要求只绑定 bundle id 与证书，重建与自动更新后身份不变，用户授权一次即长期有效。该自签身份不等同于 Developer ID 签名或 Apple 公证。
 
@@ -193,7 +193,7 @@ updater = SparkleUpdater(
 1. 统一版本号来源（`akm/__init__.py`）并确保发布时先升级版本号。
 2. 启动时调用 `releases/latest` 检查最新 tag，并匹配 Release 资产中的 `.zip` 更新包（架构优先，`_pick_zip_download_url`）。
    - **架构匹配是硬性条件**：`_pick_zip_download_url` 只选文件名含当前机器架构（arm64/x86_64，`aarch64`/`amd64` 归一化）的 zip，**匹配不到就返回空串并放弃自动更新**，绝不退回任意架构的 zip——发布产物是架构绑定的（py2app 只产出构建机的原生架构，当前发布链路只产 arm64 包），装错架构的包会「替换成功、启动即崩」。Intel（x86_64）机器在只有 arm64 资产的 Release 上会走「未提供更新包」提示，需手动处理。
-   - **替换前架构守卫**：下载解压后、替换旧 `.app` 前，`_validate_new_app_arch` 用 `/usr/bin/file` 探测新包主可执行文件的架构；与本机不匹配即中止安装（旧 `.app` 未被移动，原位保留，回滚零成本），通用二进制（universal binary）放行，`file` ���测失败时放行以保持既有行为。该守卫是 2026-09 修复「Intel 设备自��更新 arm64 包后启动失败」的兜底防线，与选包严格化共同生效。
+   - **替换前架构守卫**：下载解压后、替换旧 `.app` 前，`_validate_new_app_arch` 用 `/usr/bin/file` 探测新包主可执行文件的架构；与本机不匹配即中止安装（旧 `.app` 未被移动，原位保留，回滚零成本），通用二进制（universal binary）放行，`file` 探测失败时放行以保持既有行为。该守卫是 2026-09 修复「Intel 设备自动更新 arm64 包后启动失败」的兜底防线，与选包严格化共同生效。
    - **本地更新包缓存保留策略**：下载落在 `~/.akm/updates/`，替换前的旧 `.app` 备份落在 `~/.akm/updates/backups/`。服务启动与系统唤醒恢复时由 `akm.cleanup.cleanup_update_cache` 维护：两层合起来只保留修改时间最新的一个 `.zip`，`backups/` 只保留最新一份 `.app` 备份与当前运行版本对应的备份（回滚点），其余删除；10 分钟内修改过的文件视为进行中的更新而跳过。该行为由 `update_cache_cleanup` 控制，默认开启，用户可在设置页「日志与存储」关闭。
 3. 有更新时（`_handle_update_info`）：
    - `auto_update` 开启（默认开启）：启动 60 秒后静默下载 zip → 解压 → 备份旧 `.app` → 替换 → 自动重启，全程系统通知。**静默更新会避让进行中的转发请求**：启动前若检测到在途请求/流式响应（`app.state.health_monitor` 的 `inflight_requests` / `active_streams`），每 30 秒（`AUTO_UPDATE_BUSY_RETRY_SEC`）重试直至服务空闲再开始下载；替换 `.app` 前再次等待请求排空（最长 300 秒，`AUTO_UPDATE_DRAIN_WAIT_SEC`），避免重启掐断请求。手动「立即更新」由用户主动触发，不做等待。
