@@ -564,7 +564,8 @@ function setBucketMetric(panelId, metric) {
 
 // 环形图数据项：数值 + 悬浮明细。
 // 明细与表格保持一致：费用开启时给「费用 + 费用拆解（含价格与缓存命中率）」，
-// 未开启时给「输入 / 输出 / 缓存」Token 构成（这三项不依赖费用估算，表格非费用模式也是这几列）。
+// 未开启时给「输入 / 输出 / 缓存」Token 构成 + 缓存命中率（表格非费用模式也是这几列；
+// 命中率只依赖 token 数，不依赖费用估算，费用关闭时同样展示）。
 function bucketItemDetails(item) {
   var lines = ['请求 ' + (item.requests || 0) + ' 次 · Token ' + fmtNum(item.total || 0)];
   if (_bucketCostOn) {
@@ -574,6 +575,9 @@ function bucketItemDetails(item) {
     }
   } else {
     lines.push('输入 ' + fmtNum(item.prompt || 0) + ' · 输出 ' + fmtNum(item.completion || 0) + ' · 缓存 ' + fmtNum(item.cached || 0));
+    // 缓存命中率口径与费用 tooltip 一致：命中缓存 /（未命中输入 + 命中缓存），无输入时显示 -
+    var inTotal = (item.prompt || 0) + (item.cached || 0);
+    lines.push('缓存命中率: ' + (inTotal > 0 ? ((item.cached || 0) / inTotal * 100).toFixed(1) + '%' : '-'));
   }
   return lines;
 }

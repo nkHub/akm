@@ -26,6 +26,7 @@
   - 用途：统一空态文案
   - 常用属性：`message`
   - 使用方：Key 管理页、审计日志页、连接池页（`#pool-empty`，样式由外层 class 提供）
+  - 约定：`_styles.html` 中固定 `akm-empty-state { display: block; }` —— 自定义元素默认 `inline`，不补这条会让 `py-*` 垂直内边距与 `text-center` 全部失效（连接池页空态曾因此显示异常）；需要 flex 布局的用法（审计日志页）由 Tailwind 类按更高优先级覆盖
 
 - `akm-settings-card`
   - 用途：设置页左右布局卡片壳
