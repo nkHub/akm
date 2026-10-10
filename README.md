@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.54**：连接池页在开启出站代理时会统计代理 transport 里的真实连接，不再一直显示「无连接」；Key 连通性测试同样走 AKM 配置的出站代理。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.55**：修复侧边栏动态插件菜单悬停时文字不可见（统一为 `hover:text-strong`）；应用图标按 Apple 规范补足透明边距，Dock 中不再比其他图标大一圈。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 

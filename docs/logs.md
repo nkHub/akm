@@ -1,5 +1,13 @@
 # 版本变更记录
 
+## v0.1.55
+
+修复侧边栏动态插入的插件菜单项（如 `markdown_kb` 的「知识库」）悬停时文字几乎不可见的问题：服务端拼接的菜单（`akm/server.py` 的 `_build_sidebar_plugin_menu`）非高亮分支误用了 `hover:text-white`，与侧边栏浅色主题（悬停背景变浅灰）叠加导致对比度过低；现与静态菜单项统一为 `hover:bg-surface-hover hover:text-strong`，active 高亮分支（`text-indigo-400`）不变。
+
+应用图标按 Apple 图标规范修正：原 `logo.icns` 源图图形占画布 89.9%（921/1024，边距仅 51px），不符合 Big Sur 起「图形约 824/1024（80.5%）、四周各留约 100px 透明边距」的图标网格要求，导致 Dock 中图标比其他应用大一圈。现裁掉原图透明边后缩放至 824×824、居中放入 1024×1024 画布并重新生成全尺寸 `logo.icns`；`logo.png` 保持不动（它同时用作菜单栏托盘图标与网页 favicon，托盘图标按全画布缩放，改动会连带变小）。
+
+该版本不改变更新管理策略与打包口径，无新增模板 / 静态文件。`agent_chat` 插件包 v0.1.15 的续跑回填修复随本版本首次正式发布。
+
 ## 未发布
 `agent_chat` 插件发布 **v0.1.15**：修复客户端工具（`ui_list_sessions` / `ui_load_session`）续跑时被 DeepSeek 以 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'` 拒绝（HTTP 400）的问题。根因是消息拼接协议：服务端 `client_tool_call` 事件下发的 `messages` 末尾已带一条占位 tool 消息（`{"status": "awaiting_client"}`，`tool_call_id` 与本轮调用一致），前端此前在本地执行完工具后又**追加**一条新的 `role: "tool"` 结果消息，导致出现「tool 后紧跟第二条 tool」的结构——DeepSeek 严格校验 tool 消息必须紧跟 assistant 的 `tool_calls`，直接报错（OpenAI 等宽松上游不报错，但结构同样不对）。修复在前端续跑处（chat 项目 `App.tsx`）：按 `tool_call_id` 把真实结果**回填**进占位 tool 消息（一个 tool_call 恰好对应一条 tool 结果），仅在返回不含占位（旧版服务端）时降级为追加。协议文档 `akm/agent_runtime/agent.md` 的「客户端工具执行」、SSE 事件表及 `plugins/agent_chat/README.md`、chat 仓库 `README.md` 的续跑约定已同步改为「回填」口径；服务端 `loop.py` 行为未变。`plugins/agent_chat/dist/` 已重建（`VITE_BASE='./'` 相对路径），`npm run check:history` 26 项断言通过。该修复不改变 AKM 应用版本号、更新管理策略与打包口径，无新增模板 / 静态文件。
 
