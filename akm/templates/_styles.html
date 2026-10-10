@@ -226,6 +226,10 @@
   akm-plugin-card {
     display: block;
   }
+  /* 空状态占位：自定义元素默认 inline，会让 py-8 / text-center / rounded 全部失效 */
+  akm-empty-state {
+    display: block;
+  }
   akm-modal:not([data-ready]),
   akm-drawer:not([data-ready]),
   akm-settings-card:not([data-ready]) {
