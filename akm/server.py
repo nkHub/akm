@@ -527,7 +527,7 @@ def _build_sidebar_plugin_menu(active: str = "") -> str:
             "bg-indigo-400/10 transition-colors cursor-pointer whitespace-nowrap overflow-hidden"
             if is_active
             else "flex items-center gap-3 px-3 py-2 rounded text-sm text-gray-400 "
-            "hover:bg-surface-hover hover:text-white transition-colors cursor-pointer whitespace-nowrap overflow-hidden"
+            "hover:bg-surface-hover hover:text-strong transition-colors cursor-pointer whitespace-nowrap overflow-hidden"
         )
         parts.append(
             f'<a href="{route}" class="{class_name}">'
