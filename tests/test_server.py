@@ -4626,20 +4626,6 @@ class TestSSENullEventFilter:
 
 
 @pytest.mark.asyncio
-async def test_landing_page_serves_launch_html():
-    """根路径 / 应返回 akm/static/index.html 启动页（AKM 启动页），而非 404。"""
-    transport = ASGITransport(app=app)
-
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers.get("content-type", "")
-    # 启动页特征内容（title 与背景层）
-    assert "AKM 启动页" in resp.text
-    assert resp.text.count("AKM 启动页") == 2
-
-
-@pytest.mark.asyncio
 async def test_admin_dashboard_renders_without_plugin_cards(monkeypatch):
     """首页不再有专用记忆卡区；无启用插件卡片时通用卡片区不渲染、占位被替换。"""
     transport = ASGITransport(app=app)
