@@ -2800,19 +2800,6 @@ async def pool_page(request: Request):
     return HTMLResponse(_render_template("pool.html", title="连接池", active="pool"))
 
 
-@app.get("/")
-async def landing_page(request: Request):
-    """根路径启动页：返回 akm/static/index.html（Ecology 启动页）。
-
-    静态目录已在 app.mount("/static") 挂载，这里仅让 127.0.0.1:{port}/ 
-    直接指向该文件，避免浏览器访问根路径得到 404。
-    """
-    index_path = os.path.join(_static_dir, "index.html")
-    if os.path.isfile(index_path):
-        return FileResponse(index_path)
-    return JSONResponse({"error": "启动页文件缺失"}, status_code=404)
-
-
 @app.get("/about")
 async def about_page(request: Request):
     """关于页面"""
