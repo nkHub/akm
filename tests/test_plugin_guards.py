@@ -15,6 +15,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, UploadFile
 from fastapi import APIRouter
+from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock
 
 from akm.plugins import PluginBase
@@ -64,7 +65,10 @@ def test_remove_registered_routes_only_removes_plugin_owned_routes():
     assert removed == 2
     assert "/markdown-kb/ping" not in paths
     assert "plugin_static_markdown_kb" not in names
-    assert "/plugins/markdown_kb" in paths
+    # FastAPI >= 0.142 起 include_router 的路由包在 _IncludedRouter 延迟
+    # 包装器内，顶层 route.path 不再直接暴露宿主路径，改用真实请求验证
+    # 宿主路由未被清理且仍可访问。
+    assert TestClient(app).get("/plugins/markdown_kb").status_code == 200
 
 
 def _ctx(request: dict | None = None, **kwargs) -> RequestContext:

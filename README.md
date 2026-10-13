@@ -113,6 +113,7 @@ akm log clean --before YYYY-MM-DD # 清理旧日志
 akm plugin list               # 查看插件列表
 akm plugin enable <名称>      # 启用插件（服务在线时热生效）
 akm plugin disable <名称>     # 禁用插件（服务在线时热生效）
+akm plugin reload <名称>      # 热重载插件（手工更新源码后即时生效，无需重启）
 akm plugin config get <名称> [键] # 读取插件配置
 akm plugin config set <名称> <键> <值> # 修改插件配置
 
@@ -187,7 +188,7 @@ akm-menubar
     </tr>
     <tr>
       <td style="white-space: nowrap;">插件</td>
-      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（plugins/plugins.json 索引 + GitHub Release zip 一键安装/更新第三方插件，弹窗分页展示，下载/更新以右上角通知进度条实时展示（安装/更新中按钮防重复），删除插件后市场状态自动刷新，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启；改源码仍需重启）。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
+      <td>插件列表、启用/禁用开关、上传 .zip 安装、**插件市场**（plugins/plugins.json 索引 + GitHub Release zip 一键安装/更新第三方插件，弹窗分页展示，下载/更新以右上角通知进度条实时展示（安装/更新中按钮防重复），删除插件后市场状态自动刷新，版本落后时在插件卡片上显示「更新」）、插件配置读写；启停/安装/删除默认热生效（立即 on_load/on_unload，无需重启）；手工更新插件源码后可用插件卡片「重载」按钮（或 `POST /api/plugins/{name}/reload`、`akm plugin reload <名称>`）热重载，同样无需重启。初始化失败的插件不会进入请求 Hook 或侧边栏，已注册的插件 API 与静态资源会返回 503，避免半初始化状态对外服务。</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">设置</td>
@@ -431,6 +432,7 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | DELETE | `/api/agents/{name}` | 删除自定义供应商代理 |
 | GET | `/api/plugins` | 插件列表 |
 | POST | `/api/plugins/{name}/toggle` | 启用/禁用插件 |
+| POST | `/api/plugins/{name}/reload` | 热重载插件（手工更新源码后即时生效，无需重启） |
 | DELETE | `/api/plugins/{name}` | 删除第三方插件 |
 | POST | `/api/plugins/upload` | 上传 .zip 安装第三方插件 |
 | GET/POST | `/api/plugin-config/{name}` | 插件配置读写 |
@@ -566,7 +568,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊 |
 | `agent-tools` | app | | 可选离线工具箱：内置纯前端工具产物（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 `/tools` 即用 |
 
-插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即从市场拉取最新 zip 覆盖 `~/.akm/plugins/{name}/`，下载过程以右侧通知组件进度条实时展示，已加载第三方插件覆盖后执行**热重载**即时生效、无需重启）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装、删除与第三方插件市场更新默认**热生效**；手工修改已加载插件源码需重启服务。单个插件导入或初始化失败只会跳过该插件。
+插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即从市场拉取最新 zip 覆盖 `~/.akm/plugins/{name}/`，下载过程以右侧通知组件进度条实时展示，已加载第三方插件覆盖后执行**热重载**即时生效、无需重启）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装、删除与第三方插件市场更新默认**热生效**；手工修改已加载插件源码后可通过插件卡片「重载」按钮（或 `POST /api/plugins/{name}/reload`、`akm plugin reload <名称>`）热重载即时生效，同样无需重启。单个插件导入或初始化失败只会跳过该插件。
 
 每个插件实例拥有独立 `config`；`on_load` 返回 `False` 或抛异常时插件保持未就绪，残留的 API、插件页面和静态资源返回 503；管理台保存配置后调用 `on_config_changed` 刷新缓存状态。
 
