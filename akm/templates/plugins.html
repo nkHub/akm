@@ -908,6 +908,8 @@ function renderPluginList(plugins) {
         html += '<button type="button" data-market-name="' + esc(p.name) + '" onclick="installMarketPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer" title="GitHub 市场 v' + esc(mkt.version) + '">更新</button>';
       }
       html += '<span class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-400">' + esc(cat) + '</span>';
+      // 手工更新插件源码后可点击重载，无需重启服务
+      html += '<button type="button" onclick="reloadPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-1.5 py-0.5 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer" title="从磁盘重新加载插件代码（手工更新源码后无需重启）">重载</button>';
       if (p.settings && p.settings.length) {
         html += '<button type="button" onclick="openPluginConfigModal(\'' + esc(p.name) + '\')" class="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/30 text-indigo-300 hover:text-indigo-200 hover:border-indigo-400 cursor-pointer">配置</button>';
        }
@@ -960,6 +962,26 @@ function togglePlugin(name, currentEnabled) {
     }
   }).catch(function(e){
     alert('网络错误: ' + e.message);
+  });
+}
+
+function reloadPlugin(name, btn) {
+  if (!confirm('确认热重载插件 "' + name + '"？将从磁盘重新加载插件代码（手工更新源码后无需重启）。')) return;
+  var orig = btn.textContent;
+  btn.textContent = '重载中...';
+  btn.disabled = true;
+  fetch('/api/plugins/' + encodeURIComponent(name) + '/reload', {method: 'POST'}).then(function(r){return r.json()}).then(function(data){
+    if (data.ok) {
+      alert(data.message || '插件已热重载');
+      loadPlugins();
+    } else {
+      alert(data.error || '热重载失败');
+    }
+  }).catch(function(e){
+    alert('网络错误: ' + e.message);
+  }).finally(function(){
+    btn.textContent = orig;
+    btn.disabled = false;
   });
 }
 

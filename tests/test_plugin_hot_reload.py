@@ -1,9 +1,11 @@
-"""插件市场更新热重载（_hot_reload_plugin）的单元测试。
+"""插件热重载（_hot_reload_plugin / reload_plugin）的单元测试。
 
 覆盖场景：
 1. 已加载的第三方插件被市场版本覆盖后，热重载会用磁盘新代码重新实例化；
 2. 旧实例先被卸载（on_unload 触发），新的 plugin.json（版本号）与新 index.py
    （行为标记）都已生效；插件仍保留启用与就绪状态，restart 标记为 False。
+3. 通用 reload_plugin：手工修改第三方/项目源码插件后热重载即时生效，
+   项目来源插件重载后 source 标记保持 project；未知插件返回错误。
 """
 import asyncio
 import sys
@@ -96,7 +98,7 @@ def test_market_update_hot_reloads_third_party_plugin(tmp_path):
     # 市场覆盖：磁盘写入新版本代码 + 新 plugin.json
     _write_plugin(plugin_dir, PLUGIN_V2, INDEX_V2)
 
-    result = _run(manager._hot_reload_plugin("demo_plugin", plugin_dir, "2.0.0"))
+    result = _run(manager._hot_reload_plugin("demo_plugin", plugin_dir, "third_party", "2.0.0"))
     assert result["ok"] is True
     assert result["restart"] is False, "热重载成功后不应再要求重启"
     assert result["hot"] is True
@@ -129,7 +131,7 @@ def test_hot_reload_keeps_disabled_state(tmp_path):
 
     _write_plugin(plugin_dir, PLUGIN_V2, INDEX_V2)
 
-    result = _run(manager._hot_reload_plugin("demo_plugin", plugin_dir, "2.0.0"))
+    result = _run(manager._hot_reload_plugin("demo_plugin", plugin_dir, "third_party", "2.0.0"))
     assert result["ok"] is True
     assert result["restart"] is False
     assert result["hot"] is True
@@ -140,3 +142,68 @@ def test_hot_reload_keeps_disabled_state(tmp_path):
     assert new.enabled is False
     assert new.runtime_ready is False, "禁用态插件不应触发 on_load"
     assert not plugin_dir.joinpath(".unloaded").exists(), "未就绪的旧实例不应调用 on_unload"
+
+
+def test_reload_plugin_third_party_hot_reloads(tmp_path):
+    """通用 reload_plugin：第三方插件手工更新源码后热重载即时生效"""
+    third_party = tmp_path / "third_party"
+    plugin_dir = _write_plugin(third_party / "demo_plugin", PLUGIN_V1, INDEX_V1)
+
+    manager = PluginManager()
+    manager._third_party_dir = third_party
+    manager._config_path = tmp_path / "config.json"
+
+    old = manager._load_plugin(plugin_dir, "third_party")
+    assert old is not None
+    old.enabled = True
+    old.runtime_ready = True
+
+    # 模拟手工替换源码：直接覆盖磁盘上的插件目录
+    _write_plugin(plugin_dir, PLUGIN_V2, INDEX_V2)
+
+    result = _run(manager.reload_plugin("demo_plugin"))
+    assert result["ok"] is True
+    assert result["restart"] is False
+    assert result["hot"] is True
+    assert result["version"] == "2.0.0"
+
+    new = manager.plugins.get("demo_plugin")
+    assert new is not None and new is not old
+    assert new.marker == "v2", "应执行手工覆盖后的磁盘新代码"
+    assert manager._plugin_sources["demo_plugin"] == "third_party"
+    assert plugin_dir.joinpath(".unloaded").exists(), "旧实例应被调用 on_unload"
+
+
+def test_reload_plugin_project_source_keeps_source(tmp_path):
+    """通用 reload_plugin：项目源码插件重载后 source 保持 project"""
+    project = tmp_path / "project_plugins"
+    plugin_dir = _write_plugin(project / "demo_plugin", PLUGIN_V1, INDEX_V1)
+
+    manager = PluginManager()
+    manager._project_dir = project
+    manager._config_path = tmp_path / "config.json"
+
+    old = manager._load_plugin(plugin_dir, "project")
+    assert old is not None
+    old.enabled = True
+    old.runtime_ready = True
+
+    _write_plugin(plugin_dir, PLUGIN_V2, INDEX_V2)
+
+    result = _run(manager.reload_plugin("demo_plugin"))
+    assert result["ok"] is True
+    assert result["restart"] is False
+
+    new = manager.plugins.get("demo_plugin")
+    assert new is not None and new is not old
+    assert new.marker == "v2"
+    assert manager._plugin_sources["demo_plugin"] == "project", "重载不应改变来源标记"
+
+
+def test_reload_plugin_unknown_returns_error(tmp_path):
+    """通用 reload_plugin：未知插件返回错误而非抛异常"""
+    manager = PluginManager()
+    manager._config_path = tmp_path / "config.json"
+    result = _run(manager.reload_plugin("no_such_plugin"))
+    assert result["ok"] is False
+    assert "error" in result

@@ -13,6 +13,7 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.routing import _IncludedRouter
 
 from .models import PluginMeta
 from .base import NotifyFn, PluginBase
@@ -474,7 +475,10 @@ class PluginManager:
         已加载插件记录的 API 前缀和静态挂载名清理，不能按路径模糊删除，
         以免误删宿主的插件主页及其 raw 路由。
 
-        Args:
+        已加载插件记录的 API 前缀和静态挂载名清理，不能按路径模糊删除，
+        以免误删宿主的插件主页及其 raw 路由。FastAPI >= 0.142 的
+        include_router 会把整组路由包进 _IncludedRouter 延迟包装器，
+        这里会递归展开其有效路径后再做前缀匹配。
             app: 目标 FastAPI 实例；缺省用 self.app。
             names: 仅清理指定插件名的路由与静态挂载；None 表示清理全部
                 （保留原行为，供菜单栏睡眠唤醒等全量场景使用）。
@@ -502,21 +506,52 @@ class PluginManager:
         if not prefixes and not mount_names:
             return 0
 
+        # FastAPI >= 0.142 延迟路由包含：include_router 会把整组路由包进
+        # _IncludedRouter 包装器（path/name 为空），前缀匹配必须递归展开
+        # 包装器内的有效路径；只有包装器内全部路径都属于插件时才整组移除，
+        # 避免误删与插件路由混在同一包装器里的宿主路由。
+
+        def _match_path(path: str) -> bool:
+            return any(
+                path == prefix or path.startswith(f"{prefix}/")
+                for prefix in prefixes
+            )
+
+        def _wrapper_paths(
+            wrapper: _IncludedRouter, base: str = ""
+        ) -> list[str]:
+            """递归收集包装器内所有有效请求路径（前缀 = include 前缀叠加）。"""
+            ctx = getattr(wrapper, "include_context", None)
+            prefix = base + (getattr(ctx, "prefix", "") or "")
+            paths: list[str] = []
+            for inner in getattr(wrapper, "original_router", None).routes or []:
+                if isinstance(inner, _IncludedRouter):
+                    paths.extend(_wrapper_paths(inner, prefix))
+                else:
+                    paths.append(prefix + getattr(inner, "path", ""))
+            return paths
+
         old_routes = target_app.router.routes
         kept_routes = []
         removed = 0
         for route in old_routes:
-            route_path = getattr(route, "path", "")
             route_name = getattr(route, "name", "")
-            is_plugin_api = any(
-                route_path == prefix or route_path.startswith(f"{prefix}/")
-                for prefix in prefixes
-            )
-            if is_plugin_api or route_name in mount_names:
+            if route_name in mount_names:
+                removed += 1
+                continue
+            if isinstance(route, _IncludedRouter):
+                paths = _wrapper_paths(route)
+                # 仅当包装器存在且其中所有路径都命中插件前缀时整组移除
+                if paths and all(_match_path(p) for p in paths):
+                    removed += 1
+                    continue
+                kept_routes.append(route)
+                continue
+            route_path = getattr(route, "path", "")
+            if _match_path(route_path):
                 removed += 1
                 continue
             kept_routes.append(route)
-
         target_app.router.routes = kept_routes
         if removed:
             logger.info(f"[PluginManager] 清理旧插件路由与静态挂载: {removed} 条")
@@ -1079,7 +1114,7 @@ class PluginManager:
         # 7) 已加载的第三方插件：覆盖目录后热重载（真正即时生效，无需重启）
         local_source = self._plugin_sources.get(name)
         if local_source == "third_party":
-            return await self._hot_reload_plugin(name, dest, meta.version or "")
+            return await self._hot_reload_plugin(name, dest, "third_party", meta.version or "")
         if local_source == "project":
             return {
                 "ok": True,
@@ -1133,16 +1168,83 @@ class PluginManager:
             "message": f"已安装到 ~/.akm/plugins/{name}/，下次启动服务后生效",
         }
 
-    async def _hot_reload_plugin(self, name: str, dest: Path, fallback_version: str = "") -> dict:
-        """热重载一个已加载的第三方插件。
+    def _resolve_reload_dir(self, name: str, source: str) -> Path | None:
+        """按插件来源定位重载时应从哪个磁盘目录加载。
+
+        - third_party: ~/.akm/plugins/{name}/
+        - project:     项目根目录 plugins/{name}/
+        - builtin:     开发模式下是 akm/plugins/{name}/（真实目录）；
+                       py2app 打包后内置插件在 zip 内，返回 None，
+                       由 reload_plugin 走 _load_plugin_from_zip 重提取。
+        """
+        if source == "third_party":
+            return self._third_party_dir / name
+        if source == "project":
+            return self._project_dir / name
+        if source == "builtin":
+            candidate = self._builtin_dir / name
+            if candidate.is_dir():
+                return candidate
+            # 打包态：内置插件仍在 zip 内，由调用方走 zip 提取路径
+            return None
+        return None
+
+    async def reload_plugin(self, name: str) -> dict:
+        """热重载一个已加载的插件（通用入口，任意来源）。
+
+        与 _hot_reload_plugin 的差异在于不再假定"市场更新刚覆盖过磁盘"，
+        而是按插件当前来源重新定位磁盘目录后走同一套重载流程：
+        on_unload 旧实例 → 拆除旧路由/静态挂载 → 从磁盘重新动态导入 → on_load。
+        典型场景：手工修改插件源码后即时生效，无需重启服务。
+
+        Returns:
+            {"ok": bool, "name": ..., "version": ..., "restart": bool, "hot": True,
+             "message": ...}；ok=False 时带 error 字段。
+        """
+        source = self._plugin_sources.get(name)
+        if source is None:
+            return {"ok": False, "error": "插件不存在"}
+
+        dest = self._resolve_reload_dir(name, source)
+        if dest is None:
+            if source == "builtin":
+                # 打包态内置插件在 zip 内，先提取再重载
+                self.plugins.pop(name, None)
+                self._plugin_metas.pop(name, None)
+                self._plugin_sources.pop(name, None)
+                self._load_plugin_from_zip(name, "builtin")
+                plugin = self.plugins.get(name)
+                if plugin is None:
+                    return {
+                        "ok": False,
+                        "error": f"内置插件 {name} 重载失败（zip 提取或加载出错），请重启服务",
+                    }
+                return {
+                    "ok": True,
+                    "name": name,
+                    "version": plugin.meta.version if plugin.meta is not None else "",
+                    "restart": False,
+                    "hot": True,
+                    "message": f"已热重载内置插件 {name}（即时生效）",
+                }
+            return {"ok": False, "error": f"无法定位插件 {name} 的源码目录"}
+
+        return await self._hot_reload_plugin(name, dest, source)
+
+    async def _hot_reload_plugin(
+        self, name: str, dest: Path, source: str = "third_party", fallback_version: str = ""
+    ) -> dict:
+        """热重载一个已加载的插件。
 
         市场更新覆盖磁盘目录后调用本方法：先卸载旧实例并拆除其注册的
         API 路由/静态挂载，再从新的磁盘代码动态导入并执行 on_load，
-        使更新真正即时生效，无需重启服务。
+        使更新真正即时生效，无需重启服务。reload_plugin 也复用本方法
+        实现"手工改源码后热重载"。
 
         Args:
             name: 插件名
-            dest: 覆盖后的插件目录（~/.akm/plugins/{name}/）
+            dest: 覆盖后的插件目录
+            source: 重载后插件的来源标记（third_party / project / builtin）
             fallback_version: 市场索引版本号，加载失败时回退展示
 
         Returns:
@@ -1152,7 +1254,7 @@ class PluginManager:
         if plugin is None:
             # 磁盘有目录但内存未加载（异常状态）：直接沿全新安装路径加载
             if self.app is not None:
-                new_plugin = self._load_plugin(dest, "third_party")
+                new_plugin = self._load_plugin(dest, source)
                 if new_plugin is not None and new_plugin.enabled:
                     new_plugin.config = self.get_config(name) or {}
                     try:
@@ -1165,7 +1267,7 @@ class PluginManager:
                 "name": name,
                 "version": fallback_version,
                 "restart": False,
-                "message": f"已更新 ~/.akm/plugins/{name}/（即时生效）",
+                "message": f"已从 {dest} 重新加载 {name}（即时生效）",
             }
 
         was_ready = bool(plugin.runtime_ready)
@@ -1189,14 +1291,14 @@ class PluginManager:
         self._plugin_sources.pop(name, None)
 
         # 5) 从覆盖后的磁盘代码动态加载新版本
-        new_plugin = self._load_plugin(dest, "third_party")
+        new_plugin = self._load_plugin(dest, source)
         if new_plugin is None:
             return {
                 "ok": True,
                 "name": name,
                 "version": fallback_version,
                 "restart": True,
-                "message": f"已更新 ~/.akm/plugins/{name}/，但热重载失败，请重启服务",
+                "message": f"已更新 {dest}，但热重载失败，请重启服务",
             }
         new_version = (
             fallback_version

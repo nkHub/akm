@@ -2697,6 +2697,16 @@ async def disable_plugin(name: str, request: Request):
     return JSONResponse(result, status_code=400)
 
 
+@app.post("/api/plugins/{name}/reload")
+async def reload_plugin(name: str, request: Request):
+    """热重载插件（手工更新源码后即时生效，无需重启）"""
+    pm = request.app.state.plugin_manager
+    result = await pm.reload_plugin(name)
+    if result.get("ok"):
+        return result
+    return JSONResponse(result, status_code=400)
+
+
 @app.delete("/api/plugins/{name}")
 async def delete_plugin(name: str, request: Request):
     """删除第三方插件（热生效：先 on_unload 再删目录）"""

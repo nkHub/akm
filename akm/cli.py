@@ -796,6 +796,36 @@ def plugin_disable(name):
     _toggle_plugin(name, False)
 
 
+@plugin.command("reload")
+@click.argument("name")
+def plugin_reload(name):
+    """热重载指定插件（手工更新源码后即时生效）"""
+    base_url = _local_service_base_url()
+    service_ok, _ = _get_service_health(base_url)
+    if service_ok:
+        url = f"{base_url.rstrip('/')}/api/plugins/{name}/reload"
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post(url)
+            try:
+                result = resp.json()
+            except json.JSONDecodeError as exc:
+                raise click.ClickException(
+                    _format_non_json_service_error(resp, "插件热重载")
+                ) from exc
+            if not result.get("ok"):
+                raise click.ClickException(result.get("error") or "插件热重载失败")
+            click.echo(result.get("message") or "插件已热重载（服务热生效）")
+            return
+        except click.ClickException:
+            raise
+        except Exception as exc:
+            raise click.ClickException(f"调用本地服务失败: {exc}") from exc
+
+    # 服务未运行时无需热重载：下次启动会直接从磁盘加载最新代码
+    click.echo("本地服务未运行，无需热重载；下次启动服务时将自动加载最新插件代码")
+
+
 @plugin.group("config")
 def plugin_config():
     """读取或修改插件配置"""

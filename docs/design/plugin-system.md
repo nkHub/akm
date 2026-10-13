@@ -439,8 +439,9 @@ class PluginManager:
 ### 7.2 加载流程
 
 > **热启停（默认）**：管理台或 API 启用/禁用/安装/删除时，会立即调用 `on_load` / `on_unload`，hook 管道与侧边栏菜单即时生效，**无需重启**。  
-> **仍需重启的情况**：修改插件 `index.py` 源码、替换已加载文件、或需要拆除已注册的 FastAPI 路由/静态挂载（Starlette 限制，禁用后路由仍会保留，但会统一返回 503；Hook、转换器与宿主页则以 `enabled` 和 `runtime_ready` 为准停止调度）。  
-> CLI `akm plugin enable/disable`：若本地服务在线则转发 API 热生效；服务未运行时只写 `config.json`，下次启动生效。
+> **手工更新源码后热重载**：手工替换/修改已加载插件的源码后，可调用通用热重载入口 `PluginManager.reload_plugin(name)`（API：`POST /api/plugins/{name}/reload`；CLI：`akm plugin reload <名称>`；管理台插件卡片「重载」按钮）即时生效，无需重启。流程与市场更新热重载一致：`on_unload` 旧实例 → 按来源拆除旧 API 路由/静态挂载（`remove_registered_routes`）→ 从磁盘重新动态导入并 `on_load`。三种来源（builtin / project / third_party）均支持；py2app 打包态的内置插件走 zip 重提取。重载失败（加载或 `on_load` 抛错）时插件保持未就绪并提示重启兜底。  
+> **仍需重启的情况**：需要拆除已注册的 FastAPI 路由/静态挂载的配置类变更（如 `frontend_static_server` 的挂载路径、`routes_prefix` 调整——禁用后路由仍会保留，但会统一返回 503；Hook、转换器与宿主页则以 `enabled` 和 `runtime_ready` 为准停止调度）。  
+> CLI `akm plugin enable/disable`：若本地服务在线则转发 API 热生效；服务未运行时只写 `config.json`，下次启动生效。`akm plugin reload`：服务在线时转发 API 热重载；服务未运行时无需热重载（下次启动自动加载最新代码）。
 
 ```
 PluginManager.load_all(app)
@@ -912,7 +913,7 @@ class Plugin(PluginBase):
 
 ### 12.1 通用行为
 
-- 启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；第三方插件从市场更新时同样热重载即时生效（先卸载旧实例并拆除旧路由，再加载磁盘新代码并 `on_load`）；手工修改已加载的插件源码仍需重启服务。
+- 启用、禁用、安装与删除默认**热生效**（调用 `on_load` / `on_unload`，hook 与菜单即时切换）；第三方插件从市场更新时同样热重载即时生效（先卸载旧实例并拆除旧路由，再加载磁盘新代码并 `on_load`）；手工修改已加载插件的源码后，可通过通用热重载入口（管理台「重载」按钮、`POST /api/plugins/{name}/reload`、`akm plugin reload <名称>`）即时生效，无需重启，详见 7.2 节「手工更新源码后热重载」。
 - 每个插件实例拥有独立的 `config`；`on_load` 返回 `False` 或抛出异常时，插件保持未就绪，不会进入 Hook 管道，单个插件导入或初始化失败只会跳过该插件。残留的 API、插件页面和静态资源会按未就绪状态返回 503。
 - 管理台保存配置后会替换 `self.config` 并同步调用 `on_config_changed(old_config, new_config)`，缓存配置值的插件应在该回调中刷新自身状态。
 - `error_handler`、`model_matcher` 首次加载默认开启；已保存的插件启停状态优先，显式关闭后不会因升级自动重新启用。两者已从内置改为项目本地插件（`builtin: false`），`required` 亦改为 `false`，用户可自由禁用，key 选择由内核 `key_pool` 完成不受影响。
