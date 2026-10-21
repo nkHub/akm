@@ -54,8 +54,8 @@
   - 触发元素不要写成行内元素参与文本行盒：`inline-block` 的图标会撑高所在行，文字一换行还会被挤到下一行独占一行。重渲染单元格里应把触发元素作为 flex 子项（`flex items-start` + 触发元素 `shrink-0`，图标再给 `block`），行高才稳定（连接池页连接列即此写法）
   - 使用方：统计页费用 ⓘ、连接池页连接明细（`content` 由 JS 用 `\n` 拼出每条连接的源站 / 协议 / 状态 / 已发请求数；拼装前先 `esc()` 转义，换行保留在属性值里）
 
-- `akm-line-chart`
-  - 用途：通用折线图壳组件（内联 SVG，不引入第三方图表库），如统计页「报错趋势」
+- `akm-line-chart`（`akm/static/akm-chart.js`，底层：本地 ApexCharts 3）
+  - 用途：通用折线图壳组件，如统计页「报错趋势」与「每日用量」。早期为内联 SVG 自绘实现，现已迁移到本地打包的 ApexCharts（`akm/static/apexcharts.min.js`，仅统计页引入），对外 `render(config)` API 不变
   - 常用方法：`render({ labels, values, height, maxHeight, fill, color, unit, format, emptyText, details })`
     - `labels` / `values`：等长数组，分别对应 X 轴刻度与数值序列
     - `height`：可选，CSS px，默认 `220`；`fill` 开启时作为**最小高度**
@@ -64,25 +64,28 @@
     - `color`：可选，折线/面积主色，默认 `#818cf8`
     - `unit`：可选，数据点悬浮提示的数值单位
     - `format`：可选，`function(value) -> string`，自定义悬浮提示里的数值（给了它就不再拼 `unit`），如延迟的 `4.2s`、成功率的 `98.42%`
-    - `emptyText`：可选，全 0 时绘图区中央的空态文案
-    - `details`：可选，与 `values` 等长的附加提示行（字符串或字符串数组）；传了它时该数据点改用组件自绘浮层展示「刻度: 数值单位」+ 附加行，未传时保持 SVG `<title>` 原生提示
+    - `emptyText`：可选，无任何有效数据（全 null）时的空态文案；有数据但全 0 时照常画基线并叠加该文案
+    - `details`：可选，与 `values` 等长的附加提示行（字符串或字符串数组），如「8 / 10 成功 · 2 失败」「该时段无请求」
   - 多序列 / 多 Y 轴：`render({ labels, series, axes, height, maxHeight, fill, emptyText })`
     - `series`：`[{ label, values, color, axis, area, format, unit }]`，`axis` 指向 `axes` 里的轴 id；`area` 为 `true` 时该线带面积填充
-    - `axes`：`[{ id, side, min, max, format, color }]`，`side` 为 `left` / `right`；不写 `max` 时按该轴所有序列自动取「好看整数」上界，量纲固定时（如百分比）显式写 `min: 0, max: 100`
-    - 约定：同一 `side` 的多个轴按声明顺序由内向外排开（第一条最贴近绘图区），刻度文字用该轴第一条线的颜色；图例固定画在绘图区顶部一行；`values` 里的 `null` / 空值按 0 处理（画在基线上、折线连续），调用方需要「无样本」语义时自行决定传什么值
-    - 使用方：统计页「每日用量」7d/30d 折线图（总 Token 左轴 + 成功率/缓存命中率右轴 0~100%）
-  - 约定：沿用页面浅色 DOM（不引入 Shadow DOM）；用 `ResizeObserver` 监听宿主宽度与（`fill` 时）父容器尺寸，宿主/父容器尺寸变化、容器从 `display:none` 恢复显示时自动重绘，并以「宽度 + fill 可用高度」签名比对避免自激循环；有 `details` 或为多序列时按相邻点中点划分整列透明命中区，不必精准对准圆点即可悬浮，浮层为 fixed 定位挂到 `body`（避免被卡片 `overflow-hidden` 裁剪），优先显示在数据点上方、空间不足时翻到下方；数据点多于 40 个时只画折线、不画圆点
+    - `axes`：`[{ id, side, min, max, format }]`，`side` 为 `left` / `right`；**不写 `min`/`max` 时按数据范围自适应量程**（成功率 99.7%~100% 的差异能看出来），需要固定量程才显式写（如 `min: 0, max: 100`）
+    - 同一 `axis` id 的多条序列共用一条视觉轴：组件给每条序列生成一个 yaxis 项，并把 `seriesName` 设为**组内第一条序列的名字**来归组（ApexCharts 的分组轴按「yaxis.seriesName 与 series.name 同名」匹配，自造组名匹配不上）；组内只有第一条显示刻度
+    - **空值语义（重要）**：`values` 里的 `null` = 该点没有样本 —— 折线在这一点断开、不画点、悬浮显示「—」；`0` = 真实的 0（画在 0 值处）。两者不要混用
+    - 使用方：统计页「每日用量」7d/30d 折线图（总 Token 左轴 + 成功率/缓存命中率右轴自适应；无请求日成功率与缓存命中率传 `null` 断线）
+  - 交互：`tooltip.shared` + x 轴 crosshairs 十字准星，悬浮一次给出该时间点全部序列数值（内容自绘并 HTML 转义，序列名/报错文本来自上游数据）；图例可点击隐藏/显示序列（单序列不显示图例）
+  - 主题跟随：颜色统一从 CSS 变量（`--c-*`，注意要拼成**逗号分隔**的 `rgb(r, g, b)` —— ApexCharts 的颜色处理不认空格分隔的现代语法，会抛错导致轴渲染中断）；监听 `<html>` 的 `data-theme` / `class` 变化后销毁重建实例
+  - 约定：沿用页面浅色 DOM（不引入 Shadow DOM）；`ResizeObserver` + 「宽度 + fill 可用高度」签名比对驱动重绘；依赖缺失时显示「图表库加载失败」而不是空白；组件文件从 `akm-ui.js` 拆出（`akm-chart.js`，全局引入），echarts 底层尝试已废弃，不要再用
 
 - `akm-donut-chart`
-  - 用途：通用环形图壳组件（内联 SVG，占比视角），如统计页按 Key / 按模型 / 按来源的「图」视图
+  - 用途：通用环形图壳组件，如统计页按 Key / 按模型 / 按来源的「图」视图。已与折线图一起迁移到本地 ApexCharts（`akm/static/akm-chart.js`），对外 `render(config)` API 不变
   - 常用方法：`render({ items, unit, format, maxSlices, size, centerLabel, emptyText, palette })`
     - `items`：`[{ label, value, details }]`，`details` 为悬浮浮层的附加行（字符串或字符串数组），如费用拆解
     - `unit` / `format`：数值单位与格式化函数，图例、圆心、浮层共用
     - `maxSlices`：可选，最多画几片（**含**合并出的「其他」），默认 `6`；长尾按大小合并为「其他」并在下方提示合并了几项
     - `size`：可选，直径 CSS px，默认 `168`；`centerLabel`：可选，圆心默认文案（默认「总计」）
     - `emptyText`：可选，所有项都非正数时的空态文案
-  - 交互：悬浮扇区或图例行都会弹浮层（名称 / 数值 / 占比 / `details`），同时该片加粗、其余片淡出、圆心切换为该片数值；扇区按角度命中（整个圆盘除圆心附近都算命中区），长尾小项建议用图例行悬浮
-  - 约定：沿用页面浅色 DOM；浮层复用共享的 `akmFloatingTip()`（fixed 挂 `body`）；不引入第三方图表库
+  - 交互：悬浮扇区弹 ApexCharts 浮层（名称 / 数值 / 占比 / `details`），圆心**不显示任何文字**（用户要求去掉；数值与占比由右侧图例承担，`centerLabel` 参数保留但当前不渲染）；`dataLabels` 必须显式关掉，否则片上会出现百分比数字；悬浮图例行走 `akmFloatingTip()`，且会高亮对应扇区（其余片淡出至 0.4），悬浮扇区反向高亮图例行（图例保留自绘 HTML，带数值与占比，原生 legend 做不到）
+  - 约定：主题跟随与折线图共用 `akmObserveTheme()`（`data-theme` / `class` 变化时销毁重建）；片间缝用 `--c-border` 勾边；浮层样式统一由 `_styles.html` 的 `.apexcharts-tooltip` 覆盖块提供（`--c-tooltip-*` 配色、360px 限宽、11px 字号），折线与环形共用
 
 - `akm-chat-viewer`（`akm/static/chat-viewer.js`）
   - 用途：日志详情抽屉的对话视图，消息气泡级虚拟列表（动态测量高度，按可视区渲染）
