@@ -130,14 +130,31 @@
     --c-blue-400: 37 99 235;
   }
   body { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
-  /* 图表（akm-line-chart / akm-donut-chart）内部的中性色改成类，
-     序列色是强调色、两套主题共用，所以这里只处理会随主题变的部分 */
-  .akm-chart-grid { stroke: rgb(var(--c-border)); }
-  .akm-chart-tick { fill: rgb(var(--c-gray-500)); }
-  .akm-chart-legend { fill: rgb(var(--c-gray-400)); }
-  .akm-chart-center-label { fill: rgb(var(--c-gray-500)); }
-  .akm-chart-center-value { fill: rgb(var(--c-gray-200)); }
-  .akm-chart-dot { fill: rgb(var(--c-chart-dot)); }
+  /* 统计页折线图 / 环形图已整体迁移到 ApexCharts（akm/static/akm-chart.js）。
+     ApexCharts 的浮层默认样式依赖它自己的 CSS 文件，我们没引，这里用主题变量补齐：
+     配色跟随 --c-tooltip-*（深浅主题自动切换），限宽防止报错详情把浮层撑出屏幕 */
+  .apexcharts-tooltip {
+    background: rgb(var(--c-tooltip-bg)) !important;
+    border: 1px solid rgb(var(--c-tooltip-border)) !important;
+    color: rgb(var(--c-tooltip-text)) !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .4) !important;
+    border-radius: 6px !important;
+    padding: 8px 10px !important;
+    max-width: 360px !important;
+    font-size: 11px !important;
+    /* ApexCharts 的浮层容器自带 nowrap（长报错详情一行到底），强制回正常换行 */
+    white-space: normal !important;
+  }
+  .apexcharts-tooltip-arrow { display: none !important; }
+  /* 面积序列（图表第一条线）的线保持实色、面积填充 12%：
+     ApexCharts 的 fill.opacity 会把透明度同时写进同一个 path 的描边（总 Token 线肉眼消失），
+     这里用 CSS 分开控制 —— CSS 优先级高于 SVG 表现属性，ApexCharts 重绘也覆盖不掉 */
+  akm-line-chart g.apexcharts-series:first-child path.apexcharts-line {
+    stroke-opacity: 1 !important;
+    fill-opacity: 0.12;
+  }
+  /* ApexCharts 首次 hover 会先挂一个内容为空的浮层壳，空壳不显示（否则会闪一个小空窗） */
+  .apexcharts-tooltip:has(> div:empty) { display: none !important; }
   .status-2xx { background: #166534; color: #86efac; }
   .status-4xx { background: #854d0e; color: #fde68a; }
   .status-5xx { background: #991b1b; color: #fecaca; }

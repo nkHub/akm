@@ -226,6 +226,8 @@
 {% endblock %}
 
 {% block extra_js %}
+<!-- 折线图依赖：只在统计页引入（约 0.5MB），其它管理台页面不付这份体积 -->
+<script src="/static/apexcharts.min.js?v={{ asset_version }}"></script>
 <script>
 function esc(s) { if(!s)return''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function fmtNum(n) {
@@ -388,9 +390,11 @@ function switchMetric(metric) {
   renderTrendSeries(_lastTrendSeries);
 }
 
-// 各指标取哪个字段（成功率 / 延迟缺样本时按 0 画，提示里另行说明）
+// 各指标取哪个字段：缺样本时与「每日用量」同口径连接——成功率按 100%（该时段无失败请求）、
+// P95 按 0（无成功请求实测延迟）；报错次数的 0 本来就是真实值。
+// 悬浮提示的附加行（details）会另行说明「该时段无请求 / 无成功请求」。
 function metricValue(item, metric) {
-  if (metric === 'success') return item.success_rate == null ? 0 : Number(item.success_rate);
+  if (metric === 'success') return item.success_rate == null ? 100 : Number(item.success_rate);
   if (metric === 'latency') return item.p95_ms == null ? 0 : Number(item.p95_ms);
   return Number(item.count) || 0;
 }
@@ -677,8 +681,9 @@ function switchDays(d) {
 
 // ── 每日用量 ──
 // 1d 只有今天一天，与上面的报错趋势 / 按来源重复，整块不显示；
-// 7d / 30d 改成整行折线图，三条线：总 Token（左轴）、成功率与缓存命中率（右轴，固定 0~100%）；
-// 没有请求的自然日率值按 0 画（直接落到基线，不做插值/断线）。
+// 7d / 30d 改成整行折线图，三条线：总 Token（左轴）、成功率与缓存命中率（右轴，量程按数据自适应）；
+// 没有请求的自然日：成功率与缓存命中率都没有分母，传 null 让折线在该点断开（不再填 0 或 100 伪造数据），
+// 总 Token 那天真实的 0 用量照常画在基线。轴量程不再固定 0~100%，否则 99.7% 与 100% 的差异全挤在顶部。
 // 口径与后端一致：daily 与 errors.series 都是「最近 N 个自然日、升序」，
 // 因此按同一个下标取用量与成功率，不用做日期字符串对齐。
 function renderDailyChart(s) {
@@ -703,12 +708,20 @@ function renderDailyChart(s) {
     var cached = item ? Number(item.cached) || 0 : 0;
     var inputTotal = prompt + cached;
     tokens.push(item ? Number(item.total) || 0 : 0);
-    // 无请求的自然日：率值没有分母，按 0 画在基线（不插值、不断线），一眼能看出那几天没请求
-    successRates.push(trend[i] && trend[i].success_rate != null ? Number(trend[i].success_rate) : 0);
+    // 无请求的自然日：率值没有分母，按「成功率 100%（当日无失败）、缓存命中率 0（无缓存可命中）」
+    // 连线绘制，不做断线；总 Token 的 0 是真实值照常画。日与日之间折线始��连续。
+    var bucket = trend[i] || null;
+    successRates.push(bucket && bucket.success_rate != null ? Number(bucket.success_rate) : 100);
     // 缓存命中率口径与费用 tooltip 一致：命中缓存 /（未命中输入 + 命中缓存）
     cacheRates.push(inputTotal > 0 ? cached * 100 / inputTotal : 0);
   }
   section.classList.remove('hidden');
+  // 百分比轴：上限固定 100%（缓存命中率个别日期可能算出 >100%，不封顶会拉到 200%），
+  // 下限按数据收窄 —— 数据整体在高位（≥90%）时从数据附近起，否则从 0 起，
+  // 这样 99.x 与 100 的差异看得见，刻度又不会超过 100%
+  var pctVals = successRates.concat(cacheRates).filter(function(v) { return v != null && isFinite(v); });
+  var pctDataMin = pctVals.length ? Math.min.apply(null, pctVals) : 0;
+  var pctAxisMin = pctDataMin >= 90 ? Math.floor(pctDataMin / 5) * 5 : 0;
   chart.render({
     labels: labels,
     series: [
@@ -718,7 +731,8 @@ function renderDailyChart(s) {
     ],
     axes: [
       { id: 'tokens', side: 'left', format: function(v) { return fmtNum(v); } },
-      { id: 'percent', side: 'right', min: 0, max: 100, format: function(v) { return Math.round(v) + '%'; } }
+      // 百分比轴：上限固定 100%，下限按数据收窄（高位时从数据附近起，低位时从 0 起）
+      { id: 'percent', side: 'right', min: pctAxisMin, max: 100, format: function(v) { return (Math.round(v * 10) / 10) + '%'; } }
     ],
     height: 220,
     maxHeight: 260,

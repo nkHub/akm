@@ -42,6 +42,9 @@ DATA_FILES = [
         "akm/static/chat-viewer.js",
         "akm/static/json-viewer.js",
         "akm/static/json-worker.js",
+        # 折线图组件与 ApexCharts（统计页专用，约 0.5MB）
+        "akm/static/akm-chart.js",
+        "akm/static/apexcharts.min.js",
     )),
 ]
 
