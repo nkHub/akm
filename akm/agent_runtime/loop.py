@@ -8,6 +8,7 @@
 import json
 import inspect
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
@@ -118,6 +119,29 @@ _AGENT_CONTEXT_TOOLS: list[dict] = [
         },
     },
 ]
+#: 工具模式（akm_render）开启时追加给模型的系统指引。
+#: 不注入这段，模型默认只会用 markdown 描述，基本不会主动调用渲染工具。
+#: 只写「什么时候用 / 一次几块 / 别重复正文」三件事，避免把 system prompt 撑长。
+_RENDER_GUIDE = """
+## 结构化卡片（akm_render）
+
+回答里出现下列内容时，**优先调用 akm_render 直接出卡片**，不要只用文字或 markdown 描述：
+关键指标数字、多维对比、时间线、趋势与分布、进度占比、分栏任务。
+
+- 一次调用**只渲染 2~3 个块**；内容多就分**多次调用**（每轮 2~3 块），让卡片随回答逐步出现，
+  不要一次性堆满整屏（用户界面会突然跳出一大块，观感很差）。
+- 调用前先用一句话说明这张卡片回答什么问题；调用后不要再重复描述卡片里的数据。
+- 段落、标题、代码块、普通表格、列表交给正文 markdown，不要塞进卡片。
+"""
+
+
+def _render_guide() -> str:
+    """按配置返回渲染指引：工具模式开启时才有内容，关闭时返回空串（零行为变化）。"""
+    try:
+        return _RENDER_GUIDE if load_config().get("agent_render_enabled") is True else ""
+    except Exception:  # noqa: BLE001 - 配置读取异常绝不能影响请求本身
+        return ""
+
 
 # Agent Loop 最大迭代次数，防止工具调用无限循环（可通过 config.json 覆盖）
 
@@ -428,6 +452,7 @@ class AgentResult:
         compacted: int = 0,
         ask_user: dict | None = None,
         client_tool_call: dict | None = None,
+        layout: dict | None = None,
     ):
         self.ok = ok
         self.final_message = final_message or {}
@@ -438,6 +463,8 @@ class AgentResult:
         self.compacted = compacted  # 本次运行中上下文被压缩的次数
         self.ask_user = ask_user  # 非空表示 AI 需要向用户澄清提问（见 akm_ask_user）
         self.client_tool_call = client_tool_call  # 非空表示本次轮次等待客户端执行该工具
+        # 结构化布局（AG-UI，见 layout_agent.py）：None 表示未启用/正文过短/生成失败
+        self.layout = layout
 
     def to_dict(self) -> dict:
         """转为可序列化的 dict"""
@@ -451,6 +478,9 @@ class AgentResult:
             "compacted": self.compacted,
             "ask_user": self.ask_user,
             "client_tool_call": self.client_tool_call,
+            # 结构化布局（AG-UI）：只有配置了布局模型且生成成功时才有值。
+            # 纯增字段——旧客户端忽略它照样按 markdown 显示（见兼容约定条目）
+            "layout": self.layout,
         }
 
 
@@ -855,6 +885,53 @@ class AgentLoop:
             })
         except Exception:
             logger.warning("[AgentLoop] 审计日志写入失败", exc_info=True)
+
+    async def _maybe_render_layout(self, content: str, api_path: str) -> dict | None:
+        """按配置决定是否为本轮回答生成结构化布局（AG-UI）。
+
+        生效条件：``agent_layout_model`` 非空（唯一开关）。留空就返回 None ——
+        不注入工具、不发事件、不产生额外上游请求，前端按 markdown 显示。
+
+        布局是**增强层**：这里吞掉一切异常只返回 None，绝不影响回答收尾与落库
+        （原始 markdown 正文始终完整保留，见「兼容约定」条目）。
+        """
+        config = load_config()
+        # 工具模式（akm_render）优先：模型已在生成过程中直接交出 blocks 并由前端原位渲染，
+        # 再跑一次后置布局会重复出卡片，所以这里直接跳过（两种模式互斥）。
+        if config.get("agent_render_enabled") is True:
+            return None
+        model = str(config.get("agent_layout_model") or "").strip()
+        if not model:
+            return None
+
+        from akm.agent_runtime.layout_agent import render_layout
+
+        def _int_cfg(key: str, default: int) -> int:
+            """读整数配置：缺失用默认值，非法值回落默认值（0 视为合法）。"""
+            raw = config.get(key)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        try:
+            return await render_layout(
+                content=content,
+                model=model,
+                http_client=self._http_client,
+                api_path=api_path,
+                plugin_manager=self._plugin_manager,
+                timeout_sec=float(config.get("agent_layout_timeout_sec") or 8.0),
+                # 注意不能写 `int(x or 1)`：0 是合法值（不重试），`or` 会把它换成 1
+                # （项目里 agent_max_turns 踩过同一个坑），所以这里显式区分 None
+                max_retries=_int_cfg("agent_layout_max_retries", 1),
+                max_blocks=_int_cfg("agent_layout_max_blocks", 12),
+            )
+        except Exception as exc:  # 增强层兜底：任何异常都不允许打断回答
+            logger.warning("[AgentLoop] 布局生成异常，已忽略: %s", exc)
+            return None
 
     async def _summarize_history(
         self,
@@ -1319,6 +1396,8 @@ class AgentLoop:
         _max_turns = max_turns if max_turns > 0 else self._effective_max_turns()
 
         # 准备 messages，如有 instructions 则注入为 system 消息
+        # 工具模式开启时补上渲染指引：不写这段模型不会主动调 akm_render
+        instructions = (instructions or "") + _render_guide()
         working_messages: list[dict] = list(messages or [])
         if instructions and working_messages:
             if working_messages[0].get("role") == "system":
@@ -1451,6 +1530,8 @@ class AgentLoop:
                 if reasoning_content:
                     final_message["reasoning_content"] = reasoning_content
                 working_messages.append(final_message)
+                # 结构化布局（AG-UI）：仅当配置了布局模型；失败静默跳过（增强层）
+                layout = await self._maybe_render_layout(text_content or "", api_path)
                 logger.info(
                     "[AgentLoop] 完成，共 %d 轮，tokens=%d",
                     turn,
@@ -1463,6 +1544,7 @@ class AgentLoop:
                     turns=turn,
                     usage=total_usage,
                     compacted=compacted_count,
+                    layout=layout,
                 )
 
             # 有工具调用 → 构建 assistant 消息并执行工具
@@ -1730,6 +1812,8 @@ class AgentLoop:
 
         _max_turns = max_turns if max_turns > 0 else self._effective_max_turns()
 
+        # 工具模式开启时补上渲染指引：不写这段模型不会主动调 akm_render
+        instructions = (instructions or "") + _render_guide()
         working_messages: list[dict] = list(messages or [])
         if instructions and working_messages:
             if working_messages[0].get("role") == "system":
@@ -1946,13 +2030,24 @@ class AgentLoop:
                     "usage": total_usage,
                     "compacted": compacted_count,
                 })
+                # final 先发：布局生成实测要 10~30s，不能让用户为了「看起来更漂亮」
+                # 而晚这么久才看到「完成」。正文收尾（status / 时间线耗时）必须即时生效。
                 yield _sse_event("final", {
                     "final_message": final_message,
                     "messages": working_messages,
                     "turns": turn,
                     "usage": total_usage,
                     "compacted": compacted_count,
+                    # 流式路径的布局在 final 之后才生成，这里恒为 None；
+                    # 非流式 run() 会等布局完成后再返回，因此那边带真实值。
+                    "layout": None,
                 })
+                # 结构化布局（AG-UI）：final 之后再补发 custom 事件。客户端收到时
+                # 只是给已渲染的这条消息补一个 layout 字段（卡片替换正文），
+                # 正文 markdown 早已落地，失败/超时静默跳过，用户无感。
+                layout = await self._maybe_render_layout(text_content or "", api_path)
+                if layout is not None:
+                    yield _sse_event("custom", {"name": "akm.layout", "value": layout})
                 return
 
             # 有工具调用：工具轮正文已实时以 model_delta 下发（模型输出自然顺序），
@@ -2170,8 +2265,19 @@ class AgentLoop:
 
 
 def _sse_event(event: str, data: dict) -> str:
-    """构造一条 SSE 格式的字符串"""
-    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
+    """构造一条 SSE 格式的字符串。
+
+    统一给所有事件注入 ``ts``（毫秒时间戳，等于事件生成的时刻），供前端计算
+    「每个思考/工具步骤真实耗时」与「整轮处理时长」：服务端打点不含浏览器端
+    的网络抖动，比前端本地计时更接近真实执行时间。
+
+    字段只增不改：旧客户端会忽略未知字段，事件名与既有字段语义完全不变。
+    用 ``setdefault`` 而非直接赋值，调用方显式传入 ``ts`` 时不覆盖
+    （测试构造固定时间戳需要这个能力）。
+    """
+    payload_data = dict(data)
+    payload_data.setdefault("ts", int(time.time() * 1000))
+    payload = json.dumps({"event": event, "data": payload_data}, ensure_ascii=False)
     return f"data: {payload}\n\n"
 
 

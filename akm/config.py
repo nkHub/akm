@@ -54,6 +54,21 @@ DEFAULTS = {
     "agent_max_context_tokens": 272000, # Agent Loop 上下文 token 估算上限，超过后自动压缩早期历史（0 表示不压缩）
     "agent_keep_recent_messages": 10,   # Agent Loop 压缩上下文时保留的最近消息条数（工具调用配对消息会自动完整保留）
     "agent_context_warning_ratio": 0.8, # Agent Loop 上下文占用量超上限该比例时，SSE 下发 context_warning 事件（0 关闭）
+    # ── 布局渲染（布局 Agent）──
+    # 主 Agent 可调用 akm_render 把回答交给布局小模型，产出结构化布局 JSON（前端按块渲染）。
+    # 后置模式的开关就是 agent_layout_model：配了模型即启用，留空即关闭
+    # （不注入工具、不发事件、不产生额外上游调用），前端按 markdown 显示。
+    # ── 渲染（两种模式，二选一）──
+    # ① 工具模式（推荐）：agent_render_enabled=true 时把 akm_render 注册为主 Agent 的工具，
+    #    模型在**同一次生成**里直接给出 blocks，前端把该工具调用**原位替换**成卡片；
+    #    组件 schema、工具名与描述全部来自 `akm/agent_runtime/render_schema.json`（唯一真源）。
+    # ② 后置模式：agent_layout_model 非空时，回答完成后再调一次布局模型产出布局
+    #    （`custom` 事件补发，卡片晚到 10~27 秒）。两者同时开启时工具模式优先。
+    "agent_render_enabled": False,       # 是否把 akm_render 注册为工具（工具模式开关，默认关闭）
+    "agent_layout_model": "",            # 生成布局的模型 id（如 deepseek-v4.1-flash，注意别带 provider 前缀）；留空即关闭布局渲染
+    "agent_layout_timeout_sec": 30.0,    # 布局生成单次调用超时（秒）；实测 10~27s，超时即回落 markdown（不影响正文收尾，布局在 final 之后异步补发）
+    "agent_layout_max_retries": 1,       # 布局 JSON 校验失败时的重试次数（带上一次的错误反馈重试）
+    "agent_layout_max_blocks": 12,       # 单次布局允许的最大块数（超出由校验夹紧）
     "agent_upload_dir": "~/.akm/cache", # Agent 上传文件（图片）的保存目录，路径支持 ~ 展开
     "agent_workspace_root": "",         # Agent 工作区沙箱根目录（文件工具唯一可访问范围）；留空禁用全部文件工具
     "agent_write_tools_enabled": False, # 是否启用 Agent 写文件工具（write/edit/make_dir/delete/run_shell 中除 shell 外的全部）
@@ -103,6 +118,11 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_max_context_tokens",
     "agent_keep_recent_messages",
     "agent_context_warning_ratio",
+    "agent_render_enabled",
+    "agent_layout_model",
+    "agent_layout_timeout_sec",
+    "agent_layout_max_retries",
+    "agent_layout_max_blocks",
     "agent_upload_dir",
     "agent_workspace_root",
     "agent_write_tools_enabled",
@@ -261,6 +281,12 @@ def load_config() -> dict:
     merged["agent_max_context_tokens"] = max(0, _safe_int(merged.get("agent_max_context_tokens"), 272000))
     merged["agent_keep_recent_messages"] = max(2, _safe_int(merged.get("agent_keep_recent_messages"), 10))
     merged["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(merged.get("agent_context_warning_ratio"), 0.8)))
+    # 布局渲染（布局 Agent）：模型留空即整条链路关闭；上限一律夹紧，避免非法配置拖慢响应或放大成本
+    merged["agent_render_enabled"] = merged.get("agent_render_enabled") is True
+    merged["agent_layout_model"] = str(merged.get("agent_layout_model") or "").strip()
+    merged["agent_layout_timeout_sec"] = max(1.0, min(120.0, _safe_float(merged.get("agent_layout_timeout_sec"), 30.0)))
+    merged["agent_layout_max_retries"] = max(0, min(3, _safe_int(merged.get("agent_layout_max_retries"), 1)))
+    merged["agent_layout_max_blocks"] = max(1, min(40, _safe_int(merged.get("agent_layout_max_blocks"), 12)))
     # Agent 文件工具开关：布尔归一化，防止配置为字符串/数字时误判
     merged["agent_write_tools_enabled"] = merged.get("agent_write_tools_enabled") is True
     merged["agent_run_shell_enabled"] = merged.get("agent_run_shell_enabled") is True
@@ -338,6 +364,12 @@ def save_config(data: dict) -> None:
     current["agent_max_context_tokens"] = max(0, _safe_int(current.get("agent_max_context_tokens"), 272000))
     current["agent_keep_recent_messages"] = max(2, _safe_int(current.get("agent_keep_recent_messages"), 10))
     current["agent_context_warning_ratio"] = max(0.0, min(1.0, _safe_float(current.get("agent_context_warning_ratio"), 0.8)))
+    # 布局渲染（布局 Agent）：模型留空即整条链路关闭；上限一律夹紧，避免非法配置拖慢响应或放大成本
+    current["agent_render_enabled"] = current.get("agent_render_enabled") is True
+    current["agent_layout_model"] = str(current.get("agent_layout_model") or "").strip()
+    current["agent_layout_timeout_sec"] = max(1.0, min(120.0, _safe_float(current.get("agent_layout_timeout_sec"), 30.0)))
+    current["agent_layout_max_retries"] = max(0, min(3, _safe_int(current.get("agent_layout_max_retries"), 1)))
+    current["agent_layout_max_blocks"] = max(1, min(40, _safe_int(current.get("agent_layout_max_blocks"), 12)))
     current["agent_write_tools_enabled"] = current.get("agent_write_tools_enabled") is True
     current["agent_run_shell_enabled"] = current.get("agent_run_shell_enabled") is True
     current["agent_run_shell_sandbox"] = current.get("agent_run_shell_sandbox") is True
