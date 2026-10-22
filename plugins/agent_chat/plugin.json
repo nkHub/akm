@@ -1,6 +1,6 @@
 {
   "name": "agent_chat",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "has_menu": false,
   "category": "app",
   "description": "AKM /v1/agent Web 聊天界面（AKM AI Chat），启用后访问 /chat 即可聊天",
