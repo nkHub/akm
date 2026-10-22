@@ -1,9 +1,9 @@
 {
   "name": "agent_chat",
-  "version": "0.1.15",
+  "version": "0.1.18",
   "has_menu": false,
   "category": "app",
-  "description": "AKM /v1/agent Web 聊天界面（AetherAI 对话窗口），启用后访问 /chat 即可聊天",
+  "description": "AKM /v1/agent Web 聊天界面（AKM AI Chat），启用后访问 /chat 即可聊天",
   "builtin": false,
   "default_enabled": false,
   "priority": 200,

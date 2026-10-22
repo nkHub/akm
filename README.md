@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.55**：修复侧边栏动态插件菜单悬停时文字不可见（统一为 `hover:text-strong`）；应用图标按 Apple 规范补足透明边距，Dock 中不再比其他图标大一圈。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.56**：Agent 对话界面升级为可折叠**过程时间线**（步骤人话文案 + 真实耗时、零卡片），消息区支持拖拽调宽（含输入框宽度）、去掉消息头像与正文卡片壳，并修复夜间模式低对比度；管理台统计页图表迁移 ApexCharts。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -565,7 +565,7 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `response_schema_guard` | post | | 可选结构化响应校验：校验调用方声明的 JSON 格式与常用 Schema 字段 |
 | `provider_health_probe` | app | | 可选供应商健康探测：提供 Key 连通性批量探测与脱敏状态快照 API |
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
-| `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊 |
+| `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊（思考/工具步骤聚合为可折叠的过程时间线，每步有人话标题与耗时） |
 | `agent-tools` | app | | 可选离线工具箱：内置纯前端工具产物（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 `/tools` 即用 |
 
 插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即从市场拉取最新 zip 覆盖 `~/.akm/plugins/{name}/`，下载过程以右侧通知组件进度条实时展示，已加载第三方插件覆盖后执行**热重载**即时生效、无需重启）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装、删除与第三方插件市场更新默认**热生效**；手工修改已加载插件源码后可通过插件卡片「重载」按钮（或 `POST /api/plugins/{name}/reload`、`akm plugin reload <名称>`）热重载即时生效，同样无需重启。单个插件导入或初始化失败只会跳过该插件。

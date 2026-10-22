@@ -1,0 +1,102 @@
+{
+  "version": "1.0",
+  "note": "AG-UI 渲染能力的唯一真源（对外暴露给模型的那一档）。与 markdown 天然重复的块（text / heading / code / table / list）**不再暴露**——正文已经能做这些，卡片只负责 md 做不到的结构化呈现。layout_schema.py 的校验白名单仍是全集（15 种），仅为兼容历史消息；新增块类型时两边同步。",
+  "tool": {
+    "name": "akm_render",
+    "description": "把结构化数据渲染成聊天界面里的卡片（指标 / 对比 / 时间线 / 图表 / 待办等 markdown 做不到的形态）。正文用 markdown 解释与结论，不要用本工具重复正文已有的段落、标题、代码块、表格或列表。一次调用只带 2~3 个块；内容多时分多次调用，让卡片随回答逐步出现，不要一次堆满整屏。调用前先用一两句话说这张卡片要回答什么问题，调用后不要再重复描述卡片里的数据。",
+    "maxBlocks": 3
+  },
+  "blocks": [
+    {
+      "type": "stats",
+      "when": "几个关键指标并排（数字 + 变化率）",
+      "fields": {
+        "items": "[{label: string, value: string, delta?: {value: string, trend: up|down|neutral}, color?: default|green|red|blue|amber|violet}]（必填）",
+        "columns": "2 | 3 | 4"
+      }
+    },
+    {
+      "type": "cards",
+      "when": "并列的条目卡片（特性、方案、对象概览）",
+      "fields": {
+        "items": "[{title: string, description?: string, badge?: string, badgeColor?: default|blue|green|red|amber|violet, meta?: string, tags?: string[]}]（必填）",
+        "columns": "2 | 3 | 4"
+      }
+    },
+    {
+      "type": "alert",
+      "when": "需要注意的提醒 / 风险 / 结论强调",
+      "fields": {
+        "severity": "info | warning | error | success（必填）",
+        "title": "string",
+        "message": "string（必填）"
+      }
+    },
+    {
+      "type": "comparison",
+      "when": "两个及以上对象的逐维度对比（比 markdown 表格更好读）",
+      "fields": {
+        "headers": "string[]（必填，对比对象的名称）",
+        "rows": "[{label: string, values: (string|number|boolean)[]}]（必填，values 长度与 headers 一致）",
+        "caption": "string"
+      }
+    },
+    {
+      "type": "timeline",
+      "when": "按时间推进的事件序列",
+      "fields": {
+        "events": "[{time: string, title: string, description?: string, status?: done|active|pending}]（必填）"
+      }
+    },
+    {
+      "type": "chart",
+      "when": "数值趋势 / 分布（柱、线、面积、饼、环）",
+      "fields": {
+        "chartType": "bar | line | area | pie | donut（必填）",
+        "data": "[{x: string|number, y: number, ...}]（必填）",
+        "xKey": "string（必填，通常是 x）",
+        "series": "[{key: string, label?: string}]（必填）",
+        "title": "string",
+        "caption": "string",
+        "height": "number（像素，默认 240）",
+        "stacked": "boolean"
+      }
+    },
+    {
+      "type": "progress",
+      "when": "进度 / 占比 / 完成度",
+      "fields": {
+        "items": "[{label: string, value: number（0-100）, sublabel?: string, color?: green|blue|amber|red|violet|default}]（必填）"
+      }
+    },
+    {
+      "type": "kanban",
+      "when": "分栏排布的任务 / 状态项",
+      "fields": {
+        "columns": "[{id: string, title: string, color?: default|blue|amber|green|red|violet, cards: [{id: string, title: string, description?: string, tags?: string[], priority?: high|medium|low, assignee?: string}]}]（必填）"
+      }
+    },
+    {
+      "type": "map",
+      "when": "按地区的数值分布（热力条）",
+      "fields": {
+        "data": "[{name: string, value: number}]（必填）",
+        "unit": "string",
+        "colorScheme": "blue | green | amber | violet"
+      }
+    },
+    {
+      "type": "separator",
+      "when": "卡片内分隔不同区块",
+      "fields": {
+        "label": "string"
+      }
+    }
+  ],
+  "rules": [
+    "只允许上面 10 种 type；不要用本工具输出段落、标题、代码块、表格、列表——那些交给 markdown 正文",
+    "一次调用只带 2~3 个块；内容多就分多次调用，让卡片随回答逐步出现，宁可少而准",
+    "数据必须完全来自你已掌握的真实内容，不得编造数字",
+    "正文负责解释与结论，卡片只做结构化呈现，不要重复叙述"
+  ]
+}

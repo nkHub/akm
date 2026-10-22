@@ -58,7 +58,8 @@ def test_agent_chat_serves_index_and_assets(tmp_path):
 
     index = client.get("/chat")
     assert index.status_code == 200
-    assert "AI Chat Window" in index.text
+    # 页面标题即产品名（与 chat/index.html 的 <title> 保持一致）
+    assert "<title>AKM AI Chat</title>" in index.text
     assert f"./assets/{js_name}" in index.text
 
     assert client.get(f"/chat/assets/{js_name}").status_code == 200

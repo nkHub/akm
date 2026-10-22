@@ -107,6 +107,8 @@ async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "天气"}])])
 
     assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "turn_pause", "model_delta", "turn_pause", "final"]
+    # 事件统一带 ts（毫秒时间戳），比对工具载荷前先摘除时间戳字段。
+    assert events[1]["data"].pop("ts") > 0
     assert events[1]["data"] == {"name": "get_weather", "arguments": {"city": "beijing"}}
     assert events[2]["data"]["result"] == '{"city": "beijing", "temp": 25}'
     # 工具轮完整收尾后、进入下一轮 LLM 前，应下发停顿点并携带含工具结果的消息快照
@@ -167,6 +169,10 @@ async def test_run_stream_reports_streaming_http_error_and_closes_response(monke
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry(), audit_submitter=audit)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
+    assert len(events) == 1
+    # 所有事件统一携带 ts（毫秒时间戳，事件生成时刻）。时间戳每次不同，
+    # 断言前先摘除，再用严格相等比对剩余载荷，避免断言随运行时间漂移。
+    assert isinstance(events[0]["data"].pop("ts"), int)
     assert events == [{"event": "error", "data": {"error": "rate limited", "turns": 1, "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, "compacted": 0}}]
     assert response.closed is True
     assert audits[-1]["status_code"] == 429

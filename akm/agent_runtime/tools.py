@@ -1541,6 +1541,49 @@ def subagent_status_tool(task_id: str) -> str:
     return json.dumps(info, ensure_ascii=False)
 
 
+# ---- AG-UI 渲染工具（akm_render）----
+
+
+async def _render_tool(
+    title: str = "",
+    summary: str = "",
+    blocks: list | None = None,
+    intent: str = "explanation",
+) -> str:
+    """把模型给的结构化块校验后原样回传，由前端原位渲染成卡片。
+
+    校验完全复用 ``layout_schema.validate_layout``（15 种块白名单 + 字段归一化与夹紧），
+    本函数不重复实现任何字段规则：
+
+    - 校验不过 → 返回 ``ok=false`` + 可读原因，模型可据此重试一次；
+    - 校验通过 → 返回 ``ok=true`` 与归一化后的 ``layout``，前端从 tool_result 里取它渲染。
+
+    为什么走工具而不是从正文里抠 JSON：工具参数是协议保证的结构化通道，天然完整，
+    不需要在流式 markdown 里做括号匹配（那条路边界多且是概率性失效）。
+    """
+    from akm.agent_runtime import render_schema as render_schema_mod
+    from akm.agent_runtime.layout_schema import validate_layout
+
+    payload = render_schema_mod.build_layout_payload(title=title, blocks=blocks, intent=intent)
+    layout = validate_layout(payload, max_blocks=render_schema_mod.max_blocks())
+    if layout is None:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "blocks 未通过校验：type 必须是允许的块类型之一，必填字段不能为空",
+            },
+            ensure_ascii=False,
+        )
+    result: dict[str, Any] = {
+        "ok": True,
+        "layout": layout,
+        "blocks": len(layout.get("blocks") or []),
+    }
+    if summary.strip():
+        result["summary"] = summary.strip()
+    return json.dumps(result, ensure_ascii=False)
+
+
 # ---- 原生系统工具底层实现（剪贴板 / 系统信息 / 打开 / 前台应用）----
 # 模块级辅助函数，便于测试单独 mock；工具入口在 build_builtin_tools 内。
 
@@ -3159,6 +3202,19 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             },
             subagent_status_tool,
         ))
+    # AG-UI 渲染工具：工具名 / 描述 / 参数 schema 全部来自 render_schema.json，
+    # 这里不硬编码任何块字段。开关是 agent_render_enabled（默认关闭）。
+    if load_config().get("agent_render_enabled"):
+        from akm.agent_runtime import render_schema as render_schema_mod
+
+        tools.append(
+            ToolDef(
+                render_schema_mod.tool_name(),
+                render_schema_mod.build_tool_description(),
+                render_schema_mod.build_tool_parameters(),
+                _render_tool,
+            )
+        )
     return tools
 
 
