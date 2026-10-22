@@ -46,6 +46,11 @@ DATA_FILES = [
         "akm/static/akm-chart.js",
         "akm/static/apexcharts.min.js",
     )),
+    # akm_render 的组件 schema：由 render_schema.py 用 Path(__file__).with_name() 读取。
+    # py2app 只按 import 关系收集 .py，**非 Python 数据文件必须显式登记** ——
+    # 漏登记时打包后读不到文件，工具描述会退化成「渲染结构化卡片」一句话，
+    # 模型不知道 blocks 该填哪些字段，akm_render 实际上等于不可用（v0.1.56 新增）。
+    ("lib/python3.12/akm/agent_runtime", ("akm/agent_runtime/render_schema.json",)),
 ]
 
 OPTIONS = {

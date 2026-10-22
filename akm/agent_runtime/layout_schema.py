@@ -315,11 +315,20 @@ def _normalize_chart_block(block: dict) -> dict:
                 # 颜色交给前端主题决定，这里只在显式给了合法 hex 时透传
                 "color": _hex_or_none(entry.get("color")),
             })
-    points: list[dict] = []
+    # xKey 必须在「按 series / xKey 裁剪数据键」**之前**确定：模型常只给 data 不给 xKey，
+    # 若先裁剪，分类键（如 "x"）会被当成噪声删掉，之后就只能把数值键（"y"）误当分类轴，
+    # 前端表现为「横轴标签缺失」或「data 里的 x 字段整段消失」。
+    # 推断顺序：显式 xKey > 第一个数据点的第一个键 > "x"。
     raw_data = block.get("data")
+    sample = raw_data[:MAX_CHART_POINTS] if isinstance(raw_data, list) else []
+    x_key = _text(block.get("xKey"), 64) or next(
+        (str(key) for point in sample if isinstance(point, dict) for key in point),
+        "",
+    ) or "x"
+    points: list[dict] = []
     if isinstance(raw_data, list):
-        allowed_keys = {entry["key"] for entry in series} | {_text(block.get("xKey"), 64)}
-        for point in raw_data[:MAX_CHART_POINTS]:
+        allowed_keys = {entry["key"] for entry in series} | {x_key}
+        for point in sample:
             if not isinstance(point, dict):
                 continue
             points.append({
@@ -335,7 +344,7 @@ def _normalize_chart_block(block: dict) -> dict:
         "type": "chart",
         "chartType": _one_of(block.get("chartType"), ("bar", "line", "area", "pie", "donut"), "bar"),
         "data": points,
-        "xKey": _text(block.get("xKey"), 64) or (points[0] and list(points[0].keys())[0]) or "x",
+        "xKey": x_key,
         "series": series,
         "title": _opt_text(block.get("title"), MAX_TITLE_CHARS),
         "caption": _opt_text(block.get("caption"), MAX_TITLE_CHARS),

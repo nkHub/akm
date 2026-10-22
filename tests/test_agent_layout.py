@@ -88,6 +88,34 @@ def test_chart_points_and_series_are_clamped():
     assert set(chart["data"][0]) <= {entry["key"] for entry in chart["series"]} | {"x"}
 
 
+def test_chart_xkey_inferred_before_point_cleanup():
+    """未传 xKey 时：分类键必须保留，xKey 取数据点的第一个键。
+
+    回归「先按 series ∪ xKey 裁剪数据、再推断 xKey」的顺序错误 ——
+    模型漏传 xKey 时分类键已被当成噪声删掉，推断只能落回数值键（"y"），
+    前端随即拿不到横轴标签。
+    """
+    out = layout_schema.validate_layout(_layout([
+        {"type": "chart", "chartType": "bar",
+         "data": [{"月份": "1月", "销量": 12}, {"月份": "2月", "销量": 18}],
+         "series": [{"key": "销量", "label": "销量"}]},
+    ]))
+    assert out is not None
+    chart = out["blocks"][0]
+    assert chart["xKey"] == "月份"
+    assert [point["月份"] for point in chart["data"]] == ["1月", "2月"]
+    assert [point["销量"] for point in chart["data"]] == [12, 18]
+
+    # 显式声明时以声明为准，不被「第一个键」覆盖
+    out2 = layout_schema.validate_layout(_layout([
+        {"type": "chart", "chartType": "line", "xKey": "月",
+         "data": [{"序号": 1, "月": "1月", "值": 3}], "series": [{"key": "值"}]},
+    ]))
+    assert out2 is not None
+    assert out2["blocks"][0]["xKey"] == "月"
+    assert out2["blocks"][0]["data"][0] == {"月": "1月", "值": 3}
+
+
 def test_chart_color_must_be_hex():
     """颜色只接受 #hex，函数式 CSS 颜色被丢弃（避免注入）。"""
     out = layout_schema.validate_layout(_layout([
