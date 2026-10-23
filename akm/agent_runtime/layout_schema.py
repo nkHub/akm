@@ -21,21 +21,27 @@ from typing import Any
 LAYOUT_VERSION = "1.0"
 
 #: 允许的块类型（顺序无关，与前端 `AGUIBlock` 联合类型一一对应）。
+#:
+#: 只有 markdown 正文做不到的形态才进协议：段落 / 标题 / 代码块 / 表格 / 列表
+#: 由正文自己表达，因此**不在**白名单里（``render_schema.json`` 也不暴露，
+#: 前端 ``AGUIRenderer`` 同样没有它们的渲染分支）。
 BLOCK_TYPES: frozenset[str] = frozenset({
-    "text", "heading", "code", "table", "stats", "cards", "alert",
-    "comparison", "timeline", "list", "separator", "chart", "progress",
-    "kanban", "map",
+    "stats", "cards", "alert", "comparison", "timeline", "separator",
+    "chart", "progress", "kanban", "map", "flow",
 })
 
 #: 各项硬上限。取值原则：够用即可，宁可截断也不要让单条消息膨胀。
 MAX_TEXT_CHARS = 4000        # 单个文本类字段
-MAX_ROW_COUNT = 100          # 表格行 / 对比行
-MAX_COLUMN_COUNT = 12        # 表格列 / 看板列
-MAX_ITEM_COUNT = 24          # stats / cards / list / timeline / progress 条目
+MAX_ROW_COUNT = 100          # 对比表行
+MAX_COLUMN_COUNT = 12        # 对比表列 / 看板列
+MAX_ITEM_COUNT = 24          # stats / cards / timeline / progress 条目
 MAX_CHART_POINTS = 120       # 图表数据点
 MAX_SERIES = 8               # 图表系列数
 MAX_MAP_POINTS = 60          # 地图数据点
-MAX_SUB_ITEMS = 8            # 列表子项
+MAX_FLOW_NODES = 12          # 流程图节点数
+MAX_FLOW_EDGES = 24          # 流程图连线数
+MAX_FLOW_GROUPS = 4          # 流程图分区（泳道）数上限
+MAX_SUB_ITEMS = 8            # cards / kanban 的 tags 子项
 MAX_TITLE_CHARS = 200
 MAX_INTENT_CHARS = 40
 
@@ -75,80 +81,10 @@ def _scalar_list(value: Any, limit: int) -> list[Any]:
     return out
 
 
-def _normalize_text_block(block: dict) -> dict:
-    return {
-        "type": "text",
-        "content": _text(block.get("content")),
-        "size": _one_of(block.get("size"), ("sm", "base", "lg"), "base"),
-        "muted": bool(block.get("muted", False)),
-    }
-
-
-def _normalize_heading_block(block: dict) -> dict:
-    try:
-        rank = int(block.get("rank", 2))
-    except (TypeError, ValueError):
-        rank = 2
-    return {
-        "type": "heading",
-        "content": _text(block.get("content"), MAX_TITLE_CHARS),
-        "rank": rank if rank in (1, 2, 3) else 2,
-    }
-
-
-def _normalize_code_block(block: dict) -> dict:
-    highlight = block.get("highlight")
-    lines: list[int] = []
-    if isinstance(highlight, list):
-        for item in highlight[:60]:
-            try:
-                lines.append(int(item))
-            except (TypeError, ValueError):
-                continue
-    return {
-        "type": "code",
-        "code": _text(block.get("code")),
-        "lang": _text(block.get("lang"), 32) or "text",
-        "title": _opt_text(block.get("title"), MAX_TITLE_CHARS),
-        "highlight": lines,
-    }
-
-
-def _normalize_table_block(block: dict) -> dict:
-    columns: list[dict] = []
-    raw_columns = block.get("columns")
-    if isinstance(raw_columns, list):
-        for column in raw_columns[:MAX_COLUMN_COUNT]:
-            if not isinstance(column, dict):
-                continue
-            key = _text(column.get("key"), 64)
-            if not key:
-                continue
-            columns.append({
-                "key": key,
-                "label": _text(column.get("label"), MAX_TITLE_CHARS) or key,
-                "align": _one_of(column.get("align"), ("left", "center", "right"), "left"),
-                "mono": bool(column.get("mono", False)),
-                "badge": bool(column.get("badge", False)),
-            })
-    rows: list[dict] = []
-    raw_rows = block.get("rows")
-    if isinstance(raw_rows, list) and columns:
-        keys = [column["key"] for column in columns]
-        for row in raw_rows[:MAX_ROW_COUNT]:
-            if not isinstance(row, dict):
-                continue
-            rows.append({key: _scalar_or_text(row.get(key)) for key in keys})
-    return {
-        "type": "table",
-        "columns": columns,
-        "rows": rows,
-        "caption": _opt_text(block.get("caption"), MAX_TITLE_CHARS),
-    }
 
 
 def _scalar_or_text(value: Any) -> str | int | float:
-    """表格单元格：只允许标量，其余转字符串。"""
+    """标量单元格：只允许 str/number/bool，其余转字符串（对比表、图表数据用）。"""
     if isinstance(value, bool):
         return "是" if value else "否"
     if isinstance(value, (int, float)):
@@ -272,26 +208,104 @@ def _normalize_timeline_block(block: dict) -> dict:
     return {"type": "timeline", "events": events}
 
 
-def _normalize_list_block(block: dict) -> dict:
-    items: list[dict] = []
-    raw = block.get("items")
-    if isinstance(raw, list):
-        for item in raw[:MAX_ITEM_COUNT]:
-            if isinstance(item, str):
-                items.append({"content": _text(item, 800), "done": False, "sub": []})
+def _normalize_flow_block(block: dict) -> dict:
+    """流程图：nodes 是方框，edges 是带方向的连线。
+
+    校验口径（宁可少画一条边，也不要画错）：
+
+    - nodes 少于 2 个视为空壳块，由 ``_is_empty_block`` 丢弃；
+    - 节点 id 缺省时按顺序生成 ``n0``、``n1``…；重复 id 丢弃后来的；
+    - edges 的 ``from`` / ``to`` 必须**精确命中**已有 id，否则丢这条边
+      （不做模糊匹配——连到错误的框比不连更误导）；
+    - 自环（from == to）丢弃；
+    - edges 整段缺失或全被丢弃时，按 nodes 顺序自动串成一条主链：
+      模型只给节点也能画出线性流程，不必为「一步接一步」重复写边。
+    """
+    nodes: list[dict] = []
+    raw_nodes = block.get("nodes")
+    if isinstance(raw_nodes, list):
+        for index, node in enumerate(raw_nodes[:MAX_FLOW_NODES]):
+            if not isinstance(node, dict):
                 continue
-            if not isinstance(item, dict):
+            label = _text(node.get("label"), MAX_TITLE_CHARS)
+            if not label:
                 continue
-            sub = item.get("sub")
-            items.append({
-                "content": _text(item.get("content"), 800),
-                "done": bool(item.get("done", False)),
-                "sub": [_text(line, 400) for line in sub[:MAX_SUB_ITEMS]] if isinstance(sub, list) else [],
+            node_id = _text(node.get("id"), 64) or f"n{index}"
+            if any(existing["id"] == node_id for existing in nodes):
+                continue
+            nodes.append({
+                "id": node_id,
+                "label": label,
+                "sublabel": _opt_text(node.get("sublabel"), 120),
+                "kind": _one_of(node.get("kind"), ("step", "start", "end", "decision", "async"), "step"),
             })
+
+    ids = {node["id"] for node in nodes}
+    edges: list[dict] = []
+    raw_edges = block.get("edges")
+    if isinstance(raw_edges, list):
+        for edge in raw_edges[:MAX_FLOW_EDGES]:
+            if not isinstance(edge, dict):
+                continue
+            source = _text(edge.get("from"), 64)
+            target = _text(edge.get("to"), 64)
+            if source not in ids or target not in ids or source == target:
+                continue
+            edges.append({
+                "from": source,
+                "to": target,
+                "label": _opt_text(edge.get("label"), 120),
+                "kind": _one_of(edge.get("kind"), ("main", "branch", "async", "return"), "main"),
+            })
+
+    if not edges and len(nodes) >= 2:
+        edges = [
+            {"from": nodes[i]["id"], "to": nodes[i + 1]["id"], "label": None, "kind": "main"}
+            for i in range(len(nodes) - 1)
+        ]
+
+    # 分区/泳道：把若干节点圈进一个框（对应 archify demo 的 01 / 02 / EX / 04 泳道）。
+    # 规则：只保留真实存在的 id；一个节点只归属第一个匹配的组（避免框套框）；
+    # 空组丢弃；最多 4 组——再多图会花，反而看不清。
+    groups: list[dict] = []
+    assigned: set[str] = set()
+    raw_groups = block.get("groups")
+    if isinstance(raw_groups, list):
+        # 多给几项余量：空组 / 全无效的分组不占「最多 4 组」的名额
+        for group in raw_groups[: MAX_FLOW_GROUPS * 4]:
+            if len(groups) >= MAX_FLOW_GROUPS:
+                break
+            if not isinstance(group, dict):
+                continue
+            label = _text(group.get("label"), 40)
+            if not label:
+                continue
+            members: list[str] = []
+            for candidate in group.get("nodes") or []:
+                node_id = _text(candidate, 64)
+                if node_id in ids and node_id not in assigned:
+                    members.append(node_id)
+                    assigned.add(node_id)
+            if not members:
+                continue
+            groups.append({
+                "label": label,
+                "color": _one_of(
+                    group.get("color"),
+                    ("default", "blue", "green", "amber", "violet", "red"),
+                    "default",
+                ),
+                "nodes": members,
+            })
+
     return {
-        "type": "list",
-        "style": _one_of(block.get("style"), ("bullet", "numbered", "check"), "bullet"),
-        "items": items,
+        "type": "flow",
+        "direction": _one_of(block.get("direction"), ("LR", "TB"), "LR"),
+        "nodes": nodes,
+        "edges": edges,
+        "groups": groups,
+        "legend": bool(block.get("legend", False)),
+        "caption": _opt_text(block.get("caption"), MAX_TITLE_CHARS),
     }
 
 
@@ -445,22 +459,22 @@ def _hex_or_none(value: Any) -> str | None:
 
 
 #: 块 type → 归一化函数
+#:
+#: 与 ``render_schema.json`` 暴露给模型的集合严格一一对应（10 种结构化块 + flow）：
+#: markdown 正文已经能做的 text / heading / code / table / list 不在协议里，
+#: 前端也同步删掉了它们的渲染分支——两边不留「仅兼容历史」的第三档口径。
 _NORMALIZERS = {
-    "text": _normalize_text_block,
-    "heading": _normalize_heading_block,
-    "code": _normalize_code_block,
-    "table": _normalize_table_block,
     "stats": _normalize_stats_block,
     "cards": _normalize_cards_block,
     "alert": _normalize_alert_block,
     "comparison": _normalize_comparison_block,
     "timeline": _normalize_timeline_block,
-    "list": _normalize_list_block,
     "separator": _normalize_separator_block,
     "chart": _normalize_chart_block,
     "progress": _normalize_progress_block,
     "kanban": _normalize_kanban_block,
     "map": _normalize_map_block,
+    "flow": _normalize_flow_block,
 }
 
 
@@ -495,7 +509,7 @@ def validate_layout(raw: Any, *, max_blocks: int = 12) -> dict | None:
             # 不认识的块 → 整份放弃：半渲染的结构化内容比纯文本更容易误导用户
             return None
         normalized = _NORMALIZERS[block_type](block)
-        # 空壳块（无内容的 text/heading、空表、空卡片）不值得占用版面，直接丢掉
+        # 空壳块（空告警、空指标/卡片、没有连线意义的流程）不值得占用版面，直接丢掉
         if _is_empty_block(normalized):
             continue
         blocks.append(normalized)
@@ -514,13 +528,11 @@ def validate_layout(raw: Any, *, max_blocks: int = 12) -> dict | None:
 def _is_empty_block(block: dict) -> bool:
     """判断归一化后的块是否没有任何可展示内容（用于安静丢弃空壳块）。"""
     block_type = block.get("type")
-    if block_type in ("text", "heading", "code", "alert"):
-        payload = block.get("content") or block.get("code") or block.get("message") or ""
-        # 用 strip 判定：纯空白的 text 块同样是空壳（否则前端会渲染出一个空段落）
+    if block_type == "alert":
+        payload = block.get("message") or ""
+        # 用 strip 判定：纯空白的告警同样是空壳（否则前端会渲染出一个空提示框）
         return not str(payload).strip()
-    if block_type == "table":
-        return not block.get("rows") or not block.get("columns")
-    if block_type in ("stats", "cards", "list", "progress"):
+    if block_type in ("stats", "cards", "progress"):
         return not block.get("items")
     if block_type == "comparison":
         return not block.get("rows")
@@ -532,5 +544,8 @@ def _is_empty_block(block: dict) -> bool:
         return not block.get("columns")
     if block_type == "map":
         return not block.get("data")
+    if block_type == "flow":
+        # 单节点没有「流程」可言，与 0 节点一样视为空壳
+        return len(block.get("nodes") or []) < 2
     # separator 无内容也算有效（就是一条分割线）
     return False

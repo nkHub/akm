@@ -916,6 +916,58 @@ class AgentLoop:
             except (TypeError, ValueError):
                 return default
 
+        async def _audit_attempt(
+            result: dict | None,
+            body: dict,
+            response_body: str,
+            status_code: int,
+            error: str,
+        ) -> None:
+            """把一次布局模型调用写入审计日志（source=layout）。
+
+            布局是主 Agent 之后的一次独立上游请求，会真实消耗 token。不记录的话，
+            审计日志与统计页都看不到这次消耗；记录后统计页「按来源」里单独成组
+            （Layout），与主对话（Chat）区分开，便于看清「回答 + 布局」的真实成本。
+
+            Args:
+                result: ``forward_request`` 的返回 dict；超时 / 异常时为 None。
+                body: 本次发给上游的请求体。
+                response_body: 上游响应体（未开启 log_response_body 时不落库内容）。
+                status_code: 上游 HTTP 状态码；未拿到响应时为 0。
+                error: 超时 / 异常说明，正常为空串。
+            """
+            prompt_tokens = 0
+            completion_tokens = 0
+            cached_tokens = 0
+            cache_creation_tokens = 0
+            # 布局请求统一是非流式，usage 直接从响应体里取
+            usage: Any = {}
+            if response_body:
+                try:
+                    parsed = json.loads(response_body)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    usage = parsed.get("usage") or {}
+            if isinstance(usage, dict) and usage:
+                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                cached_tokens, cache_creation_tokens = _extract_cached_tokens(usage)
+            await self._try_audit(
+                result or {},
+                model,
+                body,
+                response_body,
+                status_code,
+                prompt_tokens,
+                completion_tokens,
+                prompt_tokens + completion_tokens,
+                error=error,
+                source="layout",
+                cached_tokens=cached_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+            )
+
         try:
             return await render_layout(
                 content=content,
@@ -928,6 +980,8 @@ class AgentLoop:
                 # （项目里 agent_max_turns 踩过同一个坑），所以这里显式区分 None
                 max_retries=_int_cfg("agent_layout_max_retries", 1),
                 max_blocks=_int_cfg("agent_layout_max_blocks", 12),
+                # 每次布局请求（含 400 后的重试）都回调一次，由调用方写入审计日志
+                on_attempt=_audit_attempt,
             )
         except Exception as exc:  # 增强层兜底：任何异常都不允许打断回答
             logger.warning("[AgentLoop] 布局生成异常，已忽略: %s", exc)
@@ -980,7 +1034,39 @@ class AgentLoop:
         )
         status_code = int(result.get("status_code", 0) or 0)
         response_body = str(result.get("body", "") or "")
-        if status_code < 200 or status_code >= 300:
+        failed = status_code < 200 or status_code >= 300
+        # 摘要是一次独立的上游请求（真实消耗 token），必须进审计：不记录的话，
+        # 上下文压缩的成本在统计页里完全不可见（source=summary 单独成组）。
+        prompt_tokens = 0
+        completion_tokens = 0
+        cached_tokens = 0
+        cache_creation_tokens = 0
+        usage: Any = {}
+        try:
+            parsed = json.loads(response_body)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            usage = parsed.get("usage") or {}
+        if isinstance(usage, dict) and usage:
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            cached_tokens, cache_creation_tokens = _extract_cached_tokens(usage)
+        await self._try_audit(
+            result,
+            model,
+            body,
+            response_body,
+            status_code,
+            prompt_tokens,
+            completion_tokens,
+            prompt_tokens + completion_tokens,
+            error=str(result.get("error", "") or "") if failed else "",
+            source="summary",
+            cached_tokens=cached_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
+        if failed:
             logger.warning("[AgentLoop] 上下文摘要调用失败: HTTP %s", status_code)
             return ""
         summary = _extract_text_content(response_body).strip()
@@ -1326,24 +1412,41 @@ class AgentLoop:
         executable_names = set(registered_names) | client_tool_names | framework_names
         return deduped_tools, seen_names & executable_names, client_tool_names, unregistered_tool_names
 
-    async def _execute_registered_tool(self, tc_name: str, tc_args: dict, workspace_root: str) -> str:
-        """执行注册在 ToolRegistry 中的普通工具，期间注入请求级工作区覆盖。
+    async def _execute_registered_tool(
+        self,
+        tc_name: str,
+        tc_args: dict,
+        workspace_root: str,
+        *,
+        model: str = "",
+        key_alias: str = "",
+        source: str = "chat",
+    ) -> str:
+        """执行注册在 ToolRegistry 中的普通工具，期间注入请求级上下文。
 
-        文件/写/shell 等工具通过 tools._workspace_root() 读取工作区根目录，
-        默认取全局配置 agent_workspace_root。这里在工具执行期间临时把
-        请求级的 workspace_root 写入 ContextVar，使 /v1/agent 请求可以按
-        请求指定工作区（如 CLI 指向当前目录），执行完立即恢复，避免泄漏
-        到并发请求。延迟导入 tools 避免循环依赖（tools 顶层导入本模块的 ToolDef）。
+        注入两样东西，都在 ``finally`` 里恢复，避免泄漏到并发请求：
+
+        - **工作区覆盖**：文件/写/shell 等工具通过 ``tools._workspace_root()`` 读取，
+          使 /v1/agent 请求可以按请求指定工作区（如 CLI 指向当前目录）；
+        - **审计上下文**：``model`` / ``key_alias`` / ``source``，供工具内部的审计
+          （如 ``akm_render`` 记 ``source=chat-tool``）填**真实的模型与实际用的 Key**，
+          而不是把工具名当模型写进 model 列。
+
+        延迟导入 tools 避免循环依赖（tools 顶层导入本模块的 ToolDef）。
         """
         from akm.agent_runtime.tools import (
+            reset_request_audit_context,
             reset_request_workspace_root,
+            set_request_audit_context,
             set_request_workspace_root,
         )
 
         ws_token = set_request_workspace_root(workspace_root)
+        audit_token = set_request_audit_context(model=model, key_alias=key_alias, source=source)
         try:
             return await self._tool_registry.execute(tc_name, tc_args)
         finally:
+            reset_request_audit_context(audit_token)
             reset_request_workspace_root(ws_token)
 
     @staticmethod
@@ -1654,7 +1757,14 @@ class AgentLoop:
                         )
                     )
                     if tool_result is None:
-                        tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
+                        tool_result = await self._execute_registered_tool(
+                            tc_name,
+                            tc_args,
+                            workspace_root,
+                            model=model,
+                            key_alias=str(result.get("key_alias", "") or ""),
+                            source=source,
+                        )
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
@@ -2169,7 +2279,14 @@ class AgentLoop:
                         )
                     )
                     if tool_result is None:
-                        tool_result = await self._execute_registered_tool(tc_name, tc_args, workspace_root)
+                        tool_result = await self._execute_registered_tool(
+                            tc_name,
+                            tc_args,
+                            workspace_root,
+                            model=model,
+                            key_alias=str(result.get("key_alias", "") or ""),
+                            source=source,
+                        )
                 yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
                 # 记录工具失败信息，供自愈重试注入修正提示（只保留第一个错误文本）
                 if not tool_error_text:
