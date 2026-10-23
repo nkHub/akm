@@ -146,7 +146,7 @@ def test_builtin_usage_stats_default_windows_without_cost(monkeypatch):
     monkeypatch.setattr("akm.server._get_stats", fake_get_stats)
     monkeypatch.setattr(
         "akm.agent_runtime.tools.load_config",
-        lambda: {"cost_stats_enabled": False, "cost_pricing_table": "gpt-4=1/0.1/2"},
+        lambda: {"cost_stats_enabled": False},
     )
     app = SimpleNamespace(state=SimpleNamespace())
 
@@ -196,10 +196,7 @@ def test_builtin_usage_stats_single_window_with_cost(monkeypatch):
     monkeypatch.setattr("akm.server._get_stats", fake_get_stats)
     monkeypatch.setattr(
         "akm.agent_runtime.tools.load_config",
-        lambda: {
-            "cost_stats_enabled": True,
-            "cost_pricing_table": "gpt-4=1/0.1/2\n*=0/0/0",
-        },
+        lambda: {"cost_stats_enabled": True},
     )
     app = SimpleNamespace(state=SimpleNamespace())
 
@@ -212,8 +209,9 @@ def test_builtin_usage_stats_single_window_with_cost(monkeypatch):
     assert win["cost_currency"] == "$"
     assert win["by_model"]["gpt-4"]["cost"] == 0.12
     assert result["cost_stats_enabled"] is True
-    assert result["pricing"]["rules"][0]["pattern"] == "gpt-4"
-    assert result["pricing"]["rules"][0]["input_per_1m"] == 1.0
+    # 手写单价表已移除，pricing 只回报取价口径（不再有 rules 列表）
+    assert result["pricing"]["mode"] == "models.dev"
+    assert "官方兜底" in result["pricing"]["rule"]
     assert result["pricing_unit"].startswith("USD per 1M")
     assert "不能替代供应商账单" in result["cost_note"]
 

@@ -2315,7 +2315,15 @@ async def test_api_logs_adds_estimated_cost_when_enabled(monkeypatch):
     monkeypatch.setattr("akm.server.count_logs_async", fake_count_logs_async)
     monkeypatch.setattr(
         "akm.server.load_config",
-        lambda: {"cost_stats_enabled": True, "cost_pricing_table": "gpt-4=1/0.1/2"},
+        lambda: {"cost_stats_enabled": True},
+    )
+    # 手写单价表已移除，价格只来自 models.dev 目录；桩掉取价避免依赖网络。
+    from akm import models_dev as _md
+
+    monkeypatch.setattr(
+        _md,
+        "resolve_price",
+        lambda provider, model, **kw: ((1.0, 0.1, 2.0), "catalog") if model == "gpt-4" else None,
     )
 
     transport = ASGITransport(app=app)
@@ -2647,10 +2655,18 @@ async def test_api_stats_includes_cost_when_enabled(monkeypatch):
         lambda: {
             "stats_include_estimated_usage": False,
             "cost_stats_enabled": True,
-            "cost_pricing_table": "gpt-4=1/0.1/2\n*=0.5/0.05/1",
             "log_request_body": False,
             "log_response_body": False,
         },
+    )
+    # 手写单价表已移除，价格只来自 models.dev 目录；这里直接桩掉取价，
+    # 让用例不依赖网络与真实目录内容（gpt-4=1/0.1/2）。
+    from akm import models_dev as _md
+
+    monkeypatch.setattr(
+        _md,
+        "resolve_price",
+        lambda provider, model, **kw: ((1.0, 0.1, 2.0), "catalog") if model == "gpt-4" else None,
     )
     # 清缓存，避免被同进程其他 stats 测试污染
     from akm import server as server_mod

@@ -40,7 +40,9 @@ def _stub_post(batch_sizes: list[int], seed: list[int]):
     """注入 httpx.AsyncClient.post：校验每批不超过 10 条、记录批次大小并
     按全局序号返回向量，便于断言结果顺序。"""
 
-    async def fake_post(self_or_none, url: str, json: dict):
+    async def fake_post(self_or_none, url: str, json: dict, headers: dict | None = None):
+        # 插件内部请求必须带来源标记，否则审计日志会把它们归成「Python」
+        assert headers and headers.get("x-akm-source") == "plugin", headers
         n = len(json["input"])
         assert n <= 10, f"单批 embedding 请求超过 10 条: {n}"
         batch_sizes.append(n)

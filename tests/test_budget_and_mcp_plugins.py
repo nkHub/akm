@@ -19,7 +19,7 @@ def _ctx(request: dict | None = None, **kwargs) -> RequestContext:
 
 
 @pytest.mark.asyncio
-async def test_budget_gate_blocks_after_spent_reaches_budget():
+async def test_budget_gate_blocks_after_spent_reaches_budget(monkeypatch):
     """累计估算费用达到预算后，后续请求应被阻断。"""
     plugin = BudgetGate()
     plugin.logger = logging.getLogger("test.budget_gate")
@@ -28,12 +28,14 @@ async def test_budget_gate_blocks_after_spent_reaches_budget():
         "scope": "global",
         "period": "calendar_day",
         "budget_usd": 0.01,
-        "use_core_pricing": False,
-        # 1M prompt = $1，1M completion = $0 → 10000 prompt ≈ $0.01
-        "custom_pricing_table": "gpt-4=1/0/0\n*=1/0/0",
         "soft_warn_ratio": 0,
         "block_status_code": 429,
     }
+    # 手写单价表已移除，价格只来自 models.dev 目录：桩成 1M prompt = $1，
+    # 于是 10000 prompt ≈ $0.01，正好卡在预算线上。
+    from akm import models_dev as _md
+
+    monkeypatch.setattr(_md, "resolve_price", lambda provider, model, **kw: ((1.0, 0.0, 0.0), "test"))
     await plugin.on_load()
 
     req = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
@@ -64,7 +66,7 @@ async def test_budget_gate_blocks_after_spent_reaches_budget():
 
 
 @pytest.mark.asyncio
-async def test_budget_gate_scope_model_independent_buckets():
+async def test_budget_gate_scope_model_independent_buckets(monkeypatch):
     """模型维度下，不同 model 应有独立预算桶。"""
     plugin = BudgetGate()
     plugin.logger = logging.getLogger("test.budget_gate")
@@ -74,10 +76,12 @@ async def test_budget_gate_scope_model_independent_buckets():
         "period": "rolling_window",
         "window_seconds": 3600,
         "budget_usd": 0.001,
-        "use_core_pricing": False,
-        "custom_pricing_table": "*=1/0/0",
         "soft_warn_ratio": 0,
     }
+    # 同上：目录取价桩成 1M prompt = $1
+    from akm import models_dev as _md
+
+    monkeypatch.setattr(_md, "resolve_price", lambda provider, model, **kw: ((1.0, 0.0, 0.0), "test"))
     await plugin.on_load()
 
     async def spend(model: str, prompt_tokens: int):
@@ -110,14 +114,12 @@ async def test_budget_gate_scope_model_independent_buckets():
 
 
 @pytest.mark.asyncio
-async def test_budget_gate_reset_clears_buckets():
+async def test_budget_gate_reset_clears_buckets(monkeypatch):
     plugin = BudgetGate()
     plugin.logger = logging.getLogger("test.budget_gate")
     plugin.config = {
         "enabled": True,
         "budget_usd": 0.001,
-        "use_core_pricing": False,
-        "custom_pricing_table": "*=1/0/0",
         "soft_warn_ratio": 0,
     }
     await plugin.on_load()
