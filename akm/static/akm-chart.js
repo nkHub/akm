@@ -372,16 +372,26 @@ if (!customElements.get('akm-line-chart')) {
           // 平滑曲线（spline）：用户要求「折线图改成平滑的」。
           // 代价要记住：smooth 会在两个采样点之间插值，造出实际不存在的中间值 ——
           // 「报错次数」是离散计数（每小时 0/1/4 次），16 点到 17 点之间的弧线会让人
-          // 以为 16:30 有 2 次失败，实际没有。要精确读值请以 markers + tooltip 为准。
+          // 以为 16:30 有 2 次失败，实际没有。要精确读值请以 tooltip 为准
+          // （数据点已改为悬浮才显示，见下方 markers 的说明）。
           curve: 'smooth',
           lineCap: 'round',
           // 线色必须按序列显式给实色：fill.opacity 数组会被 ApexCharts 连带用到线的描边上
           // （总 Token 面积 12% 时整条线也只剩 12% 不透明度，深色下几乎看不见）
           colors: seriesList.map(function(s) { return s.color; })
         },
-        // 默认 null 断线（不设 connectNulls），数据点：主题底色 + 序列色描边，无样本处自动不画
+        // 默认 null 断线（不设 connectNulls），无样本处自动不画。
+        // 数据点改为「悬浮才显示」（与 ApexCharts 官方示例一致）：
+        //   size: 0 是 ApexCharts 的默认值，此时常驻不画点，鼠标移上去才按
+        //   hover.size 画出该点。此前这里写死 size: 4（30 个日期的「每日用量」
+        //   会变成一串 8px 实心圆，比官网明显得多）。
+        //   保留 hover.size = 6（点直径 12px，含 2px 描边），悬浮时够醒目。
+        //   实测 size: 0 下 tooltip 与放大点都正常：命中走整块绘图区
+        //   （intersect: false），不依赖常驻 marker 元素。
+        //   代价：smooth 曲线插值出的「假值」不再有常驻点标注真实采样位置，
+        //   精确读值仍以 tooltip 为准（见上方 stroke.curve 的说明）。
         markers: {
-          size: labels.length <= 40 ? 4 : 0,
+          size: 0,
           strokeWidth: 2,
           hover: { size: 6, sizeOffset: 0 }
         },
