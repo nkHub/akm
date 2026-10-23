@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.56**：Agent 对话界面升级为可折叠**过程时间线**（步骤人话文案 + 真实耗时、零卡片），消息区支持拖拽调宽（含输入框宽度）、去掉消息头像与正文卡片壳，并修复夜间模式低对比度；管理台统计页图表迁移 ApexCharts。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.57**：费用估算接入 **models.dev 目录数据**（入库 SQLite、三段式取价、官方兜底可关），审计日志新增**换模型检测**（上游实际返回的 model 与请求不一致时标记，日志页按钮文案为「降智」——判定依据只是「不一致」，不代表方向），`/v1/models` 支持顶层扩展字段与 `?capability=chat` 过滤，Key 管理页供应商改为**可搜索下拉**且 Base URL 随供应商联动禁用；审计覆盖面补齐（`akm_render` 工具调用记一条 `source=tool`，后置布局小模型与上下文摘要分别记 `source=layout` / `summary`）；`akm_render` 新增 **flow 流程图块**，并把块集合前后端统一为 11 种（去掉与 markdown 重复的 text / heading / code / table / list），流程图节点宽度随容器自适应（168~300px）、文字按显示宽度并在空格处断句、层间距 LR/TB 分开、连线在主链上**常驻流动**（进场描边只播一次，滚到卡片时已结束，故另加 `.akm-flow-pulse` 无限循环）。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -192,7 +192,7 @@ akm-menubar
     </tr>
     <tr>
       <td style="white-space: nowrap;">设置</td>
-      <td>分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关与模型单价表、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除）</td>
+      <td>分区布局（服务/日志/供应商代理/费用统计/代理设置）、端口配置、日志保留天数、日志体积控制、费用估算开关、取价来源（models.dev 目录，启动自动同步）与同步状态、出站 HTTP/SOCKS 代理、清空日志、JSON 渲染阈值、供应商代理管理（自定义可编辑/删除）</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">连接池</td>
@@ -229,7 +229,6 @@ akm-menubar
   "stream_capture_max_bytes": 262144,
   "stats_include_estimated_usage": false,
   "cost_stats_enabled": false,
-  "cost_pricing_table": "gpt-5.4=2.5/0.25/15\n*=1/0.5/3",
   "json_viewer_max_text_length": 600000,
   "image_supported_models": "gpt-image-2",
   "image_request_timeout_sec": 300,
@@ -354,8 +353,38 @@ AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的
 |--------|--------|------|
 | `stats_include_estimated_usage` | `false` | 首页统计是否计入估算 token（`usage_estimated_light`），默认关闭更保守；设置页不单独展示 |
 | `cost_stats_enabled` | `false` | 首页费用估算开关（不能替代供应商账单） |
-| `cost_pricing_table` | 内置默认单价表 | 模型单价表：`model=输入/输入缓存/输出`（每 1M tokens，固定美元）；未匹配到任何规则时回退为 `$1/$1/$3` |
+| `cost_pricing_source` | `snapshot` | 取价来源。**手写单价表已移除**，只有 `snapshot`（models.dev 目录）一种；老配置里的 `manual` / `hybrid` 会被自动归一化成 `snapshot` |
+| `models_dev_official_fallback` | `true` | key 的供应商名下没有该模型时，是否按原厂价兜底；关闭后这类请求费用按 0 计 |
+| `models_dev_prefer_providers` | `openai,anthropic,deepseek,google,xai,moonshotai,zai,minimax,alibaba` | 官方兜底的查找顺序 |
+| `models_dev_sync_enabled` | `true` | 是否允许后台按间隔自动刷新目录数据 |
+| `models_dev_sync_interval_hours` | `24` | 自动刷新间隔（小时，夹紧到 1~720） |
 | `stats_cache_ttl_sec` | `60` | 首页统计缓存有效期（秒） |
+
+### models.dev 目录数据（价格 / 上下文 / 能力元数据）
+
+费用估算与 `/v1/models` 的供应商信息来自 [models.dev](https://models.dev) 的公开目录数据：运行时拉取并入库 `~/.akm/akm.db` 的三张表（`models_dev_providers` / `models_dev_models` / `models_dev_meta`），**不写 JSON 文件、也不写进 `config.json`**。
+
+- **拉取**：`https://models.dev/api.json`（约 5.9 MB；注意 `/json` 会 302 跳首页）。带 `ETag` 条件请求，远端未变化时返回 304、不重写本地数据。
+- **过滤**：`cost` 为 `null` 或缺失的模型跳过；`0/0/0/0` 这类全 0 价**保留**（代表免费或订阅渠道）；某供应商下所有模型都被跳过则整条供应商剔除。实测入库 221 个供应商 / 8457 条模型，约 900 KB。
+- **取价三段式**：① key 的供应商存在且名下有该模型 → 用它在该供应商下的价；② 不匹配时按 `models_dev_prefer_providers` 的原厂顺序兜底（受 `models_dev_official_fallback` 控制）；③ 都失败按 0。不做跨供应商的盲目猜价。
+- **同步方式**：**服务启动时自动同步一次**（新装即开箱有价），之后按 `models_dev_sync_interval_hours` 定期刷新；也可手动用 CLI `akm pricing`（`--force` 忽略 ETag 重下、`--status` 只看状态）或管理台设置页「费用统计 → 取价数据源」里的「立即同步」。
+- **同名兜底**：官方改名导致第三方中转的旧名对不上时（如官方 `deepseek-flash` vs 中转 `deepseek-v4.1-flash`），按模型的 `family` 回退到官方同系列的价；完全没在目录出现过的名字仍按 0 计。
+- **离线可用**：同步失败不影响启动与转发，旧数据继续生效，错误写入 `~/.akm/error.log`。
+
+### 换模型 / 降智检测（审计标记）
+
+审计日志新增两列：`response_model`（上游**原始响应**里的 model 名，取不到留空）与 `model_mismatch`（`NULL`=没取到、`0`=一致、`1`=被换）。用于发现三方中转站偷偷替换模型。
+
+- 比较前会归一：小写、去 `vendor/` 前缀、去日期/版本后缀，避免把 `deepseek/deepseek-v4.1-flash` 与 `deepseek-v4.1-flash` 这类无害差异误判。
+- 取的是**上游原始响应**，不是协议转换后给客户端的内容——转换器可能重写 `model`，从转换后内容取会误报。
+- 日志页在模型名后显示 `⇄` 标记，悬浮给出「请求 X → 实际 Y」；顶部「**降智**」按钮只筛 `model_mismatch=1` 的记录。流式与非流式（Chat / Responses / Messages 三种协议）都会记录。
+- 按钮文案叫「降智」是因为实测这类不一致几乎都是中转站把请求换成了更便宜、更弱的模型；但**判定依据只是「不一致」，不代表方向**（理论上也可能被换成更强的模型）。
+
+### 协议能力不由 models.dev 决定
+
+`Agent` 的 `supports_responses` / `supports_chat` / `supports_messages` / `messages_use_anthropic_path` 等仍以 `akm/agent.py` 的 `BUILTIN_AGENTS` 与用户自定义 agent 为准。models.dev 的 `npm` 字段只作为新建自定义供应商时的初始勾选建议（如 `@ai-sdk/openai` → Chat + Responses），`/anthropic` 默认永远关闭。
+
+> 反例：内置 `deepseek` 实际支持 Responses、Messages 与 `/anthropic`，但 models.dev 给它的 `npm` 是 `@ai-sdk/openai-compatible`——按 npm 推导会丢掉这三个能力，所以绝不能用它覆盖已有配置。
 
 ### 原生透传（`use_native_user_agent`）
 
@@ -399,7 +428,10 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | POST | `/v1/agent/compact` | 手动压缩 Agent 上下文：传入当前对话 `messages`，把早期历史归纳为摘要并替换（等价于 `akm_compact_context` 的 force 模式），响应含摘要文本与保留后的消息列表（详见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)「上下文压缩」）。同样受 `agent_config.agent_enabled` 控制 |
 | GET/POST | `/v1/tasks` | 定时任务接口：列表 / 创建（`agent_call`、`usage_query` 类型）；配套 `GET/PUT/DELETE /v1/tasks/{id}` 与 `POST /v1/tasks/{id}/run` 立即执行 |
 | GET/POST | `/v1/flow` | 工作流引擎（DAG）：工作流 CRUD、内置模板实例化、运行管理；配套 `GET/PUT/DELETE /v1/flow/workflows/{id}`、`POST /v1/flow/workflows/{id}/runs` 启动运行、`GET /v1/flow/runs` 分页、`GET /v1/flow/runs/{id}`、`POST /v1/flow/runs/{id}/cancel`、`GET /v1/flow/runs/{id}/events` SSE 事件流（详见 [`akm/flow/flow.md`](akm/flow/flow.md)）。全部路由受 `agent_config.flow_enabled` 总开关控制，关闭后不注册 |
-| GET | `/v1/models` | 模型列表 |
+| GET | `/v1/models` | 模型列表（OpenAI 兼容）。顶层保留 `id`/`object`/`owned_by`，并平铺扩展字段 `name`/`context_length`/`max_output_tokens`/`modalities`/`release_date`/`reasoning`/`tool_call`/`canonical_model_id`/`pricing`/`provider`。可选 `?capability=chat` 只返回可对话模型（排除图像生成 / embedding / 重排），不传则返回全量；`?detail=basic` 只回标准三字段 |
+| POST | `/api/pricing/sync` | 同步 models.dev 目录数据（可选 `{"force":true}` 忽略 ETag 强制下载）；网络失败时保留旧数据并返回 `skipped` |
+| GET | `/api/pricing/status` | 目录数据同步状态（最近同步时间 / 供应商数 / 模型数 / 被剔除供应商） |
+| GET | `/api/pricing/providers` | 已入库的 models.dev 供应商列表（供 Key 管理页供应商下拉） |
 | GET | `/health` | 健康检查 |
 | GET | `/health/live` | 存活探针：仅表示服务进程仍在响应 HTTP |
 | GET | `/health/ready` | 就绪探针：根据事件循环、审计积压、DB 探针等判断是否适合继续接流量 |
@@ -586,7 +618,9 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 
 若某供应商的 `/responses` 端点只接受 `type: "function"` 的工具，可关闭其 `supports_responses`（保留 `supports_chat`），让 Responses 请求改经协议转换为 Chat 通道发出；Codex 等客户端注入的 `web_search`、`file_search` 等内置工具会在转换时被过滤，避免上游返回 400（如 `tools.7.type`）。
 
-Key 管理页「添加 Key」中的供应商下拉会自动读取 `/api/agents`（即设置页维护的数据），并保留「自定义」选项用于手工填写 `base_url`/`auth_header`。当保存的 `models='*'` 时，管理台会同步请求该提供商的 `{base_url}/models`，并把返回的模型列表缓存到当前 key，用于前端展示以及 wildcard 模式下的模型匹配；显式自定义模型时不会自动请求该列表。
+Key 管理页「添加 Key」的供应商是**可搜索下拉**：候选来自 `/api/agents`（内置 + 设置页创建的自定义供应商）与 `/api/pricing/providers`（models.dev 目录，最多 200+ 条），输入关键字即过滤，也可用 ↑↓ / Enter 选择；列表里没有的供应商选「自定义…」后手填名称与 `base_url`。
+
+`base_url` 与供应商联动：选中已知供应商时该输入框只读，显示其默认地址；只有「自定义…」态可编辑。**老 key 兼容**：若历史上手填过与该供应商默认值不同的地址（如 `provider=openai` 但指向中转站），编辑时会自动进入自定义态，避免地址被锁死改不了。当保存的 `models='*'` 时，管理台会同步请求该提供商的 `{base_url}/models`，并把返回的模型列表缓存到当前 key，用于前端展示以及 wildcard 模式下的模型匹配；显式自定义模型时不会自动请求该列表。
 
 ```json
 // ~/.akm/config.json 中 custom_agents 示例
