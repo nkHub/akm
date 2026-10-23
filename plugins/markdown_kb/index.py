@@ -117,6 +117,13 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+#: 插件内部请求 AKM 时统一带上的来源标记。
+#:
+#: 不带的话这些请求的 UA 是 python-httpx，审计日志会把它们归成「Python」，
+#: 用户看不出是哪个插件在调上游（例如 markdown_kb 的向量化、重排、项目记忆摘要）。
+PLUGIN_REQUEST_HEADERS = {"x-akm-source": "plugin", "x-akm-plugin": "markdown_kb"}
+
+
 def _normalize_embedding_vector(values: list[float]) -> list[float]:
     """把 embedding 归一化为单位向量，便于让 L2 距离更接近原有余弦相似度语义。
 
@@ -5363,7 +5370,11 @@ class Plugin(PluginBase):
         }
 
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(f"{self._akm_base_url()}/rerank", json=payload)
+            response = await client.post(
+                f"{self._akm_base_url()}/rerank",
+                json=payload,
+                headers=PLUGIN_REQUEST_HEADERS,
+            )
 
         try:
             data = response.json()
@@ -5416,7 +5427,11 @@ class Plugin(PluginBase):
             batch_texts = texts[start:start + batch_size]
             payload = {"model": model, "input": batch_texts}
             async with httpx.AsyncClient(timeout=120) as client:
-                response = await client.post(f"{self._akm_base_url()}/embeddings", json=payload)
+                response = await client.post(
+                    f"{self._akm_base_url()}/embeddings",
+                    json=payload,
+                    headers=PLUGIN_REQUEST_HEADERS,
+                )
 
             try:
                 data = response.json()
@@ -5454,7 +5469,11 @@ class Plugin(PluginBase):
         }
 
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(f"{self._akm_base_url()}/chat/completions", json=payload)
+            response = await client.post(
+                f"{self._akm_base_url()}/chat/completions",
+                json=payload,
+                headers=PLUGIN_REQUEST_HEADERS,
+            )
 
         try:
             data = response.json()
@@ -5502,7 +5521,9 @@ class Plugin(PluginBase):
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 response = await client.post(
-                    f"{self._akm_base_url()}/chat/completions", json=payload
+                    f"{self._akm_base_url()}/chat/completions",
+                    json=payload,
+                    headers=PLUGIN_REQUEST_HEADERS,
                 )
             data = response.json()
             if response.status_code != 200:
@@ -5564,7 +5585,11 @@ class Plugin(PluginBase):
         }
 
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(f"{self._akm_base_url()}/chat/completions", json=payload)
+            response = await client.post(
+                f"{self._akm_base_url()}/chat/completions",
+                json=payload,
+                headers=PLUGIN_REQUEST_HEADERS,
+            )
 
         try:
             data = response.json()

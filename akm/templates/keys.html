@@ -16,9 +16,18 @@
   <form id="key-form" onsubmit="submitForm(event)" class="space-y-3">
     <input type="hidden" id="edit-alias" value="">
     <div><label class="block text-xs text-gray-400 mb-1">别名 *</label><input id="key-alias" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="例如: my-key"></div>
-    <div><label class="block text-xs text-gray-400 mb-1">供应商 *</label><select id="key-provider" required class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-pointer"><option value="">加载中...</option></select></div>
+    <div>
+      <label class="block text-xs text-gray-400 mb-1">供应商 *</label>
+      <akm-combobox id="key-provider" host-class="relative block w-full" placeholder="选择供应商（可输入搜索）"></akm-combobox>
+      <input id="key-provider-custom" class="hidden mt-2 w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="自定义供应商名（如 my-relay）">
+      <p class="mt-1 text-[11px] text-gray-500">供应商较多，可直接输入关键字过滤；列表里没有的请选择「自定义…」。</p>
+    </div>
     <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" required type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
-    <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
+    <div>
+      <label class="block text-xs text-gray-400 mb-1">Base URL</label>
+      <input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址">
+      <p id="key-baseurl-hint" class="mt-1 text-[11px] text-gray-500 hidden">已选供应商会决定 Base URL；需要手填请把供应商改成「自定义…」。</p>
+    </div>
     <div>
       <label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示自动同步提供商模型列表）</label>
       <input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
@@ -171,21 +180,123 @@ function copyModelName(modelName) {
   });
 }
 
+// 「自定义…」在下拉里用特殊值表示；选中后 provider 名与 base_url 都改为手填
+var CUSTOM_PROVIDER = '__custom__';
+
+// 下拉候选缓存：{ value: {default_base_url, is_custom_agent} }
+var _providerOptions = [];
+var _providerMap = {};
+
+/**
+ * 把 agents（内置 + 自定义）与 models.dev 目录供应商合并成下拉候选。
+ *
+ * 分组顺序：内置 → 自定义 → models.dev（目录数据可能为空，此时只显示前两组）。
+ * 目录供应商只带 api 作为 base_url 建议值，协议能力一律不自动带入。
+ */
 function loadProviders() {
-  fetch('/api/agents').then(function(r){ return r.json(); }).then(function(json){
-    var agents = json.data || [];
+  var agentsReq = fetch('/api/agents').then(function(r){ return r.json(); }).then(function(j){ return j.data || []; }).catch(function(){ return []; });
+  var catalogReq = fetch('/api/pricing/providers').then(function(r){ return r.json(); }).then(function(j){ return j.data || []; }).catch(function(){ return []; });
+  return Promise.all([agentsReq, catalogReq]).then(function(res){
+    var agents = res[0] || [];
+    var catalog = res[1] || [];
+
     _agentsMap = {};
-    agents.forEach(function(a){ _agentsMap[a.name] = a; });
-    var sel = document.getElementById('key-provider');
-    var html = '<option value="">选择供应商</option>';
+    _providerMap = {};
+    var options = [{ value: '', label: '未选择' }];
+
+    // 内置供应商（openai / deepseek / anthropic）**不再单独成组**：
+    // 它们在 models.dev 目录里同样存在，单独列一组既重复又占位置；
+    // 而且它们的协议能力现在由目录的 npm 决定，用户改不了，列出来也没有操作价值。
+    // 处理方式：只把内置项记进 _providerMap（base_url 联动还要用），
+    // 候选留给下面的目录分组统一渲染 —— 目录里没有它时再补一条兜底。
     agents.forEach(function(a){
-      html += '<option value="' + esc(a.name) + '">' + esc(formatProviderName(a.name)) + '</option>';
+      _agentsMap[a.name] = a;
+      var isCustomAgent = a.is_custom === true;
+      _providerMap[a.name] = { default_base_url: a.default_base_url || '', is_custom_agent: isCustomAgent };
+      if (isCustomAgent) {
+        options.push({
+          value: a.name,
+          label: formatProviderName(a.name),
+          group: '自定义供应商'
+        });
+      }
     });
-    sel.innerHTML = html;
-  }).catch(function(){
-    var sel = document.getElementById('key-provider');
-    sel.innerHTML = '<option value="">选择供应商</option><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="anthropic">Anthropic</option>';
+
+    // models.dev 目录供应商：**按显示名首字母排序**，不按接口返回的 model_count 降序。
+    // 接口那边按 model_count 排是为了「热门优先」，但下拉是用来找人的：
+    // 用户心里想的是「OpenRouter 在哪」，不是「谁模型多」，按字母才找得到。
+    // 排序键用 localeCompare + base 敏感性，保证中文/数字/英文混排时结果稳定。
+    var catalogOptions = [];
+    var catalogIds = {};
+    catalog.forEach(function(p){
+      var isBuiltin = _providerMap[p.id] && _providerMap[p.id].is_custom_agent === false;
+      // 自定义供应商同名时跳过（自定义的 base_url/协议由用户维护，优先级更高）；
+      // 内置供应商**不跳过** —— 它们就在这一组里显示。
+      if (_providerMap[p.id] && !isBuiltin) return;
+      catalogIds[p.id] = true;
+      if (!isBuiltin) {
+        _providerMap[p.id] = { default_base_url: p.api || '', is_custom_agent: false, from_catalog: true };
+      }
+      var label = p.name && p.name !== p.id ? (p.name + ' · ' + p.id) : p.id;
+      catalogOptions.push({ value: p.id, label: label, group: 'models.dev 目录' });
+    });
+    // 目录数据缺失时（首次启动尚未同步）把内置供应商补进来，避免下拉里找不到它们
+    agents.forEach(function(a){
+      if (a.is_custom === true || catalogIds[a.name]) return;
+      catalogOptions.push({
+        value: a.name,
+        label: formatProviderName(a.name),
+        group: 'models.dev 目录'
+      });
+    });
+    catalogOptions.sort(function(a, b){
+      return String(a.label).localeCompare(String(b.label), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      });
+    });
+    catalogOptions.forEach(function(opt){ options.push(opt); });
+
+    options.push({ value: CUSTOM_PROVIDER, label: '自定义…（手填供应商名与 Base URL）', group: '' });
+
+    _providerOptions = options;
+    var combo = document.getElementById('key-provider');
+    if (combo && typeof combo.setOptions === 'function') combo.setOptions(options);
   });
+}
+
+/**
+ * 切换 base_url 的可用状态。
+ *
+ * 规则（与计划口径 A 一致）：
+ * - 选中已知供应商（内置/自定义 agent/目录）→ base_url 只读，显示该供应商默认地址
+ * - 选中「自定义…」→ 显示手填输入框，base_url 可编辑
+ */
+function applyProviderMode(provider) {
+  var combo = document.getElementById('key-provider');
+  var customInput = document.getElementById('key-provider-custom');
+  var baseEl = document.getElementById('key-baseurl');
+  var hintEl = document.getElementById('key-baseurl-hint');
+  var isCustom = provider === CUSTOM_PROVIDER;
+  if (customInput) {
+    customInput.classList.toggle('hidden', !isCustom);
+    if (isCustom) customInput.focus();
+  }
+  if (combo) combo.classList.toggle('hidden', isCustom);
+  if (baseEl) {
+    baseEl.disabled = !isCustom;
+    baseEl.classList.toggle('opacity-50', !isCustom);
+    baseEl.classList.toggle('cursor-not-allowed', !isCustom);
+  }
+  if (hintEl) hintEl.classList.toggle('hidden', isCustom);
+}
+
+/** 选中已知供应商时把默认地址填入 base_url（用户仍可在自定义态下改） */
+function fillDefaultBaseUrl(provider) {
+  var baseEl = document.getElementById('key-baseurl');
+  if (!baseEl) return;
+  var meta = _providerMap[provider];
+  baseEl.value = (meta && meta.default_base_url) ? meta.default_base_url : '';
 }
 
 function _getExtractorFromScript(scriptRaw) {
@@ -562,6 +673,9 @@ function openAddModal() {
   aliasEl.disabled = false;
   aliasEl.classList.remove('opacity-50', 'cursor-not-allowed');
   providerEl.value = '';
+  var customNameEl = document.getElementById('key-provider-custom');
+  if (customNameEl) customNameEl.value = '';
+  applyProviderMode('');
   apiKeyEl.required = true;
   apiKeyEl.value = '';
   apiKeyEl.type = 'password';
@@ -623,11 +737,27 @@ function editKey(alias) {
     document.getElementById('key-alias').value = alias;
     document.getElementById('key-alias').disabled = true;
     document.getElementById('key-alias').classList.add('opacity-50', 'cursor-not-allowed');
-    document.getElementById('key-provider').value = key.provider||'';
+    // 回显供应商：已知供应商直接选中；未知名字或手填过非默认 base_url 的
+    // 走「自定义…」态，避免老 key 的地址被锁死改不了（计划口径 A）
+    var providerName = key.provider || '';
+    var meta = _providerMap[providerName];
+    var defaultBase = (meta && meta.default_base_url) || '';
+    var isKnown = !!meta;
+    var handFilledBase = !!(key.base_url && defaultBase && key.base_url !== defaultBase);
+    var customNameEl = document.getElementById('key-provider-custom');
+    if (!isKnown || handFilledBase) {
+      document.getElementById('key-provider').value = CUSTOM_PROVIDER;
+      if (customNameEl) customNameEl.value = providerName;
+      applyProviderMode(CUSTOM_PROVIDER);
+    } else {
+      document.getElementById('key-provider').value = providerName;
+      if (customNameEl) customNameEl.value = '';
+      applyProviderMode(providerName);
+    }
     document.getElementById('key-apikey').required = false;
     document.getElementById('key-apikey').value = '';
     document.getElementById('key-apikey').placeholder = '(不修改则留空)';
-    document.getElementById('key-baseurl').value = key.base_url||'';
+    document.getElementById('key-baseurl').value = key.base_url || defaultBase;
     document.getElementById('key-models').value = key.models||'*';
     document.getElementById('key-priority').value = key.priority||0;
     document.getElementById('key-modal').open();
@@ -637,6 +767,19 @@ function editKey(alias) {
 function submitForm(e) {
   e.preventDefault();
   var editing = document.getElementById('edit-alias').value;
+  // 供应商：自定义态取手填输入框，否则取下拉选中值
+  var providerValue = '';
+  var providerCombo = document.getElementById('key-provider');
+  var customNameInput = document.getElementById('key-provider-custom');
+  if (providerCombo && providerCombo.value === CUSTOM_PROVIDER) {
+    providerValue = (customNameInput && customNameInput.value || '').trim();
+    if (!providerValue) {
+      alert('请填写自定义供应商名');
+      return;
+    }
+  } else {
+    providerValue = ((providerCombo && providerCombo.value) || '').trim();
+  }
   var baseUrlValue = (document.getElementById('key-baseurl').value || '').trim();
   var modelsValue = (document.getElementById('key-models').value || '').trim() || '*';
   if (baseUrlValue && !/^https?:\/\//i.test(baseUrlValue)) {
@@ -652,7 +795,7 @@ function submitForm(e) {
   }
   var body = {
     alias: document.getElementById('key-alias').value.trim(),
-    provider: document.getElementById('key-provider').value,
+    provider: providerValue,
     api_key: document.getElementById('key-apikey').value.trim(),
     base_url: baseUrlValue || null,
     models: modelsValue,
@@ -937,12 +1080,14 @@ function setUsageQueryLoading(loading) {
 document.addEventListener('DOMContentLoaded', function() {
   var providerEl = document.getElementById('key-provider');
   if (providerEl) providerEl.addEventListener('change', function() {
-    var provider = this.value;
-    var baseEl = document.getElementById('key-baseurl');
-    var agent = _agentsMap[provider];
-    // 仅在用户未填写时自动带入默认地址，认证头模板由后端按供应商默认值决定。
-    if (agent && baseEl) {
-      if (!baseEl.value) baseEl.value = agent.default_base_url || '';
+    var provider = providerEl.value;
+    applyProviderMode(provider);
+    if (provider && provider !== CUSTOM_PROVIDER) {
+      // 已知供应商：base_url 直接展示其默认地址（只读），认证头模板仍由后端决定
+      fillDefaultBaseUrl(provider);
+    } else if (provider === CUSTOM_PROVIDER) {
+      var baseEl = document.getElementById('key-baseurl');
+      if (baseEl) baseEl.value = '';
     }
   });
   loadProviders();

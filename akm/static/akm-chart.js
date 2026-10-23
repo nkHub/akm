@@ -369,7 +369,11 @@ if (!customElements.get('akm-line-chart')) {
         colors: colors,
         stroke: {
           width: 2,
-          curve: 'straight',
+          // 平滑曲线（spline）：用户要求「折线图改成平滑的」。
+          // 代价要记住：smooth 会在两个采样点之间插值，造出实际不存在的中间值 ——
+          // 「报错次数」是离散计数（每小时 0/1/4 次），16 点到 17 点之间的弧线会让人
+          // 以为 16:30 有 2 次失败，实际没有。要精确读值请以 markers + tooltip 为准。
+          curve: 'smooth',
           lineCap: 'round',
           // 线色必须按序列显式给实色：fill.opacity 数组会被 ApexCharts 连带用到线的描边上
           // （总 Token 面积 12% 时整条线也只剩 12% 不透明度，深色下几乎看不见）

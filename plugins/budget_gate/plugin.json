@@ -25,7 +25,11 @@
       "label": "预算维度",
       "type": "select",
       "default": "global",
-      "options": ["global", "model", "user"],
+      "options": [
+        "global",
+        "model",
+        "user"
+      ],
       "description": "global 全进程共享；model 按请求 model 分桶；user 按请求体 user 字段分桶（缺省为 anonymous）。"
     },
     {
@@ -33,7 +37,10 @@
       "label": "预算周期",
       "type": "select",
       "default": "calendar_day",
-      "options": ["calendar_day", "rolling_window"],
+      "options": [
+        "calendar_day",
+        "rolling_window"
+      ],
       "description": "calendar_day 按本地自然日重置；rolling_window 按固定秒数窗口累计。"
     },
     {
@@ -61,20 +68,6 @@
       "min": 0,
       "max": 1,
       "description": "已用/预算达到该比例时写 warning 日志，不阻断。0 表示关闭软告警。"
-    },
-    {
-      "key": "use_core_pricing",
-      "label": "使用核心单价表",
-      "type": "boolean",
-      "default": true,
-      "description": "开启后读取 ~/.akm/config.json 的 cost_pricing_table；关闭则使用下方自定义单价表。"
-    },
-    {
-      "key": "custom_pricing_table",
-      "label": "自定义单价表",
-      "type": "text",
-      "default": "",
-      "description": "格式与设置页一致：model=输入/缓存/输出（每 1M tokens，美元）。use_core_pricing 关闭或核心表为空时使用。"
     },
     {
       "key": "block_message",

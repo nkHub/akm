@@ -27,6 +27,7 @@
     <akm-switch id="hide-empty-switch" label="仅对话"></akm-switch>
     <button onclick="toggleOrder()" id="btn-order" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">↓ 倒序</button>
     <button onclick="toggleStatusFilter()" id="btn-status" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">成功</button>
+    <button onclick="toggleMismatchFilter()" id="btn-mismatch" title="只筛出上游返回模型与请求不一致的记录（通常是中转站把请求换成了更便宜、更弱的「降智」模型）" class="bg-surface-light border border-border hover:border-indigo-500 text-gray-300 text-xs px-3 py-1.5 rounded transition-colors cursor-pointer">降智</button>
     <akm-range-tabs id="log-days"></akm-range-tabs>
     <label id="auto-refresh-toggle" class="flex items-center gap-2 cursor-pointer select-none">
       <akm-switch id="auto-refresh-switch" label="自动刷新"></akm-switch>
@@ -106,6 +107,7 @@ var _currentAlias = '';
 var _providerDropdownOpen = false;
 var _orderAsc = false;
 var _hideEmpty = false;
+var _mismatchOnly = false;  // 只看「上游换了模型」的记录（model_mismatch=1）
 var _statusFilter = 'success';  // success | failed
 var _currentDays = 1;  // 0=全部, 默认1天
 var _jsonViewerMaxTextLength = 600000;
@@ -490,6 +492,7 @@ function saveFilters() {
       alias: _currentAlias,
       days: _currentDays,
       hideEmpty: _hideEmpty,
+      mismatchOnly: _mismatchOnly,
       orderAsc: _orderAsc
     }));
   } catch(e) {}
@@ -500,6 +503,7 @@ function loadFilters() {
     if (initial.status) _statusFilter = initial.status;
     if (initial.days !== undefined) _currentDays = initial.days;
     if (initial.hideEmpty !== undefined) _hideEmpty = initial.hideEmpty;
+    if (initial.mismatchOnly !== undefined) _mismatchOnly = initial.mismatchOnly;
     if (initial.orderAsc !== undefined) _orderAsc = initial.orderAsc;
     if (initial.alias !== undefined) _currentAlias = initial.alias;
     return;
@@ -509,6 +513,7 @@ function loadFilters() {
     if (saved.status) _statusFilter = saved.status;
     if (saved.days !== undefined) _currentDays = saved.days;
     if (saved.hideEmpty !== undefined) _hideEmpty = saved.hideEmpty;
+    if (saved.mismatchOnly !== undefined) _mismatchOnly = saved.mismatchOnly;
     if (saved.orderAsc !== undefined) _orderAsc = saved.orderAsc;
     if (saved.alias !== undefined) _currentAlias = saved.alias;
   } catch(e) {}
@@ -532,6 +537,7 @@ async function refreshLogs(page) {
   if (_hideEmpty) url += '&hide_empty=true';
   if (_statusFilter !== 'all') url += '&status=' + _statusFilter;
   if (_currentDays > 0) url += '&days=' + _currentDays;
+  if (_mismatchOnly) url += '&mismatch=1';
 
   try {
     // 显示加载状态
@@ -589,6 +595,13 @@ function renderLogTable() {
     var countTokensBadge = hasCountTokensFallback ? '<span class="ml-1 text-cyan-400" title="该条 token 由 messages/count_tokens 回填">CT</span>' : '';
     var adapterFallbackBadge = hasAdapterFallback ? '<span class="ml-1 text-emerald-400" title="该条 token 由适配器收尾 usage 回填">AF</span>' : '';
     var estimateFallbackBadge = hasEstimateFallback ? '<span class="ml-1 text-yellow-300" title="该条 token 为轻量估算值（非上游真实 usage）">EST</span>' : '';
+    // ── 换模型检测：上游原始响应里的 model 与请求 model 不一致时打警示 ──
+    // model_mismatch 三态：1=确认被换；0=一致；null/undefined=没取到（不展示，避免噪音）
+    var swapBadge = '';
+    if (Number(log.model_mismatch) === 1) {
+      swapBadge = '<span class="ml-1 text-amber-400" title="请求模型 ' + esc(log.model || '-') +
+        ' → 上游实际返回 ' + esc(log.response_model || '-') + '（疑似被降智：换成了更便宜或更弱的模型）">⇄</span>';
+    }
     // ── 来源标签由后端统一推导（akm/request_source.py，x-akm-source 优先），
     //    前端只按标签着色；未识别来源后端已归入「其他」。──
     var sourceLabel = log.source_label || '-';
@@ -623,7 +636,7 @@ function renderLogTable() {
     var rowProvider = esc(log.provider||'-');
     var rowModel = esc(log.model||'-');
     var rowSourceTitle = esc(String(headers['user-agent'] || sourceLabel));
-    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 text-xs"><span class="block truncate" title="'+rowTime+'">'+rowTime+'</span></td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs"><span class="block truncate" title="'+rowAlias+'">'+rowAlias+'</span></td><td class="px-4 py-2.5 text-gray-300 text-xs"><span class="block truncate" title="'+rowProvider+'">'+rowProvider+'</span></td><td class="px-4 py-2.5 text-gray-400 text-xs"><div class="flex items-center min-w-0"><span class="truncate" title="'+rowModel+'">'+rowModel+'</span><span class="shrink-0">'+convWarnBadge+securityWarnBadge+countTokensBadge+adapterFallbackBadge+estimateFallbackBadge+'</span></div></td><td class="px-4 py-2.5 text-xs '+sourceClass+'"><span class="block truncate" title="'+rowSourceTitle+'">'+esc(sourceLabel)+'</span></td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td>'+costCell+'<td class="px-2 py-2.5 text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-2 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-2 py-2.5 text-center">'+detailCol+'</td></tr>';  // 状态/延迟/详情三列为固定列宽，水平内边距收到 px-2，给表头让出单行空间。
+    html += '<tr class="border-t border-border hover:bg-surface-hover"><td class="px-4 py-2.5 text-gray-400 text-xs"><span class="block truncate" title="'+rowTime+'">'+rowTime+'</span></td><td class="px-4 py-2.5 text-indigo-300 font-medium text-xs"><span class="block truncate" title="'+rowAlias+'">'+rowAlias+'</span></td><td class="px-4 py-2.5 text-gray-300 text-xs"><span class="block truncate" title="'+rowProvider+'">'+rowProvider+'</span></td><td class="px-4 py-2.5 text-gray-400 text-xs"><div class="flex items-center min-w-0"><span class="truncate" title="'+rowModel+'">'+rowModel+'</span><span class="shrink-0">'+convWarnBadge+securityWarnBadge+countTokensBadge+adapterFallbackBadge+estimateFallbackBadge+swapBadge+'</span></div></td><td class="px-4 py-2.5 text-xs '+sourceClass+'"><span class="block truncate" title="'+rowSourceTitle+'">'+esc(sourceLabel)+'</span></td><td class="px-4 py-2.5 text-center text-xs">'+promptHtml+'</td><td class="px-4 py-2.5 text-center text-xs">'+completionHtml+'</td>'+costCell+'<td class="px-2 py-2.5 text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium '+sc+'">'+(code||'ERR')+'</span></td><td class="px-2 py-2.5 text-right text-xs '+dc+'">'+ds+'</td><td class="px-2 py-2.5 text-center">'+detailCol+'</td></tr>';  // 状态/延迟/详情三列为固定列宽，水平内边距收到 px-2，给表头让出单行空间。
     if (log.error) html += '<tr class="border-t border-border bg-red-950/20"><td colspan="'+(_costStatsEnabled ? 11 : 10)+'" class="px-4 py-1.5 text-xs text-red-400">'+esc(log.error)+'</td></tr>';
   });
   html += '</tbody></table>';
@@ -1120,6 +1133,25 @@ function switchLogDays(d) {
   refreshLogs(1);
 }
 
+function syncMismatchButton() {
+  var btn = document.getElementById('btn-mismatch');
+  if (!btn) return;
+  if (_mismatchOnly) {
+    btn.classList.add('text-amber-300', 'border-amber-500/50');
+    btn.classList.remove('text-gray-300');
+  } else {
+    btn.classList.remove('text-amber-300', 'border-amber-500/50');
+    btn.classList.add('text-gray-300');
+  }
+}
+
+function toggleMismatchFilter() {
+  _mismatchOnly = !_mismatchOnly;
+  syncMismatchButton();
+  saveFilters();
+  refreshLogs(1);
+}
+
 function toggleStatusFilter() {
   var labels = {success: '成功', failed: '失败'};
   var next = {success: 'failed', failed: 'success'};
@@ -1136,6 +1168,7 @@ document.addEventListener('DOMContentLoaded', function() {
     _chatLazyThreshold = _jsonViewerMaxTextLength;
   }).catch(function(){});
   loadFilters();
+  syncMismatchButton();
 
   // 同步状态筛选按钮
   var statusBtn = document.getElementById('btn-status');
