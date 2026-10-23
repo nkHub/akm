@@ -234,24 +234,27 @@ def test_cost_estimate_parse_strict_three_part_only():
     assert parse_pricing("gpt-4=1/2") == []
 
 
-def test_default_cost_pricing_table_includes_current_models_and_free_fallback():
-    """默认单价表应覆盖当前模型，并避免未知模型产生估算费用。"""
-    from akm.cost_estimate import DEFAULT_PRICING_TABLE, match_price, parse_pricing
+def test_cost_pricing_has_no_handwritten_default_table():
+    """手写单价表已移除：价格只来自 models.dev 目录。
 
-    rules = parse_pricing(DEFAULT_PRICING_TABLE)
+    保留这条断言是为了防止有人再把 DEFAULT_PRICING_TABLE 加回来 ——
+    手填表需要人工维护、容易漏配（历史日志里 5814 次请求因缺条目被算成 $0）。
+    """
+    import akm.config as config_mod
+    import akm.cost_estimate as cost_mod
 
-    assert match_price("gpt-5.6-luna", rules) == (1.0, 0.1, 6.0)
-    assert match_price("gpt-5.6-terra", rules) == (2.5, 0.25, 15.0)
-    assert match_price("unknown-model", rules) == (0.0, 0.0, 0.0)
+    assert not hasattr(config_mod, "DEFAULT_PRICING_TABLE")
+    # 配置默认值里不再有 cost_pricing_table
+    assert "cost_pricing_table" not in config_mod.DEFAULTS
+    # 旧配置里带进来的该键会被丢弃
+    assert "cost_pricing_table" not in config_mod.load_config()
 
 
-def test_cost_pricing_table_migrates_legacy_currency_column():
-    """升级后历史四段单价表仍应继续按固定美元计费。"""
-    from akm.config import _normalize_cost_pricing_table
+def test_legacy_pricing_table_migration_removed():
+    """四段单价表迁移函数随手写表一起删除（价格改由目录提供）。"""
+    import akm.config as config_mod
 
-    assert _normalize_cost_pricing_table(
-        "gpt-4=1/0.1/2/USD\n*=0.5/0.05/1/CNY"
-    ) == "gpt-4=1/0.1/2\n*=0.5/0.05/1"
+    assert not hasattr(config_mod, "_normalize_cost_pricing_table")
 
 
 # ── header_toolkit：客户端请求头变换 ─────────────────────────
