@@ -3,7 +3,6 @@
 import json
 import os
 
-from akm.cost_estimate import DEFAULT_PRICING_TABLE
 
 CONFIG_DIR = os.path.expanduser("~/.akm")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -21,7 +20,13 @@ DEFAULTS = {
     "stream_capture_max_bytes": 262144,  # 流式响应内存捕获上限（用于审计和 token 统计，默认 256KB）
     "stats_include_estimated_usage": False,  # 首页统计是否计入 estimated token，默认关闭更保守
     "cost_stats_enabled": False,  # 首页费用估算开关（不能替代供应商账单）
-    "cost_pricing_table": DEFAULT_PRICING_TABLE,  # 模型单价表：model=输入/缓存/输出（每 1M tokens，固定美元）
+    # ── models.dev 目录数据（取价三段式）──────────────────────────
+    # 价格唯一来源是 models.dev 目录（自动同步）；保留该键仅为兼容老 config.json
+    "cost_pricing_source": "snapshot",  # 仅 snapshot（manual / hybrid 已移除）
+    "models_dev_official_fallback": True,  # 供应商不匹配时是否按原厂价兜底（关掉则直接按 0）
+    "models_dev_prefer_providers": "openai,anthropic,deepseek,google,xai,moonshotai,zai,minimax,alibaba",  # 官方兜底查找顺序
+    "models_dev_sync_enabled": True,  # 是否允许后台自动刷新目录数据
+    "models_dev_sync_interval_hours": 24,  # 自动刷新间隔（小时）
     "json_viewer_max_text_length": 600000,  # JSON 查看器超长文本阈值（超过后仅允许下载原文）
     "image_supported_models": "gpt-image-2",  # 图片生成/编辑支持的模型列表（逗号分隔，首项作为默认值）
     "image_request_timeout_sec": 300,  # 图片生成/编辑请求超时（秒），默认比聊天接口更宽松
@@ -79,6 +84,9 @@ DEFAULTS = {
     "agent_notify_enabled": True,       # 是否启用 Agent 原生通知工具（akm_send_notification，macOS 系统通知）
     "agent_native_tools_enabled": True, # 是否启用 Agent 原生系统工具（akm_clipboard_get/akm_clipboard_set/akm_system_info/akm_open/akm_frontmost_app：剪贴板读写、系统信息、打开 URL/文件/应用、查询前台应用）
     "agent_read_image_enabled": True,   # 是否启用 Agent 读图工具（akm_read_image：调用视觉模型描述图片）
+    "agent_fetch_url_enabled": False,    # 是否启用网页抓取工具（akm_fetch_url：抓取 http/https 网页并转成纯文本，默认关闭）
+    "agent_fetch_url_timeout_sec": 10.0, # akm_fetch_url 单次抓取超时（秒），含整条重定向链
+    "agent_fetch_url_max_bytes": 2097152, # akm_fetch_url 单次下载上限（字节，默认 2MB，超出即截断不报错）
     "agent_subagent_enabled": True,     # 是否启用 Agent 子 Agent 委托工具
     "agent_subagent_max_depth": 1,      # 子 Agent 最大嵌套层数，0 表示禁止 spawn
     "agent_vision_model": "gpt-5.6-luna",  # Agent 读图使用的视觉模型（akm_read_image）；与 image_supported_models（图片生成模型）相互独立
@@ -133,6 +141,9 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_notify_enabled",
     "agent_native_tools_enabled",
     "agent_read_image_enabled",
+    "agent_fetch_url_enabled",
+    "agent_fetch_url_timeout_sec",
+    "agent_fetch_url_max_bytes",
     "agent_subagent_enabled",
     "agent_subagent_max_depth",
     "agent_vision_model",
@@ -195,30 +206,36 @@ def resolve_http_proxy_url(cfg: dict | None = None) -> str | None:
 
 
 
-def _normalize_cost_pricing_table(raw: object) -> str:
-    """将历史四段单价表转换为当前固定美元的三段格式。
-
-    旧版本把币种写在每一行末尾；现在币种固定为美元符号，保留前三个
-    价格字段即可。注释、空行及不符合旧格式的内容原样保留，让前端继续
-    展示并由单价解析器统一决定其是否有效。
-    """
-    lines = []
-    for line in str(raw or "").splitlines():
-        if "=" not in line:
-            lines.append(line)
-            continue
-        model, prices = line.split("=", 1)
-        parts = [part.strip() for part in prices.split("/")]
-        if len(parts) == 4:
-            lines.append(f"{model}={'/'.join(parts[:3])}")
-            continue
-        lines.append(line)
-    return "\n".join(lines)
-
-
 def _ensure_dir() -> None:
     """确保配置目录存在"""
     os.makedirs(CONFIG_DIR, exist_ok=True)
+
+
+def _normalize_models_dev_config(target: dict) -> None:
+    """归一化 models.dev 相关配置项（数据源、兜底开关、刷新间隔）。
+
+    取值策略：
+    - ``cost_pricing_source`` **固定为 snapshot**（手写单价表已移除）；老配置里的
+      manual / hybrid 会被改写成 snapshot，避免升级后取价静默变成 0；
+    - 两个开关用「is not False」判定，只有显式 false 才关闭（与项目其它开关一致）；
+    - 刷新间隔夹紧到 1 小时 ~ 30 天，避免非法值拖死后台任务。
+    """
+
+    # 手写单价表已移除：无论老配置写 manual / hybrid，一律归一化成 snapshot，
+    # 否则升级后取价会静默变成 0（老表不再参与计算）。
+    target["cost_pricing_source"] = "snapshot"
+    target["models_dev_official_fallback"] = (
+        target.get("models_dev_official_fallback") is not False
+    )
+    target["models_dev_prefer_providers"] = str(
+        target.get("models_dev_prefer_providers") or ""
+    ).strip()
+    target["models_dev_sync_enabled"] = target.get("models_dev_sync_enabled") is not False
+    try:
+        hours = int(target.get("models_dev_sync_interval_hours") or 24)
+    except (TypeError, ValueError):
+        hours = 24
+    target["models_dev_sync_interval_hours"] = max(1, min(24 * 30, hours))
 
 
 def load_config() -> dict:
@@ -234,7 +251,15 @@ def load_config() -> dict:
     # 合并默认值；已移除的会话落盘开关从旧 config.json 中丢弃，不再暴露到设置页/API。
     merged = dict(DEFAULTS)
     merged.update(data)
-    for _obsolete_key in ("agent_session_auto_save", "agent_session_retention_days", "agent_session_max_files"):
+    # 已移除的开关从旧 config.json 中丢弃，不再暴露到设置页/API：
+    # - agent_session_*：会话落盘开关
+    # - cost_pricing_table：手写单价表（价格改由 models.dev 目录提供）
+    for _obsolete_key in (
+        "agent_session_auto_save",
+        "agent_session_retention_days",
+        "agent_session_max_files",
+        "cost_pricing_table",
+    ):
         merged.pop(_obsolete_key, None)
     # 兼容 config.json 的 agent_config 嵌套归组：展开到顶层（嵌套值优先于顶层旧键）
     _agent_group = data.get("agent_config") if isinstance(data, dict) else None
@@ -246,7 +271,7 @@ def load_config() -> dict:
             _agent_group.pop(_obsolete_key, None)
     # 内存层保持扁平，不把嵌套 agent_config 留在顶层
     merged.pop("agent_config", None)
-    merged["cost_pricing_table"] = _normalize_cost_pricing_table(merged["cost_pricing_table"])
+    _normalize_models_dev_config(merged)
     merged["http_proxy_enabled"] = merged.get("http_proxy_enabled") is True
     merged["http_proxy_url"] = normalize_http_proxy_url(merged.get("http_proxy_url", ""))
     # macOS 原生功能：自动更新默认开启，仅显式设为 false 才关闭
@@ -340,6 +365,8 @@ def save_config(data: dict) -> None:
     current["update_cache_cleanup"] = current.get("update_cache_cleanup") is not False
     current["text_log_rotation"] = current.get("text_log_rotation") is True
     current["log_file_max_mb"] = max(1, _safe_int(current.get("log_file_max_mb"), 5))
+    # models.dev 目录数据相关配置归一化
+    _normalize_models_dev_config(current)
     # 主密钥存放后端：与 load_config 同一套取值校验，非法值回退 file
     current["secret_backend"] = (
         current.get("secret_backend") if current.get("secret_backend") in ("file", "keychain") else "file"

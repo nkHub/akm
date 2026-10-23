@@ -84,7 +84,9 @@ def estimate_row_cost_detail(
     completion_tokens: int,
     cached_tokens: int,
     cache_creation_tokens: int,
-    rules: list[tuple[str, float, float, float]],
+    rules: list[tuple[str, float, float, float]] | None = None,
+    provider: str = "",
+    resolver: "PriceResolver | None" = None,
 ) -> tuple[float, str, dict]:
     """估算单条请求费用，并拆分输入未命中缓存 / 缓存命中 / 输出三部分明细。
 
@@ -111,7 +113,11 @@ def estimate_row_cost_detail(
     if non_cached <= 0 and completion <= 0 and cached <= 0:
         return 0.0, "$", zero_detail
 
-    inp_price, cache_price, out_price = match_price(model, rules)
+    if resolver is not None:
+        # 三段式取价：本供应商 → 官方兜底（开关）→ 按 0
+        inp_price, cache_price, out_price = resolver.resolve(provider, model)
+    else:
+        inp_price, cache_price, out_price = match_price(model, list(rules or []))
     input_missed_cost = (non_cached / 1_000_000.0) * inp_price
     input_cached_cost = (cached / 1_000_000.0) * cache_price
     output_cost = (completion / 1_000_000.0) * out_price
@@ -130,7 +136,9 @@ def estimate_row_cost(
     completion_tokens: int,
     cached_tokens: int,
     cache_creation_tokens: int,
-    rules: list[tuple[str, float, float, float]],
+    rules: list[tuple[str, float, float, float]] | None = None,
+    provider: str = "",
+    resolver: "PriceResolver | None" = None,
 ) -> tuple[float, str]:
     """估算单条请求费用。返回 (cost, currency)。"""
     cost, currency, _ = estimate_row_cost_detail(
@@ -140,6 +148,8 @@ def estimate_row_cost(
         cached_tokens=cached_tokens,
         cache_creation_tokens=cache_creation_tokens,
         rules=rules,
+        provider=provider,
+        resolver=resolver,
     )
     return cost, currency
 
@@ -167,3 +177,68 @@ def pricing_snapshot(pricing_table: str) -> dict:
             for p, inp, cache, out in rules
         ],
     }
+
+
+class PriceResolver:
+    """费用取价器：统一从 models.dev 目录取价。
+
+    **价格只有一个来源：models.dev 目录**（自动同步，见 :mod:`akm.models_dev`）。
+    手写单价表已移除 —— 它需要人工维护、容易漏配（历史日志里 5814 次请求因缺条目被算成 $0），
+    而目录数据覆盖 8000+ 模型且能自动更新。
+
+    取价三段式：key 的供应商存在且名下有该模型 → 用它在该供应商下的价；
+    不匹配时按原厂兜底（``models_dev_official_fallback`` 开关）；都失败按 0。
+    """
+
+    __slots__ = ("mode", "official_fallback", "prefer_providers")
+
+    def __init__(
+        self,
+        *,
+        mode: str = "snapshot",
+        official_fallback: bool = True,
+        prefer_providers: str = "",
+    ) -> None:
+        # 只保留 snapshot；老配置里的 manual / hybrid 一律归一化过来
+        self.mode = "snapshot" if mode != "snapshot" else mode
+        self.official_fallback = official_fallback is not False
+        self.prefer_providers = str(prefer_providers or "").strip()
+
+    @classmethod
+    def from_config(cls, cfg: dict | None = None) -> "PriceResolver":
+        """按当前配置构造取价器。"""
+        if not isinstance(cfg, dict):
+            try:
+                from akm.config import load_config
+
+                cfg = load_config()
+            except Exception:
+                cfg = {}
+        return cls(
+            mode=str(cfg.get("cost_pricing_source") or "snapshot"),
+            official_fallback=cfg.get("models_dev_official_fallback") is not False,
+            prefer_providers=str(cfg.get("models_dev_prefer_providers") or ""),
+        )
+
+    def resolve(
+        self, provider: str, model: str
+    ) -> tuple[float, float, float]:
+        """返回一条请求的 (输入, 缓存命中, 输出) 单价；未命中按 0。"""
+        try:
+            from akm import models_dev
+
+            found = models_dev.resolve_price(
+                provider,
+                model,
+                official_fallback=self.official_fallback,
+                prefer_providers=self.prefer_providers or None,
+            )
+        except Exception:
+            # 目录数据缺失/损坏时不能影响费用统计，按未命中处理
+            return (0.0, 0.0, 0.0)
+        return found[0] if found else (0.0, 0.0, 0.0)
+
+
+def build_resolver(cfg: dict | None = None) -> PriceResolver:
+    """便捷入口：按配置构造取价器（供各调用点统一使用）。"""
+    return PriceResolver.from_config(cfg)
