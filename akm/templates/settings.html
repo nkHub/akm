@@ -175,17 +175,26 @@
         <akm-switch id="cfg-cost-stats" slot="actions" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
       </akm-settings-card>
       <div class="bg-surface-light border border-border rounded-lg p-4">
+        <!-- 取价数据源下拉已移除：手填单价表删除后只剩 models.dev 目录一种来源，
+             保留选择框只会让用户选到已失效的 manual / hybrid。 -->
         <div class="flex items-start justify-between gap-4 mb-3">
           <div>
-            <h4 class="text-sm font-semibold text-strong">模型单价表</h4>
-            <p class="text-xs text-gray-500 mt-0.5">每行 <code class="text-indigo-300">model=输入/输入缓存/输出</code>（每 1M tokens，固定美元）。支持 <code class="text-indigo-300">#</code> 注释与尾部 <code class="text-indigo-300">*</code> 通配。</p>
+            <h4 class="text-sm font-semibold text-strong">取价数据源</h4>
+            <p class="text-xs text-gray-500 mt-0.5">价格来自 models.dev 目录（自动同步，无需手填）。</p>
           </div>
-          <button onclick="saveCostPricing()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer shrink-0">保存单价表</button>
         </div>
-        <textarea id="cost-pricing-table" rows="12"
-          class="w-full bg-surface border border-border rounded px-3 py-2 text-xs font-mono text-gray-200 focus:outline-none focus:border-indigo-500 leading-relaxed"
-          placeholder="gpt-5.4=2.5/0.25/15"></textarea>
-        <p id="cost-pricing-msg" class="text-xs mt-2 hidden"></p>
+        <div class="flex items-center justify-between gap-4 border-t border-border pt-3">
+          <div>
+            <h4 class="text-sm font-semibold text-strong">不匹配时按官方价兜底</h4>
+            <p class="text-xs text-gray-500 mt-0.5">key 的供应商名下没有该模型时，按原厂价格估算；关闭后这类请求费用按 0 计。</p>
+          </div>
+          <akm-switch id="cfg-official-fallback" host-class="flex items-center cursor-pointer select-none switch-off"></akm-switch>
+        </div>
+        <div class="flex items-center justify-between gap-4 border-t border-border pt-3 mt-3">
+          <div id="catalog-status" class="text-xs text-gray-500">目录数据状态加载中…</div>
+          <button onclick="syncCatalog()" id="catalog-sync-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded transition-colors cursor-pointer shrink-0">立即同步</button>
+        </div>
+        <p id="catalog-msg" class="text-xs mt-2 hidden"></p>
       </div>
     </div>
   </section>
@@ -359,7 +368,10 @@ function loadConfig() {
     updateUpdateCleanupToggle();
     _textLogRotation = cfg.text_log_rotation === true;
     updateTextLogRotationToggle();
-    document.getElementById('cost-pricing-table').value = cfg.cost_pricing_table || '';
+    // 单价表与取价数据源下拉已移除，这里不再回填相关字段
+    _officialFallback = cfg.models_dev_official_fallback !== false;
+    updateOfficialFallbackToggle();
+    loadCatalogStatus();
     _httpProxyEnabled = cfg.http_proxy_enabled === true;
     updateHttpProxyToggle();
     var proxyUrlEl = document.getElementById('http-proxy-url');
@@ -416,6 +428,75 @@ function toggleCostStats() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({cost_stats_enabled: _costStatsEnabled})
   });
+}
+
+// ── models.dev 目录数据：数据源 / 官方兜底 / 同步 ──────────────
+var _officialFallback = true;
+
+function updateOfficialFallbackToggle() { _updateSwitch('cfg-official-fallback', _officialFallback); }
+
+function toggleOfficialFallback() {
+  _officialFallback = !_officialFallback;
+  updateOfficialFallbackToggle();
+  fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({models_dev_official_fallback: _officialFallback})
+  });
+}
+
+/** 拉取并展示目录数据同步状态（不联网） */
+function loadCatalogStatus() {
+  var el = document.getElementById('catalog-status');
+  if (!el) return;
+  fetch('/api/pricing/status').then(function(r){ return r.json(); }).then(function(d){
+    if (!d || !d.fetched_at) {
+      el.textContent = '尚未同步 models.dev 目录数据，点右侧「立即同步」拉取。';
+      return;
+    }
+    el.textContent = '目录数据：' + d.provider_count + ' 个供应商 / ' + d.model_count +
+      ' 条模型记录，最近同步 ' + d.fetched_at;
+  }).catch(function(){
+    el.textContent = '目录数据状态读取失败';
+  });
+}
+
+/** 手动触发同步；同步完成后刷新状态 */
+function syncCatalog() {
+  var btn = document.getElementById('catalog-sync-btn');
+  var msg = document.getElementById('catalog-msg');
+  var original = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '同步中…'; btn.classList.add('opacity-60'); }
+  fetch('/api/pricing/sync', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (msg) {
+        msg.classList.remove('hidden');
+        if (d && d.skipped) {
+          msg.textContent = (d.reason === 'not_modified')
+            ? '远端数据未变化（ETag 命中），沿用本地缓存。'
+            : '同步失败：网络不可用或响应异常，本地旧数据已保留。';
+          msg.className = 'text-xs text-amber-400 mt-2';
+        } else if (d && d.ok) {
+          msg.textContent = '同步完成：' + d.provider_count + ' 个供应商 / ' + d.model_count + ' 条模型记录。';
+          msg.className = 'text-xs text-emerald-400 mt-2';
+        } else {
+          msg.textContent = '同步失败，请查看 ~/.akm/error.log。';
+          msg.className = 'text-xs text-red-400 mt-2';
+        }
+      }
+      loadCatalogStatus();
+    })
+    .catch(function(){
+      if (msg) {
+        msg.textContent = '同步请求失败，请稍后重试。';
+        msg.className = 'text-xs text-red-400 mt-2';
+        msg.classList.remove('hidden');
+      }
+    })
+    .finally(function(){
+      if (btn) { btn.disabled = false; btn.textContent = original || '立即同步'; btn.classList.remove('opacity-60'); }
+    });
 }
 
 function updateLaunchLoginToggle() { _updateSwitch('cfg-launch-login', _launchAtLogin); }
@@ -475,25 +556,6 @@ function toggleTextLogRotation() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({text_log_rotation: _textLogRotation})
-  });
-}
-
-function saveCostPricing() {
-  var table = document.getElementById('cost-pricing-table').value || '';
-  var msg = document.getElementById('cost-pricing-msg');
-  fetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({cost_pricing_table: table})
-  }).then(function(){
-    msg.textContent = '已保存模型单价表（首页统计即时生效）';
-    msg.className = 'text-xs text-emerald-400 mt-2';
-    msg.classList.remove('hidden');
-    setTimeout(function(){ msg.classList.add('hidden'); }, 3000);
-  }).catch(function(){
-    msg.textContent = '保存失败，请稍后重试';
-    msg.className = 'text-xs text-red-400 mt-2';
-    msg.classList.remove('hidden');
   });
 }
 function _updateSwitch(id, on) {
@@ -812,12 +874,16 @@ function deleteAgent(name) {
 
 function loadAgents() {
   fetch('/api/agents').then(function(r){return r.json()}).then(function(json){
-    var agents = json.data || [];
+    var allAgents = json.data || [];
+    // _agentCache 保留**全量**（含内置）：编辑弹窗回显、base_url 联动都要能查到内置供应商
     _agentCache = {};
-    agents.forEach(function(a){ _agentCache[a.name] = a; });
+    allAgents.forEach(function(a){ _agentCache[a.name] = a; });
+    // 表格只展示**自定义**供应商：内置的 openai / deepseek / anthropic 不可编辑也不可删除，
+    // 列在这里只是噪音（它们的协议能力已由 models.dev 目录决定，用户无法改动）。
+    var agents = allAgents.filter(function(a){ return a.is_custom === true; });
     var html = '';
     if (agents.length === 0) {
-      html = '<div class="text-gray-600">暂无可用的供应商代理</div>';
+      html = '<div class="text-gray-600">暂无自定义供应商，点右上角「+ 添加」创建</div>';
     } else {
       // 前三列收窄：固定表宽 + 截断，hover 用 title 看全文
       html = '<div class="overflow-x-auto"><table class="w-full table-fixed text-xs"><colgroup>'
@@ -833,9 +899,10 @@ function loadAgents() {
         + '<th class="text-center py-1.5 font-medium">/anthropic</th>'
         + '<th class="text-center py-1.5 font-medium"></th></tr></thead><tbody>';
       agents.forEach(function(a){
-        var nameTitle = esc(a.name) + (a.is_custom ? '' : ' (内置)');
+        // 表格里只剩自定义供应商（内置已过滤），名称列不再需要「(内置)」标记
+        var nameTitle = esc(a.name);
         html += '<tr class="border-t border-border">';
-        html += '<td class="py-1.5 pr-2 text-gray-300 truncate" title="' + nameTitle + '">' + esc(a.name) + (a.is_custom ? '' : ' <span class="text-gray-600">(内置)</span>') + '</td>';
+        html += '<td class="py-1.5 pr-2 text-gray-300 truncate" title="' + nameTitle + '">' + esc(a.name) + '</td>';
         html += '<td class="py-1.5 pr-2 text-gray-500 truncate" title="' + esc(a.default_base_url) + '">' + esc(a.default_base_url) + '</td>';
         html += '<td class="py-1.5 pr-2 text-gray-500 truncate" title="' + esc(a.default_auth_header) + '">' + esc(a.default_auth_header) + '</td>';
         html += '<td class="py-1.5 text-center">' + (a.supports_chat ? '<span class="text-emerald-400">✓</span>' : '<span class="text-gray-600">-</span>') + '</td>';
@@ -874,6 +941,8 @@ document.addEventListener('DOMContentLoaded', function() {
   if (logRespEl) logRespEl.addEventListener('click', toggleLogResp);
   var costStatsEl = document.getElementById('cfg-cost-stats');
   if (costStatsEl) costStatsEl.addEventListener('click', toggleCostStats);
+  var officialFallbackEl = document.getElementById('cfg-official-fallback');
+  if (officialFallbackEl) officialFallbackEl.addEventListener('click', toggleOfficialFallback);
   var httpProxyEl = document.getElementById('cfg-http-proxy');
   if (httpProxyEl) httpProxyEl.addEventListener('click', toggleHttpProxy);
   var launchLoginEl = document.getElementById('cfg-launch-login');

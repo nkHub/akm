@@ -39,6 +39,11 @@ from typing import Any
 
 import httpx
 
+#: 插件内部请求 AKM 时统一带上的来源标记（与 index.py 保持一致）：
+#: 不带的话 UA 是 python-httpx，审计日志会把项目记忆摘要归成「Python」。
+PLUGIN_REQUEST_HEADERS = {"x-akm-source": "plugin", "x-akm-plugin": "markdown_kb"}
+
+
 PROJECTS_DIR_NAME = "projects"
 CONTEXT_FILE = "context.md"
 MEMORY_FILE = "memory.md"
@@ -666,7 +671,11 @@ class ProjectMemory:
     async def _post_chat(self, base_url: str, payload: dict) -> dict:
         """调用 AKM chat 接口（单独抽出便于测试替换）。"""
         async with httpx.AsyncClient(timeout=DIGEST_TIMEOUT_SECONDS) as client:
-            response = await client.post(f"{base_url}/chat/completions", json=payload)
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=PLUGIN_REQUEST_HEADERS,
+            )
         if response.status_code != 200:
             raise RuntimeError(f"digest chat 请求失败: HTTP {response.status_code}")
         try:

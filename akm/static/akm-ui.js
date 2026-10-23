@@ -315,8 +315,8 @@ if (!customElements.get('akm-modal')) {
       this.innerHTML = '' +
         '<div data-overlay class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 fade-in">' +
           '<div data-backdrop class="absolute inset-0 bg-black/60"></div>' +
-          '<div class="relative bg-surface-light border border-border rounded-lg w-full ' + width + ' shadow-2xl ' + panelClass + '" style="animation: slideUp 0.2s ease">' +
-            '<div class="flex items-center justify-between px-4 py-3 border-b border-border">' +
+          '<div class="relative bg-surface-light border border-border rounded-lg w-full ' + width + ' shadow-2xl flex flex-col max-h-[calc(100vh-2rem)] ' + panelClass + '" style="animation: slideUp 0.2s ease">' +
+            '<div class="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">' +
               '<div class="min-w-0">' +
                 '<h3 data-title class="text-sm font-semibold text-strong"></h3>' +
                 '<p data-subtitle class="text-xs text-gray-500 mt-1 hidden"></p>' +
@@ -325,8 +325,12 @@ if (!customElements.get('akm-modal')) {
                 '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>' +
               '</button>' +
             '</div>' +
-            '<div data-body class="' + bodyClass + '"></div>' +
-            '<div data-footer class="hidden"></div>' +
+            /* 弹窗正文必须能滚动：表单较长时（Key 弹窗 7 个字段）内容会超出视口，
+               而 akm-combobox 的下拉是 absolute 定位，父级不可滚时它会被裁在弹窗底边之外，
+               表现就是「点供应商输入框没有下拉列表」。给正文 max-h + overflow-y-auto 后，
+               下拉可以在正文内部撑开并随滚动可见。 */
+            '<div data-body class="' + bodyClass + ' overflow-y-auto min-h-0"></div>' +
+            '<div data-footer class="hidden shrink-0"></div>' +
           '</div>' +
         '</div>';
       this.overlay = this.querySelector('[data-overlay]');
@@ -733,3 +737,348 @@ function akmFloatingTip() {
     window.akmNotify.close = function(id) { ensureNotifyHost().close(id); };
   }
 })();
+
+/* ── akm-combobox：可搜索下拉 ─────────────────────────────────
+ *
+ * 原生 <select> 无法搜索，供应商列表达到 200+ 条时基本不可用，所以这里提供
+ * 一个「输入框 + 过滤列表」的轻量组件。只依赖原生 DOM，不引入第三方库。
+ *
+ * 用法：
+ *   <akm-combobox id="key-provider" placeholder="选择供应商"></akm-combobox>
+ *   cb.setOptions([
+ *     { value: '', label: '选择供应商' },                    // 空值项（可选）
+ *     { value: 'openai', label: 'OpenAI', group: '内置' },
+ *     { value: 'dmxapi', label: 'dmxapi', group: '自定义' },
+ *   ]);
+ *   cb.value          // 当前选中值
+ *   cb.setValue('x')  // 程序设置
+ *   cb.addEventListener('change', ...)
+ *
+ * 交互：输入即过滤（同时匹配 label 与 value，忽略大小写）；↑↓ 移动高亮；
+ * Enter 选中；Esc 关闭；点击组件外部自动收起。
+ */
+if (!customElements.get('akm-combobox')) {
+  customElements.define('akm-combobox', class extends HTMLElement {
+    connectedCallback() {
+      if (this.__mounted) return;
+      this.__mounted = true;
+      // DOM 移动（弹窗重渲染）会走 disconnected → connected：此时 _options / _value
+      // 是调用方之前设好的，**不能清空**，否则重新挂载后下拉变空、选中值丢失。
+      if (!Array.isArray(this._options)) this._options = [];
+      this._filtered = this._options.slice();
+      this._activeIndex = -1;
+      if (typeof this._value !== 'string') this._value = '';
+      this._open = false;
+      this.render();
+      this._bindEvents();
+      // 重新挂载时把已选值回填到新渲染出来的 input 上
+      this._syncInputToValue();
+      // 初始值来自 value 属性
+      if (this.hasAttribute('value')) this.setValue(this.getAttribute('value'), true);
+    }
+
+    /** 转义 HTML，避免选项文案里的尖括号破坏结构 */
+    escape(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    render() {
+      var placeholder = this.getAttribute('placeholder') || '';
+      this.className = (this.getAttribute('host-class') || 'relative block').trim();
+      this.innerHTML = '' +
+        '<div class="relative">' +
+          '<input type="text" data-combobox-input autocomplete="off" spellcheck="false"' +
+            ' placeholder="' + this.escape(placeholder) + '"' +
+            ' class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 cursor-text">' +
+          '<button type="button" data-combobox-toggle tabindex="-1" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 cursor-pointer">' +
+            '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>' +
+          '</button>' +
+        '</div>';
+      // 下拉菜单**挂到 body**（不是组件内部）：
+      // 弹窗正文是可滚动容器（overflow-y-auto），absolute 菜单会被它裁掉 ——
+      // 实测 clientHeight 只有 69px（应 256px），表现就是「点供应商没有下拉列表」。
+      // 挂到 body + position:fixed 后完全不受父级裁剪影响。
+    }
+
+    _bindEvents() {
+      var self = this;
+      this._input = this.querySelector('[data-combobox-input]');
+      // 菜单元素建一次、挂在 body 上复用；不用时只是 hidden
+      this._menu = document.createElement('div');
+      this._menu.setAttribute('data-combobox-menu', '');
+      this._menu.className = 'hidden z-[60] overflow-y-auto bg-surface-light border border-border rounded-lg shadow-xl py-1';
+      // position 用内联样式写死：只靠 Tailwind 的 `fixed` 类在没加载该类的环境
+      // （独立预览页、样式尚未就绪的首帧）会退化成 static，菜单就跑到文档流里去了。
+      this._menu.style.position = 'fixed';
+      document.body.appendChild(this._menu);
+      this._toggle = this.querySelector('[data-combobox-toggle]');
+
+      this._input.addEventListener('focus', function() { self.openMenu(); });
+      this._input.addEventListener('input', function() {
+        self.openMenu();
+        self.filter(self._input.value);
+      });
+      this._input.addEventListener('keydown', function(ev) { self._onKeydown(ev); });
+      if (this._toggle) {
+        this._toggle.addEventListener('mousedown', function(ev) {
+          ev.preventDefault();
+          if (self._open) self.closeMenu(); else { self._input.focus(); self.openMenu(); }
+        });
+      }
+      // 点击组件外部收起（用捕获阶段，避免被其它 click 逻辑吞掉）
+      this._onDocClick = function(ev) {
+        if (!self.contains(ev.target)) self.closeMenu();
+      };
+      document.addEventListener('mousedown', this._onDocClick, true);
+    }
+
+    disconnectedCallback() {
+      if (this._onDocClick) document.removeEventListener('mousedown', this._onDocClick, true);
+      if (this._onScroll) {
+        window.removeEventListener('scroll', this._onScroll, true);
+        window.removeEventListener('resize', this._onScroll);
+        this._onScroll = null;
+      }
+      // 菜单挂在 body 上，组件移除时必须自己清理，否则会残留一个孤儿下拉
+      if (this._menu && this._menu.parentNode) this._menu.parentNode.removeChild(this._menu);
+      this._menu = null;
+      // **必须重置 __mounted**：弹窗重渲染时元素会被移出再插回（DOM 移动），
+      // 浏览器会依次触发 disconnected → connected。若不清标记，connectedCallback
+      // 会直接 return，菜单再也不会被创建 —— 表现就是「编辑 Key 时供应商点了没下拉」。
+      // 这是引入 body 挂载方案后踩到的真实回归。
+      this.__mounted = false;
+      this._input = null;
+      this._toggle = null;
+    }
+
+    _onKeydown(ev) {
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        if (!this._open) this.openMenu();
+        var step = ev.key === 'ArrowDown' ? 1 : -1;
+        var count = this._filtered.length;
+        if (!count) return;
+        this._activeIndex = (this._activeIndex + step + count) % count;
+        this._paintActive();
+        return;
+      }
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (this._open && this._activeIndex >= 0 && this._filtered[this._activeIndex]) {
+          this.setValue(this._filtered[this._activeIndex].value);
+        }
+        return;
+      }
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        this.closeMenu();
+        this._syncInputToValue();
+      }
+    }
+
+    /** 设置候选项；空值项用于「未选择」占位 */
+    setOptions(options) {
+      this._options = Array.isArray(options) ? options.slice() : [];
+      this._syncInputToValue();
+      this.filter('');
+    }
+
+    /** 设置当前值；silent=true 时不派发 change（用于初始化回显） */
+    setValue(value, silent) {
+      var next = value == null ? '' : String(value);
+      var found = null;
+      for (var i = 0; i < this._options.length; i++) {
+        if (String(this._options[i].value) === next) { found = this._options[i]; break; }
+      }
+      // 允许设置不在候选里的值（例如老 key 的私有 provider 名），回显原文
+      this._value = found ? String(found.value) : next;
+      this._input.value = found ? String(found.label || found.value) : next;
+      this.closeMenu();
+      if (this._value === '' || found) {
+        // 选中后恢复显示 label，不再保留用户输入的搜索词
+        this.filter('');
+      }
+      if (!silent) {
+        this.dispatchEvent(new CustomEvent('change', {
+          detail: { value: this._value }, bubbles: true
+        }));
+      }
+    }
+
+    get value() { return this._value; }
+    set value(v) { this.setValue(v, true); }
+
+    _syncInputToValue() {
+      if (!this._input) return;
+      for (var i = 0; i < this._options.length; i++) {
+        if (String(this._options[i].value) === this._value) {
+          this._input.value = String(this._options[i].label || this._options[i].value);
+          return;
+        }
+      }
+      this._input.value = this._value;
+    }
+
+    /** 按关键字过滤候选（匹配 label 与 value） */
+    filter(keyword) {
+      var kw = String(keyword || '').trim().toLowerCase();
+      var self = this;
+      this._filtered = this._options.filter(function(item) {
+        if (String(item.value) === '') {
+          // 空值项只在没有搜索词时展示，避免干扰搜索
+          return kw === '';
+        }
+        if (!kw) return true;
+        var label = String(item.label || '').toLowerCase();
+        var value = String(item.value || '').toLowerCase();
+        return label.indexOf(kw) >= 0 || value.indexOf(kw) >= 0;
+      });
+      this._activeIndex = this._filtered.length ? 0 : -1;
+      this._renderMenu();
+      return self._filtered;
+    }
+
+    _renderMenu() {
+      if (!this._menu) return;
+      if (!this._filtered.length) {
+        this._menu.innerHTML = '<div class="px-3 py-2 text-xs text-gray-500">无匹配供应商</div>';
+        return;
+      }
+      var html = '';
+      var lastGroup = null;
+      for (var i = 0; i < this._filtered.length; i++) {
+        var item = this._filtered[i];
+        var group = item.group || '';
+        // 分组标题只做视觉分隔，不参与搜索匹配
+        if (group && group !== lastGroup) {
+          html += '<div class="px-3 pt-2 pb-1 text-[11px] text-gray-500 select-none">' + this.escape(group) + '</div>';
+          lastGroup = group;
+        }
+        var selected = String(item.value) === this._value;
+        html += '<button type="button" data-combobox-index="' + i + '"' +
+          ' class="w-full text-left px-3 py-1.5 text-sm transition-colors cursor-pointer flex items-center justify-between gap-2 ' +
+          (i === this._activeIndex ? 'bg-surface-hover text-indigo-300' : (selected ? 'text-indigo-300' : 'text-gray-300')) + '">' +
+          '<span class="truncate">' + this.escape(item.label || item.value) + '</span>' +
+          (selected ? '<svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>' : '') +
+          '</button>';
+      }
+      this._menu.innerHTML = html;
+      var self = this;
+      this._menu.querySelectorAll('[data-combobox-index]').forEach(function(btn) {
+        btn.addEventListener('mousedown', function(ev) {
+          ev.preventDefault();  // 防止 input 先失焦导致菜单收起
+          var idx = parseInt(btn.getAttribute('data-combobox-index'), 10);
+          var picked = self._filtered[idx];
+          if (picked) self.setValue(picked.value);
+        });
+      });
+    }
+
+    _paintActive() {
+      if (!this._menu) return;
+      var buttons = this._menu.querySelectorAll('[data-combobox-index]');
+      for (var i = 0; i < buttons.length; i++) {
+        var active = i === this._activeIndex;
+        buttons[i].classList.toggle('bg-surface-hover', active);
+        buttons[i].classList.toggle('text-indigo-300', active);
+      }
+      var activeBtn = buttons[this._activeIndex];
+      if (activeBtn && activeBtn.scrollIntoView) activeBtn.scrollIntoView({ block: 'nearest' });
+    }
+
+    openMenu() {
+      if (!this._menu) return;
+      this._open = true;
+      this._menu.classList.remove('hidden');
+      this._placeMenu();
+      // 菜单是 fixed 定位，页面/弹窗一滚动就会与输入框脱节：
+      // 滚动时重新定位；输入框滚出视口则直接收起，避免菜单浮在半空。
+      var self = this;
+      if (!this._onScroll) {
+        this._onScroll = function() {
+          if (!self._open) return;
+          var r = self._input.getBoundingClientRect();
+          if (r.bottom < 0 || r.top > window.innerHeight) { self.closeMenu(); return; }
+          self._placeMenu();
+        };
+        window.addEventListener('scroll', this._onScroll, true);
+        window.addEventListener('resize', this._onScroll);
+      }
+      // 输入框里显示的可能是「当前选中项的 label」而不是用户打的搜索词。
+      // 直接拿它当关键字会误过滤：选中「未选择」时 value 是空串，
+      // 而空值项只在 kw === '' 时才展示，结果下拉里连「未选择」自己都不见了。
+      // 判定：输入内容等于当前选中项的 label（或等于 value）→ 视为没有搜索词。
+      this.filter(this._searchKeyword());
+    }
+
+    /**
+     * 从输入框内容推导「真实搜索词」。
+     *
+     * 用户没打字时输入框展示的是选中项的 label，那不算搜索词；
+     * 一旦用户改动内容，就不再等于 label，按真实关键字过滤。
+     */
+    _searchKeyword() {
+      var text = String((this._input && this._input.value) || '');
+      if (!this._value) {
+        // 当前没选中任何值：输入框里若正好是空值项的 label，也算「没搜索」
+        for (var i = 0; i < this._options.length; i++) {
+          if (String(this._options[i].value) === '' && text === String(this._options[i].label || '')) {
+            return '';
+          }
+        }
+        return text;
+      }
+      for (var j = 0; j < this._options.length; j++) {
+        var opt = this._options[j];
+        if (String(opt.value) !== this._value) continue;
+        if (text === String(opt.label || '') || text === String(opt.value)) return '';
+        break;
+      }
+      return text;
+    }
+
+    /**
+     * 决定下拉朝下还是朝上展开。
+     *
+     * 为什么需要：下拉是 `absolute top-full`（贴在输入框下方），而弹窗正文现在
+     * 是可滚动的 `overflow-y-auto` 容器。当输入框靠近弹窗底部时（Key 编辑弹窗里
+     * 「供应商」正好在中上部、下方还有 5 个字段），朝下展开会被滚动容器裁掉，
+     * 用户看到的就是「点了没反应、没有下拉列表」。
+     *
+     * 判定：下方可用空间不足 `MENU_MIN_SPACE` 且上方更宽裕 → 翻到输入框上方。
+     */
+    _placeMenu() {
+      if (!this._menu || !this._input) return;
+      var MENU_MIN_SPACE = 220;   // 大约能放下 6~7 个选项
+      var rect = this._input.getBoundingClientRect();
+      var spaceBelow = window.innerHeight - rect.bottom;
+      var spaceAbove = rect.top;
+      var flipUp = spaceBelow < MENU_MIN_SPACE && spaceAbove > spaceBelow;
+      var avail = Math.max(120, Math.min(256, (flipUp ? spaceAbove : spaceBelow) - 12));
+      this._menu.style.left = rect.left + 'px';
+      this._menu.style.width = rect.width + 'px';
+      this._menu.style.maxHeight = avail + 'px';
+      if (flipUp) {
+        // 朝上：菜单底边贴输入框顶边
+        this._menu.style.top = 'auto';
+        this._menu.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+      } else {
+        this._menu.style.bottom = 'auto';
+        this._menu.style.top = (rect.bottom + 4) + 'px';
+      }
+    }
+
+    closeMenu() {
+      if (!this._menu) return;
+      this._open = false;
+      this._menu.classList.add('hidden');
+      if (this._onScroll) {
+        window.removeEventListener('scroll', this._onScroll, true);
+        window.removeEventListener('resize', this._onScroll);
+        this._onScroll = null;
+      }
+    }
+  });
+}

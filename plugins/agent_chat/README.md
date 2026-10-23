@@ -9,8 +9,14 @@ AKM `/v1/agent` 的 Web 聊天界面（AetherAI 对话窗口）。构建产物�
    `plugin_configs.agent_chat` 中配置）。
 2. 访问 `<访问路径>`（默认 `http://127.0.0.1:8800/chat`）开始对话。
 
-界面直接请求同源 `/v1/agent` 与 `/v1/models`，上传的图片等资源走
+界面直接请求同源 `/v1/agent` 与 `/v1/models?capability=chat`，上传的图片等资源走
 `/agent-uploads/...` 相对路径，不依赖前端代理。
+
+> `capability=chat` 让模型下拉只显示可对话模型，过滤掉图像生成 / embedding / 重排
+> （例如 `gpt-image-2`、`text-embedding-3-small`、`bge-m3`）。后端不传该参数时返回全量，
+> 所以插件配置页（如 `markdown_kb` 选向量模型）不受影响。修改该参数后需按
+> `VITE_BASE='./' VITE_AKM_API_URL='' npm run build` 重建产物，并同步
+> `ccs/plugins/agent_chat/dist` 与 `~/.akm/plugins/agent_chat/dist` 两处。
 
 ## 配置
 
@@ -40,9 +46,11 @@ AKM `/v1/agent` 的 Web 聊天界面（AetherAI 对话窗口）。构建产物�
 
 服务端配置了 `agent_layout_model` 后，助手回答会额外带一份受约束的布局 JSON（`akm.layout` 事件），
 前端按 schema 声明的块类型渲染成卡片（指标 / 对比 / 时间线 / 图表 / 待办等）。要点：
-- **只暴露 markdown 做不到的块**：schema 里是 `stats / cards / alert / comparison / timeline / chart / progress / kanban / map / separator` 十种；`text / heading / code / table / list` 五种**不下发**（正文的 markdown 已经覆盖），校验白名单仍保留全集以兼容历史卡片。
+- **只暴露 markdown 做不到的块**：schema 里是 `stats / cards / alert / comparison / timeline / flow / chart / progress / kanban / map / separator` **十一种**（10 种结构化块 + flow 流程图）；`text / heading / code / table / list` 五种**既不下发、也不在校验白名单里，前端也没有渲染分支**——这些形态交给正文 markdown。
 - **开启即自动补提示词**：`agent_render_enabled` 为真时，服务端会把「什么内容该用卡片、一次 2~3 块、内容多分多次调用」这段指引拼进系统提示（`loop._render_guide()`）；不注入这段，模型基本不会主动调用渲染工具。
 - **分次渲染**：单次上限 3 块，鼓励模型分多次调用，卡片随回答逐步出现；每张卡片带 300ms 淡入上移，`prefers-reduced-motion` 下不播。
+- **flow 流程图**：模型给 `nodes`（2~12 个，带 `kind`：step/start/end/decision/async）与可选的 `edges`（`kind`：main/branch/async/return，省略时按节点顺序自动串主链），前端 `flow-diagram.tsx` 用自绘 SVG 分层布局渲染（正交折线 + 箭头 + 回边走外侧通道），保持原始像素尺寸、比卡片宽时横向滚动；服务端会丢弃指向不存在节点的边与自环。
+- **flow 进场动效**：主链边先用 `stroke-dashoffset` 描一遍再淡入（分支/异步/回边不描边，保留虚线语义），节点按层依次出现（180ms 步长）；`prefers-reduced-motion: reduce` 下全部静止。
 
 - 布局只是**增强层**：正文 markdown **始终完整渲染**，卡片作为补充**追加在正文下方**（渲染器第一帧锁定，故不提供「原文 / 卡片」切换 —— 切换等于中途换渲染器）；
 - 事件在 `final` **之后**到达：正文先落地、界面立刻收尾，卡片随后补上；生成失败或超时则一直是 markdown；

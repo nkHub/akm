@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from akm.cost_estimate import estimate_row_cost, parse_pricing
+from akm.cost_estimate import estimate_row_cost
 from akm.plugins import PluginBase
 
 
@@ -92,8 +92,6 @@ class Plugin(PluginBase):
             "window_seconds": max(60, int(cfg.get("window_seconds", 86400) or 86400)),
             "budget_usd": max(0.0, budget),
             "soft_warn_ratio": min(1.0, max(0.0, soft)),
-            "use_core_pricing": cfg.get("use_core_pricing", True) is True,
-            "custom_pricing_table": str(cfg.get("custom_pricing_table", "") or ""),
             "block_message": str(
                 cfg.get("block_message", "本地预算已用尽，请求已被预算闸门拦截。")
                 or "本地预算已用尽，请求已被预算闸门拦截。"
@@ -132,19 +130,23 @@ class Plugin(PluginBase):
             {"spent": 0.0, "requests": 0, "tokens": 0},
         )
 
-    def _pricing_rules(self, cfg: dict) -> list[tuple[str, float, float, float]]:
-        """解析单价规则：优先核心配置，否则插件自定义表。"""
-        raw = ""
-        if cfg["use_core_pricing"]:
-            try:
-                from akm.config import load_config
+    def _price_resolver(self, cfg: dict) -> "PriceResolver":
+        """构造取价器：复用核心取价口径，否则只用插件自定义表。
 
-                raw = str(load_config().get("cost_pricing_table") or "")
-            except Exception as exc:
-                self.logger.warning("[budget_gate] 读取核心单价表失败: %s", exc)
-        if not raw.strip():
-            raw = cfg["custom_pricing_table"]
-        return parse_pricing(raw)
+        价格统一来自 models.dev 目录，与首页费用统计完全同一套口径。
+
+        **插件不再有自己的单价表**：手填表需要人工维护、容易漏配，
+        预算闸门与首页统计各用一份还会算出不同金额，用户没法对账。
+        """
+        from akm.cost_estimate import PriceResolver
+
+        try:
+            from akm.config import load_config
+
+            return PriceResolver.from_config(load_config())
+        except Exception as exc:
+            self.logger.warning("[budget_gate] 读取取价配置失败，按目录默认口径: %s", exc)
+            return PriceResolver()
 
     def _extract_usage_metrics(self, response_body: str) -> dict[str, int] | None:
         """从非流式 JSON 或 SSE 审计捕获中提取统一 token 字段。
@@ -328,14 +330,17 @@ class Plugin(PluginBase):
         model = str(response.get("model") or "") or str(
             (ctx.request or {}).get("model", "") if isinstance(ctx.request, dict) else ""
         )
-        rules = self._pricing_rules(cfg)
+        resolver = self._price_resolver(cfg)
+        # provider 用于「本供应商命中」这一段；拿不到时退回官方兜底或手写表
+        provider = str(response.get("provider") or "")
         cost, _currency = estimate_row_cost(
             model=model,
             prompt_tokens=metrics["prompt_tokens"],
             completion_tokens=metrics["completion_tokens"],
             cached_tokens=metrics["cached_tokens"],
             cache_creation_tokens=metrics["cache_creation_tokens"],
-            rules=rules,
+            provider=provider,
+            resolver=resolver,
         )
         if cost <= 0:
             return
