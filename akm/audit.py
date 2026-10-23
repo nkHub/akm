@@ -35,8 +35,8 @@ def _do_write(data: dict) -> None:
              request_headers,
              prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_creation_tokens,
              client_request_headers, client_request_body, upstream_request_headers, upstream_response_body,
-             attempts)
-             VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             attempts, response_model, model_mismatch)
+             VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             data.get("provider", ""),
             data.get("key_alias", ""),
@@ -57,6 +57,10 @@ def _do_write(data: dict) -> None:
             data.get("upstream_request_headers", ""),
             data.get("upstream_response_body", ""),
             data.get("attempts", ""),
+            # 换模型检测：上游实际返回的 model 与三态标记
+            # None 表示「没取到」，与 0「确认一致」严格区分，避免统计把未知当干净
+            data.get("response_model", ""),
+            data.get("model_mismatch"),
         ),
     )
     conn.commit()
@@ -153,6 +157,7 @@ async def list_logs_async(
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
+    mismatch: bool = False,
 ) -> list[dict]:
     """异步查询日志，避免管理台轮询时阻塞事件循环。"""
     return await asyncio.to_thread(
@@ -166,6 +171,7 @@ async def list_logs_async(
         status,
         key_alias,
         days,
+        mismatch,
     )
 
 
@@ -176,6 +182,7 @@ async def count_logs_async(
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
+    mismatch: bool = False,
 ) -> int:
     """异步统计日志数量，避免同步 COUNT 阻塞请求处理。"""
     return await asyncio.to_thread(
@@ -186,6 +193,7 @@ async def count_logs_async(
         status,
         key_alias,
         days,
+        mismatch,
     )
 
 
@@ -199,6 +207,7 @@ def list_logs(
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
+    mismatch: bool = False,
 ) -> list[dict]:
     """查询日志，支持分页、供应商筛选、排序、过滤空记录、状态筛选和时间范围
 
@@ -237,6 +246,9 @@ def list_logs(
     if key_alias:
         filters += " AND key_alias = ?"
         params.append(key_alias)
+    if mismatch:
+        # 只筛「确认被换模型」的记录：NULL（没取到）与 0（一致）都不算
+        filters += " AND model_mismatch = 1"
     conn = get_connection()
     if provider:
         rows = conn.execute(
@@ -263,6 +275,7 @@ def count_logs(
     status: str = "all",
     key_alias: str = "",
     days: int = 0,
+    mismatch: bool = False,
 ) -> int:
     """统计日志总数，可按供应商筛选，可选过滤空记录、状态和时间范围"""
     filters = ""
@@ -283,6 +296,9 @@ def count_logs(
     if key_alias:
         filters += " AND key_alias = ?"
         params.append(key_alias)
+    if mismatch:
+        # 只筛「确认被换模型」的记录：NULL（没取到）与 0（一致）都不算
+        filters += " AND model_mismatch = 1"
     conn = get_connection()
     if provider:
         row = conn.execute(

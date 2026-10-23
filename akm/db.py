@@ -72,7 +72,12 @@ def init_db(conn: sqlite3.Connection) -> None:
             upstream_request_headers TEXT DEFAULT '',
             upstream_response_body TEXT DEFAULT '',
             attempts TEXT DEFAULT '',
-            converted INTEGER
+            converted INTEGER,
+            -- 换模型检测：上游实际返回的 model 与请求 model 是否一致
+            -- response_model：上游原始响应里的 model 名（未取到为空串）
+            -- model_mismatch：NULL=没取到，0=一致，1=被换（三态必须区分，未知不能当干净）
+            response_model  TEXT DEFAULT '',
+            model_mismatch  INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp
@@ -90,6 +95,43 @@ def init_db(conn: sqlite3.Connection) -> None:
             next_run_at   TEXT DEFAULT '',
             created_at    TEXT DEFAULT (datetime('now', 'localtime')),
             updated_at    TEXT DEFAULT (datetime('now', 'localtime'))
+        );
+
+        -- models.dev 目录数据（外部同步，可整体重建）
+        CREATE TABLE IF NOT EXISTS models_dev_providers (
+            id          TEXT PRIMARY KEY,
+            name        TEXT DEFAULT '',
+            api         TEXT DEFAULT '',
+            doc         TEXT DEFAULT '',
+            npm         TEXT DEFAULT '',
+            model_count INTEGER DEFAULT 0,
+            synced_at   TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS models_dev_models (
+            provider_id        TEXT NOT NULL,
+            model_id           TEXT NOT NULL,
+            input              REAL DEFAULT 0,
+            cache_read         REAL DEFAULT 0,
+            cache_write        REAL DEFAULT 0,
+            output             REAL DEFAULT 0,
+            context            INTEGER DEFAULT 0,
+            max_output         INTEGER DEFAULT 0,
+            modalities         TEXT DEFAULT '',
+            family             TEXT DEFAULT '',
+            release_date       TEXT DEFAULT '',
+            reasoning          INTEGER DEFAULT 0,
+            tool_call          INTEGER DEFAULT 0,
+            canonical_model_id TEXT DEFAULT '',
+            PRIMARY KEY (provider_id, model_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_mdm_model
+            ON models_dev_models(model_id);
+
+        CREATE TABLE IF NOT EXISTS models_dev_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT DEFAULT ''
         );
     """)
     # 迁移旧表，添加新列（忽略已存在的错误）
@@ -128,6 +170,17 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
     # audit_logs 表 — 协议转换标记列（converted：1=发生转换，0=明确未转换，NULL=旧数据未打标）
     try:
         conn.execute("ALTER TABLE audit_logs ADD COLUMN converted INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    # audit_logs 表 — 换模型检测列
+    # response_model：上游原始响应里的 model 名（未取到留空串）
+    # model_mismatch：NULL=没取到，0=一致，1=被换
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN response_model TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN model_mismatch INTEGER")
     except sqlite3.OperationalError:
         pass
     # audit_logs 表 — token 列

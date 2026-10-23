@@ -3,6 +3,7 @@
 import json
 import logging
 import asyncio
+import re
 import time
 import os
 import sys
@@ -176,6 +177,13 @@ async def lifespan(app: FastAPI):
     usage_scheduler_task = asyncio.create_task(usage_query_scheduler.run())
     app.state.usage_query_scheduler = usage_query_scheduler
     app.state.usage_scheduler_task = usage_scheduler_task
+    # models.dev 目录后台同步：首次启动立即拉一次（新用户开箱有价格），
+    # 之后按 models_dev_sync_interval_hours 定期刷新。
+    # 之前这两个配置项只被读取、没有任何任务使用，等于死开关。
+    from akm.models_dev import run_sync_loop as _models_dev_sync_loop
+
+    models_dev_task = asyncio.create_task(_models_dev_sync_loop())
+    app.state.models_dev_sync_task = models_dev_task
     # 通用定时任务调度器（scheduled_tasks 表）
     task_scheduler = TaskScheduler(app)
     await task_scheduler.start()
@@ -201,6 +209,12 @@ async def lifespan(app: FastAPI):
         usage_scheduler_task.cancel()
         try:
             await usage_scheduler_task
+        except asyncio.CancelledError:
+            pass
+
+        models_dev_task.cancel()
+        try:
+            await models_dev_task
         except asyncio.CancelledError:
             pass
 
@@ -276,6 +290,10 @@ def _build_trace_headers(request: Request) -> tuple[dict, str]:
         "user-agent", "x-request-id", "x-stainless-os", "x-stainless-lang",
         "x-stainless-package-version", "x-stainless-runtime", "x-stainless-runtime-version",
         "x-forwarded-for", "x-real-ip", "origin", "referer", "host",
+        # AKM 内部来源标记必须落库：`extract_source()` 只读 request_headers，
+        # 白名单里没有这两个键时，插件/Agent 旁路请求即使带了标记也读不到 ——
+        # 表现就是 markdown_kb 的向量化/摘要请求一直被归成「Python」。
+        "x-akm-source", "x-akm-plugin",
     ]
     trace_headers_json = json.dumps(
         {k: trace_headers[k] for k in trace_keys if k in trace_headers},
@@ -1585,6 +1603,72 @@ def _extract_tokens(response_body: str) -> dict | None:
     return _build_tokens_from_sse_usage_state(state)
 
 
+# ── 换模型检测（上游实际返回的 model 与请求是否一致）──────────
+
+# 模型名尾部的版本/日期后缀，比较时去掉（gpt-5.6-luna-2026-07-09 ≈ gpt-5.6-luna）
+_MODEL_DATE_SUFFIX_RE = re.compile(r"[-_](?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}|\d{3,4})$")
+
+
+def _normalize_model_for_compare(model: str) -> str:
+    """归一化模型名用于一致性比较：小写、去 vendor 前缀、去日期后缀。
+
+    中转站常见两种无害差异，必须归一后再比，否则会满屏误报：
+    - ``deepseek/deepseek-v4.1-flash`` 与 ``deepseek-v4.1-flash``（vendor 前缀）
+    - ``gpt-5.6-luna-2026-07-09`` 与 ``gpt-5.6-luna``（日期后缀）
+    """
+    text = str(model or "").strip().lower()
+    if not text:
+        return ""
+    bare = text.split("/")[-1]
+    return _MODEL_DATE_SUFFIX_RE.sub("", bare)
+
+
+def _is_model_mismatch(request_model: str, response_model: str) -> int | None:
+    """判断上游是否换了模型，返回三态。
+
+    - ``None``：响应里没有 model 字段（无法判断）。**绝不能返回 0**，
+      否则「没证据」会被统计当成「确认一致」。
+    - ``0``：归一后一致
+    - ``1``：不一致（请求模型被换掉）
+    """
+    if not str(response_model or "").strip():
+        return None
+    left = _normalize_model_for_compare(request_model)
+    right = _normalize_model_for_compare(response_model)
+    if not left or not right:
+        return None
+    return 0 if left == right else 1
+
+
+def _extract_response_model(payload) -> str:
+    """从上游响应里提取 model 名，兼容 chat / responses / messages 三种协议。
+
+    三种协议 model 字段的位置不同：
+    - Chat / Messages 非流式：顶层 ``model``
+    - Responses：``response.model``
+    - Messages 流式：``message.model``（message_start 事件）
+    """
+    if isinstance(payload, (str, bytes)):
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("model",):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for container in ("response", "message"):
+        inner = payload.get(container)
+        if isinstance(inner, dict):
+            value = inner.get("model")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+
 def _parse_usage_metrics_object(usage: dict) -> dict | None:
     """从 usage 对象提取 token 数，统一兼容 chat、responses 与 messages 字段。
 
@@ -1699,6 +1783,11 @@ def _update_sse_usage_state(state: dict, chunk: dict) -> None:
     """
     if not isinstance(chunk, dict):
         return
+    # 换模型检测：顺带记录上游实际返回的 model。
+    # 这里本来就在逐行解析 SSE 取 usage，多解析一个字段是零额外开销。
+    chunk_model = _extract_response_model(chunk)
+    if chunk_model:
+        state["model"] = chunk_model
     if "usage" in chunk and isinstance(chunk.get("usage"), dict):
         state["usage"] = chunk["usage"]
     if chunk.get("type") == "response.completed":
@@ -1733,6 +1822,7 @@ class _IncrementalSSEUsageTracker:
             "msg_input_tokens": 0,
             "msg_output_tokens": 0,
             "msg_cached_tokens": 0,
+            "model": "",  # 上游实际返回的 model（换模型检测用）
         }
 
     def append(self, chunk: bytes | str) -> None:
@@ -1749,6 +1839,13 @@ class _IncrementalSSEUsageTracker:
             self._consume_line(self._buffer.rstrip("\r"))
             self._buffer = ""
         return _build_tokens_from_sse_usage_state(self._state)
+
+    def response_model(self) -> str:
+        """返回流式过程中捕获到的上游 model 名（未捕获则为空串）。"""
+        if self._buffer:
+            self._consume_line(self._buffer.rstrip("\r"))
+            self._buffer = ""
+        return str(self._state.get("model") or "")
 
     def _consume_line(self, line: str) -> None:
         line = line.strip()
@@ -2016,10 +2113,10 @@ def _get_stats(days: int) -> dict:
     from datetime import datetime, timezone, timedelta
 
     from akm.cost_estimate import (
+        PriceResolver,
         add_cost,
         estimate_row_cost_detail,
         finalize_costs,
-        parse_pricing,
     )
 
     tz = timezone(timedelta(hours=8))
@@ -2027,12 +2124,20 @@ def _get_stats(days: int) -> dict:
     include_estimated_usage = bool(cfg.get("stats_include_estimated_usage", False))
     cost_enabled = bool(cfg.get("cost_stats_enabled", False))
     cost_default_currency = "$"
-    cost_pricing_table = str(cfg.get("cost_pricing_table") or "")
-    cost_rules = parse_pricing(cost_pricing_table) if cost_enabled else []
-    # 单价表变更后缓存键变化，避免展示旧费用
-    cost_cache_sig = f"{1 if cost_enabled else 0}:{hash(cost_pricing_table)}"
-    cache_key = f"days={days}|estimated={1 if include_estimated_usage else 0}|cost={cost_cache_sig}"
+    # 统一取价入口：价格唯一来源是 models.dev 目录（手写单价表已移除）
+    cost_resolver = PriceResolver.from_config(cfg) if cost_enabled else None
+    # 任一影响取价结果的配置变化都要换缓存键，避免展示旧费用。
+    # 目录数据本身也会更新，所以把 fetched_at 一起进签名（否则同步完仍显示旧价）。
+    from akm import models_dev as _models_dev
+
+    cost_cache_sig = (
+        f"{1 if cost_enabled else 0}:"
+        f"{1 if cfg.get('models_dev_official_fallback') is not False else 0}:"
+        f"{cfg.get('models_dev_prefer_providers')}:"
+        f"{_models_dev.meta_get('fetched_at')}"
+    )
     now = time.time()
+    cache_key = f"days={days}|estimated={1 if include_estimated_usage else 0}|cost={cost_cache_sig}"
     if cache_key in _stats_cache:
         ts, data = _stats_cache[cache_key]
         if now - ts < max(1, int(load_config().get("stats_cache_ttl_sec", 60) or 60)):
@@ -2222,7 +2327,8 @@ def _get_stats(days: int) -> dict:
                 completion_tokens=int(c or 0),
                 cached_tokens=int(cached or 0),
                 cache_creation_tokens=int(cache_creation or 0),
-                rules=cost_rules,
+                provider=str(provider or ""),
+                resolver=cost_resolver,
             )
             add_cost(global_costs, row_currency, row_cost)
 
@@ -2369,15 +2475,17 @@ async def api_logs(
     status: str = Query(default="all"),
     key_alias: str = Query(default=""),
     days: int = Query(default=0, ge=0, le=365),
+    mismatch: bool = Query(default=False),
 ):
     """查询审计日志 API，支持分页、排序、过滤空记录、状态筛选、Key筛选和时间范围，返回 JSON"""
-    from akm.cost_estimate import estimate_row_cost_detail, parse_pricing
+    from akm.cost_estimate import PriceResolver, estimate_row_cost_detail
 
-    logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
-    total = await count_logs_async(provider=provider, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days)
+    logs = await list_logs_async(provider=provider, limit=limit, offset=offset, order=order, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days, mismatch=mismatch)
+    total = await count_logs_async(provider=provider, hide_empty=hide_empty, hide_est=hide_est, status=status, key_alias=key_alias, days=days, mismatch=mismatch)
     cfg = load_config()
     cost_enabled = bool(cfg.get("cost_stats_enabled", False))
-    cost_rules = parse_pricing(str(cfg.get("cost_pricing_table") or "")) if cost_enabled else []
+    # 统一取价入口（手写表 / models.dev 三段式 / 混合）
+    cost_resolver = PriceResolver.from_config(cfg) if cost_enabled else None
     # 为每条日志附加 token 用量信息（优先读列，兼容旧数据才解析 body）
     for log in logs:
         p = log.get("prompt_tokens", 0) or 0
@@ -2414,7 +2522,8 @@ async def api_logs(
                 completion_tokens=int(c or 0),
                 cached_tokens=int(cached or 0),
                 cache_creation_tokens=int(cache_creation or 0),
-                rules=cost_rules,
+                provider=str(log.get("provider") or ""),
+                resolver=cost_resolver,
             )
 
         # 补充转换告警派生字段，前端可直接展示可读文本，避免重复解析逻辑
@@ -2542,6 +2651,57 @@ async def api_save_config(request: Request):
             request.app, "config.pool_settings_changed", force=True
         )
     return {"ok": True, "http_client_recreated": recreated}
+
+# ── models.dev 目录数据（价格 / 上下文 / 能力元数据）────────
+
+
+@app.post("/api/pricing/sync")
+async def api_pricing_sync(request: Request):
+    """同步 models.dev 目录数据。
+
+    请求体可选 ``{"force": true}``：忽略 ETag 强制全量下载。返回同步统计
+    （供应商数 / 模型数 / 被剔除供应商）。网络异常不会影响旧数据，仅返回
+    ``skipped=true``。
+    """
+    from akm import models_dev
+
+    force = False
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            force = body.get("force") is True
+    except Exception:
+        # 允许不传请求体（空 body 时 request.json() 会抛异常）
+        force = False
+    return await asyncio.to_thread(models_dev.sync_from_remote, force=force)
+
+
+@app.get("/api/pricing/status")
+async def api_pricing_status():
+    """返回目录数据的同步状态（供设置页展示，不联网）。"""
+    from akm import models_dev
+
+    meta = await asyncio.to_thread(models_dev.meta_all)
+    try:
+        dropped = json.loads(meta.get("dropped_providers") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        dropped = []
+    return {
+        "fetched_at": meta.get("fetched_at", ""),
+        "provider_count": int(meta.get("provider_count") or 0),
+        "model_count": int(meta.get("model_count") or 0),
+        "dropped_providers": dropped if isinstance(dropped, list) else [],
+    }
+
+
+@app.get("/api/pricing/providers")
+async def api_pricing_providers():
+    """列出已入库的 models.dev 供应商（供 Key 管理页供应商下拉使用）。"""
+    from akm import models_dev
+
+    providers = await asyncio.to_thread(models_dev.list_providers)
+    return {"data": providers}
+
 
 
 @app.get("/api/agents")
@@ -2875,23 +3035,98 @@ async def plugin_view_raw(name: str, request: Request):
 
 @app.get("/v1/models")
 @app.get("/models")
-async def list_models():
-    """返回所有 active key 支持的模型列表（OpenAI 兼容格式）"""
+async def list_models(
+    capability: str = Query(default=""),
+    detail: str = Query(default="full"),
+):
+    """返回所有 active key 支持的模型列表（OpenAI 兼容格式）。
+
+    顶层保留 ``id`` / ``object`` / ``owned_by`` 三个标准字段；模型与供应商信息
+    直接平铺在顶层（与 OpenRouter /models 惯例一致，不做命名空间包裹）。
+
+    查询参数：
+
+    - ``capability=chat``：只返回可对话模型（排除图像生成 / embedding / 重排）。
+      不传则返回全量——插件配置页需要选 embedding 模型，不能被过滤掉。
+    - ``detail=basic``：只回标准三字段，用于体积敏感场景。
+    """
+    from akm import models_dev
+
+    want_chat = str(capability or "").strip().lower() == "chat"
+    full_detail = str(detail or "").strip().lower() != "basic"
+    # 官方兜底开关按当前配置走，与费用统计保持同一口径
+    cfg = load_config()
+    official_fallback = cfg.get("models_dev_official_fallback") is not False
+    prefer_providers = str(cfg.get("models_dev_prefer_providers") or "")
+
     data = []
     seen = set()
     for k in list_keys():
-        if k["status"] != "active":
+        if k.get("status") != "active":
             continue
-        candidates = key_model_list(k)
-        for m in candidates:
-            m = m.strip()
-            if m and m not in seen:
-                seen.add(m)
-                data.append({
-                    "id": m,
-                    "object": "model",
-                    "owned_by": k["provider"],
-                })
+        provider_name = str(k.get("provider") or "")
+        key_alias = str(k.get("alias") or "")
+        provider_info = models_dev.provider_meta(provider_name) if full_detail else None
+        for raw in key_model_list(k):
+            model_id = str(raw or "").strip()
+            if not model_id or model_id in seen:
+                continue
+            meta = models_dev.model_meta(model_id) if full_detail else None
+            if want_chat and not models_dev.is_chat_capable(model_id, meta):
+                continue
+            seen.add(model_id)
+            item = {"id": model_id, "object": "model", "owned_by": provider_name}
+            if not full_detail:
+                data.append(item)
+                continue
+
+            if meta:
+                item.update(
+                    {
+                        "name": model_id,  # 有 models.dev 元数据时下面会用其官方展示名覆盖
+                        "context_length": meta.get("context") or 0,
+                        "max_output_tokens": meta.get("max_output") or 0,
+                        "modalities": {
+                            "input": list(meta.get("input_modalities") or []),
+                            "output": list(meta.get("output_modalities") or []),
+                        },
+                        "release_date": meta.get("release_date") or "",
+                        "reasoning": bool(meta.get("reasoning")),
+                        "tool_call": bool(meta.get("tool_call")),
+                        "canonical_model_id": meta.get("canonical_model_id") or "",
+                    }
+                )
+                # 模型展示名优先用 models.dev 的 name（若有），这里从元数据里补
+                meta_name = meta.get("name")
+                if isinstance(meta_name, str) and meta_name.strip():
+                    item["name"] = meta_name.strip()
+            # 单价：按三段式取（本供应商 → 官方兜底 → 无则不带 pricing 字段）
+            found = models_dev.resolve_price(
+                provider_name,
+                model_id,
+                official_fallback=official_fallback,
+                prefer_providers=prefer_providers or None,
+            )
+            if found:
+                prices, source = found
+                item["pricing"] = {
+                    "input": prices[0],
+                    "cache_read": prices[1],
+                    "output": prices[2],
+                    "currency": "USD",
+                    "unit": "per_1m_tokens",
+                    "source": source,
+                }
+            # 供应商：单值结构，与顶层 owned_by 语义一致（first-wins 去重）
+            item["provider"] = {
+                "name": provider_name,
+                "key_alias": key_alias,
+                "base_url": str(k.get("base_url") or ""),
+                "doc": str((provider_info or {}).get("doc") or ""),
+            }
+            if provider_info and provider_info.get("api") and not item["provider"]["base_url"]:
+                item["provider"]["base_url"] = provider_info["api"]
+            data.append(item)
     return {"object": "list", "data": data}
 
 
@@ -3389,6 +3624,8 @@ async def _handle_ai_request(request: Request, api_path: str):
                             request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
                     except Exception:
                         request_headers_for_log = request_headers_json
+                    # 换模型检测：取出上游实际返回的 model（buffer 已在上面的 build 中 flush，幂等）
+                    _stream_response_model = usage_tracker.response_model()
                     await _submit_audit_log(request.app, {
                         "provider": provider,
                         "key_alias": key_alias,
@@ -3410,6 +3647,9 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "upstream_response_body": raw_body_str if save_response_body else "",
                         "attempts": _attempts_to_log(result),
                         "converted": 1 if adapter else 0,
+                        # 换模型检测：从上游原始 SSE 里捕获的 model（不是转换后给客户端的）
+                        "response_model": _stream_response_model,
+                        "model_mismatch": _is_model_mismatch(model, _stream_response_model),
                     })
                     logger.info(f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)")
 
@@ -3468,6 +3708,9 @@ async def _handle_ai_request(request: Request, api_path: str):
                 request_headers_for_log = json.dumps(headers_obj, ensure_ascii=False)
         except Exception:
             request_headers_for_log = request_headers_json
+        # 换模型检测：必须用「转换前」的上游原始响应——result["body"] 是转换后
+        # 给客户端的内容，协议转换器可能重写 model 字段，会导致误报
+        _resp_model = _extract_response_model(result.get("upstream_response_body_for_log"))
         await _submit_audit_log(request.app, {
             "provider": result["provider"],
             "key_alias": result["key_alias"],
@@ -3489,6 +3732,9 @@ async def _handle_ai_request(request: Request, api_path: str):
             "upstream_response_body": str(result.get("upstream_response_body_for_log", "") or "") if save_response_body else "",
             "attempts": _attempts_to_log(result),
             "converted": 1 if result.get("adapter") else 0,
+            # 换模型检测：上游原始响应里的 model + 三态标记（None=没取到）
+            "response_model": _resp_model,
+            "model_mismatch": _is_model_mismatch(result["model"], _resp_model),
         })
 
         if result["key_alias"]:

@@ -1208,6 +1208,58 @@ def key_set_usage_interval(alias, minutes):
         click.echo(f"Key '{alias}' 用量自动查询已关闭")
 
 
+# ── pricing 命令（models.dev 目录数据）──────────────────────
+@main.command("pricing")
+@click.option("--force", is_flag=True, help="忽略 ETag 缓存，强制重新下载全量数据")
+@click.option("--status", "show_status", is_flag=True, help="只看当前目录数据状态，不联网")
+def pricing(force, show_status):
+    """同步 / 查看 models.dev 目录数据（价格、上下文、能力元数据）。
+
+    数据入库到 ~/.akm/akm.db 的 models_dev_* 三张表，供费用估算与
+    /v1/models 的供应商、模型信息使用。
+    """
+    from akm import models_dev
+
+    if show_status:
+        meta = models_dev.meta_all()
+        if not meta.get("fetched_at"):
+            click.echo("本地暂无 models.dev 目录数据，执行 `akm pricing` 同步。")
+            return
+        click.echo(f"最近同步      : {meta.get('fetched_at') or '-'}")
+        click.echo(f"供应商        : {meta.get('provider_count') or '0'} 个")
+        click.echo(f"模型记录      : {meta.get('model_count') or '0'} 条")
+        click.echo(f"ETag          : {meta.get('etag') or '-'}")
+        dropped = meta.get("dropped_providers") or "[]"
+        try:
+            dropped_list = json.loads(dropped)
+        except (json.JSONDecodeError, TypeError):
+            dropped_list = []
+        click.echo(f"已剔除供应商  : {len(dropped_list)} 个（无任何价格数据的）")
+        return
+
+    click.echo("正在从 models.dev 拉取目录数据 ...")
+    stats = models_dev.sync_from_remote(force=force)
+    if stats.get("skipped"):
+        reason = stats.get("reason")
+        if reason == "not_modified":
+            click.echo(
+                f"远端数据未变化（ETag 命中 304），沿用本地缓存："
+                f"{stats.get('provider_count', 0)} 供应商 / {stats.get('model_count', 0)} 模型"
+            )
+        else:
+            click.echo("同步失败：网络不可用或响应异常，本地旧数据已保留。详见 ~/.akm/error.log")
+        return
+    click.echo(
+        f"同步完成：{stats.get('provider_count', 0)} 个供应商 / "
+        f"{stats.get('model_count', 0)} 条模型记录"
+    )
+    dropped = stats.get("dropped_providers") or []
+    if dropped:
+        click.echo(f"已剔除 {len(dropped)} 个无价格数据的供应商")
+
+
+
+
 # ── serve 命令 ───────────────────────────────────────────
 
 @main.command("serve")

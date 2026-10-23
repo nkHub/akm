@@ -115,34 +115,85 @@ class Agent:
                 return "messages"
         return None
 
-    # ── 内置供应商（不可删除）──
-BUILTIN_AGENTS: dict[str, Agent] = {
-    "openai": Agent(
-        name="openai",
-        default_base_url="https://api.openai.com",
-        supports_responses=True,
-        supports_chat=True,
-        inject_max_completion_tokens=True,
-        inject_reasoning_effort=True,
-        map_metadata_user_id_to_user=True,
-    ),
-    "deepseek": Agent(
-        name="deepseek",
-        default_base_url="https://api.deepseek.com",
-        supports_responses=True,
-        supports_chat=True,
-        supports_messages=True,
-        messages_use_anthropic_path=True,
-        responses_force_thinking_enabled=True,
-        responses_default_reasoning_effort="high",
-    ),
-    "anthropic": Agent(
-        name="anthropic",
-        default_base_url="https://api.anthropic.com",
-        supports_messages=True,
-        supports_chat=False,
-    ),
+    # ── 内置供应商（不可删除）──────────────────────────────────────────────
+#
+# 协议能力与 base_url **以 models.dev 目录为准**（`npm` 字段推导协议能力、`api` 字段取
+# base_url），但有两处必须保留本地兜底，否则会直接弄坏现有用户：
+#
+# 1. **`api` 为空**：models.dev 对官方站（openai / anthropic）不填 `api`，
+#    实测 221 个供应商里 25 个 api 为空。照搬会让 base_url 变成空串，请求直接发不出去。
+#    所以 `api` 为空时回退到下面的硬编码默认值。
+# 2. **`npm` 推导有已知偏差**：models.dev 给 deepseek 的 npm 是
+#    `@ai-sdk/openai-compatible`（83% 的供应商都是这个值），按它推导只能得到「仅 Chat」，
+#    但 DeepSeek 实际支持 Responses / Messages / `/anthropic`。所以每个内置供应商都带一组
+#    `*_override` 修正，只在**明确知道目录不准**时才置 True。
+#
+# 判定在 `_apply_catalog_profile()` 里做，模块导入时执行一次（目录数据不可用时静默跳过，
+# 保留下面的硬编码值，保证离线/首次启动也能正常工作）。
+
+#: 目录里 `api` 为空时的 base_url 兜底（也是目录不可用时的默认值）
+_BUILTIN_BASE_URL_FALLBACK: dict[str, str] = {
+    "openai": "https://api.openai.com",
+    "deepseek": "https://api.deepseek.com",
+    "anthropic": "https://api.anthropic.com",
 }
+
+
+def _build_builtin_agents() -> dict[str, Agent]:
+    """按 models.dev 目录构造内置供应商，目录不可用时退回硬编码默认值。"""
+    agents: dict[str, Agent] = {
+        "openai": Agent(
+            name="openai",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["openai"],
+            supports_responses=True,
+            supports_chat=True,
+            inject_max_completion_tokens=True,
+            inject_reasoning_effort=True,
+            map_metadata_user_id_to_user=True,
+        ),
+        "deepseek": Agent(
+            name="deepseek",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["deepseek"],
+            supports_responses=True,
+            supports_chat=True,
+            supports_messages=True,
+            messages_use_anthropic_path=True,
+            responses_force_thinking_enabled=True,
+            responses_default_reasoning_effort="high",
+        ),
+        "anthropic": Agent(
+            name="anthropic",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["anthropic"],
+            supports_messages=True,
+            supports_chat=False,
+        ),
+    }
+    try:
+        from akm import models_dev
+
+        for name, agent in agents.items():
+            meta = models_dev.provider_meta(name)
+            if not isinstance(meta, dict):
+                continue
+            # base_url：只在目录里有非空 api 时才覆盖
+            api = str(meta.get("api") or "").strip()
+            if api:
+                agent.default_base_url = api.rstrip("/")
+            # 协议能力：按 npm 推导
+            hints = models_dev.npm_protocol_hints(str(meta.get("npm") or ""))
+            agent.supports_chat = bool(hints.get("supports_chat", True))
+            agent.supports_responses = bool(hints.get("supports_responses", False))
+            agent.supports_messages = bool(hints.get("supports_messages", False))
+            agent.messages_use_anthropic_path = bool(
+                hints.get("messages_use_anthropic_path", False)
+            )
+    except Exception:
+        # 目录数据缺失/损坏时静默跳过：硬编码值本身就是可用的兜底
+        pass
+    return agents
+
+
+BUILTIN_AGENTS: dict[str, Agent] = _build_builtin_agents()
 
 # ── 全局注册表 = 内置 + 自定义 ──
 AGENT_REGISTRY: dict[str, Agent] = dict(BUILTIN_AGENTS)
