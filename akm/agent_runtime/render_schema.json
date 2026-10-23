@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "note": "AG-UI 渲染能力的唯一真源（对外暴露给模型的那一档）。与 markdown 天然重复的块（text / heading / code / table / list）**不再暴露**——正文已经能做这些，卡片只负责 md 做不到的结构化呈现。layout_schema.py 的校验白名单仍是全集（15 种），仅为兼容历史消息；新增块类型时两边同步。",
+  "note": "AG-UI 渲染能力的唯一真源。只有 markdown 正文做不到的形态才在这里暴露：10 种结构化块 + flow（流程图）。与 markdown 重复的 text / heading / code / table / list 既不下发给模型，layout_schema.py 的白名单与前端 AGUIRenderer 也都没有它们——三处是同一份集合（11 种），新增块类型时必须同步改这三处。",
   "tool": {
     "name": "akm_render",
     "description": "把结构化数据渲染成聊天界面里的卡片（指标 / 对比 / 时间线 / 图表 / 待办等 markdown 做不到的形态）。正文用 markdown 解释与结论，不要用本工具重复正文已有的段落、标题、代码块、表格或列表。一次调用只带 2~3 个块；内容多时分多次调用，让卡片随回答逐步出现，不要一次堆满整屏。调用前先用一两句话说这张卡片要回答什么问题，调用后不要再重复描述卡片里的数据。",
@@ -86,6 +86,18 @@
       }
     },
     {
+      "type": "flow",
+      "when": "有方向的流程：步骤链路、调用链、审批流、状态推进（timeline 只有时间顺序，flow 表达谁指向谁与分支）",
+      "fields": {
+        "nodes": "[{id?: string, label: string, sublabel?: string, kind?: step|start|end|decision|async}]（必填，2~12 个；id 省略时按顺序生成 n0、n1…）",
+        "edges": "[{from: string, to: string, label?: string, kind?: main|branch|async|return}]（可选；整段省略时按 nodes 顺序串成一条主链。kind 按语义选：main 主链推进、branch 分叉到后面的节点、async 异步旁路、return 回到前面已出现过的节点（打回/重试/循环）；把回边写成 branch 会成环）",
+        "direction": "LR | TB（默认 LR）",
+        "groups": "[{label: string, color?: default|blue|green|amber|violet|red, nodes: [nodeId]}]（可选，最多 4 组；把相关节点圈成一个泳道/分区，一个节点只归第一组）",
+        "legend": "boolean（可选，底部按节点 kind 显示计数图例）",
+        "caption": "string"
+      }
+    },
+    {
       "type": "separator",
       "when": "卡片内分隔不同区块",
       "fields": {
@@ -94,7 +106,7 @@
     }
   ],
   "rules": [
-    "只允许上面 10 种 type；不要用本工具输出段落、标题、代码块、表格、列表——那些交给 markdown 正文",
+    "只允许上面 11 种 type；不要用本工具输出段落、标题、代码块、表格、列表——那些交给 markdown 正文",
     "一次调用只带 2~3 个块；内容多就分多次调用，让卡片随回答逐步出现，宁可少而准",
     "数据必须完全来自你已掌握的真实内容，不得编造数字",
     "正文负责解释与结论，卡片只做结构化呈现，不要重复叙述"
