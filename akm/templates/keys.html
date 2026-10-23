@@ -237,8 +237,11 @@ function loadProviders() {
       if (!isBuiltin) {
         _providerMap[p.id] = { default_base_url: p.api || '', is_custom_agent: false, from_catalog: true };
       }
-      var label = p.name && p.name !== p.id ? (p.name + ' · ' + p.id) : p.id;
-      catalogOptions.push({ value: p.id, label: label, group: 'models.dev 目录' });
+      // label = 人类可读的 name（菜单主文案 + 输入框回显），desc = 实际存进 key.provider 的 id。
+      // 不再用「name · id」拼一个字符串：那样 name 与 id 相同的供应商（abacus、agnes）
+      // 会显示成 "abacus · abacus"，且两个字段语义混在一起没法分别排版。
+      var name = String(p.name || '').trim() || p.id;
+      catalogOptions.push({ value: p.id, label: name, desc: p.id, group: 'models.dev 目录' });
     });
     // 目录数据缺失时（首次启动尚未同步）把内置供应商补进来，避免下拉里找不到它们
     agents.forEach(function(a){
@@ -250,10 +253,13 @@ function loadProviders() {
       });
     });
     catalogOptions.sort(function(a, b){
-      return String(a.label).localeCompare(String(b.label), undefined, {
+      // 按 name 排序（用户找的是「OpenRouter」这个名字）；name 相同时用 id 兜底保证稳定
+      var byName = String(a.label).localeCompare(String(b.label), undefined, {
         sensitivity: 'base',
         numeric: true,
       });
+      if (byName !== 0) return byName;
+      return String(a.desc || '').localeCompare(String(b.desc || ''), undefined, { sensitivity: 'base' });
     });
     catalogOptions.forEach(function(opt){ options.push(opt); });
 
