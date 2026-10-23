@@ -957,10 +957,18 @@ if (!customElements.get('akm-combobox')) {
           lastGroup = group;
         }
         var selected = String(item.value) === this._value;
+        // 主文案取 label（人类可读的 name），右侧 desc 是「实际会被存下来的值」。
+        // 两者相同时只显示一次，避免 "abacus · abacus" 这种重复。
+        var primary = String(item.label || item.value);
+        var desc = item.desc == null ? '' : String(item.desc);
+        if (desc && desc === primary) desc = '';
         html += '<button type="button" data-combobox-index="' + i + '"' +
           ' class="w-full text-left px-3 py-1.5 text-sm transition-colors cursor-pointer flex items-center justify-between gap-2 ' +
           (i === this._activeIndex ? 'bg-surface-hover text-indigo-300' : (selected ? 'text-indigo-300' : 'text-gray-300')) + '">' +
-          '<span class="truncate">' + this.escape(item.label || item.value) + '</span>' +
+          '<span class="truncate">' + this.escape(primary) + '</span>' +
+          (desc
+            ? '<span class="shrink-0 text-[11px] font-mono text-gray-500">' + this.escape(desc) + '</span>'
+            : '') +
           (selected ? '<svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>' : '') +
           '</button>';
       }
