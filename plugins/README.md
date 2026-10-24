@@ -26,6 +26,7 @@
 | `provider_health_probe` | app | 关 | Key 连通性探测与状态快照 API |
 | `mcp_tool_gateway` | app | 关 | 本地 HTTP 工具注册、可选注入 tools、受控调用 API |
 | `markdown_kb` | app | 关 | 本地 Markdown 知识库（上传/状态） |
+| `dafeiyu` | app | 关 | macOS 大肥鱼桌宠：转发状态驱动原生窗口，含甩抛/Q弹/漫游/对话/碎碎念（仅 macOS） |
 | `model_matcher` | matcher | 开 | 模型别名映射 + 拥塞/慢 Key 健康旁路 |
 | `error_handler` | handler | 开 | 429 限流换 Key、5xx 指数退避重试 |
 
@@ -99,6 +100,12 @@
 - **`markdown_kb`**  
   本地 Markdown 知识库骨架：上传 `.md`、查看状态等，供检索/注入类能力扩展。
 
+- **`dafeiyu`**  
+  macOS 原生桌宠：把转发链路状态（待机 / 思考 / 成功 / 出错）映射成无边框透明置顶窗口里的
+  角色动作，气泡显示最近请求结果与 DeepSeek 余额。桌宠跑在独立子进程（pyobjc），
+  关掉它不影响代理转发。支持拖拽甩抛（重力/边缘反弹/地面摩擦/Q 弹挤压）、多屏漫游、
+  右键选动画、对话与碎碎念（走 AKM 自己的模型，记忆落盘）。**仅 macOS**，Windows / Linux 明确返回不支持。
+
 ---
 
 ## 近期新增插件（速查）
@@ -145,6 +152,7 @@ Hook 签名均为 `on_*(ctx: RequestContext)`，控制流用 `ctx.set_block` / `
 |------|------|:----:|
 | `budget_gate` | [plugins/budget_gate/README.md](budget_gate/README.md) | 10 |
 | `cache_proxy` | [plugins/cache_proxy/README.md](cache_proxy/README.md) | 7 |
+| `dafeiyu` | [plugins/dafeiyu/README.md](dafeiyu/README.md) | 19 |
 | `data_filter_guard` | [plugins/data_filter_guard/README.md](data_filter_guard/README.md) | 14 |
 | `fallback_router` | [plugins/fallback_router/README.md](fallback_router/README.md) | 5 |
 | `header_toolkit` | [plugins/header_toolkit/README.md](header_toolkit/README.md) | 2 |

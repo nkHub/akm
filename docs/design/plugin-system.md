@@ -39,6 +39,13 @@
 
 `agent-tools` 是与 `agent_chat` 同构的**内置产物型** `app` 插件：把同级 `tools` 项目的构建产物打进插件目录 `dist/`，`on_load` 挂载到 `route_prefix`（默认 `/tools`），启用即用。它是纯前端离线工具箱（JSON/YAML 格式化、时间戳转换、哈希、二维码、颜色、正则、IP 查询等），除 IP 查询工具调用 ipapi.co / ipify / ipwho.is 等公共 API 外不依赖任何后端接口。产物同样以 `base: './'`（即 `VITE_BASE_PATH='./'`）相对路径构建，可在任意子路径下运行。
 
+`dafeiyu`（大肥鱼桌宠）是项目本地 `app` 插件里**唯一带原生窗口子进程**的特例，它演示了两种此前没有的能力边界：
+
+- **状态型 app 插件**：`category: app` 但主要职责是采集 hook 状态（`on_request` / `on_response` / `on_upstream_error`），前端只做只读展示。它把 AKM 的请求生命周期压成 `idle / thinking / working / waiting / success / error` 六个状态，通过 `GET /state` 暴露给外部消费者。`on_upstream_error` 只写展示状态、**不返回动作字符串**，因此不会与 `error_handler`、`fallback_router` 的策略决策打架。
+- **插件自带静态目录挂载**：宿主的 `has_menu` 静态挂载固定指向插件目录下的 `views/`（`/plugins/<name>/static`），而 `dafeiyu` 的素材（16 组动作 / 3444 帧 WebP，约 59MB）放在与 `views/` 平级的 `assets/`，不适合塞进 views。因此它在 `on_load` 里自行 `app.mount("/api/dafeiyu/assets-static", StaticFiles(directory=assets))`，并用 `self._assets_mounted` 保证幂等（同一 app 不能重复 mount 同名路径）。这给后续「插件资源不在 views 下」的场景提供了范式：**宿主只负责 views 挂载，其余静态目录由插件自己按需 mount 到自己的路由前缀下**。
+- **原生窗口走独立子进程**：macOS 的 AppKit 事件循环会独占主线程，塞进 FastAPI 事件循环会卡死服务。插件通过 `subprocess.Popen` 拉起 `pet/pet_app.py`（pyobjc），子进程反向轮询 `GET /api/dafeiyu/state`；插件在 `on_load` 拉起、`on_unload` 停止，并在窗口类配置变化时重启子进程。宿主只提供 `subprocess` 与状态接口，不感知 AppKit。仅 macOS；Windows / Linux 返回明确的「不支持」而不是静默失败。
+- **解释器探测**：打包成 `.app` 后 `sys.executable` 指向 App 内二进制，子进程需要能 `import AppKit` 的 Python。插件按「项目 `.venv` → 当前解释器 → 系统 Python」顺序逐个探测 `import AppKit`，失败时在插件页给出明确错误，不静默降级。
+
 ## 二、来源与优先级
 
 | 来源 | 路径 | 说明 |
