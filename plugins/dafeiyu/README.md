@@ -40,16 +40,63 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 | 触发点 | 状态 | 素材动作 |
 |--------|------|----------|
 | 空闲（无在途请求且超过 `idle_after_s`） | `idle` | `idle` |
-| `on_request`（请求到达，准备选 Key / 转换） | `thinking` | `thinking` |
-| — | `working` | `working` |
-| — | `waiting` | `waiting` |
-| `on_response` 且 `meta.ok = true` | `success` | `success` |
-| `on_response` 且 `meta.ok = false` / `on_upstream_error` | `error` | `error` |
+| `on_request`，且 `_inflight == 1`（本轮第一个请求） | `thinking` | `thinking` |
+| `on_request`，且 `_inflight >= 2`（并发第 2+ 个） | `working` | `working` |
+| 在途请求中 **≥ 90%** 已选 Key、在等上游返回 | `waiting` | `waiting` |
+| 静默期（1.5s）过后，本轮成功率 ≥ 50% | `success` | `success` |
+| 静默期（1.5s）过后，本轮成功率 < 50% | `error` | `error` |
+| 任意时刻 `on_upstream_error`（重试期间就要看到） | `error` | `error` |
 
-`success` / `error` 展示 `idle_after_s` 秒后对外回落成 `idle`，但内部仍保留最近结果供气泡展示。
+**轮次（round）驱动的展示逻辑**：一个「轮回」= 从第一个请求进来，到静默期结束。
+
+- `on_request` 时 `_inflight += 1`：
+  - `_inflight == 1`（新轮回的第一个请求）→ 清零本轮计数、作废静默期 → **`thinking`**
+  - `_inflight >= 2`（后面还有请求）→ **`working`**（转发中，表示并发在处理）
+- `_inflight > 0` 期间**不接受终态**：先完成的请求不立刻切 `success`/`error`，
+  只累计本轮成功/失败数。这样「后续请求会延长忙碌动画」，角色不会在还有请求
+  在飞时就开始庆祝或哀悼。
+- `_inflight` 归 0 → 启动**静默期** `ROUND_QUIET_S = 1.5s`，先不播终态：
+  - 静默期内来了新请求 → 静默期作废，直接进 `thinking`/`working`，**跳过终态**
+  - 静默期平安过去 → 按**过半判定**落定终态
+- **过半判定**：本轮成功率 `≥ 50%` → `success`，否则 `error`。
+  平票（1 成 1 败）算成功——用户对「有成功」更敏感，也避免一次偶发失败
+  就让整轮看起来是坏的。**不是「最后一个请求的结果」**：3 个请求 2 成 1 败时，
+  无论谁最后返回都显示 `success`。
+- 终态落定后清空本轮计数，下一个请求进来开启新轮回。
+- `_state_since` 只在状态真正变化时更新，所以连续请求都处于 `thinking`/`working`
+  时计时不动，循环动画不会被打断。
+- 上游报错走 `force=True` 立即展示，不被挂起保护拦下（重试成功会再覆盖）。
+
+**为什么需要静默期**：`success` 动画要 **10.12 秒**，而高频请求可能 2 秒一个。
+若「结束即播终态」，实测模拟 5 个请求会有 4 个被 10 秒动画挡住，角色一直在
+庆祝、完全看不出还在处理新请求。1.5 秒静默期把两种情况分开：之后没请求了
+就播完整 `success`/`error`（用户能看到反馈），之后马上又来就跳过终态。
+
+**`waiting` 状态（按请求占比判定）**：显示条件不是「等了多久」，而是
+**当前在途请求里有 9 成以上在等上游返回**（`WAITING_RATIO = 0.9`）。
+
+- **怎么知道「在等上游」**：插件注册了 `on_key_selected` hook——Key 已选、
+  请求即将发往上游，这是 AKM 里唯一准确的「已发出」时点。每个请求在
+  `_pending_requests` 登记表里记 `sent` 标记，`on_response` 时移除。
+  `waiting = sent 数 / 登记总数`。
+- **不满足 9 成就不切**：少量请求慢不该影响整体显示，其余状态逻辑照常
+  （不动 `_inflight` / 轮次计数 / 静默期）。
+- **已在 `success`/`error` 时不切**：那一轮的终态动画还没播完，切走会让
+  success 一闪就没了。
+- **`waiting` 后的走向**：
+  - 成功 → 先切 `working`（「上游回话了，正在收尾」），**等 working 动画
+    完整播完一轮**（10.12s）才落定 `success`；
+  - 失败 → **直接 `error`**，不插 `working`（失败要尽快反馈）。
+- 一般用不到，只有网络异常 / 上游挂住才会进入这条路径。
+
+**回落规则**：`_inflight == 0` 且距最后一次状态变化超过 `idle_after_s` 时，
+**所有非 idle 状态**都会回落 `idle`（`thinking` 早期不在白名单里，导致状态
+永久卡死，日志实测卡过 1510 / 1591 秒）。`success` / `error` 的展示时长按
+**动画实际时长兜底**（`max(idle_after_s, 动画时长 + 1)`）：`success` 需 241×42ms
+≈ 10.1s，`error` 需 118×42ms ≈ 5.0s，否则动画播不完就被切走。
+
 `on_upstream_error` 只做展示，**不返回动作字符串**——重试、换 Key、降级仍由 `error_handler`、
 `fallback_router` 等策略插件决定，避免本插件改变转发行为。
-
 ### 2.2 余额查询
 
 - 取 `provider=deepseek` 的 Key（优先 `base_url` 含 deepseek 的），请求 `{base_url}/user/balance`。
@@ -110,7 +157,15 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
   （计费 / 审计 / 限流照常生效），回复进气泡并保持 8 秒不被状态文案覆盖。
   气泡因此加高到 124px：上面三行继续显示状态 / 结果 / 余额，底部留给输入行。
 - **碎碎念**：待机时按 `whisper_interval_s`（默认 180s）自动说一句，也可右键手动触发。
-  提示词会把最近说过的 5 句一起给模型，让它换一句。
+  **模型同时决定「说什么」和「配哪个动画」**：提示词要求输出
+  `{"text": "...", "clip": "..."}`，`clip` 只能从 `WHISPER_CLIPS`
+  （`head_pat` / `poke` / `tail` / `eat_token` / `idle_stretch` / `idle_yawn`）里选。
+  收到后先播该动作、同时用打字机显示文本。`parse_whisper_reply()` 做容错：
+  剥 markdown 围栏、抠 JSON、clip 不在列表就丢弃、纯文本则整段当气泡文本
+  （绝不编造动作名——不存在的 clip 会让桌宠静默不播）。
+  **气泡强制显示**：碎碎念本身就是一句话，若用户关了「显示气泡」就完全看不到。
+  所以展示期临时打开气泡（复用 `_bubble_was_enabled` 机制），
+  **展示期结束自动还原成隐藏**，不会改掉用户的设置。
 - **记忆持久化**：对话保留最近 20 轮、碎碎念最近 30 条，落在
   `~/.akm/dafeiyu/memory.json`；文件损坏按空记忆继续，不影响启动。
 - **失败不伪造**：模型不可用时气泡明确显示失败原因，不编造回复。
@@ -207,8 +262,11 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 
 - **仅 macOS**。Windows / Linux 的原生窗口需要另写实现（原版用 Qt Helper）。
 - **状态粒度粗**。没有 searching / editing / testing 这类工具语义，只有请求阶段。
-- **`working` / `waiting` 目前不会被 hook 直接触发**：AKM 的 hook 里没有「已发出、等上游」的回调，
-  这两个状态留给后续接入流式首字节事件，当前实际只出现 `idle / thinking / success / error`。
+- **`working` / `waiting` 不是 hook 直给的状态**：AKM 没有「上游开始返回」
+  这类细粒度回调。`working` 由「并发第 2+ 个请求」触发；
+  `waiting` 由「在途请求里 ≥ 90% 已选 Key、在等上游」触发（`on_key_selected`
+  标记 + `on_response` 移除，靠登记表算比例）。因此这两个状态的触发时机
+  取决于请求并发度与上游响应速度，不是精确的事件边界。
 - **碎碎念会消耗额度**：每次自动碎碎念都是一次真实模型调用。默认 180s 间隔，长时间挂着会持续计费，
   不想付费就把 `whisper_enabled` 关掉。
 - **`Quartz` / `CoreGraphics` 不可用**：本环境只有 pyobjc 的 AppKit + Foundation，因此 Q 弹挤压用
@@ -288,6 +346,19 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
   长回复按 `TYPEWRITER_MAX_S=6s` 反推间隔；掉帧时按经过时间补字。
   **测量要用完整文本**：逐字时 label 里只有前几个字，`_titleLineCount()` 优先读
   `_typewriter_text`，否则行数永远是 1、气泡不会撑开、后半段被裁。
+- **任何地方都不能强制中断正在播的动画**：原来服务端 `clip` 一变就立刻切
+  `state_clip` 并把 `frame_index` 归零，动画从第 1 帧重头开始——高频状态切换
+  （thinking→working→waiting）时看起来就是一帧一帧地闪。现在改为**排队等待**：
+  新状态记到 `_pending_state_clip`、新的临时动作记到 `_pending_override_clip`，
+  由 `_tickOnce` 在**当前动作播完一轮的轮末**才真正切换。循环动作
+  （idle/thinking/working/waiting）自然走到轮末，一次性动作（success/error/
+  摸头/拖拽）播完才切，都不会被打断。唯一例外是用户在右键菜单**主动**选动画
+  （显式意图，允许立即切换）。
+- **关闭 AKM 时桌宠必须一起退出**：子进程用 `start_new_session=True` 脱离进程组，
+  宿主被强杀/崩溃时收不到 SIGTERM，会留下孤儿窗口。两道保险：
+  ① 正常关闭走 `on_unload → stop_pet()`（terminate，3 秒后 kill）；
+  ② 宿主 pid 通过 `AKM_DAFEIYU_PARENT_PID` 传给子进程，桌宠每 2 秒用
+  `os.kill(pid, 0)` 探测一次，父进程不存在就 `AppHelper.stopEventLoop()` 自行结束。
 - **`hitTest:` 不能加 `@objc.python_method`**：加了之后方法只存在于 Python 侧，
   ObjC 调 `hitTest:` 仍走 NSView 原生实现并返回视图自己，鼠标事件被角色/气泡层吃掉，
   表现为「点不动、拖不动、右键失灵」。必须是真正的 ObjC 方法。

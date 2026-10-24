@@ -245,3 +245,84 @@ def test_call_chat_connection_error_is_reported():
     )
     assert result.ok is False
     assert result.error
+
+
+# ── 碎碎念 JSON 解析（文本 + 动画）────────────────────────
+# 用户要求：碎碎念时让 AI 返回一个合适的动画，触发动画同时显示文本。
+# 提示词要求 JSON，但模型常有偏差，这里覆盖 8 种实际会遇到的情况。
+
+def test_whisper_reply_standard_json():
+    """标准 JSON：text 与 clip 都取出来。"""
+    say, clip = companion.parse_whisper_reply(
+        '{"text": "今天天气真好", "clip": "idle_stretch"}'
+    )
+    assert say == "今天天气真好"
+    assert clip == "idle_stretch"
+
+
+def test_whisper_reply_strips_markdown_fence():
+    """模型爱包 ```json 围栏，必须剥掉。"""
+    say, clip = companion.parse_whisper_reply(
+        '```json\n{"text": "摸会儿鱼", "clip": "tail"}\n```'
+    )
+    assert say == "摸会儿鱼"
+    assert clip == "tail"
+
+
+def test_whisper_reply_json_with_surrounding_text():
+    """JSON 前后夹着解释文字，也要能抠出来。"""
+    say, clip = companion.parse_whisper_reply(
+        '好的：{"text": "想吃火锅", "clip": "eat_token"} 希望你喜欢'
+    )
+    assert say == "想吃火锅"
+    assert clip == "eat_token"
+
+
+def test_whisper_reply_rejects_unknown_clip():
+    """clip 不在允许列表里 → 丢弃 clip，但文本保留（不能编造动作）。"""
+    say, clip = companion.parse_whisper_reply(
+        '{"text": "打个哈欠", "clip": "fly"}'
+    )
+    assert say == "打个哈欠"
+    assert clip == ""
+
+
+def test_whisper_reply_plain_text_fallback():
+    """模型输出纯文本（老提示词/不听话）→ 整段当气泡文本，clip 为空。"""
+    say, clip = companion.parse_whisper_reply("今天好热啊")
+    assert say == "今天好热啊"
+    assert clip == ""
+
+
+def test_whisper_reply_missing_text_does_not_leak_json():
+    """JSON 缺 text 时，不能把原始 JSON 当气泡文本显示。"""
+    say, clip = companion.parse_whisper_reply('{"clip": "poke"}')
+    assert say == ""          # 不能是 '{"clip": "poke"}'
+    assert clip == "poke"     # clip 仍可用
+
+
+def test_whisper_reply_empty():
+    """空回复返回空文本与空 clip。"""
+    assert companion.parse_whisper_reply("") == ("", "")
+
+
+def test_whisper_json_prompt_lists_all_clips():
+    """提示词必须把允许的动作全列出来，否则模型不知道能选什么。"""
+    for clip in companion.WHISPER_CLIPS:
+        assert clip in companion.WHISPER_JSON_PROMPT
+    # 提示词要明确要求 JSON
+    assert "JSON" in companion.WHISPER_JSON_PROMPT
+
+
+def test_whisper_clips_are_real_assets():
+    """允许的动作名必须真实存在于素材 manifest，否则桌宠会静默不播。"""
+    import json
+
+    manifest = json.loads(
+        (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+         / "assets" / "pet-manifest.json").read_text(encoding="utf-8")
+    )
+    clips = manifest["clips"]
+    for clip in companion.WHISPER_CLIPS:
+        assert clip in clips, f"{clip} 不在素材清单里"
+        assert clips[clip].get("frames"), f"{clip} 没有帧"

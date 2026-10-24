@@ -39,6 +39,26 @@ DEFAULT_WHISPER_PROMPT = (
     "只输出这句话本身，不要引号、不要解释。"
 )
 
+# 碎碎念可用的动画动作（与素材 manifest 的 clip 名一致）。
+# 模型只能从这些里挑，避免它编出不存在的动作导致桌宠静默不播。
+WHISPER_CLIPS = (
+    "head_pat", "poke", "tail", "eat_token",
+    "idle_stretch", "idle_yawn",
+)
+
+# 碎碎念要求模型**同时**给「一句话 + 一个动作」。
+# 用 JSON 输出比「先说动作再说内容」的纯文本更稳：模型很难只输出动作名，
+# 也避免把动作名混进气泡文本里（用户会看到「tail 今天天气不错」）。
+WHISPER_JSON_PROMPT = (
+    "你是一只住在用户电脑桌面上的大肥鱼桌宠。"
+    "请输出一个 JSON 对象，包含两个字段：\n"
+    '  "text": 一句很短的中文碎碎念（不超过 20 个字），语气轻松可爱，'
+    "可以是关于工作、天气、吃饭、摸鱼之类的小感想；\n"
+    '  "clip": 配合这句话最适合的动画动作，只能从这些里选：'
+    + "、".join(WHISPER_CLIPS) + "。\n"
+    "只输出 JSON，不要 markdown 代码块、不要额外解释。"
+)
+
 # 对话系统提示词
 DEFAULT_CHAT_PROMPT = (
     "你是用户桌面上的一只大肥鱼桌宠，名字叫大肥鱼。"
@@ -262,3 +282,56 @@ def build_whisper_messages(recent_whispers: list[dict],
         {"role": "system", "content": system},
         {"role": "user", "content": "说一句碎碎念"},
     ]
+
+
+def parse_whisper_reply(text: str) -> tuple[str, str]:
+    """解析碎碎念回复，返回 ``(气泡文本, 动画 clip)``。
+
+    **为什么要容错**：提示词要求模型输出 JSON，但实际有几种偏差：
+      ① 包了 markdown 代码块 ```json ... ```；
+      ② 输出纯文本（老提示词 / 模型不听话）；
+      ③ clip 不在允许列表里，或是编造的动作名。
+
+    处理策略：
+      - 能从回复里抠出 JSON 且含 ``text`` → 用它的 text/clip；
+      - 抠不出或 text 为空 → **整段回复当气泡文本**，clip 返回空（由调用方兜底）；
+      - clip 不在 ``WHISPER_CLIPS`` 里 → clip 返回空，文本照常保留。
+
+    返回的 clip 为空表示「让调用方决定播什么」，绝不编造动作名——
+    不存在的 clip 会让桌宠静默不播（cache.has() 返回 False）。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return "", ""
+
+    # 去掉 markdown 代码块围栏（```json / ``` 都剥掉）
+    body = raw
+    if body.startswith("```"):
+        # 去掉首行围栏与末尾围栏
+        body = body.split("\n", 1)[-1] if "\n" in body else body[3:]
+        if body.rstrip().endswith("```"):
+            body = body.rstrip()[:-3]
+        body = body.strip()
+
+    # 尝试从任意位置抠出第一个 JSON 对象（模型可能在前后加解释）
+    start = body.find("{")
+    end = body.rfind("}")
+    if start >= 0 and end > start:
+        candidate = body[start:end + 1]
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            say = clean_reply(str(data.get("text") or ""))
+            clip = str(data.get("clip") or "").strip()
+            if clip not in WHISPER_CLIPS:
+                clip = ""
+            if say:
+                return say, clip
+            # 是合法 JSON 但 text 为空：不要把原始 JSON 当气泡文本（用户会看到
+            # `{"clip": "poke"}` 这种东西）。clip 仍可保留，文本交给调用方兜底。
+            return "", clip
+
+    # 不是 JSON（纯文本回复）：整段当气泡文本，clip 留空
+    return clean_reply(raw), ""

@@ -62,6 +62,34 @@ STATE_CLIP = {
     STATE_ERROR: "error",
 }
 
+# 一次性动画（loop=False）播完一轮需要多久，用于「状态回落不能早于动画播完」。
+# 数据来自 assets/pet-manifest.json：success 241 帧、error 118 帧，每帧 42ms。
+# 硬编码而非读 manifest：index.py 与 pet/ 在不同进程/目录，且这两个值稳定，
+# 读文件失败时反倒会让回落逻辑失去兜底。
+STATE_ANIM_SECONDS = {
+    STATE_SUCCESS: 241 * 0.042,   # ≈ 10.12 秒
+    STATE_ERROR: 118 * 0.042,     # ≈ 4.96 秒
+    # thinking / working / waiting 都是 241 帧循环动作，同样 10.12 秒一轮。
+    # 用于「动画播完还没回 → 切下一个状态」的超时判定。
+    STATE_THINKING: 241 * 0.042,  # ≈ 10.12 秒
+    STATE_WORKING: 241 * 0.042,   # ≈ 10.12 秒
+}
+
+# 静默期：最后一个请求结束后，等这么多秒确认「这一轮真的结束了」，
+# 再播 success/error 动画。期间若来了新请求，就跳过终态直接进 thinking/working。
+#
+# **为什么需要它**：success 动画要 10.12 秒，而高频请求可能 2 秒一个。
+# 若「结束即播终态」，5 个请求会有 4 个被 10 秒动画挡住，角色一直在庆祝、
+# 完全看不出还在处理新请求（实测模拟：每 2 秒一个请求，5 个里 4 个被挡住）。
+# 用 1.5 秒静默期区分两种情况：
+#   - 之后没请求了 → 播完整 success/error（用户能看到反馈）
+#   - 之后马上又来 → 跳过终态，持续 thinking/working（用户看到在忙）
+ROUND_QUIET_S = 1.5
+
+
+# waiting 判定阈值：当前在途请求里「已选 Key、在等上游返回」的占比。
+# 用户要求 9 成以上才切 waiting——少量请求慢不该影响整体显示。
+WAITING_RATIO = 0.9
 # 状态的中文名：管理台首页卡片直接展示这个，不暴露内部英文枚举值。
 STATE_LABEL = {
     STATE_IDLE: "待机",
@@ -103,6 +131,34 @@ class Plugin(PluginBase):
         self._state_since: float = time.time()
         self._last_result: dict[str, Any] = {}
         self._inflight: int = 0
+        # 本轮的请求登记表：key 是请求唯一 id，value 是状态 dict
+        #   {"sent": bool, "started": float}
+        # 「sent」由 on_key_selected 置 True（Key 已选、请求马上发往上游），
+        # on_response 时移除。用它精确统计「当前有多少请求在等上游返回」，
+        # 而不是靠 thinking 动画播了多久去猜。
+        self._pending_requests: dict[str, dict] = {}
+        # ── 轮次（一个「轮回」= 从第一个请求进来，到静默期结束）──
+        # 终态不立刻落定，而是先记在这里，等静默期过了再播 success/error。
+        self._pending_state: str = ""
+        self._pending_detail: str = ""
+        # 本轮成功/失败计数：用于「过半判定」（成功数 > 总数的一半 → success）
+        self._round_ok: int = 0
+        self._round_err: int = 0
+        # 静默期截止时刻：_inflight 归 0 时设为 now + ROUND_QUIET_S。
+        # waiting 相关：thinking 动画播完一轮仍未返回 → 切 waiting。
+        # 记录本轮「thinking 开始」的时刻作为基准，而不是 _state_since——
+        # 因为 _state_since 在切到 working 时会重置，用它会导致永远触发不到。
+        self._round_started_at: float = 0.0
+        # working 需要「完整播完一轮」才允许切 success 的场景：
+        # waiting 期间请求成功返回时，先切 working 并记下「可落定时刻」，
+        # 等 working 动画播完才由 _maybe_settle_round 落定 success。
+        self._working_until: float = 0.0
+        self._deferred_terminal: str = ""     # 待落定的终态（waiting→working 场景用）
+        self._deferred_detail: str = ""
+        # 期间若来了新请求，静默期作废、直接进 thinking/working（跳过终态动画）。
+        self._quiet_until: float = 0.0
+        # 本轮是否已落定终态（防止重复触发 / 静默期结束后又播一次）
+        self._round_settled: bool = True
         self._counters: dict[str, int] = {
             "requests": 0,
             "success": 0,
@@ -237,11 +293,35 @@ class Plugin(PluginBase):
         """构造给桌宠进程轮询的状态快照（纯数据，不含内部对象）。"""
         idle_after = max(2, int(self._cfg.get("idle_after_s") or 8))
         now = time.time()
-        # 没有在途请求且距上次状态变化超过阈值时，对外表现为待机，
-        # 但内部仍保留 success / error 供气泡展示最近结果。
+        # 每次轮询做两件由时间驱动的事（AKM 没有「全部请求结束」回调，
+        # 只能靠桌宠每 0.5 秒拉一次 /state 顺路推进）：
+        #   1. 静默期（或 working 播完）已过 → 落定 success/error
+        #   2. 9 成以上在途请求在等上游 → 切 waiting
+        #
+        # **顺序不能反**：先落定终态，再判 waiting。否则刚落定的 success
+        # 会被 waiting 判定立刻覆盖（落定时 _pending_requests 可能还没清空），
+        # 用户就看到 success 一闪而过、直接变 waiting。
+        self._maybe_settle_round(now)
+        self._maybe_enter_waiting(now)
+        # 状态回落规则（对外快照用，不改内部 _state）：
+        #
+        # 1. 有在途请求（_inflight > 0）→ **一律保持当前状态**。
+        #    这就是「后续请求延长 working 时间」：连续请求期间角色一直忙，
+        #    动画不被打断。
+        # 2. 没有在途请求且距最后一次状态变化超过 idle_after → 回落 idle。
+        #    **不再只对 success/error/waiting 生效**：之前 thinking 不在白名单里，
+        #    导致 on_response 缺失时状态永久卡在 thinking（日志实测卡了
+        #    1510 / 1591 秒）。现在所有非 idle 状态都能回落。
+        # 3. success / error 的展示时长按**动画实际时长**兜底：
+        #    这两个动作是 loop=False 的一次性动画，success 需要 241*42ms=10.12s，
+        #    而 idle_after 默认 8 秒会让它只播到 79% 就被切走。
         state = self._state
-        if state in (STATE_SUCCESS, STATE_ERROR, STATE_WAITING):
-            if self._inflight == 0 and now - self._state_since > idle_after:
+        if self._inflight == 0 and state != STATE_IDLE:
+            hold = idle_after
+            if state in (STATE_SUCCESS, STATE_ERROR):
+                # 至少留够动画播完一轮的时间（+1 秒缓冲）
+                hold = max(idle_after, int(STATE_ANIM_SECONDS.get(state, 0)) + 1)
+            if now - self._state_since > hold:
                 state = STATE_IDLE
         return {
             "state": state,
@@ -294,8 +374,30 @@ class Plugin(PluginBase):
         pool = STATE_TEXT.get(state) or STATE_TEXT[STATE_IDLE]
         return pool[int(time.time()) % len(pool)]
 
-    def _set_state(self, state: str, *, detail: str = "", text: str = "") -> None:
-        """切换状态并记录切换时间。相同状态重复设置不重置计时。"""
+    def _set_state(self, state: str, *, detail: str = "", text: str = "",
+                   force: bool = False) -> None:
+        """切换状态并记录切换时间。
+
+        **关键规则：在途请求期间不接受终态（success/error）**。
+
+        多个请求并发时，先完成的那个会调 ``_set_state(SUCCESS)``，但此时
+        ``_inflight`` 仍 > 0（还有别的请求在飞）。如果直接切到 success，
+        桌宠会播成功动画——可用户明明还在等其余请求。
+
+        所以：``_inflight > 0`` 时，终态只记到 ``_pending_state``，
+        等最后一个请求结束（``_inflight`` 归 0）再统一落定。
+        ``thinking``/``working`` 这类「进行中」状态不受此限制。
+
+        相同状态重复设置不重置计时——连续请求都处于 thinking 时，
+        计时不动，桌宠的循环动画就不会被打断。
+        """
+        if not force and self._inflight > 0 and state in (
+            STATE_SUCCESS, STATE_ERROR, STATE_IDLE
+        ):
+            # 还有请求在飞：先挂起，等最后一个结束再定
+            self._pending_state = state
+            self._pending_detail = detail or self._pending_detail
+            return
         if state != self._state:
             self._state = state
             self._state_since = time.time()
@@ -317,7 +419,47 @@ class Plugin(PluginBase):
         model = str(getattr(ctx, "model", "") or "")
         path = str(getattr(ctx, "api_path", "") or "")
         detail = model or path or "新请求"
-        self._set_state(STATE_THINKING, detail=f"正在准备 {detail}")
+        # 登记本次请求：此时还没选 Key，sent=False（还不算「在等上游」）。
+        # 用 id(ctx) 做 key 便于 on_response 时按同一对象移除。
+        req_id = str(id(ctx))
+        self._pending_requests[req_id] = {
+            "sent": False,
+            "started": time.time(),
+        }
+        try:
+            ctx.bag_set("dafeiyu.req_id", req_id)
+        except Exception:
+            pass
+        # **新一轮判定**：_inflight 从 0 → 1 说明上一轮已结束、这是新轮回的
+        # 第一个请求。此时清零本轮计数、作废静默期，并标记「本轮未落定」。
+        #
+        # 静默期被新请求打断 → 直接进 thinking/working，跳过终态动画。
+        # 这样高频请求时不会「一直在播 success」（success 动画 10.12 秒，
+        # 若每个请求都播会被大量请求挡住）。
+        if self._inflight == 1:
+            self._round_ok = 0
+            self._round_err = 0
+            self._quiet_until = 0.0
+            self._round_settled = False
+            self._pending_state = ""
+            self._pending_detail = ""
+            # 本轮计时基准：thinking 播完一轮（10.12s）仍未返回就切 waiting
+            self._round_started_at = time.time()
+            self._working_until = 0.0
+            self._deferred_terminal = ""
+            self._deferred_detail = ""
+        # **第一个请求 → thinking（准备选 Key / 转换格式）；
+        # 后面还有请求进来 → 切成 working（转发中，表示并发在处理）**。
+        #
+        # 语义：thinking 是「我在准备」，working 是「已经有好几条在跑了」。
+        # 注意 _set_state 对相同状态不重置计时，所以：
+        #   - 第 1 个请求：idle → thinking（切一次，开始计时）
+        #   - 第 2 个请求：thinking → working（切一次，开始计时）
+        #   - 第 3+ 个请求：已是 working，计时不动，循环动画不被打断
+        if self._inflight >= 2:
+            self._set_state(STATE_WORKING, detail=f"转发中 {detail}（{self._inflight} 个）")
+        else:
+            self._set_state(STATE_THINKING, detail=f"正在准备 {detail}")
         # 把本次请求的开始时间放进 bag，on_response 用来算耗时。
         try:
             ctx.bag_set("dafeiyu.started_at", time.time())
@@ -325,6 +467,35 @@ class Plugin(PluginBase):
         except Exception:
             pass
 
+
+    async def on_key_selected(self, ctx, model: str = "", key: dict | None = None) -> None:
+        """Key 已选、请求即将发往上游 → 标记该请求进入「等上游返回」。
+
+        **为什么用这个 hook 而不是猜时间**：这是 AKM 里唯一能准确知道
+        「请求已经交给上游了」的时点。`on_request` 太早（还在选 Key / 转换格式），
+        `on_response` 太晚（已经回来了）。有了这个标记，`waiting` 判定就不再
+        依赖「thinking 动画播了多久」这种猜测。
+        """
+        if not self._cfg.get("enabled", True):
+            return
+        if not self._should_track(ctx):
+            return
+        req_id = ""
+        try:
+            req_id = str(ctx.bag_get("dafeiyu.req_id", "") or "")
+        except Exception:
+            pass
+        entry = self._pending_requests.get(req_id) if req_id else None
+        if entry is not None:
+            entry["sent"] = True
+            entry["sent_at"] = time.time()
+            return
+        # 兜底：on_request 没登记上（例如 bag 不可用）时，按 id(ctx) 补一条
+        self._pending_requests[str(id(ctx))] = {
+            "sent": True,
+            "started": time.time(),
+            "sent_at": time.time(),
+        }
     async def on_upstream_error(
         self,
         ctx,
@@ -345,7 +516,10 @@ class Plugin(PluginBase):
         detail = f"HTTP {status_code}" if status_code else str(error_type or "网络错误")
         if attempt:
             detail += f"（第 {attempt} 次尝试）"
-        self._set_state(STATE_ERROR, detail=f"上游异常：{detail}")
+        # 上游报错要**立刻**展示（重试期间用户就该看到异常），
+        # 所以传 force=True 绕过「在途请求期间挂起终态」的保护。
+        # 若后续重试成功，on_response 会把状态覆盖成 success。
+        self._set_state(STATE_ERROR, detail=f"上游异常：{detail}", force=True)
         return None
 
     async def on_response(self, ctx) -> None:
@@ -356,6 +530,18 @@ class Plugin(PluginBase):
             return
         if self._inflight > 0:
             self._inflight -= 1
+        # 并发数降回 1：从 working 退回 thinking（还有一条在准备/转发中）。
+        # 不退回的话，剩下那条请求明明只剩一个，动画却还显示「多个在跑」。
+        # 只在确实是 working 时才退，避免把 thinking 打回 thinking（无意义切换）。
+        if self._inflight == 1 and self._state == STATE_WORKING:
+            self._set_state(STATE_THINKING, detail=self._state_text)
+
+        # 从登记表移除本次请求（它已经拿到响应，不再算「在等上游」）。
+        try:
+            req_id = str(ctx.bag_get("dafeiyu.req_id", "") or "")
+        except Exception:
+            req_id = ""
+        self._pending_requests.pop(req_id or str(id(ctx)), None)
 
         meta = getattr(ctx, "response", None) or {}
         ok = bool(meta.get("ok"))
@@ -392,15 +578,142 @@ class Plugin(PluginBase):
         )
         del self._recent[8:]
 
+        # 累计本轮成功/失败数，用于「过半判定」。
         if ok:
-            self._set_state(STATE_SUCCESS, detail="")
+            self._round_ok += 1
         else:
-            self._set_state(
-                STATE_ERROR,
-                detail=f"失败 {status_code or ''} {phase}".strip(),
-            )
+            self._round_err += 1
+        # 记住最近一次失败详情，落定 error 时用作气泡文案
+        if not ok:
+            self._pending_detail = f"失败 {status_code or ''} {phase}".strip()
+
+        # **waiting 期间的返回要特殊处理**：
+        #   - 成功 → 先切 working（表示「上游回话了」），并等 working 动画完整
+        #     播完一轮再落定 success。用户要求「等 working 的动画播放完，再 success」。
+        #   - 失败 → 直接 error，不需要中间态（失败要尽快反馈）。
+        # 注意：这只在「已经进入 waiting」时才走这条路；正常速度的请求不会经过它。
+        now = time.time()
+        was_waiting = self._state == STATE_WAITING
+        # 最后一个请求结束 → 启动静默期，等 1.5 秒确认「这一轮真的结束了」。
+        # 静默期内若有新请求进来，on_request 会作废它并直接进 thinking/working；
+        # 静默期平安过去，才由 _maybe_settle_round() 播 success/error。
+        if self._inflight == 0:
+            self._quiet_until = now + ROUND_QUIET_S
+            if was_waiting and ok:
+                # waiting → working：等 working 播完一轮再落定 success。
+                # 把静默期截止时刻推到「working 动画播完」之后，
+                # _maybe_settle_round 到点后按过半判定落定（此时通常是 success）。
+                self._working_until = now + STATE_ANIM_SECONDS.get(STATE_WORKING, 10.12)
+                self._quiet_until = self._working_until
+                self._deferred_terminal = STATE_SUCCESS
+                self._deferred_detail = ""
+                self._set_state(STATE_WORKING, detail="上游回话了，正在收尾", force=True)
+            elif was_waiting and not ok:
+                # waiting → error：失败直接落定，不等动画（尽快反馈异常）
+                self._deferred_terminal = ""
+                self._deferred_detail = ""
         if self._cfg.get("sound_enabled"):
             self._play_sound(ok)
+
+
+    def _waiting_ratio(self) -> tuple[int, int, float]:
+        """返回 ``(在等上游的请求数, 总在途请求数, 占比)``。
+
+        「在等上游」= 已选 Key（on_key_selected 打过标记）但还没拿到响应。
+        用请求登记表精确统计，不靠动画播了多久去猜。
+        """
+        total = len(self._pending_requests)
+        waiting = sum(1 for e in self._pending_requests.values() if e.get("sent"))
+        ratio = (waiting / total) if total > 0 else 0.0
+        return waiting, total, ratio
+
+    def _maybe_enter_waiting(self, now: float) -> None:
+        """**9 成以上在途请求都在等上游返回**时才切 waiting。
+
+        用户的语义是：「当前存在的请求里面，有 9 成请求在等上游返回」。
+        所以判定是**比例**，不是时间：
+
+          - 总在途数 = `_pending_requests` 里登记的数量；
+          - 在等上游数 = 其中已选 Key（on_key_selected 标记过）的；
+          - 占比 ≥ 0.9 → 切 waiting。
+
+        **为什么不用「thinking 播了多久」**：那是猜测，与请求真实状态无关。
+        流式请求上游已经开始回字节时，该请求仍算「等上游」（还没结束），
+        但此时通常还有其他请求没发出，占比达不到 9 成，因此不会误切。
+
+        **不影响其他逻辑**：只做状态切换，不改 `_inflight` / 轮次计数 /
+        静默期；`_inflight == 0` 或已在 waiting 时直接返回。
+        """
+        if self._state == STATE_WAITING:
+            return
+        # 已在播终态（success/error）时不切 waiting：那一轮的动画还没播完，
+        # 切走会造成「success 一闪就没了」。等状态回落 idle 后才会再判。
+        if self._state in (STATE_SUCCESS, STATE_ERROR):
+            return
+        waiting, total, ratio = self._waiting_ratio()
+        if total == 0:
+            return
+        if ratio >= WAITING_RATIO and waiting >= 1:
+            self._set_state(
+                STATE_WAITING,
+                detail=f"上游有点慢（{waiting}/{total} 在等）",
+            )
+
+    def _maybe_settle_round(self, now: float) -> None:
+        """静默期结束后落定本轮终态（由 ``_state_payload`` 每次轮询时调用）。
+
+        **为什么要在这里判**：AKM 没有「请求全部结束」的回调，只能靠轮询驱动。
+        桌宠每 0.5 秒拉一次 ``/state``，顺路做这件事成本为零。
+
+        **过半判定**：本轮成功率 ≥ 50% → success，否则 error。
+        平票（1 成 1 败）算成功——用户对「有成功」更敏感，
+        也避免一次偶发失败就让整轮看起来是坏的。
+
+        **waiting→working 的延迟落定**：若本轮是从 waiting 恢复的（请求拖了很久
+        才成功），`_deferred_terminal` 会记着 success，且 `_quiet_until` 已被推到
+        「working 动画播完」的时刻。所以这里到点后落定的就是 success——
+        用户要求「等 working 的动画播放完，再 success」。
+
+        只落定一次（``_round_settled`` 挡住重复触发），落定后清空计数，
+        下一个请求进来时（``_inflight`` 0→1）会重置为新一轮。
+        """
+        if self._round_settled or self._inflight > 0:
+            return
+        if self._quiet_until <= 0 or now < self._quiet_until:
+            return
+        # 延迟落定的终态优先（waiting→working 场景）
+        if self._deferred_terminal:
+            state = self._deferred_terminal
+            detail = self._deferred_detail
+        else:
+            total = self._round_ok + self._round_err
+            if total <= 0:
+                # 本轮没有任何结果（例如请求被过滤掉），不播终态
+                self._quiet_until = 0.0
+                self._round_settled = True
+                self._working_until = 0.0
+                return
+            ok_ratio = self._round_ok / total
+            if ok_ratio >= 0.5:
+                state = STATE_SUCCESS
+                detail = ""
+            else:
+                state = STATE_ERROR
+                detail = self._pending_detail or f"失败 {self._round_err}/{total}"
+        self._set_state(state, detail=detail, force=True)
+        # 落定后清空本轮标记，等下一个请求开启新轮回。
+        # **登记表也要清空**：否则残留的「已 sent」请求会让 waiting 判定
+        # 在下一帧立刻把刚落定的 success/error 覆盖成 waiting
+        # （表现为 success 一闪就没了）。
+        self._quiet_until = 0.0
+        self._round_settled = True
+        self._round_ok = 0
+        self._round_err = 0
+        self._pending_detail = ""
+        self._working_until = 0.0
+        self._deferred_terminal = ""
+        self._deferred_detail = ""
+        self._pending_requests.clear()
 
     def _should_track(self, ctx) -> bool:
         """过滤掉 AKM 自身的内部子请求，避免 Agent 聊天把角色刷成永动机。"""
@@ -581,6 +894,10 @@ class Plugin(PluginBase):
         env["AKM_DAFEIYU_STATE_URL"] = f"http://127.0.0.1:{self._port}/api/dafeiyu/state"
         env["AKM_DAFEIYU_ASSET_ROOT"] = str(Path(__file__).resolve().parent / "assets")
         env["AKM_DAFEIYU_DATA_DIR"] = str(_DATA_DIR)
+        # 把宿主 pid 传下去：桌宠每 2 秒探测一次，宿主没了就自己退出。
+        # 子进程用了 start_new_session=True 已脱离进程组，宿主被强杀/崩溃时
+        # 不会收到 SIGTERM，只能靠子进程主动检测（否则会留下孤儿窗口）。
+        env["AKM_DAFEIYU_PARENT_PID"] = str(os.getpid())
         return env
 
     def _pet_running(self) -> bool:
