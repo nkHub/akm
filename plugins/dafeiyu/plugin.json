@@ -1,0 +1,159 @@
+{
+  "name": "dafeiyu",
+  "version": "0.1.0",
+  "has_menu": true,
+  "category": "app",
+  "description": "大肥鱼桌宠（macOS）：把 AKM 转发链路状态映射成原生透明置顶窗口里的角色动作，并在气泡里显示 DeepSeek 余额与最近请求结果",
+  "builtin": false,
+  "default_enabled": false,
+  "required": false,
+  "priority": 200,
+  "menu": {
+    "title": "大肥鱼",
+    "icon": "sparkle",
+    "order": 60
+  },
+  "routes_prefix": "/api/dafeiyu",
+  "hooks": {
+    "on_request": true,
+    "on_response": true,
+    "on_upstream_error": true
+  },
+  "settings": [
+    {
+      "key": "enabled",
+      "label": "启用大肥鱼",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后插件保持加载，但不采集状态、不自动拉起桌宠进程"
+    },
+    {
+      "key": "autostart_pet",
+      "label": "随服务自动启动桌宠",
+      "type": "boolean",
+      "default": true,
+      "description": "插件启用时自动拉起原生桌宠窗口。关闭后需在插件页手动点「启动桌宠」"
+    },
+    {
+      "key": "bubble_enabled",
+      "label": "显示气泡",
+      "type": "boolean",
+      "default": true,
+      "description": "在角色上方显示状态文案与最近请求结果"
+    },
+    {
+      "key": "bubble_show_balance",
+      "label": "气泡显示余额",
+      "type": "boolean",
+      "default": true,
+      "description": "气泡底部显示 DeepSeek 余额。无可用凭据时自动隐藏，不影响状态显示"
+    },
+    {
+      "key": "balance_interval_s",
+      "label": "余额刷新间隔（秒）",
+      "type": "number",
+      "default": 60,
+      "min": 15,
+      "max": 3600,
+      "description": "自动刷新 DeepSeek 余额的间隔。查询失败时保留上次成功结果"
+    },
+    {
+      "key": "idle_after_s",
+      "label": "回到待机（秒）",
+      "type": "number",
+      "default": 8,
+      "min": 2,
+      "max": 600,
+      "description": "请求结束后经过多少秒没有新请求就回到待机动作"
+    },
+    {
+      "key": "reduce_motion",
+      "label": "减少动态",
+      "type": "boolean",
+      "default": false,
+      "description": "固定角色姿势，停止待机与点击动画；状态和气泡仍实时更新"
+    },
+    {
+      "key": "sound_enabled",
+      "label": "提示音",
+      "type": "boolean",
+      "default": false,
+      "description": "请求成功或失败时播放系统提示音"
+    },
+    {
+      "key": "allow_drag",
+      "label": "允许拖动角色",
+      "type": "boolean",
+      "default": true,
+      "description": "关闭后角色固定在初始位置，鼠标拖动无效"
+    },
+    {
+      "key": "always_on_top",
+      "label": "始终置顶",
+      "type": "boolean",
+      "default": true,
+      "description": "窗口保持在其他应用之上。关闭后角色会随普通窗口一起被遮挡"
+    },
+    {
+      "key": "track_agent_requests",
+      "label": "统计 Agent 内部请求",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后 AKM 自身 /v1/agent 产生的内部转发也会驱动角色动作；默认只统计外部客户端请求"
+    },
+    {
+      "key": "chat_model",
+      "label": "对话模型",
+      "type": "select",
+      "default": "",
+      "options_source": "/v1/models",
+      "allow_empty_option": true,
+      "empty_option_label": "（不启用对话与碎碎念）",
+      "description": "右键「跟我说话」与自动碎碎念使用该模型。请求走 AKM 自己的 /v1/chat/completions，因此计费与审计照常生效。留空则对话功能不可用"
+    },
+    {
+      "key": "chat_prompt",
+      "label": "对话人设",
+      "type": "text",
+      "default": "你是用户桌面上的一只大肥鱼桌宠，名字叫大肥鱼。用简短、轻松、可爱的中文回答，一般不超过两句话。如果用户问你是什么，就说自己是他桌面上的桌宠。",
+      "description": "对话的系统提示词，决定桌宠的说话风格"
+    },
+    {
+      "key": "whisper_enabled",
+      "label": "自动碎碎念",
+      "type": "boolean",
+      "default": true,
+      "description": "待机时按间隔自动说一句话。需要先配置对话模型；工作状态下不会打扰"
+    },
+    {
+      "key": "whisper_interval_s",
+      "label": "碎碎念间隔（秒）",
+      "type": "number",
+      "default": 180,
+      "min": 30,
+      "max": 7200,
+      "description": "两次自动碎碎念之间的最短间隔。每次都会产生一次模型调用，间隔太短会持续消耗额度"
+    },
+    {
+      "key": "whisper_prompt",
+      "label": "碎碎念人设",
+      "type": "text",
+      "default": "你是一只住在用户电脑桌面上的大肥鱼桌宠。请说一句很短的中文碎碎念（不超过 20 个字），语气轻松可爱，可以是关于工作、天气、吃饭、摸鱼之类的小感想。只输出这句话本身，不要引号、不要解释。",
+      "description": "碎碎念的系统提示词"
+    },
+    {
+      "key": "notify_unfocused",
+      "label": "失焦时弹系统通知",
+      "type": "boolean",
+      "default": true,
+      "description": "桌宠窗口不在前台时，对话回复与碎碎念改用 macOS 系统通知提示"
+    },
+    {
+      "key": "lock_screen",
+      "label": "锁定在当前屏幕",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后漫游与甩抛都只在当前这块屏内进行，不会跑到其他显示器"
+    }
+  ]
+}

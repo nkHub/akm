@@ -211,6 +211,8 @@ akm-menubar
 
 仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，提供 Markdown 知识库、RAG 检索增强生成能力。其「自动注入」也**默认关闭**：开启插件并开启插件配置里的 `auto_inject` 后，才会对 `chat / messages / responses` 三类文本请求自动抽取最后一个用户问题检索并注入参考资料；关闭时可使用管理台 query / ask 或 `/api/markdown-kb/query`、`ask` 手动使用知识库。v0.1.3 起插件还新增了独立开关 `inject_project_context`（同样默认关闭）：开启后为每个绑定过工作区的项目在插件数据目录下自动维护 `context.md` / `memory.md`（项目级上下文 + 最近修改记忆，不进知识库索引，与 `auto_inject` 互不影响），带工作区信号的请求会在会话首轮注入项目上下文、后续轮次仅在记忆版本更新时轻量刷新（若希望每个请求都带全量项目上下文，可再开启 `inject_project_context_each_turn`，默认关闭）；老项目可在插件加载时自动回填，也可调用 `POST /api/markdown-kb/projects/init` 手动补齐；`context.md` 的“首次生成 / 增量更新”由本地模型完成（只依据一次性读取的真实仓库材料，≤150 行固定章节，1 天冷却，无模型时保留现状）。v0.1.4 起信号抽取做了严格化与目录防御：只认会话开头少量消息里的完整环境块 / 系统级工作目录信号，对话正文里的 `Working directory:` 字样不再触发，且自动建项目只面向真实存在的目录，避免产生垃圾项目与无意义生成。该插件的检索接口还以 **MCP（HTTP）** 方式暴露，配置为 `{"type": "http", "url": "http://127.0.0.1:{port}/api/markdown-kb/mcp"}` 即可接入支持 HTTP 的 MCP 客户端（如 Claude Desktop / Cursor）。详见 [plugins/markdown_kb/README.md](plugins/markdown_kb/README.md)。
 
+仓库还提供一个**默认关闭**的 `dafeiyu`（大肥鱼桌宠）插件，**仅 macOS**：把 AKM 转发链路状态映射成一只原生桌宠——无边框透明置顶窗口里的角色会随请求进入思考、成功或失败，气泡同时显示最近一次请求结果与 DeepSeek 余额（长回复按宽度换行、逐字打字机显示）。状态来源是 AKM 的请求生命周期（`on_request → thinking`、`on_response → success/error`），不是 DSH 的会话事件，因此没有「查找/修改/执行」这类工具语义；`on_upstream_error` 只做展示、不返回策略动作，重试与换 Key 仍由 `error_handler`、`fallback_router` 决定。桌宠跑在独立 pyobjc 子进程里（AppKit 事件循环独占主线程，不能塞进 FastAPI），反向轮询 `/api/dafeiyu/state`；关闭桌宠不影响代理转发。**素材来自上游 [`PC2005-cloud/dsh-pet`](https://github.com/PC2005-cloud/dsh-pet)**（16 组动作 / 3444 帧 / 59MB WebP，MIT 授权，随本仓库 git 提交但不进插件市场 zip），授权与代码分离，详见 [plugins/dafeiyu/README.md](plugins/dafeiyu/README.md#素材来源与授权)。
+
 ## 配置
 
 所有配置保存在 `~/.akm/config.json`（首次启动自动创建），服务启动时读取，缺失项自动用默认值补全。命令行可用 `akm config get <项>` 查看、`akm config set <项> <值>` 修改单个配置项。

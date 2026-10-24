@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大肥鱼桌宠</title>
+<script>
+  /* 主题跟随管理台：插件页与管理台同源，直接读同一个 localStorage 键（akm.theme），
+     在首次绘制前把 data-theme 落到 <html>，避免先闪深色再跳浅色。
+     三种来源即时同步：管理台切主题（storage 事件）、宿主 postMessage、
+     「跟随系统」时的系统外观变化。 */
+  (function () {
+    var KEY = 'akm.theme';
+    var stored = 'dark';
+    try { stored = localStorage.getItem(KEY) || 'dark'; } catch (e) {}
+
+    function resolved() {
+      if (stored !== 'system') return stored;
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+        ? 'light' : 'dark';
+    }
+    function apply() {
+      var v = resolved();
+      document.documentElement.setAttribute('data-theme', v);
+      document.documentElement.style.colorScheme = v;
+    }
+    window.__akmPluginTheme = {
+      get: function () { return stored; },
+      set: function (v) { stored = (v === 'light' || v === 'system') ? v : 'dark'; apply(); },
+      apply: apply
+    };
+    apply();
+    window.addEventListener('storage', function (e) {
+      if (e && e.key && e.key !== KEY) return;
+      try { stored = localStorage.getItem(KEY) || 'dark'; } catch (err) {}
+      apply();
+    });
+    window.addEventListener('message', function (e) {
+      var d = e && e.data;
+      if (d && d.type === 'akm:theme') window.__akmPluginTheme.set(d.theme);
+    });
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var onChange = function () { if (stored === 'system') apply(); };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    }
+  })();
+</script>
+<style>
+  /* iframe 内拿不到父级 CSS 变量，这里自带两套配色；
+     主题由 <head> 脚本按 localStorage['akm.theme'] 落到 html[data-theme]。 */
+  :root {
+    color-scheme: dark;
+    --bg: #1e1e2e;
+    --bg-light: #262637;
+    --border: #33334d;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --accent: #818cf8;
+    --accent-soft: rgba(129, 140, 248, 0.16);
+    --ok: #34d399;
+    --ok-soft: rgba(52, 211, 153, 0.18);
+    --err: #f87171;
+    --err-soft: rgba(248, 113, 113, 0.16);
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, 0.18);
+  }
+
+  /* 浅色：与管理台 token 同档位（页面浅灰、卡片纯白、强调色压到 600 档） */
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f5f8;
+    --bg-light: #ffffff;
+    --border: #dfe3ea;
+    --text: #1f2937;
+    --muted: #4b5563;
+    --accent: #4f46e5;
+    --accent-soft: rgba(79, 70, 229, 0.12);
+    --ok: #059669;
+    --ok-soft: rgba(5, 150, 105, 0.14);
+    --err: #dc2626;
+    --err-soft: rgba(220, 38, 38, 0.12);
+    --warn: #b45309;
+    --warn-soft: rgba(180, 83, 9, 0.14);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--bg-light);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card h2 {
+    font-size: 13px; margin: 0 0 12px; font-weight: 600;
+    color: var(--text); display: flex; align-items: center; gap: 8px;
+  }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 12.5px; }
+  .kv span:first-child { color: var(--muted); flex-shrink: 0; }
+  .kv span:last-child { text-align: right; word-break: break-all; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 11px; line-height: 1.7;
+  }
+  .badge.ok { background: var(--ok-soft); color: var(--ok); }
+  .badge.off { background: var(--border); color: var(--muted); }
+  .badge.err { background: var(--err-soft); color: var(--err); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  button {
+    font: inherit; font-size: 12.5px; padding: 6px 14px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  button:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .preview {
+    display: flex; align-items: flex-end; justify-content: center;
+    min-height: 150px; background: var(--bg); border-radius: 8px;
+    border: 1px solid var(--border); padding: 10px; margin-bottom: 10px;
+    position: relative; overflow: hidden;
+  }
+  .preview img { max-width: 100%; max-height: 190px; image-rendering: auto; }
+  .recent { max-height: 200px; overflow-y: auto; }
+  .recent-row {
+    display: flex; justify-content: space-between; gap: 10px;
+    padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+  }
+  .recent-row:last-child { border-bottom: 0; }
+  .recent-row .t { color: var(--muted); flex-shrink: 0; }
+  .recent-row .d { color: var(--muted); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
+  .hint { color: var(--muted); font-size: 11.5px; margin-top: 10px; }
+  .err-line { color: var(--err); font-size: 12px; margin-top: 8px; word-break: break-all; }
+</style>
+</head>
+<body>
+  <h1>大肥鱼桌宠</h1>
+  <div class="sub">把 AKM 转发链路状态映射到原生桌宠窗口 · macOS 原生渲染</div>
+
+  <div class="grid">
+    <!-- 运行状态 -->
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="kv"><span>当前状态</span><span id="st-state">-</span></div>
+      <div class="kv"><span>桌宠进程</span><span id="st-pet">-</span></div>
+      <div class="kv"><span>在途请求</span><span id="st-inflight">-</span></div>
+      <div class="kv"><span>累计请求</span><span id="st-counters">-</span></div>
+      <div class="kv"><span>素材</span><span id="st-assets">-</span></div>
+      <div class="err-line" id="st-error" style="display:none"></div>
+      <div class="actions">
+        <button class="primary" id="btn-start">启动桌宠</button>
+        <button id="btn-stop">停止桌宠</button>
+        <button id="btn-restart">重启桌宠</button>
+      </div>
+      <div class="hint">窗口尺寸、置顶、拖动等外观项在插件「配置」里改，保存后自动重启桌宠生效。</div>
+    </div>
+
+    <!-- 余额 -->
+    <div class="card">
+      <h2>DeepSeek 余额</h2>
+      <div id="balance-box"><div class="empty">尚未查询</div></div>
+      <div class="actions">
+        <button id="btn-refresh">刷新余额</button>
+      </div>
+      <div class="hint">复用 AKM 里 provider=deepseek 的 Key 查询 /user/balance；无 Key 时不影响状态显示。</div>
+    </div>
+
+    <!-- 动作预览 -->
+    <div class="card">
+      <h2>动作预览</h2>
+      <div class="preview">
+        <img id="preview-img" alt="角色预览" src="">
+      </div>
+      <div class="kv"><span>当前动作</span><span id="st-clip">-</span></div>
+      <div class="hint">这里只预览当前状态的首帧，实际动画在原生窗口里播放。</div>
+    </div>
+
+    <!-- 最近请求 -->
+    <div class="card">
+      <h2>最近请求</h2>
+      <div class="recent" id="recent-box"><div class="empty">还没有请求经过 AKM</div></div>
+    </div>
+
+    <!-- 运行日志：卡住时自助排查用 -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <h2>运行日志</h2>
+      <pre id="log-box" style="max-height:280px;overflow:auto;margin:0 0 10px;
+        background:var(--bg);border:1px solid var(--border);border-radius:8px;
+        padding:10px;font-size:11px;line-height:1.5;white-space:pre-wrap;
+        word-break:break-all;color:var(--muted);">加载中…</pre>
+      <div class="actions">
+        <button id="btn-log-refresh">刷新日志</button>
+        <button id="btn-log-clear">清空日志</button>
+      </div>
+      <div class="hint">桌宠子进程的 stderr 全部写在这里（含鼠标事件、心跳、异常栈）。
+        遇到卡住时先看这里：如果心跳停了说明进程僵死，如果还在跳说明是动画层问题。</div>
+    </div>
+  </div>
+
+<script>
+// 插件页运行在宿主 iframe 内，同源访问 /api/dafeiyu/*，无需额外鉴权头。
+const API = "/api/dafeiyu";
+// 静态素材通过插件自己挂载的只读静态路径访问（宿主 views/ 挂载不含 assets/）
+const ASSET_BASE = "/api/dafeiyu/assets-static/pet";
+
+let state = null;
+
+// 简单 DOM 文本写入：所有内容来自本地插件接口，仍统一走 textContent 避免注入
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text == null ? "-" : String(text);
+}
+
+function setBadge(id, text, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = "badge " + (cls || "off");
+}
+
+// 状态名 → 中文（与后端 STATE_* 常量对应）
+const STATE_LABEL = {
+  idle: "待机",
+  thinking: "思考中",
+  working: "转发中",
+  waiting: "等待响应",
+  success: "成功",
+  error: "出错",
+};
+
+const STATE_CLASS = {
+  idle: "off",
+  thinking: "warn",
+  working: "warn",
+  waiting: "warn",
+  success: "ok",
+  error: "err",
+};
+
+async function loadStatus() {
+  try {
+    const res = await fetch(API + "/status");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    render(data);
+  } catch (err) {
+    setText("st-state", "读取失败");
+    const box = document.getElementById("st-error");
+    box.style.display = "block";
+    box.textContent = "无法连接插件接口：" + err.message;
+  }
+}
+
+function render(data) {
+  const st = data.state || {};
+  const pet = data.pet || {};
+  const assets = data.assets || {};
+
+  // 状态
+  const stateName = st.state || "idle";
+  setText("st-state", STATE_LABEL[stateName] || stateName);
+  setBadge("st-pet", pet.running ? "运行中" : "未启动", pet.running ? "ok" : "off");
+  setText("st-inflight", st.inflight || 0);
+  const c = st.counters || {};
+  setText("st-counters", `请求 ${c.requests || 0} · 成功 ${c.success || 0} · 失败 ${c.error || 0}`);
+  setText("st-assets", `${assets.clips || 0} 组动作 / ${assets.frames || 0} 帧`);
+  setText("st-clip", st.clip || "-");
+
+  // 进程错误提示
+  const errBox = document.getElementById("st-error");
+  if (pet.last_error) {
+    errBox.style.display = "block";
+    errBox.textContent = pet.last_error;
+  } else {
+    errBox.style.display = "none";
+  }
+
+  // 平台不支持时禁用按钮
+  const unsupported = pet.supported === false;
+  document.getElementById("btn-start").disabled = unsupported || pet.running;
+  document.getElementById("btn-stop").disabled = unsupported || !pet.running;
+
+  // 余额
+  renderBalance(st.balance || {});
+
+  // 最近请求
+  renderRecent(st.recent || []);
+
+  // 预览首帧：用当前动作的第一帧
+  const clip = st.clip || "idle";
+  const img = document.getElementById("preview-img");
+  const nextSrc = `${ASSET_BASE}/${clip}/${clip}_001.webp`;
+  if (img.getAttribute("src") !== nextSrc) img.src = nextSrc;
+}
+
+function renderBalance(bal) {
+  const box = document.getElementById("balance-box");
+  const rows = bal.balances || [];
+  if (!rows.length) {
+    const reason = bal.reason || "";
+    const text =
+      reason === "no_key" ? "未配置 DeepSeek Key"
+      : reason === "auth" ? "凭据无效或已过期"
+      : reason === "unavailable" ? "余额服务暂时不可用"
+      : bal.error ? "查询失败：" + bal.error
+      : "尚未查询";
+    box.innerHTML = `<div class="empty">${escapeHtml(text)}</div>`;
+    return;
+  }
+  const parts = rows.map((row) => {
+    const stale = bal.stale ? "（上次查询）" : "";
+    return `<div class="kv"><span>${escapeHtml(row.currency || "")} 总余额${stale}</span>
+      <span>${escapeHtml(row.total || "-")}</span></div>
+      <div class="kv"><span>赠送 / 充值</span>
+      <span>${escapeHtml(row.granted || "-")} / ${escapeHtml(row.topped_up || "-")}</span></div>`;
+  });
+  if (bal.queried_at) {
+    parts.push(`<div class="kv"><span>查询时间</span><span>${escapeHtml(bal.queried_at)}</span></div>`);
+  }
+  box.innerHTML = parts.join("");
+}
+
+function renderRecent(items) {
+  const box = document.getElementById("recent-box");
+  if (!items.length) {
+    box.innerHTML = '<div class="empty">还没有请求经过 AKM</div>';
+    return;
+  }
+  box.innerHTML = items
+    .map((item) => {
+      const cls = item.ok ? "ok" : "err";
+      return `<div class="recent-row">
+        <span class="t">${escapeHtml(item.at || "")}</span>
+        <span class="badge ${cls}">${escapeHtml(item.text || "")}</span>
+        <span class="d">${escapeHtml(item.detail || "")}</span>
+      </div>`;
+    })
+    .join("");
+}
+
+// 统一转义：内容来自本机接口，但仍是字符串拼接进 innerHTML
+function escapeHtml(text) {
+  return String(text == null ? "" : text).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
+async function post(path, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(API + path, { method: "POST" });
+    const data = await res.json();
+    if (data.ok === false && data.error) {
+      const errBox = document.getElementById("st-error");
+      errBox.style.display = "block";
+      errBox.textContent = data.error;
+    }
+  } catch (err) {
+    const errBox = document.getElementById("st-error");
+    errBox.style.display = "block";
+    errBox.textContent = "操作失败：" + err.message;
+  } finally {
+    if (btn) btn.disabled = false;
+    // 稍等进程状态落定再刷新
+    setTimeout(loadStatus, 700);
+  }
+}
+
+document.getElementById("btn-start").addEventListener("click", (e) => post("/pet/start", e.target));
+document.getElementById("btn-stop").addEventListener("click", (e) => post("/pet/stop", e.target));
+document.getElementById("btn-restart").addEventListener("click", (e) => post("/pet/restart", e.target));
+document.getElementById("btn-refresh").addEventListener("click", (e) => post("/balance/refresh", e.target));
+
+// ── 运行日志 ──
+// 日志可能很长，单独拉取而不是跟着 2 秒轮询走（避免每次刷新都传几十 KB）
+async function loadLog() {
+  const box = document.getElementById("log-box");
+  try {
+    const res = await fetch(API + "/log?lines=200");
+    const data = await res.json();
+    if (!data.ok) {
+      box.textContent = "读取日志失败：" + (data.error || "未知错误");
+      return;
+    }
+    const lines = data.lines || [];
+    if (!lines.length) {
+      box.textContent = "（暂无日志：桌宠还没启动过）";
+      return;
+    }
+    box.textContent = lines.join("\n");
+    // 自动滚到底部，最新日志可见
+    box.scrollTop = box.scrollHeight;
+  } catch (err) {
+    box.textContent = "读取日志失败：" + err.message;
+  }
+}
+
+document.getElementById("btn-log-refresh").addEventListener("click", loadLog);
+document.getElementById("btn-log-clear").addEventListener("click", async (e) => {
+  e.target.disabled = true;
+  try {
+    await fetch(API + "/log/clear", { method: "POST" });
+    document.getElementById("log-box").textContent = "（已清空）";
+  } finally {
+    e.target.disabled = false;
+  }
+});
+
+// 首次加载 + 每 5 秒自动刷新日志（比状态轮询慢，日志不需要那么实时）
+loadLog();
+setInterval(loadLog, 5000);
+
+// 每 2 秒刷新一次：与桌宠轮询同源，不额外加压
+loadStatus();
+setInterval(loadStatus, 2000);
+</script>
+</body>
+</html>
