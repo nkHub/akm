@@ -17,6 +17,7 @@
   "hooks": {
     "on_request": true,
     "on_response": true,
+    "on_key_selected": true,
     "on_upstream_error": true
   },
   "settings": [
@@ -64,7 +65,7 @@
       "default": 8,
       "min": 2,
       "max": 600,
-      "description": "请求结束后经过多少秒没有新请求就回到待机动作"
+      "description": "最后一个请求结束后经过多少秒没有新请求就回到待机。成功/失败动画至少播完一轮（success 约 10.1s、error 约 5.0s），设得比动画短也会自动兜底"
     },
     {
       "key": "reduce_motion",

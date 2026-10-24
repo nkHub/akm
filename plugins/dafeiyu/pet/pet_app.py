@@ -62,6 +62,11 @@ import companion  # noqa: E402  （同上）
 STATE_URL = os.environ.get("AKM_DAFEIYU_STATE_URL", "http://127.0.0.1:8800/api/dafeiyu/state")
 ASSET_ROOT = Path(os.environ.get("AKM_DAFEIYU_ASSET_ROOT", "")).expanduser()
 DATA_DIR = Path(os.environ.get("AKM_DAFEIYU_DATA_DIR", str(Path.home() / ".akm" / "dafeiyu")))
+# 父进程（AKM 宿主）pid：由插件在 spawn 时注入。
+# **用途**：宿主被强杀 / 崩溃时，桌宠子进程因 start_new_session=True 已脱离
+# 进程组，会变成孤儿窗口一直挂在桌面上。tick 里定期检查这个 pid 是否还活着，
+# 宿主没了就自己退出，保证「关闭 AKM 时桌宠一起关闭」。
+PARENT_PID = int(os.environ.get("AKM_DAFEIYU_PARENT_PID") or 0)
 LAYOUT_FILE = DATA_DIR / "layout.json"
 
 # 轮询间隔：状态变化不需要毫秒级，1 秒足够，也不给宿主添压力。
@@ -282,6 +287,15 @@ class PetWindowController(NSObject):
         self.manual_clip: str | None = None
         self.frame_index = 0
         self.last_frame_at = 0.0
+        # 进程启动时刻：父进程存活检测的宽限期基准（启动 10 秒内不检测，
+        # 避免宿主刚 spawn 完、pid 还没稳定时误判成「父进程已退出」）。
+        self._started_at = time.time()
+        self._last_parent_check = 0.0
+        # **待播队列：不强制中断正在播放的动画**。
+        # 新动作先记在这里，等当前动作播完一轮（_tickOnce 轮末）才切换。
+        # 直接切会让动画从第 1 帧重头开始，高频切换时看起来就是闪动。
+        self._pending_state_clip: str = ""
+        self._pending_override_clip: str = ""
 
         # ── 交互状态 ──
         self.dragging = False
@@ -322,6 +336,9 @@ class PetWindowController(NSObject):
         self.bubble_show_balance = True
         # 对话期间强制开气泡时，记录用户原本的开关值以便还原
         self._bubble_was_enabled = True
+        # 碎碎念临时借用气泡（用户可能设了「不显示气泡」）：True 表示
+        # 当前气泡是碎碎念临时打开的，展示期结束后要还原成隐藏。
+        self._whisper_forced_bubble = False
         self.reduce_motion = False
         self.idle_decor_at = time.time()
         self.next_decor_delay = random.uniform(25, 55)
@@ -812,18 +829,29 @@ class PetWindowController(NSObject):
             if self.panel:
                 self.panel.setLevel_(NSStatusWindowLevel if new_top else 0)
 
-        # 状态动作：只有在没有一次性动作覆盖时才切换
+        # 状态动作：**不强制中断正在播放的动画**。
+        #
+        # 用户明确要求「所有地方不能强制中断已运行的动画，否则会造成动画闪动」。
+        # 原来的做法是：服务端 clip 一变就立刻切 state_clip 并把 frame_index 归零，
+        # 于是动画从第 1 帧重头开始——高频状态切换时（thinking→working→waiting）
+        # 看起来就是一帧一帧地闪。
+        #
+        # 现在改为「排队等待」：新 clip 先记到 _pending_state_clip，
+        # 等当前动作**播完一轮**（_tickOnce 里检测到 loop 边界）才真正切换。
+        # 循环动作（idle/thinking/working/waiting）本来就会自然走到轮末，
+        # 一次性动作（success/error）播完才切，都不会被打断。
         clip = str(payload.get("clip") or "idle")
         if clip != self.state_clip and self.cache.has(clip):
-            self.state_clip = clip
-            # 只在真正按状态播放时重置帧进度；手动锁定/临时动作期间不打断它们
-            if self.override_clip is None and self.manual_clip is None:
-                self.frame_index = 0
-                self.last_frame_at = 0.0
+            # 只登记目标，真正切换在 _tickOnce 里「当前动作播完一轮」时执行。
+            # 临时动作/手动锁定期间也照常登记，它们自然结束后会看到这个目标。
+            self._pending_state_clip = clip
 
         # 气泡文案：一次性写满三行
         # 气泡：对话/碎碎念内容在展示期内优先，不被状态文案立刻覆盖
         if time.time() >= self.bubble_hold_until:
+            # 碎碎念的展示期结束：把临时打开的气泡还原成用户原本的设置
+            # （用户可能是「不显示气泡」，碎碎念只是临时借用一下）。
+            self._restoreBubbleAfterWhisper()
             self._setBubbleLines(self._format_lines(payload))
 
         # 待机装饰动作调度（手动锁定动画时不插播，否则会打断用户选的动作）
@@ -1158,6 +1186,40 @@ class PetWindowController(NSObject):
         # 打字机效果：逐字推进第 0 行（对话/碎碎念回复）
         self._tickTypewriter(now)
 
+        # 宿主存活检测：AKM 关掉/崩溃后桌宠要一起退出，不留孤儿窗口。
+        # 用 os.kill(pid, 0) 探测（不真发信号，只检查进程存在）。
+        # 父进程正常关闭时会走 on_unload → stop_pet 主动终止子进程，
+        # 这里是「宿主被强杀 / 崩溃」时的兜底。
+        # 宿主存活检测：AKM 关掉/崩溃后桌宠要一起退出，不留孤儿窗口。
+        # 用 os.kill(pid, 0) 探测（不真发信号，只检查进程存在）。
+        #
+        # **三种结果要分开处理**：
+        #   - 正常返回 → 进程存在，继续
+        #   - ProcessLookupError → 进程不存在 → 退出
+        #   - PermissionError → 进程存在但无权限（不该发生在同一用户下）→ **继续**
+        #     之前把 PermissionError 也当「已退出」，会在某些沙箱/权限场景下
+        #     误杀桌宠（表现为「启动失败」）。
+        # 另外启动后 10 秒内不做检测：宿主刚 spawn 完子进程、pid 还没稳定，
+        # 过早探测容易误判。
+        if PARENT_PID > 0 and now - getattr(self, "_last_parent_check", 0) > 2.0:
+            self._last_parent_check = now
+            if getattr(self, "_started_at", 0) and now - self._started_at < 10.0:
+                pass  # 启动宽限期，先不检测
+            else:
+                gone = False
+                try:
+                    os.kill(PARENT_PID, 0)
+                except ProcessLookupError:
+                    gone = True
+                except PermissionError:
+                    gone = False   # 进程存在，只是没权限探测
+                except Exception:
+                    gone = False   # 其它异常保守当存在，���误杀
+                if gone:
+                    log(f"父进程 {PARENT_PID} 已退出，桌宠自行结束")
+                    AppHelper.stopEventLoop()
+                    return
+
         # 自动碎碎念：到点且空闲时触发一次
         # 兜底消费：后台线程若没能通过 performSelectorOnMainThread 回主线程，
         # 载荷会留在 _pending_reply，这里在主线程安全地处理掉，避免回复丢失。
@@ -1203,6 +1265,39 @@ class PetWindowController(NSObject):
             return
         self.last_frame_at = now
         if self.frame_index >= len(frames):
+            # 用户要求「不能强制中断已运行的动画」——所以动作切换必须等
+            # 当前动作完整播完一轮，而不是新 clip 一到就归零重播（那会闪）。
+            #
+            # 优先级：待播的 override（摸头/装饰/拖拽）> 待切的状态动作。
+            if self.manual_clip is None:
+                pend_override = getattr(self, "_pending_override_clip", "")
+                if pend_override and self.cache.has(pend_override):
+                    self._pending_override_clip = ""
+                    self.override_clip = pend_override
+                    new_frames = self.cache.frames(pend_override)
+                    if new_frames:
+                        self.frame_index = 1
+                        self.last_frame_at = now
+                        self._showFrame(new_frames[0])
+                        return
+            if self.override_clip is None and self.manual_clip is None:
+                target = getattr(self, "_pending_state_clip", "")
+                if target and target != self.state_clip and self.cache.has(target):
+                    self.state_clip = target
+                    self._pending_state_clip = ""
+                    # 换动作了：重取帧列表，从第 1 帧开始播新动作
+                    new_frames = self.cache.frames(target)
+                    if new_frames:
+                        self.frame_index = 1
+                        self.last_frame_at = now
+                        self._showFrame(new_frames[0])
+                        return
+            # **状态动作也要遵守 loop=False**：success / error 是一次性动画，
+            # 播完应该停在最后一帧，而不是归零重播。
+            if not self.cache.loops(clip) and self.override_clip is None:
+                # 停在最后一帧，等状态回落（服务端按动画时长兜底切到 idle）
+                self._showFrame(frames[len(frames) - 1])
+                return
             self.frame_index = 0
         self._showFrame(frames[self.frame_index])
         self.frame_index += 1
@@ -1234,17 +1329,23 @@ class PetWindowController(NSObject):
 
     @objc.python_method
     def _play_override(self, clip: str) -> None:
-        """播放一次性动作（摸头 / 装饰）。不存在该素材时静默跳过。
+        """请求播放一次性动作（摸头 / 装饰 / 拖拽 / 思考等）。
 
-        手动锁定动画期间直接忽略：否则点击角色会把用户选中的动画切走。
+        不存在该素材时静默跳过；手动锁定动画期间直接忽略（否则点击角色会把
+        用户选中的动画切走）。
+
+        **不强制中断正在播放的动作**（用户要求：强制中断会造成动画闪动）：
+        新动作只登记到 `_pending_override_clip`，等当前动作播完一轮后
+        由 `_tickOnce` 在轮末切换。这样摸头、拖拽、思考这些叠加触发
+        不会把正在播的动画切成两截。
         """
         if self.manual_clip is not None:
             return
         if not self.cache.has(clip):
             return
-        self.override_clip = clip
-        self.frame_index = 0
-        self.last_frame_at = 0.0
+        # 当前没有任何动作在播（override 为空且状态动作已到轮末）时直接生效；
+        # 否则排队，等 _tickOnce 在轮末切换。
+        self._pending_override_clip = clip
 
     # ── 屏幕空间（多屏） ────────────────────────────────────
 
@@ -1934,11 +2035,20 @@ class PetWindowController(NSObject):
         # 思考动作
         self._play_override("thinking")
 
+        # 碎碎念要「文本 + 动作」一起回来：thinking 动画播完也未必有结果，
+        # 这里仍先播 thinking（表示「在想」），等回复到了再换成模型选的动作。
+        self._play_override("thinking")
+
         memory = self.memory
         if kind == "chat":
             messages = companion.build_chat_messages(memory, user_text, self.chat_prompt)
         else:
-            messages = companion.build_whisper_messages(memory.whispers, self.whisper_prompt)
+            # 碎碎念用 JSON 提示词：让模型同时给出「一句话」和「配哪个动作」。
+            # 用 companion.WHISPER_JSON_PROMPT 而不是用户自定义的 chat_prompt——
+            # 后者是自由文本提示词，模型不会按 JSON 输出。
+            messages = companion.build_whisper_messages(
+                memory.whispers, companion.WHISPER_JSON_PROMPT
+            )
 
         import threading
 
@@ -2005,6 +2115,13 @@ class PetWindowController(NSObject):
             return
 
         text = result.text
+        # 碎碎念：解析出「气泡文本 + 动画 clip」。对话保持原文不解析
+        # （用户自己说的话，模型回复里不该出现动作名）。
+        whisper_clip = ""
+        if kind == "whisper":
+            text, whisper_clip = companion.parse_whisper_reply(text)
+        if not text:
+            text = "…"
         now = time.time()
         if kind == "chat":
             self.memory.chat.append(
@@ -2021,9 +2138,51 @@ class PetWindowController(NSObject):
         self.bubble_hold_until = time.time() + 8.0 + min(
             TYPEWRITER_MAX_S, len(text) * TYPEWRITER_CHAR_S
         )
+        # **碎碎念强制显示气泡**：用户可能关掉了「显示气泡」，但碎碎念本身
+        # 就是一句话，没有气泡就完全看不到。这里临时打开气泡并在展示期结束后
+        # 还原用户原本的设置（复用对话输入框那套 _bubble_was_enabled 机制）。
+        if kind == "whisper":
+            self._showBubbleTemporarily()
         self._setBubbleLines((text, "", ""), typewriter=True)
-        self._play_override("poke" if self.cache.has("poke") else "idle")
+        # **动画由模型选**（碎碎念）：clip 已在 parse_whisper_reply 里校验过
+        # 存在于 WHISPER_CLIPS；这里再确认素材真的有，避免静默不播。
+        # 对话 / 解析失败时退回 poke（戳一下）。
+        if whisper_clip and self.cache.has(whisper_clip):
+            self._play_override(whisper_clip)
+        else:
+            self._play_override("poke" if self.cache.has("poke") else "idle")
         self._notify_if_unfocused("大肥鱼", text)
+
+    @objc.python_method
+    def _showBubbleTemporarily(self) -> None:
+        """临时打开气泡，展示期结束后由 ``_restoreBubbleAfterWhisper`` 还原。
+
+        **为什么不直接改 bubble_enabled 就完事**：用户配置是「不显示气泡」，
+        碎碎念必须显示（否则看不到那句话），但显示完要**自动隐藏回去**——
+        不能因为一次碎碎念就把用户的设置永久改掉。
+        这里记下原值到 ``_bubble_was_enabled``，与对话输入框复用同一套还原机制。
+        """
+        if self.bubble_enabled:
+            # 本来就开着，什么都不用做，也不需要还原
+            self._whisper_forced_bubble = False
+            return
+        self._bubble_was_enabled = False
+        self._whisper_forced_bubble = True
+        self.bubble_enabled = True
+        if self.bubble is not None:
+            self.bubble.setHidden_(False)
+        self._resizeWindow()
+
+    @objc.python_method
+    def _restoreBubbleAfterWhisper(self) -> None:
+        """碎碎念展示结束后把气泡还原成用户原本的设置（隐藏）。"""
+        if not getattr(self, "_whisper_forced_bubble", False):
+            return
+        self._whisper_forced_bubble = False
+        self.bubble_enabled = False
+        if self.bubble is not None:
+            self.bubble.setHidden_(True)
+        self._resizeWindow()
 
     def menuHide_(self, sender) -> None:
         """把窗口藏起来（进程仍在跑，状态继续采集）。"""
