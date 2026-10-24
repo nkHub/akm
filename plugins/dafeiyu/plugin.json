@@ -1,7 +1,7 @@
 {
   "name": "dafeiyu",
   "version": "0.1.0",
-  "has_menu": true,
+  "has_menu": false,
   "category": "app",
   "description": "大肥鱼桌宠（macOS）：把 AKM 转发链路状态映射成原生透明置顶窗口里的角色动作，并在气泡里显示 DeepSeek 余额与最近请求结果",
   "builtin": false,
@@ -50,13 +50,12 @@
       "description": "气泡底部显示 DeepSeek 余额。无可用凭据时自动隐藏，不影响状态显示"
     },
     {
-      "key": "balance_interval_s",
-      "label": "余额刷新间隔（秒）",
-      "type": "number",
-      "default": 60,
-      "min": 15,
-      "max": 3600,
-      "description": "自动刷新 DeepSeek 余额的间隔。查询失败时保留上次成功结果"
+      "key": "balance_key_alias",
+      "label": "关联 Key（余额来源）",
+      "type": "select",
+      "default": "",
+      "options": [],
+      "description": "选择用哪个 Key 显示余额。选项由插件加载时填入真实 Key 列表，默认选中自动匹配到的那个。余额数据读 AKM 已查好的用量缓存，插件不会重复请求"
     },
     {
       "key": "idle_after_s",

@@ -380,11 +380,17 @@ def test_no_requests_means_no_terminal_animation():
 # 否则不影响其他显示逻辑。判定依据是请求登记表（on_key_selected 标记 sent），
 # 不再用「thinking 播了多久」这种猜测。
 
-def _add_pending(plugin, req_id: str, sent: bool):
-    """往登记表塞一个在途请求。sent=True 表示已选 Key、在等上游。"""
+def _add_pending(plugin, req_id: str, sent: bool, ago: float = 0.0):
+    """往登记表塞一个在途请求。sent=True 表示已选 Key、在等上游。
+
+    ``ago`` 把「已发往上游」的时刻往前推 N 秒——单请求按时间判定
+    （方案 B）时用来模拟「已经等了很久」。
+    """
+    now = time.time()
     plugin._pending_requests[req_id] = {
         "sent": sent,
-        "started": time.time(),
+        "started": now - ago,
+        "sent_at": now - ago,
     }
 
 
@@ -455,15 +461,42 @@ def test_waiting_does_not_touch_round_counters():
 
 
 def test_waiting_stays_waiting():
-    """已在 waiting 时不重复切换（避免状态抖动）。"""
+    """已在 waiting 且条件仍成立时，不重复切换（避免状态抖动）。"""
     plugin = _new_plugin()
-    plugin._inflight = 1
+    plugin._inflight = 2
     _add_pending(plugin, "a", True)
+    _add_pending(plugin, "b", True)
     plugin._set_state(idx.STATE_WAITING)
     before = plugin._state_since
     _payload(plugin)
     assert plugin._state == idx.STATE_WAITING
     assert plugin._state_since == before   # 计时没被重置
+
+
+def test_waiting_exits_when_ratio_drops():
+    """**waiting 必须能自己退出**：占比跌回阈值以下要回到忙碌态。"""
+    plugin = _new_plugin()
+    plugin._inflight = 2
+    _add_pending(plugin, "a", True)
+    _add_pending(plugin, "b", True)
+    plugin._set_state(idx.STATE_WORKING)
+    assert _payload(plugin)["state"] == idx.STATE_WAITING
+    # 新请求进来但还没选 Key → 占比掉到 2/3
+    _add_pending(plugin, "c", False)
+    plugin._inflight = 3
+    assert _payload(plugin)["state"] == idx.STATE_WORKING
+
+
+def test_single_request_not_waiting_immediately():
+    """**单请求刚发出不该切 waiting**（原来 ratio=1/1 会立刻满足 9 成）。"""
+    plugin = _new_plugin()
+    plugin._inflight = 1
+    _add_pending(plugin, "a", True)     # ago=0，刚发出
+    plugin._set_state(idx.STATE_THINKING)
+    assert _payload(plugin)["state"] == idx.STATE_THINKING
+    # 等够 thinking 动画时长后才切
+    _add_pending(plugin, "a", True, ago=idx.STATE_ANIM_SECONDS[idx.STATE_THINKING] + 1)
+    assert _payload(plugin)["state"] == idx.STATE_WAITING
 
 
 # ── waiting → working → success / error ──────────────────
@@ -472,7 +505,8 @@ def test_waiting_success_plays_working_then_success():
     """waiting 期间成功 → 先播 working，播完一轮才落定 success。"""
     plugin = _new_plugin()
     plugin._inflight = 1
-    _add_pending(plugin, "a", True)
+    # 单请求要等够 thinking 动画时长才切 waiting（方案 B）
+    _add_pending(plugin, "a", True, ago=idx.STATE_ANIM_SECONDS[idx.STATE_THINKING] + 1)
     plugin._set_state(idx.STATE_THINKING)
     assert _payload(plugin)["state"] == idx.STATE_WAITING
     # 请求成功返回（模拟 on_response 的 waiting 分支）
@@ -498,7 +532,8 @@ def test_waiting_error_settles_immediately():
     """waiting 期间失败 → 直接 error（不等 working 动画）。"""
     plugin = _new_plugin()
     plugin._inflight = 1
-    _add_pending(plugin, "a", True)
+    # 单请求要「等够 thinking 动画时长」才切 waiting（方案 B）
+    _add_pending(plugin, "a", True, ago=idx.STATE_ANIM_SECONDS[idx.STATE_THINKING] + 1)
     plugin._set_state(idx.STATE_THINKING)
     assert _payload(plugin)["state"] == idx.STATE_WAITING
     plugin._inflight = 0
@@ -523,3 +558,181 @@ def test_deferred_terminal_cleared_after_settle():
     assert _payload(plugin)["state"] == idx.STATE_SUCCESS
     assert plugin._deferred_terminal == ""
     assert plugin._deferred_detail == ""
+
+
+# ── 余额：读 AKM 缓存（不再自己请求）─────────────────────
+# 用户确认：AKM 已有用量查询体系，插件不该重复请求。
+# 数据来自 keys.usage_data，形状是「查询记录包装 → raw_response → balance_infos」。
+
+def test_parse_balance_wrapped_record():
+    """AKM 实际存的形状：{ok, raw_response:{balance_infos:[...]}}。"""
+    data = {
+        "ok": True, "status_code": 200, "latency_ms": 127,
+        "queried_at": "2026-10-24 22:09:46", "error": "",
+        "raw_response": {
+            "is_available": True,
+            "balance_infos": [{
+                "currency": "CNY", "total_balance": "180.91",
+                "granted_balance": "77.16", "topped_up_balance": "103.74",
+            }],
+        },
+    }
+    parsed = idx.Plugin._parse_balance(data)
+    assert parsed["available"] is True
+    assert parsed["balances"][0]["currency"] == "CNY"
+    assert parsed["balances"][0]["total"] == "180.91"
+
+
+def test_parse_balance_raw_shape():
+    """未包装的上游原始结构（自定义脚本可能直接返回）。"""
+    parsed = idx.Plugin._parse_balance({
+        "is_available": True,
+        "balance_infos": [{"currency": "CNY", "total_balance": "50.5"}],
+    })
+    assert parsed["balances"][0]["total"] == "50.5"
+
+
+def test_parse_balance_flat_extractor_shape():
+    """extractor 扁平结果 {remaining, unit}。"""
+    parsed = idx.Plugin._parse_balance(
+        {"isValid": True, "remaining": "182.97", "unit": "元"}
+    )
+    assert parsed["balances"][0]["currency"] == "元"
+    assert parsed["balances"][0]["total"] == "182.97"
+
+
+def test_parse_balance_rejects_empty():
+    """空/缺字段的数据不能当成余额。"""
+    for data in (None, {}, {"isValid": True}, {"remaining": ""}, {"raw_response": {}}):
+        assert idx.Plugin._parse_balance(data) is None
+
+
+def test_balance_interval_setting_removed():
+    """balance_interval_s 设置项必须已删除（余额改读 AKM 缓存）。"""
+    import json
+    from pathlib import Path
+    meta = json.loads(
+        (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+         / "plugin.json").read_text(encoding="utf-8")
+    )
+    keys = [s["key"] for s in meta["settings"]]
+    assert "balance_interval_s" not in keys, "余额刷新间隔应已删除"
+    assert "bubble_show_balance" in keys, "气泡余额开关要保留"
+
+
+def test_no_balance_loop_in_plugin():
+    """插件不应再有 _balance_loop（自己定时查余额）。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+           / "index.py").read_text(encoding="utf-8")
+    assert "_balance_loop" not in src, "余额轮询任务应已移除"
+    assert "get_usage_query_config" in src, "应改为读 AKM 用量缓存"
+
+
+# ── 关联 Key 配置（balance_key_alias）────────────────────
+
+def test_balance_key_alias_setting_exists():
+    """配置里要有「关联 Key」项，让用户能指定余额来源。"""
+    import json
+    from pathlib import Path
+    meta = json.loads(
+        (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+         / "plugin.json").read_text(encoding="utf-8")
+    )
+    keys = [s["key"] for s in meta["settings"]]
+    assert "balance_key_alias" in keys
+
+
+def test_plugin_page_hidden():
+    """插件页已隐藏（has_menu=false），配置项仍可用。"""
+    import json
+    from pathlib import Path
+    meta = json.loads(
+        (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+         / "plugin.json").read_text(encoding="utf-8")
+    )
+    assert meta["has_menu"] is False, "插件页应隐藏"
+    assert meta["settings"], "配置项必须保留"
+
+
+def test_pick_balance_key_respects_alias():
+    """填了 alias 就只认那一个；找不到返回 None，不偷偷退回别的 Key。"""
+    plugin = _new_plugin()
+    plugin._cfg = {"balance_key_alias": "not-exist-alias"}
+    assert plugin._pick_balance_key() is None
+
+
+def test_pick_balance_key_alias_empty_falls_back():
+    """alias 留空时走默认匹配（不返回 None 或返回某个真实 Key）。"""
+    plugin = _new_plugin()
+    plugin._cfg = {"balance_key_alias": ""}
+    key = plugin._pick_balance_key()
+    # 没有 Key 的环境返回 None 也算正常；有 Key 时必须返回一个 dict
+    assert key is None or isinstance(key, dict)
+
+
+# ── 关联 Key 下拉（动态填充 options）─────────────────────
+
+class _FakeSetting:
+    def __init__(self, key, typ, default=""):
+        self.key = key
+        self.type = typ
+        self.default = default
+        self.options = []
+        self.allow_empty_option = False
+
+
+class _FakeMeta:
+    def __init__(self):
+        self.settings = [_FakeSetting("balance_key_alias", "select", "")]
+
+
+def _plugin_with_meta(cfg=None):
+    plugin = _new_plugin()
+    plugin._cfg = cfg or {}
+    plugin.meta = _FakeMeta()
+    return plugin
+
+
+def test_sync_key_options_fills_real_aliases():
+    """加载后下拉选项应填成真实 Key 的 alias 列表。"""
+    plugin = _plugin_with_meta()
+    plugin._sync_balance_key_options()
+    setting = plugin.meta.settings[0]
+    assert setting.type == "select"
+    # 环境里至少有一个 Key 才会填；没有 Key 时保持空也算正常
+    if setting.options:
+        assert all(isinstance(a, str) and a for a in setting.options)
+
+
+def test_sync_key_options_defaults_to_auto_match():
+    """配置留空时，下拉默认选中「自动匹配」算出来的那个 Key。"""
+    plugin = _plugin_with_meta({})
+    plugin._sync_balance_key_options()
+    setting = plugin.meta.settings[0]
+    auto = plugin._pick_balance_key()
+    if auto and setting.options:
+        assert setting.default == auto["alias"], "默认选中应等于自动匹配结果"
+
+
+def test_sync_key_options_keeps_user_choice():
+    """用户已显式选了有效 Key 时，不能被他自动匹配结果覆盖。"""
+    plugin = _plugin_with_meta()
+    plugin._sync_balance_key_options()
+    aliases = plugin.meta.settings[0].options
+    if not aliases:
+        return  # 没有 Key 的环境跳过
+    chosen = aliases[-1]
+    plugin2 = _plugin_with_meta({"balance_key_alias": chosen})
+    plugin2._sync_balance_key_options()
+    # 用户选的是有效 alias → default 保持空（不覆盖），配置值本身仍是 chosen
+    assert plugin2.meta.settings[0].default == ""
+
+
+def test_sync_key_options_falls_back_when_alias_deleted():
+    """配置指向已删除的 Key 时，回落到自动匹配结果。"""
+    plugin = _plugin_with_meta({"balance_key_alias": "__deleted__"})
+    plugin._sync_balance_key_options()
+    setting = plugin.meta.settings[0]
+    if setting.options:
+        assert setting.default != "__deleted__"

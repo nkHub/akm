@@ -42,7 +42,7 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 | 空闲（无在途请求且超过 `idle_after_s`） | `idle` | `idle` |
 | `on_request`，且 `_inflight == 1`（本轮第一个请求） | `thinking` | `thinking` |
 | `on_request`，且 `_inflight >= 2`（并发第 2+ 个） | `working` | `working` |
-| 在途请求中 **≥ 90%** 已选 Key、在等上游返回 | `waiting` | `waiting` |
+| 并发 ≥ 2 时 ≥ 90% 已选 Key 在等上游；单请求时已等 ≥ 10.12s | `waiting` | `waiting` |
 | 静默期（1.5s）过后，本轮成功率 ≥ 50% | `success` | `success` |
 | 静默期（1.5s）过后，本轮成功率 < 50% | `error` | `error` |
 | 任意时刻 `on_upstream_error`（重试期间就要看到） | `error` | `error` |
@@ -72,15 +72,19 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 庆祝、完全看不出还在处理新请求。1.5 秒静默期把两种情况分开：之后没请求了
 就播完整 `success`/`error`（用户能看到反馈），之后马上又来就跳过终态。
 
-**`waiting` 状态（按请求占比判定）**：显示条件不是「等了多久」，而是
-**当前在途请求里有 9 成以上在等上游返回**（`WAITING_RATIO = 0.9`）。
+**`waiting` 状态（方案 B：单请求按时间、多请求按占比）**：
 
 - **怎么知道「在等上游」**：插件注册了 `on_key_selected` hook——Key 已选、
   请求即将发往上游，这是 AKM 里唯一准确的「已发出」时点。每个请求在
   `_pending_requests` 登记表里记 `sent` 标记，`on_response` 时移除。
-  `waiting = sent 数 / 登记总数`。
-- **不满足 9 成就不切**：少量请求慢不该影响整体显示，其余状态逻辑照常
-  （不动 `_inflight` / 轮次计数 / 静默期）。
+- **并发 ≥ 2 时用占比**：`sent 数 / 总数 ≥ 0.9`（`WAITING_RATIO`）才切。
+  这才符合「9 成请求在等上游」的本意。
+- **只有 1 个请求时用时间**：`thinking` 动画播完一轮（10.12s）仍未返回才切。
+  **不能用占比**——单请求时 `1/1` 恒为 100%，每个请求刚发出就切 waiting，
+  thinking 只剩选 Key 那几毫秒、working 几乎看不到（这是实际踩过的坑）。
+- **`waiting` 能自己退出**：占比跌破阈值（有请求完成、或新请求还没发出）时
+  自动回到 `working`（多请求）/ `thinking`（单请求），不会卡死。
+- **不满足条件就不切**：其余状态逻辑照常（不动 `_inflight` / 轮次计数 / 静默期）。
 - **已在 `success`/`error` 时不切**：那一轮的终态动画还没播完，切走会让
   success 一闪就没了。
 - **`waiting` 后的走向**：
@@ -99,12 +103,37 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 `fallback_router` 等策略插件决定，避免本插件改变转发行为。
 ### 2.2 余额查询
 
-- 取 `provider=deepseek` 的 Key（优先 `base_url` 含 deepseek 的），请求 `{base_url}/user/balance`。
-- 金额按字符串原样透传，不在插件侧做浮点换算。
-- 失败保留上次成功结果并标 `stale`，气泡显示「余额(上次)」；无 Key 时显示「未配置 DeepSeek Key」，
-  不影响状态动作。
-- 自动刷新间隔 `balance_interval_s`（默认 60s），手动刷新最快 5s 一次。
-- 凭据与上游原始错误不会进入状态接口、气泡或事件流。
+- **数据来源是 AKM 的用量缓存，插件不再自己请求**。AKM 本身就有完整的
+  用量查询体系：`key_pool._DEEPSEEK_USAGE_SCRIPT` 内置了
+  `{{baseUrl}}/user/balance`，`usage_query.execute_query_script()` 负责执行，
+  后台 `UsageQueryWorker` 按每个 Key 的 `usage_query_interval_m` 定时刷新，
+  结果写进 `keys.usage_data`。插件自己再写一套 httpx 请求 + 定时器，
+  等于**同一个 Key 被查两次、两份数据、两处配置**，还可能不一致。
+- **选哪个 Key**：
+  - **配置里选了某个 Key**（`balance_key_alias` 下拉）→ **只认那一个**。
+    找不到就返回 `no_key`，**不会偷偷退回别的 Key**——否则用户以为在看 A 的
+    余额、实际显示的是 B 的。
+  - **下拉的选项怎么来的**：插件在 `on_load` 里把 `list_keys()` 的 alias
+    写进 `meta.settings[*].options`（`self.meta` 与
+    `PluginManager._plugin_metas[name]` 是同一个对象）。宿主的
+    `options_source` 只硬编码支持 `/v1/models`，没法动态列 Key，只能这么做。
+  - **默认选中自动匹配的结果**：用户没显式配过、或配的 Key 已删除时，
+    插件把「自动匹配算出来的 alias」写进该项的 `default`，下拉打开就是
+    实际生效的那个，不会出现「显示 A、实际用 B」。
+  - **自动匹配规则**（用于算默认值）：优先 `provider=deepseek` 且 `base_url`
+    含 deepseek（官方或指向官方的网关）；否则第一个 deepseek Key；否则任何
+    `base_url` 含 deepseek 的 Key。多个候选取**优先级最高的那个**
+    （`list_keys` 按 `priority` 升序），不做合计。
+- **`usage_data` 有三层包装，必须逐层剥**：① 查询记录
+  `{ok, status_code, queried_at, error, raw_response}` → ② 上游原始响应
+  `{is_available, balance_infos:[...]}` → ③ extractor 扁平结果
+  `{isValid, remaining, unit}`（自定义脚本可能直接返回）。
+  `_parse_balance()` 三种都兼容，金额按字符串原样透传、不做浮点换算。
+- 失败保留上次成功结果并标 `stale`，气泡显示「余额(上次)」；无 Key 时显示
+  「未配置 DeepSeek Key」；有 Key 但 AKM 还没查过 → 显示「未查询」。
+  都不影响状态动作。
+- **想让余额立刻更新**：去 Key 管理页对该 Key 点「查询用量」，
+  或把该 Key 的「用量查询间隔」调小。插件侧没有独立的刷新间隔了。
 
 ### 2.3 桌宠进程
 
@@ -199,7 +228,7 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 | POST | `/pet/start` | 启动桌宠进程 |
 | POST | `/pet/stop` | 停止桌宠进程 |
 | POST | `/pet/restart` | 重启（改完窗口配置后调用） |
-| POST | `/balance/refresh` | 手动刷新余额（5s 限频） |
+| POST | `/balance/refresh` | 重新读余额缓存（数据来自 AKM 的 `keys.usage_data`） |
 | GET | `/assets/manifest` | 素材清单 |
 | GET | `/assets-static/*` | 素材只读静态挂载（设置页预览首帧用） |
 
@@ -211,7 +240,7 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 | 文件 | 职责 |
 |------|------|
 | `plugin.json` | 插件元数据、菜单、hook 声明、19 项 settings |
-| `index.py` | 状态采集、余额查询、桌宠进程管理、HTTP 路由、首页卡片 |
+| `index.py` | 状态采集、余额读取（AKM 缓存）、桌宠进程管理、HTTP 路由、首页卡片 |
 | `pet/pet_app.py` | 原生窗口进程：建窗、逐帧播放、鼠标交互、布局持久化 |
 | `pet/physics.py` | 甩抛 / Q 弹 / 弹簧 / 漫游的纯函数物理（无 AppKit 依赖，可单测） |
 | `pet/companion.py` | 对话与碎碎念：提示词、记忆读写、LLM 调用、回复清洗 |
@@ -230,7 +259,7 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 | （无） | — | 角色大小固定 50%，不提供设置项（100% 会挡视线，50% 是默认观感） |
 | `bubble_enabled` | 开 | 显示气泡 |
 | `bubble_show_balance` | 开 | 气泡显示余额 |
-| `balance_interval_s` | 60 | 余额刷新间隔 |
+| `balance_key_alias` | 自动匹配 | 关联 Key（下拉选择）。选项由插件加载时填入真实 Key 列表，默认选中自动匹配到的那个 |
 | `idle_after_s` | 8 | 结果状态回落待机的秒数 |
 | `reduce_motion` | 关 | 固定姿势，停止动画 |
 | `sound_enabled` | 关 | 成功/失败播放系统提示音（`afplay`） |
@@ -264,9 +293,10 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
 - **状态粒度粗**。没有 searching / editing / testing 这类工具语义，只有请求阶段。
 - **`working` / `waiting` 不是 hook 直给的状态**：AKM 没有「上游开始返回」
   这类细粒度回调。`working` 由「并发第 2+ 个请求」触发；
-  `waiting` 由「在途请求里 ≥ 90% 已选 Key、在等上游」触发（`on_key_selected`
-  标记 + `on_response` 移除，靠登记表算比例）。因此这两个状态的触发时机
-  取决于请求并发度与上游响应速度，不是精确的事件边界。
+  `waiting` 的触发分两种（`on_key_selected` 标记 + `on_response` 移除，
+  靠登记表算比例）：并发 ≥ 2 时「≥ 90% 已选 Key 在等上游」；
+  单请求时「已等 ≥ 10.12s」。因此这两个状态的触发时机取决于请求并发度
+  与上游响应速度，不是精确的事件边界。
 - **碎碎念会消耗额度**：每次自动碎碎念都是一次真实模型调用。默认 180s 间隔，长时间挂着会持续计费，
   不想付费就把 `whisper_enabled` 关掉。
 - **`Quartz` / `CoreGraphics` 不可用**：本环境只有 pyobjc 的 AppKit + Foundation，因此 Q 弹挤压用

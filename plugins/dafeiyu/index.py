@@ -195,8 +195,21 @@ class Plugin(PluginBase):
             # 不阻塞宿主启动：桌宠拉起放在后台任务里，失败只记录。
             asyncio.create_task(self._safe_start_pet())
 
+        # **不再启动余额轮询任务**：AKM 后台 `UsageQueryWorker` 已按每个 Key
+        # 的 `usage_query_interval_m` 定时查询并把结果写进 `keys.usage_data`。
+        # 插件只需在 `/state` 里顺带读缓存（见 `_refresh_balance`），
+        # 不需要自己的定时器——否则同一个 Key 会被查两次。
         if self._cfg.get("enabled", True):
-            self._balance_task = asyncio.create_task(self._balance_loop())
+            # 首帧就把余额读进来，避免桌宠刚起来时余额行是空的
+            try:
+                self._refresh_balance()
+            except Exception as exc:
+                self.logger.debug("[dafeiyu] 初始余额读取失败: %s", exc)
+
+        # 把 Key 列表填进「关联 Key」下拉选项。
+        # 必须在 _refresh_balance 之后：那时已经能算出「自动匹配到哪个 Key」，
+        # 用它作为下拉的默认选中项（用户看到的就是实际生效的那个）。
+        self._sync_balance_key_options()
         return True
 
     async def on_unload(self) -> None:
@@ -239,7 +252,9 @@ class Plugin(PluginBase):
                 merged[key] = getattr(item, "default", "")
         merged.update(self.config or {})
         # number 类型在配置里可能是字符串，这里统一转数值。
-        for num_key in ("balance_interval_s", "idle_after_s"):
+        # number 类型在配置里可能是字符串，这里统一转数值。
+        # balance_interval_s 已移除（余额改为读 AKM 缓存，插件不再自己定时查）。
+        for num_key in ("idle_after_s",):
             try:
                 merged[num_key] = int(float(merged.get(num_key) or 0))
             except (TypeError, ValueError):
@@ -628,24 +643,23 @@ class Plugin(PluginBase):
         return waiting, total, ratio
 
     def _maybe_enter_waiting(self, now: float) -> None:
-        """**9 成以上在途请求都在等上游返回**时才切 waiting。
+        """决定是否进入 waiting（方案 B：单请求按时间，多请求按占比）。
 
-        用户的语义是：「当前存在的请求里面，有 9 成请求在等上游返回」。
-        所以判定是**比例**，不是时间：
+        **为什么不能只用占比**：单请求时 ``waiting/total`` 恒为 1.0，
+        「9 成以上」的条件立刻满足——于是每个请求刚发出就切 waiting，
+        thinking 只剩选 Key 那几毫秒，working 几乎看不到（实测日志里
+        waiting 连续出现、thinking/working 极少）。
 
-          - 总在途数 = `_pending_requests` 里登记的数量；
-          - 在等上游数 = 其中已选 Key（on_key_selected 标记过）的；
-          - 占比 ≥ 0.9 → 切 waiting。
+        所以分两种场景：
 
-        **为什么不用「thinking 播了多久」**：那是猜测，与请求真实状态无关。
-        流式请求上游已经开始回字节时，该请求仍算「等上游」（还没结束），
-        但此时通常还有其他请求没发出，占比达不到 9 成，因此不会误切。
+          - **并发 ≥ 2**：用占比。``sent 数 / 总数 ≥ 0.9`` 才切——
+            这才符合「9 成请求在等上游」的本意。
+          - **只有 1 个请求**：用时间。``thinking`` 动画播完一轮（10.12s）
+            仍未返回才切——「这么久还没回」才是真的异常。
 
         **不影响其他逻辑**：只做状态切换，不改 `_inflight` / 轮次计数 /
-        静默期；`_inflight == 0` 或已在 waiting 时直接返回。
+        静默期。
         """
-        if self._state == STATE_WAITING:
-            return
         # 已在播终态（success/error）时不切 waiting：那一轮的动画还没播完，
         # 切走会造成「success 一闪就没了」。等状态回落 idle 后才会再判。
         if self._state in (STATE_SUCCESS, STATE_ERROR):
@@ -653,10 +667,28 @@ class Plugin(PluginBase):
         waiting, total, ratio = self._waiting_ratio()
         if total == 0:
             return
-        if ratio >= WAITING_RATIO and waiting >= 1:
+
+        if total >= 2:
+            # 多请求：按占比。已是 waiting 时若占比跌破阈值要退回去。
+            should_wait = ratio >= WAITING_RATIO and waiting >= 1
+            detail = f"上游有点慢（{waiting}/{total} 在等）"
+        else:
+            # 单请求：按时间。从「已发往上游」的时刻算起。
+            entry = next(iter(self._pending_requests.values()), {})
+            sent_at = float(entry.get("sent_at") or entry.get("started") or 0)
+            limit = STATE_ANIM_SECONDS.get(STATE_THINKING, 10.12)
+            should_wait = bool(sent_at) and (now - sent_at) >= limit
+            detail = f"上游有点慢，已等 {int(now - sent_at)}s" if sent_at else ""
+
+        if should_wait:
+            if self._state != STATE_WAITING:
+                self._set_state(STATE_WAITING, detail=detail)
+        elif self._state == STATE_WAITING:
+            # **waiting 必须能自己退出**：占比降下来（有请求完成或新请求
+            # 还没发出）就该回到忙碌态，否则会一直卡在 waiting。
             self._set_state(
-                STATE_WAITING,
-                detail=f"上游有点慢（{waiting}/{total} 在等）",
+                STATE_WORKING if total >= 2 else STATE_THINKING,
+                detail=f"{total} 个请求处理中",
             )
 
     def _maybe_settle_round(self, now: float) -> None:
@@ -746,131 +778,235 @@ class Plugin(PluginBase):
         except Exception:
             pass
 
-    # ── 余额查询 ────────────────────────────────────────────
+    # ── 余额：读取 AKM 已查好的结果，不再自己请求 ─────────────
+    #
+    # **为什么不再自己查**：AKM 本身就有完整的用量查询体系——
+    # `key_pool._DEEPSEEK_USAGE_SCRIPT` 内置了 `{{baseUrl}}/user/balance`，
+    # `usage_query.execute_query_script()` 负责执行，后台 `UsageQueryWorker`
+    # 按每个 Key 的 `usage_query_interval_m` 定时刷新，结果存在
+    # `keys.usage_data` 里。插件自己再写一套 httpx 请求 + 定时器，
+    # 等于**同一个 Key 被查两次、两份数据、两处配置**，还可能不一致。
+    #
+    # 现在只做一件事：按「默认匹配 Key」的规则选出一个 Key，
+    # 读它已经缓存好的 `usage_data`。零网络请求、零定时器。
 
-    async def _balance_loop(self) -> None:
-        """按配置间隔刷新余额；首次延迟几秒，避免和宿主启动抢资源。"""
-        await asyncio.sleep(5)
-        while True:
-            try:
-                if self._cfg.get("enabled", True):
-                    await self._refresh_balance()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.logger.debug("[dafeiyu] 余额刷新异常: %s", exc)
-            interval = max(15, int(self._cfg.get("balance_interval_s") or 60))
-            await asyncio.sleep(interval)
+    def _sync_balance_key_options(self) -> None:
+        """把 Key 列表写进「关联 Key」下拉的 options，并让自动匹配项默认选中。
 
-    async def _refresh_balance(self) -> dict[str, Any]:
-        """查询 DeepSeek 余额。
+        **为什么能这么做**：``self.meta`` 与 ``PluginManager._plugin_metas[name]``
+        是同一个对象，而宿主渲染配置弹窗时读的是 ``meta.settings[*].options``。
+        所以插件在 ``on_load`` 里改它，前端下拉就能拿到真实的 Key 列表——
+        宿主的 ``options_source`` 只硬编码支持 ``/v1/models``，没法动态列 Key。
 
-        复用 AKM 已有的 Key 存储：取 provider=deepseek 且 base_url 指向 DeepSeek
-        官方（或支持 /user/balance 的自定义网关）的第一个 Key。
-        查询失败时保留上次成功结果，只标记 stale，避免气泡闪成空。
+        **默认选中**：宿主渲染 select 时用 ``option === 当前配置值`` 判断选中，
+        而 value 与 label 是同一个字符串。所以这里直接把「自动匹配到的 alias」
+        写进 ``setting.default``——用户没显式配过时，下拉打开就是实际生效的那个，
+        不会出现「显示 A、实际用 B」。
         """
-        key = self._pick_balance_key()
-        if not key:
-            # 没有可用 Key 不是错误，只是「无凭据」，气泡自动隐藏余额行。
-            self._balance = {"available": False, "reason": "no_key", "balances": []}
-            self._balance_at = time.time()
-            return self._balance
-
-        base_url = str(key.get("base_url") or "").strip().rstrip("/")
-        api_key = str(key.get("api_key") or "")
-        if not base_url or not api_key:
-            self._balance = {"available": False, "reason": "no_key", "balances": []}
-            self._balance_at = time.time()
-            return self._balance
-
-        url = f"{base_url}/user/balance"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        meta = getattr(self, "meta", None)
+        if meta is None:
+            return
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=8.0)) as client:
-                resp = await client.get(url, headers=headers)
-            if resp.status_code == 401 or resp.status_code == 403:
-                self._mark_balance_failure("auth", f"HTTP {resp.status_code}")
-                return self._balance
-            if resp.status_code >= 400:
-                self._mark_balance_failure("unavailable", f"HTTP {resp.status_code}")
-                return self._balance
-            body = resp.json()
-        except httpx.TimeoutException:
-            self._mark_balance_failure("unavailable", "请求超时")
-            return self._balance
-        except Exception as exc:
-            self._mark_balance_failure("unavailable", str(exc))
-            return self._balance
+            from akm.key_pool import list_keys
 
-        parsed = self._parse_balance(body)
-        if not parsed:
-            self._mark_balance_failure("invalid_response", "返回结构无法识别")
-            return self._balance
-        parsed["stale"] = False
-        parsed["source"] = "api_key"
-        self._balance = parsed
-        self._balance_at = time.time()
-        return self._balance
+            keys = list_keys()
+        except Exception:
+            return
+        aliases = [str(k.get("alias") or "") for k in keys if str(k.get("alias") or "")]
+        if not aliases:
+            return
+
+        # 算出「自动匹配」会选哪个 Key：临时清空配置再跑一次选择逻辑
+        auto_alias = ""
+        try:
+            saved = self._cfg.get("balance_key_alias")
+            self._cfg["balance_key_alias"] = ""
+            auto_key = self._pick_balance_key()
+            self._cfg["balance_key_alias"] = saved
+            auto_alias = str((auto_key or {}).get("alias") or "")
+        except Exception:
+            auto_alias = ""
+
+        for setting in (getattr(meta, "settings", None) or []):
+            if getattr(setting, "key", "") != "balance_key_alias":
+                continue
+            setting.type = "select"
+            setting.options = list(aliases)
+            setting.allow_empty_option = False
+            configured = str(self._cfg.get("balance_key_alias") or "").strip()
+            if (not configured or configured not in aliases) and auto_alias:
+                setting.default = auto_alias
+            break
 
     def _pick_balance_key(self) -> dict | None:
-        """挑选用于余额查询的 Key：优先 deepseek provider，其次 base_url 命中。"""
+        """挑选用于显示余额的 Key。
+
+        **优先用配置里指定的 Key**（``balance_key_alias``）：填了别名就只认
+        那一个，找不到就返回 None（气泡提示未配置），不会偷偷退回别的 Key——
+        否则用户以为在看 A 的余额，实际显示的是 B 的。
+
+        **留空时按默认匹配规则**：
+          ① ``provider=deepseek`` 且 ``base_url`` 含 deepseek
+             （官方或指向官方的网关）；
+          ② 否则第一个 deepseek Key；
+          ③ 否则任何 ``base_url`` 含 deepseek 的 Key（自建网关常见配置）。
+        多个候选时取**优先级最高的那个**（``list_keys`` 已按 ``priority`` 升序），
+        不做合计——用户确认按 A 方案。
+        """
         try:
             from akm.key_pool import list_keys
 
             keys = list_keys()
         except Exception:
             return None
+
+        # ① 配置指定的 Key 优先，且只认它
+        want = str(self._cfg.get("balance_key_alias") or "").strip()
+        if want:
+            for k in keys:
+                if str(k.get("alias") or "") == want:
+                    return k
+            return None
+
         deepseek = [k for k in keys if str(k.get("provider") or "") == "deepseek"]
         for k in deepseek:
             if "deepseek" in str(k.get("base_url") or "").lower():
                 return k
         if deepseek:
             return deepseek[0]
-        # 兜底：任何 base_url 含 deepseek 的 Key（自定义网关自建 Key 常这么配）
         for k in keys:
             if "deepseek" in str(k.get("base_url") or "").lower():
                 return k
         return None
 
-    @staticmethod
-    def _parse_balance(body: Any) -> dict[str, Any] | None:
-        """解析 DeepSeek /user/balance。
+    def _refresh_balance(self) -> dict[str, Any]:
+        """从 AKM 的 Key 缓存里读余额（不发请求）。
 
-        官方结构：``{is_available, balance_infos:[{currency,total_balance,
-        granted_balance,topped_up_balance}]}``。金额是字符串，保留原始精度，
-        不在插件侧做浮点换算（前端/气泡直接显示字符串）。
+        数据来源是 ``get_usage_query_config(alias, provider)`` 返回的
+        ``data`` 字段——那是 AKM 后台按 Key 自己的查询间隔刷新的结果。
+
+        几种状态要分清：
+          - 没有 deepseek Key → ``no_key``，气泡隐藏余额行；
+          - 有 Key 但从没查过 → ``not_queried``，提示「未查询」；
+          - 查过但失败 → 有旧值就保留并标 ``stale``，没旧值给失败原因。
         """
-        if not isinstance(body, dict):
+        key = self._pick_balance_key()
+        if not key:
+            self._balance = {"available": False, "reason": "no_key", "balances": []}
+            self._balance_at = time.time()
+            return self._balance
+
+        alias = str(key.get("alias") or "")
+        provider = str(key.get("provider") or "")
+        try:
+            from akm.key_pool import get_usage_query_config
+
+            cfg = get_usage_query_config(alias, provider) or {}
+        except Exception as exc:
+            self._mark_balance_failure("unavailable", str(exc))
+            return self._balance
+
+        data = cfg.get("data")
+        error = str(cfg.get("error") or "")
+        queried_at = str(cfg.get("queried_at") or "")
+
+        parsed = self._parse_balance(data) if isinstance(data, dict) else None
+        if parsed and parsed.get("balances"):
+            parsed["stale"] = bool(error)      # 有旧值但最近一次失败 → 标 stale
+            parsed["source"] = "akm_usage_cache"
+            parsed["alias"] = alias
+            if error:
+                parsed["error"] = error
+            self._balance = parsed
+            self._balance_at = time.time()
+            return self._balance
+
+        # 没有可用数据：区分「从没查过」与「查过但失败」
+        if error:
+            self._mark_balance_failure("unavailable", error)
+        else:
+            self._balance = {
+                "available": False,
+                "reason": "not_queried",
+                "alias": alias,
+                "queried_at": queried_at,
+                "balances": [],
+            }
+            self._balance_at = time.time()
+        return self._balance
+
+    @staticmethod
+    def _parse_balance(data: Any) -> dict[str, Any] | None:
+        """把 AKM 缓存的 ``usage_data`` 转成气泡需要的结构。
+
+        **数据形状有三层，必须逐层剥**（实测 AKM 存的是第三种）：
+
+          ① 查询记录包装：``{ok, status_code, latency_ms, queried_at,
+             error, raw_response}`` —— 这是 ``keys.usage_data`` 的实际结构，
+             真正的上游响应在 ``raw_response`` 里；
+          ② 上游原始响应：``{is_available, balance_infos: [...]}``；
+          ③ extractor 扁平结果：``{isValid, remaining, unit, planName}``
+             （自定义脚本可能直接返回这个）。
+
+        所以先剥 ① 的 ``raw_response``，再按 ②/③ 解析。
+        金额保持字符串原样，不在插件侧做浮点换算。
+        """
+        if not isinstance(data, dict):
             return None
-        infos = body.get("balance_infos")
-        if not isinstance(infos, list) or not infos:
-            return None
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for row in infos[:8]:
-            if not isinstance(row, dict):
-                continue
-            currency = str(row.get("currency") or "").upper()
-            if not currency or currency in seen:
-                continue
-            seen.add(currency)
-            rows.append(
-                {
-                    "currency": currency,
-                    "total": str(row.get("total_balance") or "0"),
-                    "granted": str(row.get("granted_balance") or "0"),
-                    "topped_up": str(row.get("topped_up_balance") or "0"),
+
+        # ① 剥掉查询记录包装：真正的上游响应在 raw_response 里
+        inner = data.get("raw_response")
+        if isinstance(inner, dict):
+            # 记录里的 ok/error 也要一并带出来（查询失败时 raw_response 可能为空）
+            if not inner and data.get("error"):
+                return None
+            data = inner
+        # 形状 A：DeepSeek 官方原始结构（自定义查询脚本可能返回这个）
+        infos = data.get("balance_infos")
+        if isinstance(infos, list) and infos:
+            rows: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for row in infos[:8]:
+                if not isinstance(row, dict):
+                    continue
+                currency = str(row.get("currency") or "").upper()
+                if not currency or currency in seen:
+                    continue
+                seen.add(currency)
+                rows.append(
+                    {
+                        "currency": currency,
+                        "total": str(row.get("total_balance") or "0"),
+                        "granted": str(row.get("granted_balance") or "0"),
+                        "topped_up": str(row.get("topped_up_balance") or "0"),
+                    }
+                )
+            if rows:
+                return {
+                    "available": bool(data.get("is_available", True)),
+                    "balances": rows,
                 }
-            )
-        if not rows:
             return None
+
+        # 形状 B：AKM extractor 的扁平结果
+        remaining = data.get("remaining")
+        if remaining is None or str(remaining).strip() == "":
+            return None
+        unit = str(data.get("unit") or "元")
         return {
-            "available": bool(body.get("is_available", True)),
-            "balances": rows,
+            "available": bool(data.get("isValid", True)),
+            "balances": [
+                {
+                    "currency": unit,
+                    "total": str(remaining),
+                    "granted": "0",
+                    "topped_up": "0",
+                }
+            ],
         }
 
     def _mark_balance_failure(self, reason: str, detail: str) -> None:
-        """余额查询失败：有旧值就标 stale 保留，没旧值就记失败原因。"""
+        """余额不可用：有旧值就标 stale 保留，没旧值就记失败原因。"""
         if self._balance and self._balance.get("balances"):
             self._balance = {**self._balance, "stale": True, "error": detail}
         else:
@@ -1097,10 +1233,13 @@ class Plugin(PluginBase):
 
         @router.post("/balance/refresh")
         async def balance_refresh():
-            """手动刷新余额（最快 5 秒一次，避免打爆上游）。"""
-            if self._balance_at and time.time() - self._balance_at < 5:
-                return {"ok": False, "error": "刷新过于频繁，请稍后再试", "balance": self._balance_payload()}
-            data = await self._refresh_balance()
+            """重新读一次余额缓存。
+
+            **不再是「去上游查一次」**：数据源是 AKM 的 `keys.usage_data`，
+            由 AKM 后台按 Key 自己的间隔刷新。这里只是重新读缓存——
+            如果用户想立刻拿到最新值，应该去 Key 管理页点「查询用量」。
+            """
+            data = self._refresh_balance()
             return {"ok": True, "balance": self._balance_payload(), "raw": data}
 
         @router.get("/assets/manifest")
