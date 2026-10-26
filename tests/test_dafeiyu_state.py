@@ -84,12 +84,24 @@ def test_inflight_keeps_state_busy():
     """有在途请求时，即使超过 idle_after 也不回落 idle。
 
     这就是「后续请求延长 working 时间」：连续请求期间角色一直忙。
+
+    **登记表必须同步填充**：真实链路里 on_request 先 `_inflight += 1` 再写登记表，
+    两者恒等。若只设 `_inflight` 不填登记表，那是「计数泄漏」而非「有请求在跑」，
+    `_reap_stale_requests` 会把它校正回 0（这正是要修的那个 bug）。
     """
     plugin = _new_plugin()
     plugin._set_state(idx.STATE_THINKING)
     plugin._inflight = 2
-    # 已经过去 1 小时，远超 idle_after，但在途请求还在 → 必须保持 thinking
-    assert _payload(plugin, ago=3600)["state"] == idx.STATE_THINKING
+    # 用 sent=False（还没发往上游）表示「在途但还没进入等上游阶段」：
+    # 这样 waiting 判定不成立，状态应停在 thinking。
+    # 若用 sent=True，2/2 占比 100% 会（正确地）切到 waiting，
+    # 那测的就是 waiting 语义，不是本用例要锁的「不回落」。
+    _add_pending(plugin, "a", False)
+    _add_pending(plugin, "b", False)
+    # 已过去 1 小时远超 idle_after，但请求仍在 TTL 内（刚登记）→ 必须保持忙碌。
+    # 注意不能把 ago 传成 3600：那会让条目变成「陈旧泄漏」被自愈清掉。
+    plugin._state_since = time.time() - 3600
+    assert _payload(plugin)["state"] == idx.STATE_THINKING
 
 
 def test_inflight_zero_falls_back_to_idle():
@@ -736,3 +748,156 @@ def test_sync_key_options_falls_back_when_alias_deleted():
     setting = plugin.meta.settings[0]
     if setting.options:
         assert setting.default != "__deleted__"
+
+
+# ── 漂移开关（drift_enabled）──────────────────────────────
+
+def test_drift_setting_exists_and_defaults_off():
+    """配置里要有「开启漂移」，且默认关闭。"""
+    import json
+    from pathlib import Path
+    meta = json.loads(
+        (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+         / "plugin.json").read_text(encoding="utf-8")
+    )
+    item = next((s for s in meta["settings"] if s["key"] == "drift_enabled"), None)
+    assert item is not None, "缺少 drift_enabled 配置项"
+    assert item["type"] == "boolean"
+    assert item["default"] is False, "漂移必须默认关闭"
+
+
+def test_drift_sent_in_state_payload():
+    """插件要把 drift 下发给桌宠进程（否则开关不生效）。"""
+    plugin = _new_plugin()
+    plugin._cfg = {"drift_enabled": True}
+    assert _payload(plugin)["config"]["drift"] is True
+    plugin2 = _new_plugin()
+    plugin2._cfg = {}
+    assert _payload(plugin2)["config"]["drift"] is False
+
+
+def test_wander_gated_by_drift_flag():
+    """_stepWander 必须检查 drift_enabled（源码级断言，无 AppKit 环境也能跑）。"""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+           / "pet" / "pet_app.py").read_text(encoding="utf-8")
+    # 找到 _stepWander 函数体，确认里面有 drift_enabled 判断
+    idx_start = src.find("def _stepWander")
+    assert idx_start > 0
+    body = src[idx_start:idx_start + 2000]
+    assert "drift_enabled" in body, "_stepWander 必须检查 drift_enabled"
+    assert "if not self.drift_enabled" in body, "应是「未开启则直接 return」"
+
+
+# ── 状态自愈：泄漏的在途计数与陈旧登记条目 ────────────────
+# 这一组锁住 2026-10-25 真实故障：10:06 漏回收一次后，_inflight 卡在 1 整整
+# 一夜，桌宠一直播 waiting（气泡「上游有点慢（2/2 在等）」）。根因有两个：
+#   ① on_response 提前 return 时跳过了 _inflight -= 1（单向泄漏）；
+#   ② 没有任何超时兜底，_inflight 一旦偏大就再也回不到 0。
+# 修复后 _reap_stale_requests 每轮轮询做自愈，且 waiting 判定要求 _inflight > 0。
+
+def test_stale_pending_entries_are_reaped():
+    """超过 TTL 的登记条目要被清掉，否则会永久污染 waiting 判定。"""
+    plugin = _new_plugin()
+    _add_pending(plugin, "stale", True, ago=idx.PENDING_TTL_S + 1)
+    assert "stale" in plugin._pending_requests
+    _payload(plugin)
+    assert plugin._pending_requests == {}
+
+
+def test_fresh_pending_entries_survive_reap():
+    """TTL 内的正常请求绝不能被误清（否则 waiting 判定失真）。"""
+    plugin = _new_plugin()
+    plugin._inflight = 1
+    _add_pending(plugin, "live", True, ago=5)
+    _payload(plugin)
+    assert "live" in plugin._pending_requests
+    assert plugin._inflight == 1
+
+
+def test_leaked_inflight_is_corrected_down():
+    """_inflight 大于登记表条数 → 视为泄漏，校正回条数。"""
+    plugin = _new_plugin()
+    plugin._inflight = 5
+    _add_pending(plugin, "a", True)
+    _payload(plugin)
+    assert plugin._inflight == 1
+
+
+def test_leaked_inflight_never_increases():
+    """_inflight 小于登记表条数时不能凭空加回去（会误判有请求在跑）。"""
+    plugin = _new_plugin()
+    plugin._inflight = 0
+    _add_pending(plugin, "a", True)
+    _payload(plugin)
+    assert plugin._inflight == 0
+
+
+def test_leaked_inflight_falls_back_to_idle():
+    """泄漏场景的最终验收：校正后状态必须能回落 idle，不能钉在 waiting。
+
+    复现真实现场——2 条 24 小时前的陈旧登记 + _inflight=1 + 状态停在 waiting。
+    """
+    plugin = _new_plugin()
+    plugin._inflight = 1
+    plugin._set_state(idx.STATE_WAITING, detail="上游有点慢（2/2 在等）")
+    _add_pending(plugin, "old-a", True, ago=89118)
+    _add_pending(plugin, "old-b", True, ago=89000)
+    plugin._state_since = time.time() - 7200
+    # 多轮轮询：自愈后应当稳定在 idle，而不是每轮被重新判成 waiting
+    for _ in range(5):
+        assert _payload(plugin)["state"] == idx.STATE_IDLE
+    assert plugin._inflight == 0
+    assert plugin._pending_requests == {}
+
+
+def test_waiting_requires_inflight():
+    """没有任何在途请求时，即使登记表有残留也不能判 waiting。"""
+    plugin = _new_plugin()
+    plugin._inflight = 0
+    plugin._set_state(idx.STATE_WAITING)
+    # 手工塞入「未过期但 inflight 为 0」的条目，模拟计数与登记表不一致
+    _add_pending(plugin, "a", True)
+    _add_pending(plugin, "b", True)
+    # _inflight=0 时自愈把条数校正为 0（只减不增），状态不该是 waiting
+    assert _payload(plugin)["state"] != idx.STATE_WAITING
+
+
+def test_on_response_reclaims_inflight_before_tracking_gate():
+    """on_response 必须先回收计数，再做追踪判定（否则单向泄漏）。
+
+    源码级断言：确认 `_inflight -= 1` 出现在 `_should_track` 之前。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu"
+           / "index.py").read_text(encoding="utf-8")
+    body_start = src.find("async def on_response")
+    assert body_start > 0
+    body = src[body_start:body_start + 2500]
+    # 只看代码行，跳过注释（注释里会提到 _should_track，会误判顺序）
+    code_lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith("#")]
+    code = "\n".join(code_lines)
+    dec_at = code.find("self._inflight -= 1")
+    gate_at = code.find("if not self._should_track(ctx)")
+    assert dec_at > 0, "on_response 必须回收 _inflight"
+    assert gate_at > 0, "on_response 仍应有追踪判定"
+    assert dec_at < gate_at, "回收必须排在追踪判定之前，否则会漏回收"
+
+
+def test_fallback_to_idle_also_refreshes_text():
+    """状态回落 idle 时，气泡文案必须跟着换，不能留着「上游有点慢」这种过期内容。
+
+    真实现场：状态自愈成 idle 后，若 `text` 仍读内部残留的 `_state_text`，
+    用户看到的就是「上游有点慢（2/2 在等）」——状态对了但话还在说错，
+    等于没修好。
+    """
+    plugin = _new_plugin()
+    plugin._inflight = 0
+    plugin._set_state(idx.STATE_WAITING, detail="上游有点慢（2/2 在等）")
+    plugin._state_since = time.time() - 7200
+    payload = _payload(plugin)
+    assert payload["state"] == idx.STATE_IDLE
+    assert "上游有点慢" not in payload["text"], (
+        f"回落后不能留着过期文案，实际为：{payload['text']!r}"
+    )
+    assert payload["text"] in idx.STATE_TEXT[idx.STATE_IDLE]
