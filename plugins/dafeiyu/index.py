@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import platform
 import shutil
@@ -39,6 +40,10 @@ from fastapi import APIRouter
 
 from akm.plugins import PluginBase
 
+
+# 模块级日志器：`self.logger` 由宿主基类在 __init__ 注入，但状态自愈方法
+# 需要能在单测/无宿主环境下运行，所以这里用模块级 logger，行为一致且无依赖。
+_log = logging.getLogger(__name__)
 
 # 角色缩放百分比，固定值（不开放设置项）。桌宠是常驻挂件，100% 会挡视线，
 # 50% 是用户确认的默认观感；改这个值等于改默认大小。
@@ -90,6 +95,21 @@ ROUND_QUIET_S = 1.5
 # waiting 判定阈值：当前在途请求里「已选 Key、在等上游返回」的占比。
 # 用户要求 9 成以上才切 waiting——少量请求慢不该影响整体显示。
 WAITING_RATIO = 0.9
+# 请求登记表条目存活上限（秒）。
+#
+# **为什么必须有它**：`_inflight` 依赖「on_request 加 1 / on_response 减 1」成对
+# 回收。但 `on_response` 并非在所有路径上都一定会被调用（客户端中途断开、流式
+# 生成器被取消等），一旦漏掉一次，`_inflight` 就永远回不到 0。而
+# `_state_payload` 的状态回落分支要求 `_inflight == 0`，于是状态永久卡死。
+#
+# 实测故障（2026-10-25）：10:06 漏掉一次回收后，`_inflight` 卡在 1 整整一夜，
+# 桌宠一直播 waiting 动画（气泡显示「上游有点慢（2/2 在等）」）。AKM 本身没有
+# 「请求全部结束」回调，也没有断开事件，所以只能靠超时兜底。
+#
+# 取值 180 秒：实测正常请求最长约 35 秒（含长上下文 + 慢上游），留 5 倍余量，
+# 正常请求绝不会被误清；真有请求挂 3 分钟，那本来就该判定为异常并让状态回落。
+PENDING_TTL_S = 180.0
+
 # 状态的中文名：管理台首页卡片直接展示这个，不暴露内部英文枚举值。
 STATE_LABEL = {
     STATE_IDLE: "待机",
@@ -304,18 +324,74 @@ class Plugin(PluginBase):
         except Exception:
             return 8800
 
+    def _reap_stale_requests(self, now: float) -> None:
+        """清理陈旧的请求登记条目，并校正泄漏的 ``_inflight``。
+
+        **这是本插件唯一的状态自愈点**。设计上 ``_inflight`` 与
+        ``_pending_requests`` 必须同步增减，但宿主不保证 ``on_response`` 一定被
+        调用（客户端中途断开、流式生成器被取消、进程重启等），漏一次就永久卡死：
+
+          - ``_state_payload`` 的状态回落要求 ``_inflight == 0`` → 永不回落；
+          - ``_maybe_enter_waiting`` 只看登记表条数 → 残留条目让 waiting 判定
+            每轮都成立，且 ``_set_state`` 会不断刷新 ``_state_since``。
+
+        两者叠加的结果就是「啥都没干也一直播 waiting」（2026-10-25 实测卡了整夜）。
+
+        处理方式：
+          1. 丢弃 ``started`` 早于 ``PENDING_TTL_S`` 的条目（正常请求最长约 35 秒，
+             3 分钟还没回收的一律视为泄漏）；
+          2. **把 ``_inflight`` 校正到不超过登记表条数**——只减不增。登记表是
+             「有多少请求真的还没结束」的唯一可信来源；``_inflight`` 偏大只可能
+             是漏回收。反过来 ``_inflight`` 偏小时不能凭空加回去，那会误判有请求
+             在跑，所以这里取 ``min``。
+
+        正常情况下这个函数是纯空转（没有任何条目过期，``_inflight`` 也不超），
+        每轮轮询只多一次字典遍历，成本可忽略。
+        """
+        # 1. 丢弃过期条目
+        if self._pending_requests:
+            stale = [
+                rid for rid, entry in self._pending_requests.items()
+                if now - float(entry.get("started") or 0.0) > PENDING_TTL_S
+            ]
+            for rid in stale:
+                self._pending_requests.pop(rid, None)
+            if stale:
+                _log.warning(
+                    "[dafeiyu] 清理 %d 条陈旧请求登记（疑似 on_response 漏回收）",
+                    len(stale),
+                )
+        # 2. 校正泄漏的 _inflight（只减不增）
+        alive = len(self._pending_requests)
+        if self._inflight > alive:
+            _log.warning(
+                "[dafeiyu] _inflight 泄漏已校正：%d → %d", self._inflight, alive
+            )
+            self._inflight = alive
+            # 计数被校正过 → 本轮没有真实在途请求，允许静默期正常落定，
+            # 否则 _maybe_settle_round 会因 _inflight > 0 永远不触发。
+            if self._inflight == 0 and self._quiet_until <= 0:
+                self._quiet_until = now + ROUND_QUIET_S
+
     def _state_payload(self) -> dict[str, Any]:
         """构造给桌宠进程轮询的状态快照（纯数据，不含内部对象）。"""
         idle_after = max(2, int(self._cfg.get("idle_after_s") or 8))
         now = time.time()
-        # 每次轮询做两件由时间驱动的事（AKM 没有「全部请求结束」回调，
+        # 每次轮询做三件由时间驱动的事（AKM 没有「全部请求结束」回调，
         # 只能靠桌宠每 0.5 秒拉一次 /state 顺路推进）：
+        #   0. 清理陈旧登记条目 + 校正泄漏的 _inflight（自愈，必须先做）
         #   1. 静默期（或 working 播完）已过 → 落定 success/error
         #   2. 9 成以上在途请求在等上游 → 切 waiting
         #
-        # **顺序不能反**：先落定终态，再判 waiting。否则刚落定的 success
-        # 会被 waiting 判定立刻覆盖（落定时 _pending_requests 可能还没清空），
+        # **自愈必须排在最前**：若 _inflight 已泄漏（> 0），后面两步全被挡住——
+        # _maybe_settle_round 因 `_inflight > 0` 直接 return，状态回落分支也
+        # 永远不成立，于是永久卡在 waiting（2026-10-25 实测卡了整夜）。
+        # 先校正再判定，泄漏才能在同一轮轮询内被消化掉。
+        #
+        # **落定与 waiting 的顺序不能反**：先落定终态，再判 waiting。否则刚落定的
+        # success 会被 waiting 判定立刻覆盖（落定时 _pending_requests 可能还没清空），
         # 用户就看到 success 一闪而过、直接变 waiting。
+        self._reap_stale_requests(now)
         self._maybe_settle_round(now)
         self._maybe_enter_waiting(now)
         # 状态回落规则（对外快照用，不改内部 _state）：
@@ -338,10 +414,20 @@ class Plugin(PluginBase):
                 hold = max(idle_after, int(STATE_ANIM_SECONDS.get(state, 0)) + 1)
             if now - self._state_since > hold:
                 state = STATE_IDLE
+        # 文案跟着**对外状态**走，不能沿用内部残留的 _state_text。
+        #
+        # 原来 `"text": self._state_text or ...` 直接读内部字段：状态已回落 idle，
+        # 但 `_state_text` 还停在「上游有点慢（2/2 在等）」，桌宠气泡就一直显示
+        # 这句过期文案——状态自愈后用户仍看到「在等上游」，等于没修好。
+        # 所以：状态被回落成 idle 时用 idle 文案；否则才用内部 detail/文案。
+        if state != self._state:
+            text = self._pick_text(state)
+        else:
+            text = self._state_text or self._pick_text(state)
         return {
             "state": state,
             "clip": STATE_CLIP.get(state, "idle"),
-            "text": self._state_text or self._pick_text(state),
+            "text": text,
             "since": self._state_since,
             "inflight": self._inflight,
             "counters": dict(self._counters),
@@ -368,6 +454,8 @@ class Plugin(PluginBase):
                 "whisper_prompt": str(self._cfg.get("whisper_prompt") or ""),
                 "notify_unfocused": bool(self._cfg.get("notify_unfocused", True)),
                 "lock_screen": bool(self._cfg.get("lock_screen", False)),
+                # 漂移（待机时自己走动）：默认关闭，由用户显式开启
+                "drift": bool(self._cfg.get("drift_enabled", False)),
             },
             "server_time": now,
         }
@@ -416,6 +504,12 @@ class Plugin(PluginBase):
         if state != self._state:
             self._state = state
             self._state_since = time.time()
+            # **切到 idle 必须清掉旧文案**：`_state_text` 是上一个状态的 detail
+            # （例如「上游有点慢（2/2 在等）」）。若不清，状态已是 idle、气泡却还
+            # 在说「在等上游」——用户看到的仍是错的。idle 的文案由 `_pick_text`
+            # 现场生成，不依赖残留字段。
+            if state == STATE_IDLE:
+                self._state_text = ""
         if text:
             self._state_text = text
         elif detail:
@@ -539,24 +633,36 @@ class Plugin(PluginBase):
 
     async def on_response(self, ctx) -> None:
         """响应返回：按 meta.ok 落到 success / error，并更新最近结果。"""
-        if not self._cfg.get("enabled", True):
-            return
-        if not self._should_track(ctx):
-            return
+        # **先回收在途计数，再做 enabled / 追踪判定**。
+        #
+        # 这是曾经真实发生的单向泄漏（2026-10-25 卡了整夜）：原来的写法是
+        #   if not self._should_track(ctx): return
+        #   if self._inflight > 0: self._inflight -= 1
+        # 一旦 on_request 判定「要追踪」而 on_response 判定「不追踪」（客户端头
+        # 快照不同、bag 不可用、插件中途被禁用等），减一就永远不执行，
+        # _inflight 永久偏大 → 状态永不回落。
+        #
+        # 回收必须无条件执行：登记表里「有没有这条」才是唯一依据，
+        # 没登记过就什么都不做，天然幂等，不会误减别的请求。
         if self._inflight > 0:
             self._inflight -= 1
-        # 并发数降回 1：从 working 退回 thinking（还有一条在准备/转发中）。
-        # 不退回的话，剩下那条请求明明只剩一个，动画却还显示「多个在跑」。
-        # 只在确实是 working 时才退，避免把 thinking 打回 thinking（无意义切换）。
-        if self._inflight == 1 and self._state == STATE_WORKING:
-            self._set_state(STATE_THINKING, detail=self._state_text)
-
         # 从登记表移除本次请求（它已经拿到响应，不再算「在等上游」）。
         try:
             req_id = str(ctx.bag_get("dafeiyu.req_id", "") or "")
         except Exception:
             req_id = ""
         self._pending_requests.pop(req_id or str(id(ctx)), None)
+
+        # 展示类逻辑才受 enabled / 追踪开关控制（关掉插件就不该刷状态文案）。
+        if not self._cfg.get("enabled", True):
+            return
+        if not self._should_track(ctx):
+            return
+        # 并发数降回 1：从 working 退回 thinking（还有一条在准备/转发中）。
+        # 不退回的话，剩下那条请求明明只剩一个，动画却还显示「多个在跑」。
+        # 只在确实是 working 时才退，避免把 thinking 打回 thinking（无意义切换）。
+        if self._inflight == 1 and self._state == STATE_WORKING:
+            self._set_state(STATE_THINKING, detail=self._state_text)
 
         meta = getattr(ctx, "response", None) or {}
         ok = bool(meta.get("ok"))
@@ -663,6 +769,18 @@ class Plugin(PluginBase):
         # 已在播终态（success/error）时不切 waiting：那一轮的动画还没播完，
         # 切走会造成「success 一闪就没了」。等状态回落 idle 后才会再判。
         if self._state in (STATE_SUCCESS, STATE_ERROR):
+            return
+        # **没有在途请求就绝不可能是 waiting**。
+        #
+        # waiting 的语义是「有请求发出去了、在等上游回话」。`_inflight == 0`
+        # 意味着一个在途请求都没有，此时判定 waiting 逻辑上不成立。
+        #
+        # 这道闸门是纵深防御：`_reap_stale_requests` 已把 `_inflight` 与登记表
+        # 对齐，但登记表本身也可能被残留条目污染。以 `_inflight` 为准能保证
+        # 即使登记表脏了，也不会把状态钉死在 waiting。
+        if self._inflight <= 0:
+            if self._state == STATE_WAITING:
+                self._set_state(STATE_IDLE, detail="")
             return
         waiting, total, ratio = self._waiting_ratio()
         if total == 0:

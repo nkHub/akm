@@ -331,6 +331,8 @@ class PetWindowController(NSObject):
         self.always_on_top = True
         # 锁定在当前屏幕：漫游与甩抛都只在本屏内（屏缝当墙）
         self.lock_screen = False
+        # 漂移（待机时自己走动）：默认关闭。用户可在插件配置里开启。
+        self.drift_enabled = False
         self.bubble_enabled = True
         # 气泡里是否显示余额（插件配置 bubble_show_balance）
         self.bubble_show_balance = True
@@ -799,6 +801,12 @@ class PetWindowController(NSObject):
         new_top = bool(cfg.get("always_on_top", True))
         self.allow_drag = bool(cfg.get("allow_drag", True))
         self.reduce_motion = bool(cfg.get("reduce_motion", False))
+        # 漂移：待机时自己走动。默认关闭，只有插件配置显式开启才走。
+        self.drift_enabled = bool(cfg.get("drift", False))
+        # 锁定在当前屏幕（漫游/甩抛不跨屏）。
+        # **之前这个字段从未从 cfg 读取**，所以插件里「锁定在当前屏幕」的
+        # 开关一直是摆设——这里补上。
+        self.lock_screen = bool(cfg.get("lock_screen", False))
 
         # 对话 / 碎碎念配置：由插件设置下发，缺省保持启动时的值
         if cfg.get("model"):
@@ -1214,7 +1222,7 @@ class PetWindowController(NSObject):
                 except PermissionError:
                     gone = False   # 进程存在，只是没权限探测
                 except Exception:
-                    gone = False   # 其它异常保守当存在，���误杀
+                    gone = False   # 其它异常保守当存在，不误杀
                 if gone:
                     log(f"父进程 {PARENT_PID} 已退出，桌宠自行结束")
                     AppHelper.stopEventLoop()
@@ -1574,6 +1582,10 @@ class PetWindowController(NSObject):
         即先探测空间、不走出屏幕。
         """
         if self.panel is None or self.dragging or self.throwing or self.reduce_motion:
+            return
+        # **漂移开关（默认关闭）**：关掉时桌宠只在原地待机，不会自己走动。
+        # 想移动请直接拖动它；开启后才恢复「待机时自己走」的行为。
+        if not self.drift_enabled:
             return
         if self.manual_clip is not None or self.override_clip is not None:
             return

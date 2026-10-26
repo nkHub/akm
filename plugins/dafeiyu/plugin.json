@@ -154,6 +154,13 @@
       "type": "boolean",
       "default": false,
       "description": "开启后漫游与甩抛都只在当前这块屏内进行，不会跑到其他显示器"
+    },
+    {
+      "key": "drift_enabled",
+      "label": "开启漂移",
+      "type": "boolean",
+      "default": false,
+      "description": "开启后桌宠待机时会自己在桌面上左右走动（漂移）。关闭时只在原地待机，需要移动请直接拖动它"
     }
   ]
 }
