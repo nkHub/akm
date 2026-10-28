@@ -1,5 +1,19 @@
 # 版本变更记录
 
+## v0.1.59
+
+**修复 Agent 自测报告暴露的四个回归**（35 个探测点 / 30 通过 / 1 致命 / 2 轻微，均为 v0.1.58 引入）。只改 `akm/agent_runtime/tools.py`、测试与文档，无对外工具签名变化，无新增模板 / 静态文件。
+
+1. **P0：GB18030 等非 UTF-8 文件的 tag 死锁**——`akm_read_file` 用「解码成 `str` 再 `.encode('utf-8')`」算 tag，而 `akm_edit_file` / `akm_write_file` 的校验路径用「原始字节 `.decode('utf-8', errors='replace')`」算 tag。同一个文件两条口径两个哈希（`测试二` 得到 `D94C` vs `C1E9`），纯 UTF-8 文件恰好相等所以测试全过，GB18030 / GBK / Latin-1 文件则永久死锁：**读得到、改不了**，重读也救不回来（read 永远给一个值、校验永远要另一个值）。修法是把 tag 收敛成**唯一一条字节口径**：`_content_tag()` 只接受 `bytes`，`_file_tag()` / `_record_observation()` 的输入要么是调用方已持有的原始字节、要么自己 `read_bytes()`（>8MB 走 `size ^ mtime_ns` 指纹），read 与校验调的是同一个函数、同一份输入。
+2. **同一处连带的编码破坏**：v0.1.58 写盘一律用 UTF-8，覆盖一个 GBK 老文件会把它整体转码，用户在别的编辑器里看到满屏 diff 甚至乱码。现在 `_atomic_write_text(target, text, encoding)` 接受目标编码并**返回实际使用的编码**，`write`（覆盖/追加）与 `edit`（行号/内容两种模式）都按原文件编码写回；编码表示不了新内容时回退 UTF-8，并在结果里给 `encoding` / `encoding_changed` / `notice`。解不干净的文件（二进制或未知编码，`_decode_text_bytes` 返回 `utf-8(replace)`）**拒绝 edit**——行号与锚点编辑在乱码上改必然写坏文件；`write` 仍允许，因为那是模型显式声明的整体内容。
+3. **P1：敏感名单在 shell 侧形同虚设**——文件工具层拦住了 `.env` / `id_rsa` / `.git/config`，但 `akm_run_shell` 里 `cat .env .git/config id_rsa` 三条全成功。现在 seatbelt profile 在 `(allow file-read*)` **之后**补上工作区内敏感文件的 `(deny file-read-data (regex ...))`（SBPL 是 last-match-wins，写在 allow 前面等于没写），名单直接复用 `_WORKSPACE_SENSITIVE_NAMES` / `_WORKSPACE_SENSITIVE_SUFFIXES` / `_ENV_TEMPLATE_SUFFIXES`，`.env.example` 这类模板在 deny 之后再放行。只 deny `file-read-data` 而不是 `file-read*`：后者会把 `ls` / `stat` 一起打掉、刷一屏 `Operation not permitted`，而真正要防的只是「读到密钥内容」。`.git` 不 deny（文件工具层已拦）。同时修掉一个更隐蔽的坑：profile 里的工作区、家目录、`TMPDIR` 路径原先未解析，而 macOS 上 `/var`、`/tmp`、`/etc` 都是 `/private/*` 的符号链接，工作区落在 `TMPDIR` 或 `/tmp` 下时所有 `subpath` allow 都会失配——既写不进文件（fail-close），新加的敏感 deny 也一起失效（fail-open，`.env` 反而能读）。现在统一 `os.path.realpath`。
+4. **P2-1：大文件截断时总行数错**——`_collect_window()` 在字节预算超限时直接 `break`，`total_lines` 停在被截断的那一行，于是 5000 行的文件在 60KB 窗口处报「共 1225 行」，模型以为已读到结尾，后面的内容直接丢失（`offset=1224` 重读才报对 5000）。现在超预算只停止**收集内容**，仍继续数完真实行数。
+5. **P2-2：`.git` 的拒绝文案指向不存在的工具**——旧文案写「请用 `akm_run_git`」，但 `agent_git_enabled=false` 时该工具根本没注册，等于让模型去调一个不存在的工具。改为中性提示：「位于版本库内部目录 `.git/` 下，文件工具不直接访问；如需操作版本库，请先开启 `agent_git_enabled` 再用 `akm_run_git`」。
+
+**验证**：`pytest` 全量 1409 项通过，其中 `tests/test_agent_workspace_tools.py` 新增 7 项针对性用例——GB18030 文件 `read → edit` 全链路（tag 一致且写回仍是 GB18030 字节）、未知编码拒绝 edit、write/append 保持编码、5000 行文件截断时 footer 报真实总行数、`.git` 文案、seatbelt profile 的 deny 位置与 realpath、以及**真实执行**沙箱后被拒 `cat .env id_rsa` 而 `cat .env.example` 正常。
+
+**已知边界（本次未改，勿误读为安全边界）**：① 敏感名单在文件工具层是**硬拦截**，shell 侧只在 `agent_run_shell_sandbox=true` 时有同口径 deny，关掉沙箱即失效；② shell 内的 `git` 仍不可用（`/etc/gitconfig`、`~/.gitconfig` 在家目录/系统目录 deny 列表里），需要用 git 请走 `akm_run_git` 或关沙箱，这是 v0.1.58 之前就有的行为；③ `akm_delete_file` 同样受敏感名单拦截，`.env` 之类删不掉，需要清理只能走 shell 或手工操作——这是有意的，避免模型顺手删凭据。
+
 ## v0.1.58
 
 **Agent 工作区读写工具全面对齐参考实现（pi-desktop / DeepSeek Harness）**：`akm/agent_runtime/tools.py` 的读写工具做了五组改造，目标是「模型一次把文件改对」，而不是靠反复试探。

@@ -111,6 +111,8 @@ _WORKSPACE_VCS_DIR = ".git"
 _TEXT_FULL_DECODE_MAX_BYTES = 8 * 1024 * 1024
 # 二进制嗅探字节数：前 8KB 出现 NUL 即判为二进制（与 git 的判据一致）
 _BINARY_SNIFF_BYTES = 8192
+# UTF-8 BOM：算 tag 前先剥掉，避免「带不带 BOM」被当成内容差异
+_UTF8_BOM = b"\xef\xbb\xbf"
 
 # ── 文件版本 tag 与「先读后写」观察状态 ────────────────────────────────────────
 # 会话级观察记录：绝对路径 → {"tag": 4 位 hex, "mtime_ns": int, "lines": (首行, 末行), "at": 时间}。
@@ -233,7 +235,12 @@ def _sensitive_path_reason(path: Path) -> str:
     if lowered.endswith(_WORKSPACE_SENSITIVE_SUFFIXES):
         return f"{name} 属于密钥/证书文件，禁止通过文件工具访问"
     if _WORKSPACE_VCS_DIR in path.parts:
-        return f"{path.name} 位于 {_WORKSPACE_VCS_DIR} 目录内，禁止通过文件工具访问（请用 akm_run_git）"
+        # 不写死「请用 akm_run_git」：agent_git_enabled=false 时那个工具根本没注册，
+        # 提示会指向一个不存在的工具（v0.1.58 P2-2）
+        return (
+            f"{path.name} 位于版本库内部目录 {_WORKSPACE_VCS_DIR}/ 下，文件工具不直接访问；"
+            "如需操作版本库，请先开启 agent_git_enabled 再用 akm_run_git"
+        )
     return ""
 
 
@@ -248,11 +255,29 @@ def _guard_sensitive_path(path: Path) -> None:
         raise ValueError(reason)
 
 
-def _normalize_tag_text(text: str) -> str:
-    """把文本归一化成算 tag 用的规范形态（去 BOM、CRLF→LF、每行去尾部空白）。
+def _normalize_tag_bytes(data: bytes) -> bytes:
+    """把文件**字节**归一化成算 tag 用的规范形态（去 BOM、CRLF→LF、每行去尾部空格/Tab）。
 
-    归一化的目的：换行风格（CRLF/LF）与编辑器自动去尾随空格的差异不应该让
-    tag 失效，否则模型在 Windows 工作区里几乎每次编辑都要报版本不匹配。
+    为什么按字节而不是按解码后的文本（v0.1.58 的 P0 缺陷根因）：同一份内容可能有多种
+    解码结果。read 走 `_decode_text_bytes`（GB18030 能正确解码）得到中文文本，而校验
+    走 `read_text(utf-8, errors="replace")` 得到一串 U+FFFD，两条路径对**同一份内容**
+    算出两个不同哈希 —— 于是 GBK/GB18030/Latin-1 文件「读得到、改不了」：read 给 A、
+    校验要 B，重读还是 A，永久死锁。统一到磁盘原始字节后，两条路径不可能再分叉。
+
+    归一化的目的不变：换行风格（CRLF/LF）与编辑器「保存时去尾随空白」的差异不应该
+    让 tag 失效。
+    """
+    if data.startswith(_UTF8_BOM):
+        data = data[len(_UTF8_BOM):]
+    data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return b"\n".join(line.rstrip(b" \t") for line in data.split(b"\n"))
+
+
+def _normalize_anchor_text(text: str) -> str:
+    """锚点校验用的**文本**归一化（去 BOM、统一换行、每行去尾部空白）。
+
+    与 tag 的字节口径相互独立：tag 决定「是不是同一版内容」，这里只用于放宽
+    edit 的锚点比较（缩进/换行风格差异不该被当成锚点不匹配）。
     """
     if text.startswith("\ufeff"):
         text = text[1:]
@@ -260,34 +285,33 @@ def _normalize_tag_text(text: str) -> str:
     return "\n".join(line.rstrip(" \t") for line in text.split("\n"))
 
 
-def _content_tag(text: str) -> str:
-    """计算整文件内容 tag：SHA-256 取低 16 位，输出 4 位大写 hex。
+def _content_tag(data: bytes) -> str:
+    """对文件**字节**算整文件 tag：SHA-256 取低 16 位，输出 4 位大写 hex。
 
     与 pi-desktop 的 hashline tag 同一个思路：Read 返回 tag、Edit 带上它，
     服务端就能判断「模型改的是不是它读到的那版内容」。
     """
-    digest = hashlib.sha256(_normalize_tag_text(text).encode("utf-8", errors="replace")).digest()
+    digest = hashlib.sha256(_normalize_tag_bytes(data)).digest()
     return f"{int.from_bytes(digest[:2], 'big') & 0xFFFF:04X}"
 
 
-def _file_tag(target: Path, text: str | None = None) -> str:
-    """返回文件当前 tag（4 位大写 hex），用于 write/edit 的版本校验。
+def _file_tag(target: Path, data: bytes | None = None) -> str:
+    """返回文件当前 tag（4 位大写 hex），**口径固定为磁盘原始字节**。
 
-    口径：
-    - 调用方已经拿到全文（read 的常规路径、write/edit 写完后）→ 直接对文本算哈希；
-    - 未提供文本且文件不超过 8MB → 读全文算哈希；
+    - 调用方已持有原始字节（read 的全量路径、write/edit 读入的那份）→ 直接传入，省一次 IO；
+    - 未提供且文件不超过 8MB → 读原始字节算哈希；
     - 更大的文件 → 用「大小 ^ mtime」指纹。大文件本来不适合整文件编辑，
       指纹足以发现「读到之后被别人改了」，同时避免为算 tag 再整文件读一遍。
     """
-    if text is not None:
-        return _content_tag(text)
+    if data is not None:
+        return _content_tag(data)
     try:
         stat = target.stat()
     except OSError:
         return ""
     if stat.st_size <= _TEXT_FULL_DECODE_MAX_BYTES:
         try:
-            return _content_tag(target.read_text(encoding="utf-8", errors="replace"))
+            return _content_tag(target.read_bytes())
         except OSError:
             return ""
     return f"{(stat.st_size ^ stat.st_mtime_ns) & 0xFFFF:04X}"
@@ -298,7 +322,7 @@ def _record_observation(
     start_line: int,
     end_line: int,
     *,
-    text: str | None = None,
+    data: bytes | None = None,
     windowed: bool = False,
 ) -> str:
     """记录「本会话读过这个文件的这一行区间」，返回当前内容 tag。
@@ -307,10 +331,11 @@ def _record_observation(
     目标文件本会话读过；行区间用于判断模型是否看到过即将修改的那几行。
 
     Args:
+        data: 调用方已持有的文件原始字节（与 `_file_tag` 同一口径），None 表示由本函数读盘。
         windowed: True 表示只看了文件的一段（read 分页），False 表示整文件都看过
             （全文写入/整文件编辑之后）。
     """
-    tag = _file_tag(target, text)
+    tag = _file_tag(target, data)
     try:
         mtime_ns = target.stat().st_mtime_ns
     except OSError:
@@ -831,9 +856,10 @@ def _collect_window(
     used_bytes = 0
     truncated = False
     clipped_lines = 0
+    stopped = False  # 字节预算已耗尽：不再收集内容，但必须继续数完剩余行
     for idx, raw_line in enumerate(lines, start=1):
         total_lines = idx
-        if idx < start_line:
+        if idx < start_line or stopped:
             continue
         if len(selected) >= max_lines:
             continue
@@ -844,8 +870,12 @@ def _collect_window(
             clipped_lines += 1
         used_bytes += len(line.encode("utf-8"))
         if used_bytes > max_bytes:
+            # 超字节预算：窗口到此为止，但**不能 break**——footer 的「共 N 行」
+            # 必须是文件真实总行数，否则截断时会把它报成窗口行数（v0.1.58 P2-1：
+            # 5000 行的文件被报成「共 1225 行」，模型据此以为已读到结尾）
             truncated = True
-            break
+            stopped = True
+            continue
         selected.append((idx, line))
     return selected, total_lines, truncated, clipped_lines
 
@@ -856,13 +886,16 @@ def _read_window_sync(
     max_lines: int,
     max_bytes: int,
     max_line_chars: int,
-) -> tuple[list[tuple[int, str]], int, bool, int, str, str | None]:
-    """同步读取文件窗口，返回 (选中行, 总行数, 预算截断, 超长行数, 编码, 全文)。
+) -> tuple[list[tuple[int, str]], int, bool, int, str, bytes | None]:
+    """同步读取文件窗口，返回 (选中行, 总行数, 预算截断, 超长行数, 编码, 原始字节)。
 
-    小文件整体解码（支持编码回退，并顺带返回全文供算 tag）；超过
-    ``_TEXT_FULL_DECODE_MAX_BYTES`` 的文件走流式 utf-8（全文返回 None）。
-    二进制内容抛 ValueError，由工具层转成可读错误。
+    小文件整体解码（支持编码回退，并把**原始字节**一并返回供算 tag）；超过
+    ``_TEXT_FULL_DECODE_MAX_BYTES`` 的文件走流式 utf-8（字节返回 None，由调用方
+    按「大小 ^ mtime」指纹取 tag）。二进制内容抛 ValueError，由工具层转成可读错误。
     该函数在 asyncio.to_thread 中执行，避免阻塞事件循环。
+
+    注意：返回的是原始字节而不是解码后的文本——tag 必须按字节口径计算，
+    否则 GB18030 文件会出现「read 给一个哈希、校验要另一个哈希」的死锁（v0.1.58 P0）。
     """
     try:
         size = target.stat().st_size
@@ -882,7 +915,7 @@ def _read_window_sync(
         selected, total, truncated, clipped = _collect_window(
             iter(lines), start_line, max_lines, max_bytes, max_line_chars
         )
-        return selected, total, truncated, clipped, encoding, text
+        return selected, total, truncated, clipped, encoding, data
     with open(target, "rb") as fb:
         if _looks_binary(fb.read(_BINARY_SNIFF_BYTES)):
             raise ValueError("文件内容是二进制，不能用 akm_read_file 读取")
@@ -953,7 +986,7 @@ async def _read_file_tool(
 
     try:
         # 同步 IO 放到线程池执行，避免阻塞事件循环
-        selected, total_lines, truncated, clipped, encoding, full_text = await asyncio.to_thread(
+        selected, total_lines, truncated, clipped, encoding, raw_bytes = await asyncio.to_thread(
             _read_window_sync,
             target,
             start_line,
@@ -978,7 +1011,7 @@ async def _read_file_tool(
             target,
             start_line,
             end_line,
-            text=full_text,
+            data=raw_bytes,
             windowed=(end_line < total_lines),
         )
     except OSError:
@@ -1443,14 +1476,23 @@ async def _file_info_tool(path: str) -> str:
         return json.dumps({"error": f"读取文件信息失败: {exc}"}, ensure_ascii=False)
 
 
-def _atomic_write_text(target: Path, text: str) -> None:
-    """以「临时文件 + os.replace」原子写入文本，避免进程中断/磁盘满时留下半个文件。
+def _atomic_write_text(target: Path, text: str, encoding: str = "utf-8") -> str:
+    """以「临时文件 + os.replace」原子写入文本，返回**实际使用的编码**。
 
-    临时文件创建在与目标同一目录，保证 os.replace 在同一文件系统内是原子操作。
-    完成后按目标原权限（或默认 0644）修正临时文件权限，避免 mkstemp 的 0600
-    覆盖掉原本可被同机其他用户读写的文件。
+    - `encoding` 传原文件编码时优先保持——否则把 GB18030/GBK 文件悄悄改写成 UTF-8，
+      用户在别的编辑器里会看到整文件 diff 甚至乱码（v0.1.58 只顾着写 tag 没管这件事）；
+    - 该编码表示不了新内容（UnicodeEncodeError）或编码名非法时回退 UTF-8，
+      调用方据返回值得知「编码变了」，可以在结果里提示模型；
+    - 临时文件创建在与目标同一目录，保证 os.replace 在同一文件系统内是原子操作；
+    - 完成后按目标原权限（或默认 0644）修正临时文件权限，避免 mkstemp 的 0600
+      覆盖掉原本可被同机其他用户读写的文件。
     """
-    data = text.encode("utf-8")
+    used_encoding = str(encoding or "utf-8")
+    try:
+        data = text.encode(used_encoding)
+    except (LookupError, UnicodeEncodeError):
+        used_encoding = "utf-8"
+        data = text.encode("utf-8")
     fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".akm-write-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -1467,6 +1509,19 @@ def _atomic_write_text(target: Path, text: str) -> None:
         except OSError:
             pass
         raise
+    return used_encoding
+
+
+def _read_bytes_safe(target: Path) -> bytes | None:
+    """读文件原始字节，失败返回 None。
+
+    用于写入/编辑之后「回读铸 tag」：tag 必须按磁盘真实字节计算，
+    回读失败时退回 None（`_file_tag` 会自己再试一次），不影响主结果返回。
+    """
+    try:
+        return target.read_bytes()
+    except OSError:
+        return None
 
 
 async def _write_file_tool(
@@ -1505,13 +1560,19 @@ async def _write_file_tool(
     async with _path_lock(target):
         existed = target.is_file()
         previous = ""
+        previous_bytes: bytes | None = None
+        previous_encoding = "utf-8"
         current_tag = ""
         if existed:
             try:
-                previous = target.read_text(encoding="utf-8", errors="replace")
+                previous_bytes = target.read_bytes()
             except OSError as exc:
                 return json.dumps({"error": f"读取原文件失败: {exc}"}, ensure_ascii=False)
-            current_tag = _file_tag(target, previous)
+            previous, previous_encoding = _decode_text_bytes(previous_bytes)
+            if previous_encoding == "utf-8(replace)":
+                # 解不干净（二进制或未知编码）：覆盖时按 UTF-8 写，不做编码保持
+                previous_encoding = "utf-8"
+            current_tag = _file_tag(target, previous_bytes)
 
         # ① 显式 tag：模型声明「我改的是这一版」，与当前内容比对
         if expected_tag and current_tag and expected_tag != current_tag:
@@ -1547,22 +1608,30 @@ async def _write_file_tool(
                     "current_tag": current_tag,
                 }, ensure_ascii=False)
 
+        used_encoding = previous_encoding if existed else "utf-8"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if mode == "append":
-                # 追加无原子语义，直接以 O_APPEND 打开续写
-                with open(target, "a", encoding="utf-8") as fh:
+                # 追加无原子语义，直接以 O_APPEND 打开续写（用原文件编码，避免混编）
+                with open(target, "a", encoding=used_encoding) as fh:
                     fh.write(payload)
                 new_text = (previous + payload) if existed else payload
             else:
-                # 覆盖走原子替换，避免中断留下半个文件
-                _atomic_write_text(target, payload)
+                # 覆盖走原子替换，避免中断留下半个文件；按原编码写回，保持文件编码不变
+                used_encoding = _atomic_write_text(target, payload, used_encoding)
                 new_text = payload
         except OSError as exc:
             return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
 
-        # 写入后重新记录观察：本会话已知整文件内容，后续 edit 不再要求重读
-        new_tag = _record_observation(target, 1, max(1, len(new_text.splitlines())), text=new_text)
+        # 写入后**回读磁盘字节**记录观察：tag 必须反映真实落盘内容（含编码回退的影响），
+        # 这样紧接着的 edit 不会因为「写的是 UTF-8、算的是别的口径」而假报警。
+        try:
+            new_bytes: bytes | None = target.read_bytes()
+        except OSError:
+            new_bytes = None
+        new_tag = _record_observation(
+            target, 1, max(1, len(new_text.splitlines())), data=new_bytes
+        )
 
     result: dict[str, Any] = {
         "ok": True,
@@ -1572,7 +1641,14 @@ async def _write_file_tool(
         "lines": len(new_text.splitlines()),
         "tag": new_tag,
         "created": not existed,
+        "encoding": used_encoding,
     }
+    if existed and used_encoding != previous_encoding:
+        result["encoding_changed"] = used_encoding
+        result["notice"] = (
+            f"原文件是 {previous_encoding} 编码，但新内容无法用该编码表示，已改写为 "
+            f"{used_encoding}；如需保持原编码，请检查内容里是否有该编码不支持的字符"
+        )
     if existed and mode == "overwrite":
         diff = _text_diff(previous, payload)
         if diff:
@@ -1629,11 +1705,18 @@ async def _edit_file_tool(
                          "请用 akm_run_shell 里的 sed/脚本处理大文件",
             }, ensure_ascii=False)
         try:
-            content = target.read_text(encoding="utf-8", errors="replace")
+            raw_bytes = target.read_bytes()
         except OSError as exc:
             return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
+        content, file_encoding = _decode_text_bytes(raw_bytes)
+        if file_encoding == "utf-8(replace)":
+            # 解不干净说明是二进制或未知编码：整文件改写会破坏原内容，直接拒绝
+            return json.dumps({
+                "error": "文件不是干净的 UTF-8 / GB18030 文本（含无法解码的字节），"
+                         "拒绝编辑以免写坏原文件；确需替换整体内容请用 akm_write_file",
+            }, ensure_ascii=False)
 
-        current_tag = _file_tag(target, content)
+        current_tag = _file_tag(target, raw_bytes)
         if expected_tag and expected_tag != current_tag:
             return json.dumps({
                 "error": (
@@ -1691,7 +1774,7 @@ async def _edit_file_tool(
                 target_slice = "\n".join(lines[start_line - 1:effective_end])
                 if (
                     old_string not in target_slice
-                    and _normalize_tag_text(old_string) not in _normalize_tag_text(target_slice)
+                    and _normalize_anchor_text(old_string) not in _normalize_anchor_text(target_slice)
                 ):
                     return json.dumps(
                         {"error": f"锚点校验失败：old_string 未在第 {start_line}-{effective_end} 行区间内找到"},
@@ -1707,11 +1790,13 @@ async def _edit_file_tool(
                     "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
                 }, ensure_ascii=False)
             try:
-                _atomic_write_text(target, new_text)
+                # 按原文件编码写回：否则 GB18030 文件被悄悄改成 UTF-8，用户在别的编辑器里看到整文件乱码
+                used_encoding = _atomic_write_text(target, new_text, file_encoding)
             except OSError as exc:
                 return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
+            # 回读磁盘字节铸 tag：紧随其后的 read/edit 必须看到同一口径的 tag
             new_tag = _record_observation(
-                target, 1, max(1, len(new_text.splitlines())), text=new_text
+                target, 1, max(1, len(new_text.splitlines())), data=_read_bytes_safe(target)
             )
             result = {
                 "ok": True,
@@ -1720,7 +1805,14 @@ async def _edit_file_tool(
                 "old_lines": effective_end - start_line + 1,
                 "new_lines": len(str(new_content or "").splitlines()),
                 "tag": new_tag,
+                "encoding": used_encoding,
             }
+            if used_encoding != file_encoding:
+                result["encoding_changed"] = used_encoding
+                result["notice"] = (
+                    f"原文件是 {file_encoding} 编码，但编辑后的内容无法用该编码表示，"
+                    f"已改写为 {used_encoding}"
+                )
             diff = _text_diff(content, new_text)
             if diff:
                 result["diff"] = diff
@@ -1755,11 +1847,12 @@ async def _edit_file_tool(
                 "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
             }, ensure_ascii=False)
         try:
-            _atomic_write_text(target, new_text)
+            # 同为「保持原编码」：内容模式也不该把 GBK 老文件偷偷转码
+            used_encoding = _atomic_write_text(target, new_text, file_encoding)
         except OSError as exc:
             return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
         new_tag = _record_observation(
-            target, 1, max(1, len(new_text.splitlines())), text=new_text
+            target, 1, max(1, len(new_text.splitlines())), data=_read_bytes_safe(target)
         )
         result = {
             "ok": True,
@@ -1767,7 +1860,14 @@ async def _edit_file_tool(
             "mode": "content",
             "replaced": replaced,
             "tag": new_tag,
+            "encoding": used_encoding,
         }
+        if used_encoding != file_encoding:
+            result["encoding_changed"] = used_encoding
+            result["notice"] = (
+                f"原文件是 {file_encoding} 编码，但编辑后的内容无法用该编码表示，"
+                f"已改写为 {used_encoding}"
+            )
         diff = _text_diff(content, new_text)
         if diff:
             result["diff"] = diff
@@ -1949,6 +2049,19 @@ async def _run_workspace_argv(argv: list[str], root: Path, timeout: int, label: 
         return json.dumps({"error": f"执行{label}失败: {exc}"}, ensure_ascii=False)
 
 
+_SBPL_REGEX_META = frozenset(".^$*+?()[]{}|\\")
+
+
+def _sbpl_regex_escape(text: str) -> str:
+    """转义正则元字符，供 SBPL 的 ``(regex #"...")`` 使用。
+
+    不用 ``re.escape``：它会把空格转成 ``"\\ "``，而 SBPL 走的是 ERE 风格引擎，
+    反斜杠加普通字符属于未定义行为；工作区路径里带空格（`My Project`）很常见，
+    一旦正则编译不过，sandbox_init 会返回非零、整个 shell 工具直接不可用。
+    """
+    return "".join("\\" + ch if ch in _SBPL_REGEX_META else ch for ch in text)
+
+
 def _seatbelt_profile(root: Path) -> str:
     """构造 macOS seatbelt 黑名单式 sandbox profile（SBPL）。
 
@@ -1959,10 +2072,18 @@ def _seatbelt_profile(root: Path) -> str:
     这是「限制敏感读写」级别的隔离，不是真正的 chroot，命令仍可读系统
     目录、访问网络；但能挡住读密钥/配置文件/命令历史/家目录 dotfile、
     列家目录与 /var、/tmp 结构、往系统写文件的越界。
+
+    两条容易踩的坑（都实测过）：
+    - **路径一律 realpath**：seatbelt 的 ``subpath`` 匹配的是内核看到的真实路径，
+      而 macOS 上 ``/var``、``/tmp``、``/etc`` 都是 ``/private/*`` 的符号链接。
+      工作区若落在 ``/var/folders/...``（TMPDIR）或 ``/tmp`` 下，用未解析路径会让
+      所有 allow 失配——工作区写不进去（fail-close），同时下面按工作区拼的敏感
+      deny 也一起失效（fail-open，`.env` 反而能读）；
+    - **敏感文件 deny 必须写在 allow 之后**：last-match-wins，写在前面等于没写。
     """
-    ws = str(root)
-    home = str(Path.home())
-    tmp = os.environ.get("TMPDIR") or "/tmp"
+    ws = os.path.realpath(str(root))
+    home = os.path.realpath(str(Path.home()))
+    tmp = os.path.realpath(os.environ.get("TMPDIR") or "/tmp")
     sensitive = [
         f'"{home}/.ssh"',
         f'"{home}/.aws"',
@@ -2003,6 +2124,16 @@ def _seatbelt_profile(root: Path) -> str:
         f'(subpath "{ws}") (subpath "{tmp}")'
         ' (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/zero")'
     )
+    # ── 工作区内敏感文件名：与文件工具层同一份名单 ─────────────────────────
+    # 路径与名单项都转义后拼成 SBPL 正则（用 (.*/)? 覆盖任意层级子目录）
+    ws_pat = _sbpl_regex_escape(ws)
+    names_pat = "|".join(_sbpl_regex_escape(n) for n in sorted(_WORKSPACE_SENSITIVE_NAMES))
+    suffix_pat = "|".join(
+        _sbpl_regex_escape(s.lstrip(".")) for s in _WORKSPACE_SENSITIVE_SUFFIXES
+    )
+    env_tpl_pat = "|".join(
+        _sbpl_regex_escape(s.lstrip(".")) for s in _ENV_TEMPLATE_SUFFIXES
+    )
     return (
         "(version 1)\n"
         "(allow default)\n"
@@ -2014,6 +2145,22 @@ def _seatbelt_profile(root: Path) -> str:
         f"(allow file-write* {allow_write})\n"
         f"(allow file-read* {allow_read})\n"
         f'(allow file-read-metadata (subpath "{ws}") (subpath "{tmp}"))\n'
+        # ── 工作区内敏感文件（补 v0.1.58 P1）──
+        # 名单原先只在文件工具层生效，导致 shell 里 `cat .env`、`cat id_rsa` 秒过。
+        # 这几条**必须写在上面 (allow file-read*) 之后**：SBPL 是 last-match-wins，
+        # 写在 allow 前面会被直接覆盖掉，看着有规则实际不生效。
+        # 只 deny file-read-data（读内容）而不是 file-read*：后者会把 ls/stat 这类
+        # 只取元数据的命令一起打掉、刷一屏 Operation not permitted，而真正要防的
+        # 只是「读到密钥内容」。
+        # 不 deny .git 目录：文件工具层已拦 .git 下的读写，而 shell 侧 deny 掉 .git 会让
+        # 所有 git 命令直接失效，这里按「不扩大拦截面」处理。
+        # 注：沙箱内的 git 目前仍因 /etc/gitconfig、~/.gitconfig 被 deny 而不可用
+        # （既有行为，本次不动），需要 git 请用 akm_run_git 或关掉沙箱。
+        f'(deny file-read-data (regex #"^{ws_pat}/(.*/)?({names_pat})$"))\n'
+        f'(deny file-read-data (regex #"^{ws_pat}/(.*/)?[^/]*\\.({suffix_pat})$"))\n'
+        f'(deny file-read-data (regex #"^{ws_pat}/(.*/)?\\.env(\\.[^/]*)?$"))\n'
+        # 模板（.env.example 等）不含真实密钥，deny 之后再放行（last-match-wins）
+        f'(allow file-read-data (regex #"^{ws_pat}/(.*/)?\\.env\\.({env_tpl_pat})$"))\n'
     )
 
 

@@ -26,13 +26,13 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；本地路径仅允许工作区或上传目录，亦可传入 base64 数据 |
 | `akm_read_image` | 调用配置的视觉模型描述一张图片（图片来源 `image_path` 本地文件或 `image_base64` data URL），返回图片的文字描述；本质是一次多模态 chat/completions 请求，视觉模型取 `agent_config.agent_vision_model`（默认 `gpt-5.6-luna`，与图片生成的 `image_supported_models` 相互独立） |
-| `akm_read_file` | 读取工作区内的文本文件，返回「行号: 内容」的纯文本窗口 + 4 位版本 tag（`[路径#TAG]` 头）。`offset` 为 **1-based** 起始行（与 `akm_edit_file` 的 `start_line` 完全一致），`limit` 默认 2000 行、上限 4000；窗口未读完时 footer 直接给出下一次的 `offset`。单文件超 50MB 拒绝，单次窗口超 60KB 或单行超 2000 字符则截断并标注；编码按 utf-8 → gb18030 回退，二进制内容返回可操作错误 |
+| `akm_read_file` | 读取工作区内的文本文件，返回「行号: 内容」的纯文本窗口 + 4 位版本 tag（`[路径#TAG]` 头）。`offset` 为 **1-based** 起始行（与 `akm_edit_file` 的 `start_line` 完全一致），`limit` 默认 2000 行、上限 4000；窗口未读完时 footer 直接给出下一次的 `offset`。单文件超 50MB 拒绝，单次窗口超 60KB 或单行超 2000 字符则截断并标注；编码按 utf-8 → gb18030 回退，tag 一律按**磁盘原始字节**计算（解码后的文本不参与），footer 的「共 N 行」在窗口被字节预算截断时也是文件真实总行数；二进制内容返回可操作错误 |
 | `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小、是否敏感），支持 `offset` / `limit` 分页（默认 500，上限 2000），被截断时返回 `truncated` 与 `next_offset` |
 | `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表并**按 mtime 倒序**；支持 `path` 限定子目录与 `limit`（默认 100，上限 1000）；遍历统一跳过隐藏目录与 `node_modules`/`.git`/`build`/`dist` 等依赖构建目录，结果或扫描预算被截断时标记 `truncated` 并给 `notice` |
 | `akm_grep` | 在工作区内按正则搜索文件内容，**每个文件返回其全部命中行**（候选文件按 mtime 倒序扫描）；支持 `include`（glob 过滤）、`case_sensitive`、`output_mode`（`content` / `files_with_matches` / `count`）与 `head_limit`（默认 100，上限 4000）；单文件超 10MB 跳过，截断时返回 `truncated` 与 `notice` |
 | `akm_file_info` | 查询工作区内文件/目录的类型、大小与修改时间 |
-| `akm_write_file` | 新建或覆盖工作区内文件（`mode=overwrite` 覆盖 / `append` 追加；单次内容超 10MB 拒绝）。覆盖已存在文件前**必须先读过**（或用 `tag` 声明要改的版本），写入后返回新 tag 与 diff；需开启 `agent_write_tools_enabled` |
-| `akm_edit_file` | 结构化编辑工作区内文件：行号模式（`start_line` 1-based，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`；内容模式把 `old_string` → `new_string`，`old_string` **必须唯一匹配**（多处命中需补充上下文或显式传 `replace_all=true`）。编辑前必须先读过该文件，行号模式还要求目标区间落在已读范围内；`tag` 与磁盘内容不一致即拒绝；成功后返回新 tag 与 diff；需开启 `agent_write_tools_enabled` |
+| `akm_write_file` | 新建或覆盖工作区内文件（`mode=overwrite` 覆盖 / `append` 追加；单次内容超 10MB 拒绝）。覆盖已存在文件前**必须先读过**（或用 `tag` 声明要改的版本），写入后返回新 tag 与 diff，并按原文件编码写回（结果含 `encoding`，编码回退时给 `encoding_changed` / `notice`）；需开启 `agent_write_tools_enabled` |
+| `akm_edit_file` | 结构化编辑工作区内文件：行号模式（`start_line` 1-based，可配 `end_line` 与锚点 `old_string` 校验）把行区间整体替换为 `new_content`；内容模式把 `old_string` → `new_string`，`old_string` **必须唯一匹配**（多处命中需补充上下文或显式传 `replace_all=true`）。编辑前必须先读过该文件，行号模式还要求目标区间落在已读范围内；`tag` 与磁盘内容不一致即拒绝；成功后返回新 tag 与 diff，同样按原文件编码写回；含无法解码字节的文件拒绝编辑（提示改用 `akm_write_file`）；需开启 `agent_write_tools_enabled` |
 | `akm_make_dir` | 在工作区内递归创建目录（需开启 `agent_write_tools_enabled`） |
 | `akm_delete_file` | 删除工作区内的文件或目录。默认只删除**单个文件**；`recursive=true` 可删除目录并递归清除其中所有内容（批量删除，返回 `entries_removed`）；始终禁止删除工作区根目录；需开启 `agent_write_tools_enabled` |
 | `akm_move_file` | 在工作区内移动/重命名文件或目录（一步完成，不必 read+write+delete）；目标已存在需显式传 `overwrite=true`；需开启 `agent_write_tools_enabled` |
@@ -81,7 +81,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_sensitive_path_guard` | `true` | 是否拦截工作区内的敏感文件：`.env`（`.env.example` / `.env.sample` / `.env.template` 等模板除外）、`id_rsa` / `id_ed25519` 等私钥、`credentials.json` / `.netrc` 等凭据、`*.pem` / `*.key` / `*.p12` / `*.pfx` 等证书、`.git` 目录内部文件；读写删建与搜索全部生效 |
 | `agent_tool_audit_enabled` | `true` | 是否为工作区文件工具写「工具调用级」审计记录（`provider=akm`、token 为 0、`x-akm-source=<chat|task>-tool`、`x-akm-tool=<工具名>`），用于追查谁在何时改了哪个文件；审计写入失败不影响工具结果 |
 | `agent_run_shell_enabled` | `false` | 是否启用 Agent shell 执行工具（`akm_run_shell`），默认关闭需显式开启；命令由模型直接传入、系统 shell 执行。**注意：这不是文件系统沙箱**，命令可访问工作区之外（如 `/etc`、家目录），仅以工作区为 cwd，启用前应确认调用方可信 |
-| `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区与临时目录，全局禁写（仅放行工作区/TMP/`/dev`），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zprofile` / `.bash_profile` / `.bashrc` / `.zsh_history` / `.bash_history` / `.gitconfig` / `.git-credentials` / `.npmrc` / `.netrc`）/ `/etc` / `/private/etc` / `/var/log` / `/private/var/log` / `/var/db` / `/private/var/db` / `/tmp` / `/private/tmp` 等敏感路径，同时拒绝 `~` 的目录列举（`file-read-metadata`）；系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
+| `agent_run_shell_sandbox` | `true` | `akm_run_shell` 默认用 macOS seatbelt 沙箱（`sandbox_init_with_parameters` + `preexec_fn`）隔离 shell 子进程：只读工作区与临时目录，全局禁写（仅放行工作区/TMP/`/dev`），并拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Downloads` / `~/Documents` / `~/Desktop` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zprofile` / `.bash_profile` / `.bashrc` / `.zsh_history` / `.bash_history` / `.gitconfig` / `.git-credentials` / `.npmrc` / `.netrc`）/ `/etc` / `/private/etc` / `/var/log` / `/private/var/log` / `/var/db` / `/private/var/db` / `/tmp` / `/private/tmp` 等敏感路径，同时拒绝 `~` 的目录列举（`file-read-metadata`）；并用与文件工具层**同一份名单** deny 工作区内 `.env` / 私钥 / `credentials.json` / `*.pem` 等敏感文件的 `file-read-data`（`.env.example` 类模板仍可读，`.git` 不拦）；profile 中的工作区、家目录与 `TMPDIR` 一律取 `realpath`——`/var`、`/tmp`、`/etc` 都是 `/private/*` 的符号链接，未解析会让整份规则失配（写不进文件 + 敏感文件反而能读）。系统不支持该 API 时自动退回普通执行并记录警告。设为 `false` 可关闭隔离。注意：这是「限制敏感读写」级隔离，非真正的 chroot（网络、`/usr` 等仍可访问） |
 | `agent_git_enabled` | `false` | 是否启用 Agent git 工具（`akm_run_git`，仅允许固定的结构化 operation），默认关闭需显式开启 |
 | `agent_subagent_enabled` | `true` | 是否启用子 Agent 递归委托工具（`akm_subagent_spawn` / `akm_subagent_wait` / `akm_subagent_kill`），默认开启；子 Agent 通过子进程调用本机 `/v1/agent`，进程级隔离 |
 | `agent_subagent_max_depth` | `1` | 子 Agent 最大嵌套层数：默认 1 表示主会话（depth 0）能开启子进程会话、子进程内（depth ≥ 1）不能再开下一级；调大后允许更深的多级递归委托（`akm_subagent_spawn` 在达到上限时返回错误而非报错） |
@@ -279,8 +279,8 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 - 行号是**绝对行号（1-based）**，`offset` 同样是 1-based，与 `akm_edit_file` 的 `start_line` 同一口径（早先 read 用 0-based、edit 用 1-based，是最容易改错行的错位来源）；
 - 默认窗口 2000 行、上限 4000 行；单次窗口 60KB、单行 2000 字符封顶，超长行会标注被裁断；
 - 窗口没读完时 footer 直接给出下一次的 `offset`，模型不必自己累加；
-- 编码按 `utf-8` → `gb18030` 回退；前 8KB 含 `NUL` 判为二进制并拒绝（图片请用 `akm_read_image`）；
-- 返回头里的 4 位 `TAG` 是整文件内容哈希（大文件退化为「大小 ^ mtime」指纹），可回传给 `akm_write_file` / `akm_edit_file` 做版本校验；
+- 编码按 `utf-8` → `gb18030` 回退；前 8KB 含 `NUL` 判为二进制并拒绝（图片请用 `akm_read_image`）；写入（`akm_write_file` / `akm_edit_file` 两种模式）都**按原文件编码写回**，结果里回 `encoding`，编码表示不了新内容时回退 `utf-8` 并给 `encoding_changed` / `notice`——否则 GBK 老文件会被悄悄转成 UTF-8；含无法解码字节的文件拒绝 `edit`（会把乱码写回去），需要整体改写请用 `akm_write_file`；
+- 返回头里的 4 位 `TAG` **只按磁盘原始字节**计算（超大文件退化为「大小 ^ mtime」指纹），可回传给 `akm_write_file` / `akm_edit_file` 做版本校验；解码后的文本**不参与** tag 计算——否则非 UTF-8 文件会出现「read 给一个哈希、校验要另一个哈希」的死锁；
 - 读完会记录「本会话读过这个文件的这一行区间」，写工具的「先读后写」与行区间 provenance 都基于它。
 
 ### 写工具、shell 与 git（默认禁用）
@@ -290,14 +290,14 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_move_file` / `akm_copy_file`）共同遵守以下约定，`agent_write_requires_read` 默认开启：
 
 - **先读后写**：覆盖已存在文件、或编辑任意文件前，本会话必须先 `akm_read_file` 读过它，否则返回「必须先读取」错误并附带恢复指令；`mode=append` 追加不受此限制（追加不破坏原文）；
-- **版本校验**：`akm_read_file` 返回的 4 位 `TAG` 可传给 `tag` 参数，与磁盘当前内容不一致（文件已被外部改动）即拒绝并回当前 tag；
+- **版本校验**：`akm_read_file` 返回的 4 位 `TAG` 可传给 `tag` 参数，与磁盘当前内容不一致（文件已被外部改动）即拒绝并回当前 tag。tag **只按磁盘原始字节**计算，read 与写工具校验走同一个函数：早先 read 用「解码成 str 再 encode('utf-8')」、校验用「字节 decode('utf-8', errors='replace')」，纯 UTF-8 文件恰好相等，GB18030/GBK/Latin-1 文件则是同一个文件两个哈希，读得到、改不了，重读也救不回来；
 - **行区间 provenance**：行号模式要求目标行区间落在本会话读过的窗口内，避免「凭旧行号盲改没看过的行」；
 - **唯一匹配**：`akm_edit_file` 内容模式的 `old_string` 必须唯一匹配，多处命中报错要求补充上下文或显式 `replace_all=true`（早先会静默改掉第一处，是最容易改错位置的坑）；
 - **回显变更**：写入/编辑成功后返回新 `tag` 与 unified `diff`；删除返回 `entries_removed`；移动/复制一步完成，不必 read + write + delete；
 - **并发串行**：同一路径的写/编辑在进程内用 asyncio 锁串行，避免并发工具调用互相覆盖；
 - **审计留痕**：每个写工具调用都会写一条工具级审计（`agent_tool_audit_enabled` 默认开启），记录工具名、参数摘要（长内容只留头部）、耗时与成败。
 
-`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zsh_history` / `.gitconfig` / `.npmrc` 等）/ `/etc` / `/private/etc` / `/var/log` / `/var/db` / `/tmp` 等敏感路径与家目录列举），将越界风险从「无限制」降到「限制敏感读写」级别。此外，父进程若携带 `PYTHONHOME`/`PYTHONPATH`（py2app 打包的 app 内嵌 Python 运行时设置），执行前会被剥离，避免污染 shell 里外部 `python3` 使其启动即崩溃。
+`akm_run_shell` 接受 `command` 字符串参数。模型可直接传入任意 shell 命令，服务端用系统 shell 解释执行（支持管道、通配符、重定向），以当前工作区作为 cwd；执行受超时（1–300 秒，默认 60）与输出大小（60KB）限制。这是显式开启的主机级进程执行能力，`cwd` 不能提供文件系统隔离，管理员应结合 `tool_policy_guard` 等插件策略约束调用内容。默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 沙箱隔离 shell 子进程（只读工作区与临时目录 + 全局禁写 + 拒绝 `~/.ssh` / `~/.aws` / `~/.akm` / `~/Library` / 家目录根 dotfile（`.zshrc` / `.zsh_history` / `.gitconfig` / `.npmrc` 等）/ `/etc` / `/private/etc` / `/var/log` / `/var/db` / `/tmp` 等敏感路径与家目录列举），并补上与文件工具层同一份名单的 `file-read-data` deny（工作区内 `.env` / 私钥 / `credentials.json` / `*.pem` 等，`.env.example` 类模板仍可读），将越界风险从「无限制」降到「限制敏感读写」级别。profile 里的工作区、家目录与 `TMPDIR` 一律取 `os.path.realpath`：seatbelt 的 `subpath` 匹配的是内核看到的真实路径，而 macOS 上 `/var`、`/tmp`、`/etc` 都是 `/private/*` 的符号链接，工作区若在 `TMPDIR` 或 `/tmp` 下，未解析路径会让所有 allow 失配——既写不进文件，敏感 deny 也一起失效。此外，父进程若携带 `PYTHONHOME`/`PYTHONPATH`（py2app 打包的 app 内嵌 Python 运行时设置），执行前会被剥离，避免污染 shell 里外部 `python3` 使其启动即崩溃。注意：沙箱内 `git` 命令本身不可用（`/etc/gitconfig`、`~/.gitconfig` 在 deny 列表内），需要 git 请用 `akm_run_git` 或关沙箱。
 
 `akm_run_git` 不接受 `command` 参数，只支持 `status`、`diff`、`log`、`show`、`add`、`restore`、`reset`、`commit`、`branch`。模型以 `operation` 调用；涉及文件的操作传相对 `paths`，`commit` 必须传 `message`。可选 `dir` 参数指定 git 仓库目录（等价于 `git -C <dir>`，默认工作区根）：接受工作区内的相对或绝对路径（含根目录），用于切换不同仓库；越界（工作区外）会返回错误。`paths` 为相对 `dir` 的路径。
 
@@ -311,7 +311,9 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv，`dir` 参数限定的仓库目录必须在工作区内。`akm_read_file` 单次窗口最多 60000 字节 / 2000 行（上限 4000 行），`akm_grep` 默认 100 条命中（`head_limit` 可调到 4000），`akm_glob` 默认 100 条（`limit` 可到 1000），`akm_list_dir` 默认 500 条（`limit` 可到 2000）；被截断时一律返回 `truncated` 与 `notice`，避免模型误以为拿到了完整结果。除各工具自身的限额，工具结果还有一层统一字符预算（`akm_run_shell` / `akm_grep` / `akm_glob` 等文本型工具 100–200KB，超出时按「首尾保留、中间省略」裁剪并标注），结构化结果（`akm_render` 的 layout）不受影响。
 
-敏感文件是**沙箱内的第二道闸**：工作区内的 `.env`（`.env.example` 等模板除外）、`id_rsa` / `id_ed25519` 等私钥、`credentials.json` / `.netrc` / `.npmrc` 等凭据、`*.pem` / `*.key` / `*.p12` / `*.pfx` 等证书、`.git` 目录内部文件，由 `agent_sensitive_path_guard`（默认开启）在路径解析层统一拒绝，读写删建与搜索全部生效——与 shell 侧的 seatbelt 黑名单同口径，避免文件工具变成绕过隔离的后门。
+敏感文件是**沙箱内的第二道闸**：工作区内的 `.env`（`.env.example` 等模板除外）、`id_rsa` / `id_ed25519` 等私钥、`credentials.json` / `.netrc` / `.npmrc` 等凭据、`*.pem` / `*.key` / `*.p12` / `*.pfx` 等证书、`.git` 目录内部文件，由 `agent_sensitive_path_guard`（默认开启）在路径解析层统一拒绝，读写删建与搜索全部生效，避免文件工具变成绕过隔离的后门。
+
+**这条名单是「防手滑」，不是安全边界**：`agent_run_shell_sandbox=true` 时 seatbelt 会用同一份名单再拦一层（工作区内 `.env` / 私钥 / 证书的 `file-read-data` deny，位置在 `allow file-read*` 之后才生效），但关掉沙箱后 shell 里 `cat .env` 就是能读——任何依赖这层名单「挡住模型读密钥」的假设都不成立。另外 `akm_delete_file` 同样受名单拦截，`.env` 之类删不掉（要删只能走 shell 或手工），这是有意的：宁可挡住清理动作，也不让模型顺手删凭据。
 
 ## 自愈重试
 
