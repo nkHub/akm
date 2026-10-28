@@ -164,11 +164,16 @@ class ToolDef:
         description: str,
         parameters: dict,
         handler: Callable,
+        max_result_chars: int = 0,
     ):
         self.name = name
         self.description = description
         self.parameters = parameters
         self.handler = handler
+        # 结果字符预算：0 表示不裁剪。文本型工具（shell/grep/glob）声明上限，
+        # 避免单次工具结果把 messages 上下文预算吃穿；结构化结果（如 akm_render
+        # 的 layout JSON）保持 0，裁剪会破坏前端渲染所需的 JSON 结构。
+        self.max_result_chars = max(0, int(max_result_chars or 0))
 
     def to_openai(self) -> dict:
         """转为 OpenAI tool 格式"""
@@ -262,11 +267,31 @@ class ToolRegistry:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
         if isinstance(result, str):
-            return result
+            return self._clip_result(name, result)
         try:
-            return json.dumps(result, ensure_ascii=False)
+            return self._clip_result(name, json.dumps(result, ensure_ascii=False))
         except (TypeError, ValueError):
-            return str(result)
+            return self._clip_result(name, str(result))
+
+    def _clip_result(self, name: str, text: str) -> str:
+        """按工具声明的结果预算裁剪超长输出（``max_result_chars=0`` 表示不限制）。
+
+        为什么需要：工具结果会原样进 messages 并在后续每一轮重复计费，单个工具
+        吐 1MB 就能把上下文预算吃穿。裁剪保留首尾、中间省略，并显式标注「被截断」，
+        避免模型误以为拿到了完整内容。结构化结果（akm_render 的 layout JSON）
+        不声明预算，因此不会被裁断成非法 JSON。
+        """
+        definition = self.get_definition(name)
+        budget = getattr(definition, "max_result_chars", 0) if definition else 0
+        if not budget or len(text) <= budget:
+            return text
+        head = budget // 2
+        tail = budget - head
+        return (
+            text[:head]
+            + f"\n...(工具结果超过 {budget} 字符，已截断；原始 {len(text)} 字符，中间内容省略)\n"
+            + text[-tail:]
+        )
 
 
 def _extract_tool_calls_from_response(response_body: str) -> list[dict]:

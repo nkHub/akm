@@ -26,6 +26,9 @@ def _workspace_cfg(**overrides):
         "agent_workspace_root": WORKSPACE,
         "agent_write_tools_enabled": True,
         "agent_run_shell_enabled": True,
+        # 既有用例大多数是「直接改没读过的文件」，这里默认关掉先读守卫；
+        # 守卫本身由 test_edit_requires_read_when_guard_enabled 专门覆盖。
+        "agent_write_requires_read": False,
     }
     cfg.update(overrides)
     return cfg
@@ -133,16 +136,18 @@ def test_request_workspace_root_empty_keeps_global(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_read_file_within_workspace(_workspace, monkeypatch):
-    """读取工作区内文件应返回内容与行信息。"""
+    """读取工作区内文件应返回带绝对行号的纯文本窗口与版本 tag。"""
     f = _workspace / "hello.txt"
     f.write_text("第一行\n第二行\n第三行\n", encoding="utf-8")
     handlers = _handlers(monkeypatch)
 
-    out = json.loads(await handlers["akm_read_file"](path="hello.txt"))
+    out = await handlers["akm_read_file"](path="hello.txt")
 
-    assert out["path"].endswith("/hello.txt")
-    assert "第一行" in out["content"]
-    assert out["start_line"] == 0
+    # 成功路径返回纯文本（不是 JSON）：[path#TAG] 头 + 1-based 绝对行号 + footer
+    assert out.startswith("[hello.txt#")
+    assert "1: 第一行" in out
+    assert "3: 第三行" in out
+    assert "已读到文件结尾，共 3 行" in out
 
 
 @pytest.mark.asyncio
@@ -690,5 +695,284 @@ def test_shell_and_git_schema(monkeypatch):
     assert "command" not in git_properties
     assert "dir" in git_properties
     assert git_properties["dir"]["type"] == "string"
+
+
+# ── 读写工具契约：行号 / tag / 截断 / 唯一匹配 / 敏感名单 ──
+
+
+@pytest.mark.asyncio
+async def test_read_file_footer_gives_next_offset(_workspace, monkeypatch):
+    """分页读取时 footer 必须直接给出下一次要用的 offset（1-based）。"""
+    (_workspace / "many.txt").write_text(
+        "\n".join(f"row-{i}" for i in range(1, 11)) + "\n", encoding="utf-8"
+    )
+    handlers = _handlers(monkeypatch)
+
+    out = await handlers["akm_read_file"](path="many.txt", offset=4, limit=3)
+
+    assert "4: row-4" in out
+    assert "6: row-6" in out
+    assert "继续读取用 offset=7" in out
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_binary(_workspace, monkeypatch):
+    """二进制内容不能让模型看到乱码：直接给出可操作错误。"""
+    (_workspace / "blob.bin").write_bytes(b"\x00\x01\x02PNG")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_read_file"](path="blob.bin"))
+
+    assert "二进制" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_decodes_gb18030(_workspace, monkeypatch):
+    """GBK/GB18030 文件应按回退编码正确解码，而不是静默乱码。"""
+    (_workspace / "gbk.txt").write_bytes("中文内容\n".encode("gb18030"))
+    handlers = _handlers(monkeypatch)
+
+    out = await handlers["akm_read_file"](path="gbk.txt")
+
+    assert "中文内容" in out
+    assert "gb18030" in out
+
+
+@pytest.mark.asyncio
+async def test_sensitive_paths_blocked(_workspace, monkeypatch):
+    """.env / 私钥即使在沙箱内也必须被文件工具拒绝，模板文件放行。"""
+    (_workspace / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (_workspace / "id_rsa").write_text("PRIVATE\n", encoding="utf-8")
+    (_workspace / ".env.example").write_text("SECRET=\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    env_out = json.loads(await handlers["akm_read_file"](path=".env"))
+    key_out = json.loads(await handlers["akm_read_file"](path="id_rsa"))
+    sample = await handlers["akm_read_file"](path=".env.example")
+
+    assert "禁止" in env_out["error"]
+    assert "禁止" in key_out["error"]
+    assert "SECRET=" in sample
+
+
+@pytest.mark.asyncio
+async def test_edit_requires_read_when_guard_enabled(_workspace, monkeypatch):
+    """开启先读守卫时，没读过就编辑必须被拒绝，读过之后才放行。"""
+    (_workspace / "code.py").write_text("print('old')\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch, agent_write_requires_read=True)
+
+    blocked = json.loads(
+        await handlers["akm_edit_file"](path="code.py", old_string="old", new_string="new")
+    )
+    assert "必须先读取" in blocked["error"]
+
+    await handlers["akm_read_file"](path="code.py")
+    ok = json.loads(
+        await handlers["akm_edit_file"](path="code.py", old_string="old", new_string="new")
+    )
+    assert ok["ok"] is True
+    assert (_workspace / "code.py").read_text(encoding="utf-8") == "print('new')\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_rejects_ambiguous_old_string(_workspace, monkeypatch):
+    """old_string 多处命中时必须报错，不能静默改掉第一处。"""
+    f = _workspace / "dup.py"
+    f.write_text("x = 1\nx = 1\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(
+        await handlers["akm_edit_file"](path="dup.py", old_string="x = 1", new_string="x = 2")
+    )
+
+    assert "2 次" in out["error"]
+    assert f.read_text(encoding="utf-8") == "x = 1\nx = 1\n"
+
+    out2 = json.loads(
+        await handlers["akm_edit_file"](
+            path="dup.py", old_string="x = 1", new_string="x = 2", replace_all=True
+        )
+    )
+    assert out2["replaced"] == 2
+    assert f.read_text(encoding="utf-8") == "x = 2\nx = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_tag_mismatch_rejected(_workspace, monkeypatch):
+    """tag 与磁盘内容不一致时拒绝编辑，避免基于旧快照改写。"""
+    f = _workspace / "tagged.py"
+    f.write_text("a = 1\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(
+        await handlers["akm_edit_file"](
+            path="tagged.py", old_string="a = 1", new_string="a = 2", tag="0000"
+        )
+    )
+
+    assert "tag 与文件当前内容不一致" in out["error"]
+    assert f.read_text(encoding="utf-8") == "a = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_line_mode_reports_new_tag_and_diff(_workspace, monkeypatch):
+    """编辑成功应回新 tag 与 diff，模型可据此确认改动结果。"""
+    f = _workspace / "lines.py"
+    f.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(
+        await handlers["akm_edit_file"](path="lines.py", start_line=2, new_content="TWO")
+    )
+
+    assert out["ok"] is True
+    assert len(out["tag"]) == 4
+    assert "-two" in out["diff"] and "+TWO" in out["diff"]
+    assert f.read_text(encoding="utf-8") == "one\nTWO\nthree\n"
+
+
+@pytest.mark.asyncio
+async def test_write_overwrite_requires_read(_workspace, monkeypatch):
+    """覆盖已存在文件在守卫开启时要求先读；新建文件不受限。"""
+    (_workspace / "cfg.json").write_text('{"a": 1}', encoding="utf-8")
+    handlers = _handlers(monkeypatch, agent_write_requires_read=True)
+
+    blocked = json.loads(await handlers["akm_write_file"](path="cfg.json", content='{"a": 2}'))
+    assert "必须先读取" in blocked["error"]
+
+    created = json.loads(await handlers["akm_write_file"](path="new.json", content="{}"))
+    assert created["ok"] is True and created["created"] is True
+
+    await handlers["akm_read_file"](path="cfg.json")
+    overwritten = json.loads(await handlers["akm_write_file"](path="cfg.json", content='{"a": 2}'))
+    assert overwritten["ok"] is True
+    assert "diff" in overwritten
+
+
+@pytest.mark.asyncio
+async def test_grep_returns_all_matches_per_file(_workspace, monkeypatch):
+    """同一文件的多处命中必须全部返回（早先只返回第一条）。"""
+    (_workspace / "multi.py").write_text("hit one\nnope\nhit two\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_grep"](pattern="hit"))
+
+    lines = [r["line"] for r in out["results"] if r["file"] == "multi.py"]
+    assert lines == [1, 3]
+    assert out["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_grep_include_and_output_modes(_workspace, monkeypatch):
+    """include 过滤与 files_with_matches / count 两种输出模式。"""
+    (_workspace / "a.py").write_text("needle\nneedle\n", encoding="utf-8")
+    (_workspace / "b.txt").write_text("needle\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    only_py = json.loads(await handlers["akm_grep"](pattern="needle", include="*.py"))
+    assert only_py["file_count"] == 1
+    assert only_py["match_count"] == 2
+
+    files_only = json.loads(
+        await handlers["akm_grep"](pattern="needle", output_mode="files_with_matches")
+    )
+    assert set(files_only["matches"]) == {"a.py", "b.txt"}
+    assert files_only["results"] == []
+
+    counts = json.loads(await handlers["akm_grep"](pattern="needle", output_mode="count"))
+    assert counts["counts"]["a.py"] == 2
+    assert counts["counts"]["b.txt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_marks_truncation(_workspace, monkeypatch):
+    """命中数达到 head_limit 时必须标记 truncated 并给 notice。"""
+    (_workspace / "many.txt").write_text(
+        "\n".join("hit" for _ in range(10)) + "\n", encoding="utf-8"
+    )
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_grep"](pattern="hit", head_limit=3))
+
+    assert len(out["results"]) == 3
+    assert out["truncated"] is True
+    assert "notice" in out
+
+
+@pytest.mark.asyncio
+async def test_glob_limit_marks_truncated(_workspace, monkeypatch):
+    """glob 结果被 limit 截断时必须如实标记（早先只有扫描预算才标记）。"""
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (_workspace / name).write_text("x", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_glob"](pattern="*.txt", limit=2))
+
+    assert len(out["matches"]) == 2
+    assert out["total"] == 3
+    assert out["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_dir_pagination(_workspace, monkeypatch):
+    """list_dir 支持 offset/limit 并返回 next_offset。"""
+    for i in range(5):
+        (_workspace / f"f{i}.txt").write_text("x", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    first = json.loads(await handlers["akm_list_dir"](path="", offset=0, limit=2))
+    assert len(first["entries"]) == 2
+    assert first["truncated"] is True
+    assert first["next_offset"] == 2
+
+    rest = json.loads(await handlers["akm_list_dir"](path="", offset=4, limit=2))
+    assert len(rest["entries"]) == 1
+    assert rest["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_move_and_copy_tools(_workspace, monkeypatch):
+    """移动/复制工具应一步完成，不需要 read+write+delete。"""
+    (_workspace / "src.txt").write_text("payload", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    copied = json.loads(await handlers["akm_copy_file"](path="src.txt", dest="dup.txt"))
+    assert copied["ok"] is True
+    assert (_workspace / "dup.txt").read_text(encoding="utf-8") == "payload"
+
+    moved = json.loads(await handlers["akm_move_file"](path="dup.txt", dest="sub/renamed.txt"))
+    assert moved["ok"] is True
+    assert (_workspace / "sub" / "renamed.txt").read_text(encoding="utf-8") == "payload"
+    assert not (_workspace / "dup.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_reports_entries_removed(_workspace, monkeypatch):
+    """递归删除应返回被删条目数，便于确认删了多少。"""
+    d = _workspace / "tree"
+    (d / "nested").mkdir(parents=True)
+    (d / "a.txt").write_text("x", encoding="utf-8")
+    (d / "nested" / "b.txt").write_text("y", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_delete_file"](path="tree", recursive=True))
+
+    assert out["ok"] is True
+    assert out["entries_removed"] >= 2
+    assert not d.exists()
+
+
+def test_workspace_tools_registration_includes_move_copy(monkeypatch):
+    """写工具开关打开时，移动/复制工具也要注册，并带上结果预算。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools.load_config",
+        lambda: _workspace_cfg(),
+    )
+    tools = {tool.name: tool for tool in build_workspace_tools()}
+
+    assert {"akm_move_file", "akm_copy_file"} <= set(tools)
+    # 文本型工具声明了结果预算；读取本身已有字节上限，所以不需要额外预算
+    assert tools["akm_grep"].max_result_chars == 200_000
+    assert tools["akm_read_file"].max_result_chars == 0
 
 

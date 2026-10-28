@@ -611,23 +611,22 @@ async def test_builtin_read_file_rejects_oversized_file(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_builtin_read_file_paginates_and_truncates(tmp_path, monkeypatch):
-    """分页应按行返回；超出字节上限时标记 truncated 且行保持完整。"""
-    import json as _json
-
+    """分页按 1-based 行号返回窗口；被字节预算截断时 footer 仍给出下一次 offset。"""
     ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
     try:
         (ws / "lines.txt").write_text("\n".join(f"line-{i}" for i in range(20)) + "\n")
         handler = handlers["akm_read_file"]
-        r = _json.loads(await handler(path="lines.txt", offset=10, limit=3))
-        assert r["start_line"] == 10
-        assert r["content"] == "line-10\nline-11\nline-12\n"
-        assert r["truncated"] is False
-        assert r["total_lines"] == 20
+        text = await handler(path="lines.txt", offset=11, limit=3)
+        # offset 是 1-based，与返回的行号一致（不再有 0/1 基错位）
+        assert "11: line-10" in text
+        assert "13: line-12" in text
+        assert "共 20 行" in text
+        assert "继续读取用 offset=14" in text
 
         monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_READ_MAX_BYTES", 10)
-        r2 = _json.loads(await handler(path="lines.txt", offset=0, limit=-1))
-        assert r2["truncated"] is True
-        assert r2["content"].endswith("\n")  # 截断按整行进行，不切半个字符
+        text2 = await handler(path="lines.txt", offset=1, limit=-1)
+        # 字节预算只裁窗口内容；截断时仍要给出下一次 offset（模型据此续读）
+        assert "继续读取用 offset=" in text2
     finally:
         reset_request_workspace_root(token)
 
@@ -698,6 +697,8 @@ async def test_builtin_edit_file_rejects_oversized_result(tmp_path, monkeypatch)
     try:
         (ws / "f.txt").write_text("hello world")
         monkeypatch.setattr("akm.agent_runtime.tools._WORKSPACE_WRITE_MAX_BYTES", 8)
+        # 先读守卫默认开启：读过之后才允许编辑（顺便验证「先读放行」这条路径）
+        await handlers["akm_read_file"](path="f.txt")
         r = _json.loads(await handlers["akm_edit_file"](
             path="f.txt", old_string="hello", new_string="hello world extra content"
         ))

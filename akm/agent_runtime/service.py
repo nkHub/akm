@@ -26,7 +26,7 @@ async def initialize_agent_runtime(
     tool_registry = ToolRegistry.instance()
     for tool in build_builtin_tools(app):
         tool_registry.register(tool)
-    for tool in build_workspace_tools():
+    for tool in build_workspace_tools(app):
         tool_registry.register(tool)
     app.state.agent_loop = agent_loop
     logger.info("[Server] Agent Loop 已初始化，审计日志已就绪，已注册 %d 个内置调试工具", len(tool_registry))

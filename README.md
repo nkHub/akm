@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.57**：费用估算接入 **models.dev 目录数据**（入库 SQLite、三段式取价、官方兜底可关），审计日志新增**换模型检测**（上游实际返回的 model 与请求不一致时标记，日志页按钮文案为「降智」——判定依据只是「不一致」，不代表方向），`/v1/models` 支持顶层扩展字段与 `?capability=chat` 过滤，Key 管理页供应商改为**可搜索下拉**且 Base URL 随供应商联动禁用；审计覆盖面补齐（`akm_render` 工具调用记一条 `source=tool`，后置布局小模型与上下文摘要分别记 `source=layout` / `summary`）；`akm_render` 新增 **flow 流程图块**，并把块集合前后端统一为 11 种（去掉与 markdown 重复的 text / heading / code / table / list），流程图节点宽度随容器自适应（168~300px）、文字按显示宽度并在空格处断句、层间距 LR/TB 分开、连线在主链上**常驻流动**（进场描边只播一次，滚到卡片时已结束，故另加 `.akm-flow-pulse` 无限循环）。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.58**：Agent 工作区读写工具全面对齐参考实现（pi-desktop / DeepSeek Harness）——`akm_read_file` 改为**带绝对行号与版本 tag 的纯文本窗口**（`offset` 统一 1-based、footer 直接给下一次 offset、编码 utf-8→gb18030 回退、二进制内容拒绝），写工具新增**先读后写 + tag 版本校验 + 唯一匹配 + 回显 diff**，`akm_grep` **每个文件返回全部命中行**并支持 `include` / `output_mode` / `head_limit`，`akm_glob` 按 mtime 倒序并如实标记截断、`akm_list_dir` 支持分页，新增 `akm_move_file` / `akm_copy_file`，工作区内 `.env` / 私钥 / 证书 / `.git` 内部文件统一拦截，并为读写工具补上**工具调用级审计**与结果字符预算；同版本重建了 `agent_chat` 前端产物（声明新工具、对齐 1-based 行号与 schema、时间线文案与摘要修正）。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -481,6 +481,8 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 此外，`/v1/agent` 还支持**子 Agent 递归委托**：注入 `akm_subagent_spawn` / `akm_subagent_wait` / `akm_subagent_kill` / `akm_subagent_list` / `akm_subagent_status` 五个工具，主会话可以开启独立的子 Agent 子进程（子进程调用本机 `/v1/agent` 跑次级对话，进程级隔离、默认独立临时工作区），句柄式管理（spawn 返回 `task_id` → wait 等结果 / kill 终止；list 列出全部任务、status 查单任务详情与日志尾部）。嵌套层数由 `agent_subagent_max_depth` 控制（默认 `1`，即主会话能开子进程、子进程内不能再开下一级；调大可支持多级递归），并发上限 8，开关 `agent_subagent_enabled`（默认 `true`）。
 
 完整文档见 [`akm/agent_runtime/agent.md`](akm/agent_runtime/agent.md)，涵盖请求格式、参数说明、配置、文件上传、联网搜索、图片生成/编辑、工作区文件工具、响应格式与 SSE 流式事件。
+
+基于 `/v1/agent` 扩展为**独立桌面产品 akm-desktop**（Tauri + Python sidecar，一次性迁入后脱离 AKM）的设计文档在 `../desktop/docs/DESIGN.md`。该产品独立演进，AKM 代码不受影响。
 
 ## 工作流引擎（/v1/flow）
 
