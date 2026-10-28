@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.58**：Agent 工作区读写工具全面对齐参考实现（pi-desktop / DeepSeek Harness）——`akm_read_file` 改为**带绝对行号与版本 tag 的纯文本窗口**（`offset` 统一 1-based、footer 直接给下一次 offset、编码 utf-8→gb18030 回退、二进制内容拒绝），写工具新增**先读后写 + tag 版本校验 + 唯一匹配 + 回显 diff**，`akm_grep` **每个文件返回全部命中行**并支持 `include` / `output_mode` / `head_limit`，`akm_glob` 按 mtime 倒序并如实标记截断、`akm_list_dir` 支持分页，新增 `akm_move_file` / `akm_copy_file`，工作区内 `.env` / 私钥 / 证书 / `.git` 内部文件统一拦截，并为读写工具补上**工具调用级审计**与结果字符预算；同版本重建了 `agent_chat` 前端产物（声明新工具、对齐 1-based 行号与 schema、时间线文案与摘要修正）。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.59**：修复 Agent 自测报告里的四个回归（v0.1.58 引入）——① **P0 文件 tag 死锁**：read 用解码后文本算 tag、edit 用 `utf-8/replace` 乱码算 tag，同一文件两个哈希，GB18030/GBK/Latin-1 文件「读得到、改不了」；现在 tag 只认**磁盘原始字节**，读与校验共用同一函数，并让写入（write/edit/append）**保持原文件编码**，编码解不干净时 edit 拒绝、write 仍可显式覆盖；② **P1 敏感名单拦不住 shell**：seatbelt 补上工作区内 `.env` / 私钥 / 证书的 `file-read-data` deny（与文件工具层同一份名单、位置在 allow 之后），并把 profile 里的路径统一 `realpath`——否则 `/var`、`/tmp` 下的工作区会让整份规则失配；③ **P2 大文件总行数错**：字节预算截断时 footer 把窗口行数当成文件总行数（5000 行报成 1225 行），现在继续数完真实行数；④ **P2 `.git` 拒绝文案**指向未注册的 `akm_run_git`，改为提示 `agent_git_enabled` 开关。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -974,5 +975,178 @@ def test_workspace_tools_registration_includes_move_copy(monkeypatch):
     # 文本型工具声明了结果预算；读取本身已有字节上限，所以不需要额外预算
     assert tools["akm_grep"].max_result_chars == 200_000
     assert tools["akm_read_file"].max_result_chars == 0
+
+
+# ── 编码 / tag 口径 / 截断行数（v0.1.58 回归）──
+
+
+def _tag_from_read(text: str) -> str:
+    """从 read 输出的 ``[路径#TAG]`` 头里取出 tag。"""
+    head = text.splitlines()[0]
+    assert head.startswith("[") and "#" in head, head
+    return head[head.rindex("#") + 1 : -1]
+
+
+@pytest.mark.asyncio
+async def test_gb18030_file_read_then_edit_keeps_encoding(_workspace, monkeypatch):
+    """GB18030 文件：read 给的 tag 必须能直接用于 edit，且写回不改编码。
+
+    v0.1.58 P0：read 按「解码成 str 再 encode('utf-8')」算 tag，edit 按
+    「原始字节 decode('utf-8', errors='replace')」算 tag —— 同一个文件两个哈希，
+    于是「读得到、改不了」，重读也救不回来。根因是 tag 有两条口径，现在只认磁盘字节。
+    """
+    target = _workspace / "gbk.txt"
+    target.write_bytes("测试二\n".encode("gb18030"))
+    handlers = _handlers(monkeypatch)
+
+    out = await handlers["akm_read_file"](path="gbk.txt")
+    assert "encoding=gb18030" in out
+    assert "测试二" in out
+    tag = _tag_from_read(out)
+
+    edited = json.loads(
+        await handlers["akm_edit_file"](
+            path="gbk.txt", old_string="测试二", new_string="测试三", tag=tag
+        )
+    )
+
+    assert edited["ok"] is True, edited
+    assert edited["encoding"] == "gb18030"
+    # 写回仍是 GB18030 字节：不能把老文件悄悄转成 UTF-8
+    assert target.read_bytes() == "测试三\n".encode("gb18030")
+
+    # 编辑后铸的 tag 与磁盘一致：重读拿到的 tag 可以直接用于下一次编辑
+    again = await handlers["akm_read_file"](path="gbk.txt")
+    assert _tag_from_read(again) == edited["tag"]
+
+
+@pytest.mark.asyncio
+async def test_edit_rejects_undecodable_bytes(_workspace, monkeypatch):
+    """解不干净的文件拒绝 edit（行/锚点编辑会写坏原内容），但允许 write 显式覆盖。"""
+    target = _workspace / "weird.txt"
+    original = b"\xff\xff\xffhello\n"
+    target.write_bytes(original)
+    handlers = _handlers(monkeypatch)
+
+    read_out = await handlers["akm_read_file"](path="weird.txt")
+    assert "encoding=utf-8(replace)" in read_out
+
+    refused = json.loads(
+        await handlers["akm_edit_file"](path="weird.txt", old_string="hello", new_string="bye")
+    )
+    assert "拒绝编辑" in refused["error"]
+    assert target.read_bytes() == original
+
+    written = json.loads(await handlers["akm_write_file"](path="weird.txt", content="clean\n"))
+    assert written["ok"] is True
+    assert target.read_bytes() == b"clean\n"
+
+
+@pytest.mark.asyncio
+async def test_write_and_append_preserve_gb18030_encoding(_workspace, monkeypatch):
+    """覆盖与追加都沿用原文件编码，并在结果里回报实际使用的编码。"""
+    target = _workspace / "gbk.txt"
+    target.write_bytes("第一行\n".encode("gb18030"))
+    handlers = _handlers(monkeypatch)
+
+    appended = json.loads(
+        await handlers["akm_write_file"](path="gbk.txt", content="第二行\n", mode="append")
+    )
+    assert appended["encoding"] == "gb18030"
+    assert target.read_bytes().decode("gb18030") == "第一行\n第二行\n"
+
+    overwritten = json.loads(
+        await handlers["akm_write_file"](path="gbk.txt", content="第三行\n")
+    )
+    assert overwritten["encoding"] == "gb18030"
+    assert "encoding_changed" not in overwritten
+    assert target.read_bytes() == "第三行\n".encode("gb18030")
+
+
+@pytest.mark.asyncio
+async def test_read_truncated_window_reports_real_total_lines(_workspace, monkeypatch):
+    """字节预算截断窗口时，footer 的「共 N 行」必须是文件真实总行数。
+
+    v0.1.58 P2-1：5000 行文件在 60KB 处截断，footer 却写「共 1225 行」——
+    把窗口行数当成了文件总行数，模型会以为已经读到结尾，后面的内容直接丢失。
+    """
+    target = _workspace / "big.txt"
+    lines = [f"line-{i:05d} " + "x" * 40 for i in range(1, 5001)]
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = await handlers["akm_read_file"](path="big.txt", limit=-1)
+
+    assert "共 5000 行" in out
+    # 确认真的走到了「字节预算截断」这条路径，而不是没截断就通过了
+    assert "继续读取用 offset=" in out
+    assert out.splitlines()[1].startswith("1: line-00001")
+
+
+def test_git_dir_rejection_points_to_enable_flag(_workspace):
+    """.git 的拒绝文案不能指向一个没注册的工具（v0.1.58 P2-2）。
+
+    agent_git_enabled=false 时 akm_run_git 根本不在工具列表里，旧文案却直接说
+    「请用 akm_run_git」，等于让模型去调一个不存在的工具。
+    """
+    (_workspace / ".git").mkdir()
+    (_workspace / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as excinfo:
+        _safe_resolve_workspace_path(".git/config")
+
+    msg = str(excinfo.value)
+    assert "agent_git_enabled" in msg
+    assert "请用 akm_run_git" not in msg
+
+
+# ── seatbelt：工作区内敏感文件也要拦（v0.1.58 P1）──
+
+
+def test_seatbelt_profile_denies_sensitive_files_inside_workspace(_workspace):
+    """沙箱自身要按文件工具层的同一份名单拒绝工作区内敏感文件。"""
+    profile = _seatbelt_profile(_workspace)
+    real_ws = os.path.realpath(str(_workspace))
+
+    # 路径一律 realpath：/var、/tmp 下的工作区否则整份规则都失配（读得到 .env、写不进文件）
+    assert real_ws in profile
+    assert "id_rsa" in profile
+    assert "\\.env" in profile
+    # last-match-wins：deny 写在 allow 前面等于没写
+    assert profile.index("(allow file-read* (") < profile.index(
+        "(deny file-read-data (regex"
+    )
+    # .env.example 之类模板要在 deny 之后重新放行
+    assert profile.rindex("(deny file-read-data (regex") < profile.rindex(
+        "(allow file-read-data (regex"
+    )
+
+
+@pytest.mark.skipif(
+    not _seatbelt_available(), reason="当前环境不提供 sandbox_init_with_parameters"
+)
+@pytest.mark.asyncio
+async def test_run_shell_sandbox_blocks_env_and_private_key(_workspace, monkeypatch):
+    """开沙箱后 shell 读 .env / id_rsa 被拒，普通文件与模板仍可正常读。"""
+    monkeypatch.setattr(
+        "akm.agent_runtime.tools._seatbelt_api_ok", True, raising=False
+    )
+    (_workspace / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (_workspace / ".env.example").write_text("SECRET=\n", encoding="utf-8")
+    (_workspace / "id_rsa").write_text("KEY\n", encoding="utf-8")
+    (_workspace / "ok.txt").write_text("ok\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch, agent_run_shell_sandbox=True)
+
+    denied = json.loads(await handlers["akm_run_shell"](command="cat .env id_rsa"))
+    assert denied["exit_code"] != 0
+    assert "Operation not permitted" in denied["output"]
+    assert "SECRET=1" not in denied["output"]
+    assert "KEY" not in denied["output"]
+
+    allowed = json.loads(
+        await handlers["akm_run_shell"](command="cat .env.example ok.txt")
+    )
+    assert allowed["exit_code"] == 0
+    assert "SECRET=" in allowed["output"] and "ok" in allowed["output"]
 
 
