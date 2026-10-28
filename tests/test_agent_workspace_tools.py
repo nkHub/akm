@@ -464,7 +464,7 @@ def test_seatbelt_profile_denies_sensitive_paths(_workspace):
     assert '"/private/var/log"' in profile
     assert '"/tmp"' in profile
     assert '"/private/tmp"' in profile
-    assert f'(deny file-read-metadata (subpath "{Path.home()}"))' in profile
+    assert f'(deny file-read-data (literal "{Path.home()}"))' in profile
     assert f'(allow file-read-metadata (subpath "{_workspace}")' in profile
     assert profile.index("(deny file-write*)") < profile.index(
         f'(allow file-write* (subpath "{_workspace}")'
