@@ -4,7 +4,10 @@ import asyncio
 import base64
 import ctypes
 import datetime
+import difflib
 import fnmatch
+import hashlib
+import inspect
 import ipaddress
 import json
 import logging
@@ -18,6 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextvars import ContextVar
@@ -25,7 +29,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -41,10 +45,23 @@ logger = logging.getLogger(__name__)
 
 # 文件读取工具单次返回的最大字节数，防止超大文件撑爆模型上下文
 _WORKSPACE_READ_MAX_BYTES = 60000
-# grep 工具单次返回的最大命中行数
+# read 工具单次默认返回行数：只给窗口而不是整文件，避免一次拉满上下文
+_WORKSPACE_READ_DEFAULT_LINES = 2000
+# read 工具单次允许的最大行数（模型可显式把 limit 调到这里）
+_WORKSPACE_READ_MAX_LINES = 4000
+# read 单行最大字符数：压缩后的产物（minified js、单行 JSON）会把有效内容挤出窗口
+_WORKSPACE_READ_MAX_LINE_CHARS = 2000
+# grep 工具单次返回的最大命中行数（默认值，head_limit 可调大到上限）
 _WORKSPACE_GREP_MAX_RESULTS = 100
-# 目录工具单次返回的最大条目数
+# grep head_limit 允许的上限
+_WORKSPACE_GREP_MAX_RESULTS_LIMIT = 4000
+# 目录工具单次返回的最大条目数（list_dir 默认值，支持 offset + limit 分页）
 _WORKSPACE_DIR_MAX_RESULTS = 500
+# list_dir limit 允许的上限
+_WORKSPACE_DIR_MAX_RESULTS_LIMIT = 2000
+# glob 单次返回的最大匹配数（默认值）与上限
+_WORKSPACE_GLOB_MAX_RESULTS = 100
+_WORKSPACE_GLOB_MAX_RESULTS_LIMIT = 1000
 # 图片生成/编辑单次允许请求的最大张数，限制异常参数造成的上游费用放大
 _AGENT_IMAGE_MAX_COUNT = 4
 # 图片编辑单个本地文件或 base64 解码后的最大字节数，避免工具调用占满进程内存。
@@ -63,13 +80,50 @@ _WORKSPACE_GREP_MAX_FILE_BYTES = 10 * 1024 * 1024
 _WORKSPACE_GREP_MAX_LINE_BYTES = 1024 * 1024
 # grep 单次扫描的全局字节预算：达到后停止继续遍历，防止全盘递归拖垮进程
 _WORKSPACE_GREP_MAX_SCAN_BYTES = 128 * 1024 * 1024
-# glob 遍历时剪枝跳过的目录名（与 grep 一致，跳过依赖/版本库/构建产物目录）
-_WORKSPACE_GLOB_EXCLUDE_DIRS = frozenset((".git", "node_modules", "__pycache__", "venv", ".venv", "build", "dist"))
+# 遍历时剪枝跳过的目录名：grep / glob / list_dir 共用这一份，避免多处硬编码互相漂移
+_WORKSPACE_IGNORE_DIRS = frozenset((
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", "venv", ".venv", "env", "build",
+    "dist", "target", "coverage", ".next", ".nuxt", ".cache", ".turbo",
+))
+# 兼容旧名字：既有调用方与测试仍可能引用
+_WORKSPACE_GLOB_EXCLUDE_DIRS = _WORKSPACE_IGNORE_DIRS
 # glob 单次遍历的条目预算：达到后停止继续扫描并标记 truncated，
 # 防止 ``**`` 类大范围模式在事件循环/线程内全盘递归拖垮进程
 _WORKSPACE_GLOB_MAX_SCAN_ENTRIES = 200_000
 # 写文件工具允许写入的内容大小上限，防止模型一次写入 GB 级内容撑爆磁盘/内存
 _WORKSPACE_WRITE_MAX_BYTES = 10 * 1024 * 1024
+
+# ── 敏感文件保护 ────────────────────────────────────────────────────────────
+# 即使位于工作区内，以下文件也不允许文件工具读写：.env 与私钥/凭据是「沙箱内也不该给模型看」
+# 的东西，shell 侧本来就被 seatbelt 黑名单挡住，文件工具必须自己拦（否则等于绕过隔离）。
+_WORKSPACE_SENSITIVE_NAMES = frozenset((
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials.json",
+    ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".htpasswd",
+))
+# 敏感扩展名：私钥/证书/密钥库
+_WORKSPACE_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".jks")
+# .env 允许放行的模板后缀（.env.example 之类不含真实密钥，模型经常需要参考）
+_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist", ".defaults")
+# 工作区内 .git 目录下的文件一律不通过文件工具访问（config 里可能带远端凭据）
+_WORKSPACE_VCS_DIR = ".git"
+# 全文解码上限：不超过该大小的文件整体解码（带编码回退 + 精确内容 tag），更大走流式
+_TEXT_FULL_DECODE_MAX_BYTES = 8 * 1024 * 1024
+# 二进制嗅探字节数：前 8KB 出现 NUL 即判为二进制（与 git 的判据一致）
+_BINARY_SNIFF_BYTES = 8192
+
+# ── 文件版本 tag 与「先读后写」观察状态 ────────────────────────────────────────
+# 会话级观察记录：绝对路径 → {"tag": 4 位 hex, "mtime_ns": int, "lines": (首行, 末行), "at": 时间}。
+# 三个用途：① read 返回 tag，write/edit 可带 tag 做版本校验（防止基于旧快照改写）；
+# ② 覆盖已存在文件前要求本会话读过它（对齐 dsh 的 fs-observation-policy）；
+# ③ 给「文件在读到之后被外部改动」这种情况一个可诊断的错误码。
+_FILE_OBSERVATIONS: dict[str, dict] = {}
+# 观察记录与路径锁都是进程级状态，用线程锁保护（读取在 asyncio.to_thread 中执行）
+_FILE_OBSERVATIONS_LOCK = threading.Lock()
+# 单个 path 的写操作串行锁：asyncio.Lock 绑定事件循环，键里带 loop id 避免跨请求复用报错
+_PATH_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+# 观察记录最多保留多少条，避免长跑进程无限增长
+_FILE_OBSERVATIONS_MAX = 512
 
 # 请求级工作区覆盖：由 AgentLoop 在单次请求执行工具期间设置，优先于
 # config.json 的全局 agent_workspace_root；空字符串表示不使用覆盖。
@@ -152,6 +206,185 @@ def _path_is_under(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_ignored_dir_name(name: str) -> bool:
+    """判断目录名是否属于统一忽略名单（隐藏目录 + 依赖/构建产物目录）。
+
+    grep / glob / list_dir 共用同一份规则：早先 grep 与 glob 各写一份排除列表，
+    新增目录时经常只改一处，导致「glob 看不见、grep 能搜到」的怪现象。
+    """
+    return name.startswith(".") or name in _WORKSPACE_IGNORE_DIRS
+
+
+def _sensitive_path_reason(path: Path) -> str:
+    """返回该路径命中敏感名单的原因，非敏感时返回空串（供错误文案直接使用）。
+
+    规则（对齐 pi-desktop 的 ignore_rules 永久敏感名单）：
+    - 文件名命中 ``_WORKSPACE_SENSITIVE_NAMES``（私钥、凭据文件）；
+    - 扩展名命中 ``_WORKSPACE_SENSITIVE_SUFFIXES``（.pem/.key/.p12…）；
+    - 以 ``.env`` 开头且不是 ``.env.example`` 这类模板；
+    - 位于工作区内 ``.git/`` 目录之下（config 可能含远端凭据）。
+    """
+    name = path.name
+    if name in _WORKSPACE_SENSITIVE_NAMES:
+        return f"{name} 属于敏感文件（私钥/凭据），禁止通过文件工具访问"
+    if name.startswith(".env") and not name.endswith(_ENV_TEMPLATE_SUFFIXES):
+        return f"{name} 可能包含密钥，禁止通过文件工具访问（模板文件如 .env.example 不受限）"
+    lowered = name.lower()
+    if lowered.endswith(_WORKSPACE_SENSITIVE_SUFFIXES):
+        return f"{name} 属于密钥/证书文件，禁止通过文件工具访问"
+    if _WORKSPACE_VCS_DIR in path.parts:
+        return f"{path.name} 位于 {_WORKSPACE_VCS_DIR} 目录内，禁止通过文件工具访问（请用 akm_run_git）"
+    return ""
+
+
+def _guard_sensitive_path(path: Path) -> None:
+    """敏感路径直接拒绝；由 ``_safe_resolve_workspace_path`` 统一调用。
+
+    为什么放在路径解析层而不是各工具里：读写/删除/建目录走的是同一个入口，
+    放这一处就不会出现「新加的工具忘了拦」的漏网。
+    """
+    reason = _sensitive_path_reason(path)
+    if reason:
+        raise ValueError(reason)
+
+
+def _normalize_tag_text(text: str) -> str:
+    """把文本归一化成算 tag 用的规范形态（去 BOM、CRLF→LF、每行去尾部空白）。
+
+    归一化的目的：换行风格（CRLF/LF）与编辑器自动去尾随空格的差异不应该让
+    tag 失效，否则模型在 Windows 工作区里几乎每次编辑都要报版本不匹配。
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip(" \t") for line in text.split("\n"))
+
+
+def _content_tag(text: str) -> str:
+    """计算整文件内容 tag：SHA-256 取低 16 位，输出 4 位大写 hex。
+
+    与 pi-desktop 的 hashline tag 同一个思路：Read 返回 tag、Edit 带上它，
+    服务端就能判断「模型改的是不是它读到的那版内容」。
+    """
+    digest = hashlib.sha256(_normalize_tag_text(text).encode("utf-8", errors="replace")).digest()
+    return f"{int.from_bytes(digest[:2], 'big') & 0xFFFF:04X}"
+
+
+def _file_tag(target: Path, text: str | None = None) -> str:
+    """返回文件当前 tag（4 位大写 hex），用于 write/edit 的版本校验。
+
+    口径：
+    - 调用方已经拿到全文（read 的常规路径、write/edit 写完后）→ 直接对文本算哈希；
+    - 未提供文本且文件不超过 8MB → 读全文算哈希；
+    - 更大的文件 → 用「大小 ^ mtime」指纹。大文件本来不适合整文件编辑，
+      指纹足以发现「读到之后被别人改了」，同时避免为算 tag 再整文件读一遍。
+    """
+    if text is not None:
+        return _content_tag(text)
+    try:
+        stat = target.stat()
+    except OSError:
+        return ""
+    if stat.st_size <= _TEXT_FULL_DECODE_MAX_BYTES:
+        try:
+            return _content_tag(target.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            return ""
+    return f"{(stat.st_size ^ stat.st_mtime_ns) & 0xFFFF:04X}"
+
+
+def _record_observation(
+    target: Path,
+    start_line: int,
+    end_line: int,
+    *,
+    text: str | None = None,
+    windowed: bool = False,
+) -> str:
+    """记录「本会话读过这个文件的这一行区间」，返回当前内容 tag。
+
+    观察记录是「先读后写」的判据：write 覆盖已存在文件、edit 定位锚点都要求
+    目标文件本会话读过；行区间用于判断模型是否看到过即将修改的那几行。
+
+    Args:
+        windowed: True 表示只看了文件的一段（read 分页），False 表示整文件都看过
+            （全文写入/整文件编辑之后）。
+    """
+    tag = _file_tag(target, text)
+    try:
+        mtime_ns = target.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    entry = {
+        "tag": tag,
+        "mtime_ns": mtime_ns,
+        "lines": (int(start_line), int(end_line)),
+        "all": bool(not windowed),
+        "at": time.time(),
+    }
+    key = str(target)
+    with _FILE_OBSERVATIONS_LOCK:
+        _FILE_OBSERVATIONS[key] = entry
+        # 简单容量控制：超上限时按写入时间淘汰最旧的一批
+        if len(_FILE_OBSERVATIONS) > _FILE_OBSERVATIONS_MAX:
+            for old_key, _ in sorted(
+                _FILE_OBSERVATIONS.items(), key=lambda item: item[1].get("at", 0)
+            )[: len(_FILE_OBSERVATIONS) - _FILE_OBSERVATIONS_MAX]:
+                _FILE_OBSERVATIONS.pop(old_key, None)
+    return tag
+
+
+def _observed_state(target: Path) -> dict | None:
+    """返回本会话对目标文件的观察记录（未读过时返回 None）。"""
+    with _FILE_OBSERVATIONS_LOCK:
+        return _FILE_OBSERVATIONS.get(str(target))
+
+
+def _forget_observation(target: Path) -> None:
+    """清除观察记录（文件被删除/改名后调用，避免残留失效 tag）。"""
+    with _FILE_OBSERVATIONS_LOCK:
+        _FILE_OBSERVATIONS.pop(str(target), None)
+
+
+def _path_lock(target: Path) -> asyncio.Lock:
+    """返回某个路径的写操作锁（同一进程内同 path 的写/编辑串行执行）。
+
+    键里带当前事件循环 id：asyncio.Lock 绑定 loop，测试/多 loop 场景复用旧锁
+    会抛 "attached to a different loop"。
+    """
+    try:
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        loop_id = 0
+    key = (loop_id, str(target))
+    lock = _PATH_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PATH_LOCKS[key] = lock
+    return lock
+
+
+def _text_diff(before: str, after: str, *, max_chars: int = 4000) -> str:
+    """生成简短 unified diff（超长时截断），用于 write/edit 的返回值。
+
+    模型看不到改动结果时会重复改同一处或漏改下一处，回一段 diff 比只回
+    "已替换 1 处" 有用得多。
+    """
+    diff = "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile="before",
+            tofile="after",
+            lineterm="",
+            n=2,
+        )
+    )
+    if len(diff) > max_chars:
+        return diff[:max_chars] + f"\n...(diff 截断，共 {len(diff)} 字符)"
+    return diff
+
+
 def _allowed_image_path(path: Path) -> bool:
     """校验 Agent 请求读取的图片只能来自工作区或 Agent 上传目录。"""
     upload_raw = str(load_config().get("agent_upload_dir") or "~/.akm/cache").strip()
@@ -194,6 +427,10 @@ def _safe_resolve_workspace_path(raw: str, *, must_exist: bool = True) -> Path:
         raise ValueError(f"路径 {raw} 超出工作区范围，禁止访问")
     if must_exist and not candidate.exists():
         raise ValueError(f"路径 {raw} 不存在")
+    # 敏感文件（.env / 私钥 / 凭据 / .git 内部文件）即使在沙箱内也拒绝，
+    # 与 shell 侧 seatbelt 黑名单保持同一口径，避免文件工具成为绕过隔离的后门。
+    if load_config().get("agent_sensitive_path_guard", True):
+        _guard_sensitive_path(candidate)
     return candidate
 
 
@@ -551,83 +788,235 @@ async def _save_generated_image(item: dict[str, Any], client) -> None:
         item["save_error"] = str(exc)
 
 
-def _read_file_lines_sync(target: Path, start_line: int, max_lines: int) -> tuple[list[str], int, bool]:
-    """同步迭代读取文件，仅保留目标行区间，返回 (选中的行, 总行数, 是否截断)。
+def _looks_binary(data: bytes) -> bool:
+    """用「前 8KB 是否含 NUL 字节」判断二进制内容（与 git 的判据一致）。"""
+    return b"\x00" in data[:_BINARY_SNIFF_BYTES]
 
-    与旧实现的区别：不再用 readlines() 把整个文件读进内存，而是逐行迭代，
-    只缓存目标区间的行；累计字节超过返回上限即停止（truncated=True）。
-    运行在 asyncio.to_thread 中，避免阻塞事件循环。
+
+def _decode_text_bytes(data: bytes) -> tuple[str, str]:
+    """把文件字节解码成文本，返回 (文本, 使用的编码)。
+
+    顺序：utf-8 → gb18030（中文老代码库常见）→ utf-8(errors=replace) 兜底。
+    固定 utf-8 + errors=replace 会让 GBK 文件静默变成乱码，模型看到乱码后
+    往往直接整文件覆写，损失比直接报错大得多。
     """
-    selected: list[str] = []
-    truncated = False
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return data.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace"), "utf-8(replace)"
+
+
+def _collect_window(
+    lines,
+    start_line: int,
+    max_lines: int,
+    max_bytes: int,
+    max_line_chars: int,
+) -> tuple[list[tuple[int, str]], int, bool, int]:
+    """从行迭代器收集 [start_line, ...] 的窗口。
+
+    Returns:
+        ``(选中行[(绝对行号, 行内容)], 总行数, 是否因字节预算截断, 超长被裁的行数)``。
+
+    行为约定：
+    - 行号是文件**绝对行号（1-based）**，模型可直接用于 akm_edit_file 的行号模式，
+      不再出现「read 的 offset 是 0-based、edit 的 start_line 是 1-based」的错位；
+    - 达到 max_lines 后继续计数总行数（footer 需要 "共 N 行"），但不再缓存内容；
+    - 字节预算只裁窗口内容，不影响总行数统计。
+    """
+    selected: list[tuple[int, str]] = []
     total_lines = 0
-    read_bytes = 0
+    used_bytes = 0
+    truncated = False
+    clipped_lines = 0
+    for idx, raw_line in enumerate(lines, start=1):
+        total_lines = idx
+        if idx < start_line:
+            continue
+        if len(selected) >= max_lines:
+            continue
+        line = raw_line.rstrip("\n").rstrip("\r")
+        if len(line) > max_line_chars:
+            # 压缩产物/minified 单行会把整个窗口挤满，裁断并留痕，便于模型知道内容不完整
+            line = line[:max_line_chars] + f" ...(单行已截断到 {max_line_chars} 字符)"
+            clipped_lines += 1
+        used_bytes += len(line.encode("utf-8"))
+        if used_bytes > max_bytes:
+            truncated = True
+            break
+        selected.append((idx, line))
+    return selected, total_lines, truncated, clipped_lines
+
+
+def _read_window_sync(
+    target: Path,
+    start_line: int,
+    max_lines: int,
+    max_bytes: int,
+    max_line_chars: int,
+) -> tuple[list[tuple[int, str]], int, bool, int, str, str | None]:
+    """同步读取文件窗口，返回 (选中行, 总行数, 预算截断, 超长行数, 编码, 全文)。
+
+    小文件整体解码（支持编码回退，并顺带返回全文供算 tag）；超过
+    ``_TEXT_FULL_DECODE_MAX_BYTES`` 的文件走流式 utf-8（全文返回 None）。
+    二进制内容抛 ValueError，由工具层转成可读错误。
+    该函数在 asyncio.to_thread 中执行，避免阻塞事件循环。
+    """
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        raise OSError(f"读取文件信息失败: {exc}") from exc
+    if size <= _TEXT_FULL_DECODE_MAX_BYTES:
+        data = target.read_bytes()
+        if _looks_binary(data):
+            raise ValueError(
+                "文件内容是二进制，不能用 akm_read_file 读取（图片用 akm_read_image，"
+                "其它二进制用 akm_run_shell）"
+            )
+        text, encoding = _decode_text_bytes(data)
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()  # 结尾换行不额外算一行
+        selected, total, truncated, clipped = _collect_window(
+            iter(lines), start_line, max_lines, max_bytes, max_line_chars
+        )
+        return selected, total, truncated, clipped, encoding, text
+    with open(target, "rb") as fb:
+        if _looks_binary(fb.read(_BINARY_SNIFF_BYTES)):
+            raise ValueError("文件内容是二进制，不能用 akm_read_file 读取")
     with open(target, "r", encoding="utf-8", errors="replace") as fh:
-        for idx, line in enumerate(fh):
-            total_lines = idx + 1
-            if idx < start_line:
-                continue
-            if max_lines >= 0 and len(selected) >= max_lines:
-                # 行数已达上限：继续计数总行数，但不再缓存内容
-                continue
-            read_bytes += len(line)
-            if read_bytes > _WORKSPACE_READ_MAX_BYTES:
-                truncated = True
-                break
-            selected.append(line)
-    return selected, total_lines, truncated
+        selected, total, truncated, clipped = _collect_window(
+            fh, start_line, max_lines, max_bytes, max_line_chars
+        )
+    return selected, total, truncated, clipped, "utf-8(replace)", None
 
 
 async def _read_file_tool(
     path: str,
-    offset: int = 0,
-    limit: int = -1,
+    offset: int = 1,
+    limit: int = 0,
 ) -> str:
-    """读取工作区内的文本文件，返回内容摘要（含长度限制与分页）。
+    """读取工作区内的文本文件，返回「绝对行号 + 版本 tag」的纯文本窗口。
 
-    仅允许读取工作区根目录内的文件（见 _safe_resolve_workspace_path）。
-    offset/limit 为行级分页：offset 从 0 开始，limit 为返回的最大行数，
-    -1 表示读到文件结尾。单次返回字节数上限为 _WORKSPACE_READ_MAX_BYTES，
-    超长时在结果中标记 truncated。
+    输出形态（纯文本而非 JSON：JSON 会把每个换行转义成 ``\\n``，既白烧 token
+    也让模型难以按行号定位）::
+
+        [src/main.py#A1B2]
+        41: def main():
+        42:     do_work()
+
+        （显示第 41-42 行，共 120 行，encoding=utf-8；继续读取用 offset=43）
+
+    参数口径：
+    - ``offset`` 为 1-based 起始行（0/负数按 1 处理，兼容旧调用），与
+      ``akm_edit_file`` 的 ``start_line`` 完全一致，消除 0/1 基错位；
+    - ``limit`` 默认 ``_WORKSPACE_READ_DEFAULT_LINES``，上限 ``_WORKSPACE_READ_MAX_LINES``，
+      传 -1 表示尽量读到结尾（仍受行数与字节上限约束）；
+    - footer 直接给下一次的 offset，省掉模型自己累加；
+    - 读完记录观察状态（tag + 行区间）：``akm_write_file``/``akm_edit_file`` 据此
+      做「先读后写」判定与 tag 版本校验；
+    - 失败仍返回 ``{"error": ...}``（与其它工具一致，供自愈重试识别）。
     """
     try:
         target = _safe_resolve_workspace_path(path, must_exist=True)
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     if not target.is_file():
-        return json.dumps({"error": f"{path} 不是文件"}, ensure_ascii=False)
+        return json.dumps(
+            {"error": f"{path} 不是文件（目录请用 akm_list_dir 或 akm_glob）"},
+            ensure_ascii=False,
+        )
     try:
-        if target.stat().st_size > _WORKSPACE_READ_MAX_FILE_BYTES:
-            return json.dumps({
-                "error": f"文件过大（{target.stat().st_size} 字节），超过单次读取上限 "
-                         f"{_WORKSPACE_READ_MAX_FILE_BYTES}。可改用 akm_grep 定位关键内容，"
-                         "或用 offset/limit 分页读取较小的文件。",
-            }, ensure_ascii=False)
+        size = target.stat().st_size
     except OSError as exc:
         return json.dumps({"error": f"读取文件信息失败: {exc}"}, ensure_ascii=False)
+    if size > _WORKSPACE_READ_MAX_FILE_BYTES:
+        return json.dumps({
+            "error": f"文件过大（{size} 字节），超过单次读取上限 {_WORKSPACE_READ_MAX_FILE_BYTES}。"
+                     "可用 akm_grep 定位关键内容，或在 akm_run_shell 中用 head/sed 分段查看。",
+        }, ensure_ascii=False)
 
-    offset = max(0, int(offset or 0))
-    limit = int(limit if limit is not None else -1)
+    try:
+        start_line = max(1, int(offset if offset is not None else 1))
+    except (TypeError, ValueError):
+        start_line = 1
+    try:
+        raw_limit = int(limit if limit is not None else 0)
+    except (TypeError, ValueError):
+        raw_limit = 0
+    max_lines = (
+        _WORKSPACE_READ_DEFAULT_LINES if raw_limit <= 0
+        else min(raw_limit, _WORKSPACE_READ_MAX_LINES)
+    )
+
     try:
         # 同步 IO 放到线程池执行，避免阻塞事件循环
-        lines, total_lines, truncated = await asyncio.to_thread(
-            _read_file_lines_sync, target, offset, limit
+        selected, total_lines, truncated, clipped, encoding, full_text = await asyncio.to_thread(
+            _read_window_sync,
+            target,
+            start_line,
+            max_lines,
+            _WORKSPACE_READ_MAX_BYTES,
+            _WORKSPACE_READ_MAX_LINE_CHARS,
         )
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
     except OSError as exc:
         return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
 
-    text = "".join(lines)
-    return json.dumps({
-        "path": str(target),
-        "start_line": offset,
-        "total_lines": total_lines,
-        "truncated": truncated,
-        "content": text,
-    }, ensure_ascii=False)
+    if not selected and total_lines and start_line > total_lines:
+        return json.dumps({
+            "error": f"offset 超出文件范围：文件共 {total_lines} 行，请求从第 {start_line} 行开始",
+        }, ensure_ascii=False)
+
+    end_line = selected[-1][0] if selected else start_line
+    try:
+        tag = await asyncio.to_thread(
+            _record_observation,
+            target,
+            start_line,
+            end_line,
+            text=full_text,
+            windowed=(end_line < total_lines),
+        )
+    except OSError:
+        tag = ""
+
+    try:
+        root = _workspace_root()
+    except ValueError:
+        root = None
+    display = (
+        str(target.relative_to(root))
+        if root is not None and _path_is_under(target, root)
+        else str(target)
+    )
+
+    parts = [f"[{display}#{tag}]" if tag else f"[{display}]"]
+    parts.extend(f"{line_no}: {content}" for line_no, content in selected)
+    if clipped:
+        parts.append(f"（有 {clipped} 行超过 {_WORKSPACE_READ_MAX_LINE_CHARS} 字符已截断）")
+    parts.append("")
+    if not selected:
+        parts.append(f"（窗口为空，文件共 {total_lines} 行，encoding={encoding}）")
+    elif truncated or end_line < total_lines:
+        parts.append(
+            f"（显示第 {selected[0][0]}-{end_line} 行，共 {total_lines} 行，"
+            f"encoding={encoding}；继续读取用 offset={end_line + 1}）"
+        )
+    else:
+        parts.append(f"（已读到文件结尾，共 {total_lines} 行，encoding={encoding}）")
+    return "\n".join(parts)
 
 
-async def _list_dir_tool(path: str = "") -> str:
-    """列出工作区内目录的条目（名称、类型、大小），供模型感知工作区结构。"""
+async def _list_dir_tool(path: str = "", offset: int = 0, limit: int = 0) -> str:
+    """列出工作区内目录的条目（名称、类型、大小），支持 offset/limit 分页。
+
+    分页参数存在的原因：大目录（构建产物、日志目录）动辄上千条，早先只回
+    前 500 条且没有游标，模型看到 ``total=5000`` 却无法翻页，只能改用 shell。
+    """
     raw_path = str(path or "").strip()
     if not raw_path:
         raw_path = "."
@@ -638,12 +1027,27 @@ async def _list_dir_tool(path: str = "") -> str:
     if not target.is_dir():
         return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
     try:
+        start = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        start = 0
+    try:
+        raw_limit = int(limit or 0)
+    except (TypeError, ValueError):
+        raw_limit = 0
+    page = (
+        _WORKSPACE_DIR_MAX_RESULTS if raw_limit <= 0
+        else min(raw_limit, _WORKSPACE_DIR_MAX_RESULTS_LIMIT)
+    )
+    try:
+        # 目录优先、再按名字排序：模型扫描目录结构时通常先看子目录
+        items = sorted(
+            target.iterdir(),
+            key=lambda p: (0 if p.is_dir() else 1, p.name),
+        )
+        total = len(items)
+        page_items = items[start : start + page]
         entries = []
-        total = 0
-        for item in sorted(target.iterdir(), key=lambda p: p.name):
-            total += 1
-            if len(entries) >= _WORKSPACE_DIR_MAX_RESULTS:
-                continue
+        for item in page_items:
             if item.is_dir():
                 kind = "dir"
                 size = None
@@ -656,10 +1060,27 @@ async def _list_dir_tool(path: str = "") -> str:
             else:
                 kind = "other"
                 size = None
-            entries.append({"name": item.name, "type": kind, "size": size})
+            entry = {"name": item.name, "type": kind, "size": size}
+            # 敏感文件只标记存在、不暴露大小，避免把「这里有密钥文件」变成可利用信息
+            reason = _sensitive_path_reason(item)
+            if reason:
+                entry["sensitive"] = True
+            entries.append(entry)
     except OSError as exc:
         return json.dumps({"error": f"读取目录失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"path": str(target), "entries": entries, "total": total}, ensure_ascii=False)
+
+    truncated = start + len(entries) < total
+    result = {
+        "path": str(target),
+        "entries": entries,
+        "total": total,
+        "offset": start,
+        "truncated": truncated,
+    }
+    if truncated:
+        result["next_offset"] = start + len(entries)
+        result["notice"] = "还有更多条目，用 offset 继续翻页"
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _glob_matches(rel_parts: tuple, pattern: str) -> bool:
@@ -689,29 +1110,31 @@ def _glob_matches(rel_parts: tuple, pattern: str) -> bool:
     return dp[n][m]
 
 
-def _glob_sync(root: Path, pattern: str) -> dict:
+def _glob_sync(root: Path, pattern: str, *, base: Path | None = None, limit: int = 0) -> dict:
     """在工作区内按 glob 模式同步匹配文件路径（相对工作区根目录返回）。
 
-    递归遍历时剪枝跳过隐藏目录与常见依赖/构建目录（node_modules/.git 等），
+    递归遍历时剪枝跳过隐藏目录与常见依赖/构建目录（统一走 ``_is_ignored_dir_name``），
     并设遍历条目预算，防止 ``**`` 类大范围模式全盘递归。该函数在
     asyncio.to_thread 中执行，避免阻塞事件循环。
+
+    排序按 mtime 倒序：模型找「最近改过的文件」时，字典序往往把真正想看的
+    文件排到很后面，甚至挤出结果窗口。
     """
     # 统一 resolve，确保与逐项 p.resolve() 的可比性（如 /var -> /private/var）
     root = root.resolve()
-    matches = []
+    walk_root = (base or root).resolve()
+    max_results = limit if limit > 0 else _WORKSPACE_GLOB_MAX_RESULTS
+    matched: list[tuple[float, str]] = []
     total = 0
     scanned = 0
-    truncated = False
-    for dirpath, dirnames, filenames in os.walk(root):
-        # 剪枝：隐藏目录与依赖/构建目录不进入递归
-        dirnames[:] = [
-            d for d in dirnames
-            if not d.startswith(".") and d not in _WORKSPACE_GLOB_EXCLUDE_DIRS
-        ]
+    budget_exhausted = False
+    for dirpath, dirnames, filenames in os.walk(walk_root):
+        # 剪枝：隐藏目录与依赖/构建目录不进入递归（与 grep / list_dir 共用同一份规则）
+        dirnames[:] = [d for d in dirnames if not _is_ignored_dir_name(d)]
         for name in dirnames + filenames:
             scanned += 1
             if scanned > _WORKSPACE_GLOB_MAX_SCAN_ENTRIES:
-                truncated = True
+                budget_exhausted = True
                 break
             p = Path(dirpath, name)
             # 与 grep 一致：逐项 resolve 后校验仍位于工作区内，
@@ -721,24 +1144,46 @@ def _glob_sync(root: Path, pattern: str) -> dict:
                     continue
             except OSError:
                 continue
+            # 敏感文件不进入匹配结果（存在性也不暴露给模型）
+            if _sensitive_path_reason(p):
+                continue
             rel_parts = p.relative_to(root).parts
             if not _glob_matches(rel_parts, pattern):
                 continue
             total += 1
-            if len(matches) < _WORKSPACE_GREP_MAX_RESULTS:
-                matches.append(str(Path(*rel_parts)))
-        if truncated:
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            matched.append((mtime, str(Path(*rel_parts))))
+        if budget_exhausted:
             break
-    matches.sort()
-    return {"pattern": pattern, "matches": matches, "total": total, "truncated": truncated}
+    matched.sort(key=lambda item: (-item[0], item[1]))
+    matches = [name for _, name in matched[:max_results]]
+    truncated = budget_exhausted or total > len(matches)
+    result = {"pattern": pattern, "matches": matches, "total": total, "truncated": truncated}
+    if truncated:
+        # 早先只在扫描预算超限时才置 truncated，结果数达上限也报「完整」，
+        # 模型据此以为已经找全；现在两种截断都如实标记。
+        result["notice"] = (
+            f"结果被截断：共命中 {total} 个，仅返回 {len(matches)} 个；"
+            "可缩小 pattern 或指定 path 子目录，也可提高 limit"
+        )
+    return result
 
 
-async def _glob_tool(pattern: str = "") -> str:
+async def _glob_tool(pattern: str = "", path: str = "", limit: int = 0) -> str:
     """在工作区内按 glob 模式匹配文件路径（相对工作区根目录返回）。
 
     模式如 ``**/*.py``、``src/**/*.ts``。绝对模式或以 ``../`` 开头
     试图离开工作区的模式会被拒绝。遍历在 asyncio.to_thread 中执行，
     避免同步递归扫描（如 ``**/*``）阻塞事件循环。
+
+    Args:
+        path: 限定遍历的子目录（工作区内相对路径），留空表示整个工作区。
+        limit: 返回条数上限，默认 ``_WORKSPACE_GLOB_MAX_RESULTS``，
+            上限 ``_WORKSPACE_GLOB_MAX_RESULTS_LIMIT``；结果截断时返回
+            ``truncated=true`` 与 notice。
     """
     pattern = str(pattern or "").strip()
     if not pattern:
@@ -748,8 +1193,23 @@ async def _glob_tool(pattern: str = "") -> str:
     root = _workspace_root()
     if root is None:
         return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    raw_base = str(path or "").strip()
+    base = None
+    if raw_base:
+        try:
+            base = _safe_resolve_workspace_path(raw_base, must_exist=True)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        if not base.is_dir():
+            return json.dumps({"error": f"{raw_base} 不是目录"}, ensure_ascii=False)
     try:
-        result = await asyncio.to_thread(_glob_sync, root, pattern)
+        max_results = max(1, min(int(limit or 0) or _WORKSPACE_GLOB_MAX_RESULTS, _WORKSPACE_GLOB_MAX_RESULTS_LIMIT))
+    except (TypeError, ValueError):
+        max_results = _WORKSPACE_GLOB_MAX_RESULTS
+    try:
+        result = await asyncio.to_thread(
+            _glob_sync, root, pattern, base=base, limit=max_results
+        )
     except OSError as exc:
         return json.dumps({"error": f"匹配失败: {exc}"}, ensure_ascii=False)
     return json.dumps(result, ensure_ascii=False)
@@ -759,11 +1219,23 @@ async def _grep_tool(
     pattern: str = "",
     path: str = "",
     case_sensitive: bool = False,
+    include: str = "",
+    output_mode: str = "content",
+    head_limit: int = 0,
 ) -> str:
     """在工作区内按正则搜索文件内容，返回命中文件与行号。
 
-    默认递归搜索整个工作区；path 指定时仅搜索该目录/文件（仍限工作区内）。
-    结果条数上限为 _WORKSPACE_GREP_MAX_RESULTS。
+    与早先实现的关键区别：**每个文件返回全部命中行**（早先命中第一条就 break，
+    同文件的其它命中被静默丢弃），候选文件按 mtime 倒序，结果被截断时如实标记。
+
+    Args:
+        pattern: 正则表达式（Python ``re`` 语法）。
+        path: 限定搜索的目录或单个文件（工作区内），留空搜整个工作区。
+        case_sensitive: 是否区分大小写，默认 False。
+        include: 只搜匹配该 glob 的文件；不含 ``/`` 时按文件名匹配（如 ``*.py``）。
+        output_mode: ``content``（默认，带行内容）/ ``files_with_matches`` / ``count``。
+        head_limit: 上限（content 模式按命中行数，其它模式按匹配文件数），
+            默认 ``_WORKSPACE_GREP_MAX_RESULTS``，上限 ``_WORKSPACE_GREP_MAX_RESULTS_LIMIT``。
     """
     pattern = str(pattern or "").strip()
     if not pattern:
@@ -773,75 +1245,183 @@ async def _grep_tool(
         rx = re.compile(pattern, flags)
     except re.error as exc:
         return json.dumps({"error": f"正则表达式非法: {exc}"}, ensure_ascii=False)
+    mode = str(output_mode or "content").strip().lower()
+    if mode not in ("content", "files_with_matches", "count"):
+        return json.dumps(
+            {"error": "output_mode 只能是 content / files_with_matches / count"},
+            ensure_ascii=False,
+        )
     raw_path = str(path or "").strip()
     if not raw_path:
         raw_path = "."
     try:
-        root = _safe_resolve_workspace_path(raw_path, must_exist=True)
+        target = _safe_resolve_workspace_path(raw_path, must_exist=True)
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
-    if not root.is_dir():
-        return json.dumps({"error": f"{path or '.'} 不是目录"}, ensure_ascii=False)
+    workspace = _workspace_root()
+    if workspace is None:
+        return json.dumps({"error": "未配置 agent_workspace_root，工作区文件工具不可用"}, ensure_ascii=False)
+    try:
+        limit = max(
+            1,
+            min(
+                int(head_limit or 0) or _WORKSPACE_GREP_MAX_RESULTS,
+                _WORKSPACE_GREP_MAX_RESULTS_LIMIT,
+            ),
+        )
+    except (TypeError, ValueError):
+        limit = _WORKSPACE_GREP_MAX_RESULTS
 
     try:
         # 同步遍历与逐行正则匹配放到线程池执行，避免阻塞事件循环
-        results = await asyncio.to_thread(_grep_sync, root, rx)
+        payload = await asyncio.to_thread(
+            _grep_sync, target, workspace, rx, str(include or "").strip(), limit, mode
+        )
     except OSError as exc:
         return json.dumps({"error": f"搜索失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"pattern": pattern, "results": results, "total": len(results)}, ensure_ascii=False)
+    return json.dumps({"pattern": pattern, "mode": mode, **payload}, ensure_ascii=False)
 
 
-def _grep_sync(root: Path, rx: re.Pattern) -> list[dict]:
-    """在工作区内同步按正则搜索文件内容，返回命中行结果列表。
+def _matches_include(path: Path, root: Path, include: str) -> bool:
+    """判断文件是否匹配 include 过滤。
 
-    rglob 会返回工作区内指向外部文件的软链接，必须逐项 resolve 后再次校验；
-    跳过隐藏目录与常见二进制/版本库目录，并按字节预算封顶，防止全盘递归
-    逐行正则匹配拖垮进程。该函数在 asyncio.to_thread 中执行。
+    不含 ``/`` 的写法（``*.py``）按**文件名**匹配，这样 ``include="*.py"`` 能命中
+    任意层级；含 ``/`` 的写法（``src/**/*.ts``）按相对工作区的路径做 glob。
     """
-    results = []
+    if not include:
+        return True
+    try:
+        rel = path.resolve().relative_to(root)
+    except (OSError, ValueError):
+        rel = Path(path.name)
+    if "/" in include:
+        return _glob_matches(rel.parts, include)
+    return fnmatch.fnmatchcase(rel.name, include)
+
+
+def _grep_sync(
+    target: Path,
+    workspace: Path,
+    rx: re.Pattern,
+    include: str,
+    head_limit: int,
+    output_mode: str,
+) -> dict:
+    """在工作区内同步按正则搜索文件内容。
+
+    设计要点：
+    - **每个文件的命中行全部返回**（早先命中第一条就 ``break``，同文件其余命中
+      被静默丢弃，模型只能反复换 pattern 试探）；
+    - 候选文件按 mtime 倒序，最近改过的更可能是目标；
+    - 统一忽略目录、跳过敏感文件与超大文件，全局扫描字节预算封顶，防止全盘递归；
+    - 逐项 resolve 后校验仍位于工作区内，防止软链接外泄；
+    - 结果被 head_limit 或扫描预算截断时如实返回 ``truncated`` + ``notice``。
+    该函数在 asyncio.to_thread 中执行。
+    """
+    root = workspace.resolve()
+    files: list[Path] = []
     scanned_bytes = 0
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
+    budget_exhausted = False
+
+    if target.is_file():
+        if not _sensitive_path_reason(target):
+            files = [target]
+    else:
+        for dirpath, dirnames, filenames in os.walk(target):
+            # 统一忽略规则（隐藏目录 + 依赖/构建产物），与 glob / list_dir 保持一致
+            dirnames[:] = [d for d in dirnames if not _is_ignored_dir_name(d)]
+            for name in filenames:
+                p = Path(dirpath, name)
+                if _sensitive_path_reason(p):
+                    continue
+                if not _matches_include(p, root, include):
+                    continue
+                try:
+                    if not _path_is_under(p.resolve(), root):
+                        continue
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                # 资源预算：超大文件跳过、全局扫描字节预算封顶
+                if size > _WORKSPACE_GREP_MAX_FILE_BYTES:
+                    continue
+                scanned_bytes += size
+                if scanned_bytes > _WORKSPACE_GREP_MAX_SCAN_BYTES:
+                    budget_exhausted = True
+                    break
+                files.append(p)
+            if budget_exhausted:
+                break
+
+    def _mtime(path: Path) -> float:
         try:
-            if not _path_is_under(p.resolve(), root):
-                continue
+            return path.stat().st_mtime
         except OSError:
-            continue
-        # 跳过隐藏目录与常见二进制/版本库目录，避免命中无意义内容
-        rel = p.relative_to(root)
-        parts = rel.parts
-        if any(part.startswith(".") or part in ("node_modules", ".git", "__pycache__", "venv", ".venv", "build", "dist") for part in parts):
-            continue
-        # 资源预算：超大文件跳过、全局扫描字节预算封顶，防止全盘递归
-        # 逐行正则匹配拖垮线程池。
+            return 0.0
+
+    if len(files) > 1:
+        files.sort(key=_mtime, reverse=True)
+
+    results: list[dict] = []
+    matched_files: list[str] = []
+    counts: dict[str, int] = {}
+    total_hits = 0
+    truncated = budget_exhausted
+
+    for p in files:
         try:
-            size = p.stat().st_size
-        except OSError:
-            continue
-        if size > _WORKSPACE_GREP_MAX_FILE_BYTES:
-            continue
-        scanned_bytes += size
-        if scanned_bytes > _WORKSPACE_GREP_MAX_SCAN_BYTES:
-            break
+            rel = str(p.resolve().relative_to(root))
+        except (OSError, ValueError):
+            rel = str(p)
+        file_hits = 0
         try:
             with open(p, "r", encoding="utf-8", errors="ignore") as fh:
                 for lineno, line in enumerate(fh, start=1):
                     # 跳过超长单行，避免灾难性正则（ReDoS）在超大输入上回退爆炸
                     if len(line) > _WORKSPACE_GREP_MAX_LINE_BYTES:
                         continue
-                    if rx.search(line):
-                        results.append({
-                            "file": str(rel),
-                            "line": lineno,
-                            "content": line.rstrip("\n").encode("utf-8")[:_WORKSPACE_READ_MAX_BYTES].decode("utf-8", errors="ignore"),
-                        })
-                        break
+                    if not rx.search(line):
+                        continue
+                    file_hits += 1
+                    total_hits += 1
+                    if output_mode == "content":
+                        content = line.rstrip("\n").rstrip("\r")
+                        if len(content) > _WORKSPACE_READ_MAX_LINE_CHARS:
+                            content = (
+                                content[:_WORKSPACE_READ_MAX_LINE_CHARS]
+                                + f" ...(单行已截断到 {_WORKSPACE_READ_MAX_LINE_CHARS} 字符)"
+                            )
+                        results.append({"file": rel, "line": lineno, "content": content})
+                        if len(results) >= head_limit:
+                            truncated = True
+                            break
         except OSError:
             continue
-        if len(results) >= _WORKSPACE_GREP_MAX_RESULTS:
-            break
-    return results
+        if file_hits:
+            matched_files.append(rel)
+            counts[rel] = file_hits
+            if output_mode != "content" and len(matched_files) >= head_limit:
+                truncated = True
+                break
+
+    payload: dict[str, Any] = {
+        "results": results,
+        "total": len(results) if output_mode == "content" else len(matched_files),
+        "file_count": len(matched_files),
+        "match_count": total_hits,
+        "truncated": truncated,
+    }
+    if output_mode == "files_with_matches":
+        payload["matches"] = matched_files
+    if output_mode == "count":
+        payload["counts"] = counts
+    if truncated:
+        limit_hint = head_limit
+        payload["notice"] = (
+            f"结果被截断（上限 {limit_hint}）：可能还有更多命中。"
+            "可缩小 path / 加 include 过滤 / 提高 head_limit"
+        )
+    return payload
 
 
 async def _file_info_tool(path: str) -> str:
@@ -893,8 +1473,17 @@ async def _write_file_tool(
     path: str,
     content: str,
     mode: str = "overwrite",
+    tag: str = "",
 ) -> str:
-    """写文件：新建或覆盖工作区内的文本文件。仅 agent_write_tools_enabled=true 时可用。"""
+    """写文件：新建或覆盖工作区内的文本文件。仅 agent_write_tools_enabled=true 时可用。
+
+    安全约定（对齐 dsh 的 ``fs-observation-policy``）：
+    - **覆盖已存在文件前必须在本会话读过它**，或用 ``tag`` 明确声明改的是哪一版；
+      否则模型可能把没看过的新内容直接冲掉。开关 ``agent_write_requires_read``
+      默认开启，可在 config.json 关闭；
+    - ``tag`` 与文件当前内容不一致时拒绝写入（版本冲突），要求重新读取；
+    - 写入后回算 tag 并回显 diff，模型据此确认改动真的落盘。
+    """
     await _check_tool_enabled("agent_write_tools_enabled", "akm_write_file")
     mode = str(mode or "overwrite").strip()
     if mode not in ("overwrite", "append"):
@@ -906,23 +1495,89 @@ async def _write_file_tool(
             "error": f"内容过大（{payload_bytes} 字节），超过单次写入上限 {_WORKSPACE_WRITE_MAX_BYTES}",
         }, ensure_ascii=False)
     try:
-        target = _safe_resolve_workspace_path(path, must_exist=(mode == "append"))
+        target = _safe_resolve_workspace_path(path, must_exist=False)
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     if target.exists() and target.is_dir():
         return json.dumps({"error": f"{path} 是目录，不能写入"}, ensure_ascii=False)
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if mode == "append":
-            # 追加无原子语义，直接以 O_APPEND 打开续写
-            with open(target, "a", encoding="utf-8") as fh:
-                fh.write(payload)
-        else:
-            # 覆盖走原子替换，避免中断留下半个文件
-            _atomic_write_text(target, payload)
-    except OSError as exc:
-        return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "path": str(target), "mode": mode, "bytes_written": payload_bytes}, ensure_ascii=False)
+
+    expected_tag = str(tag or "").strip().upper()
+    async with _path_lock(target):
+        existed = target.is_file()
+        previous = ""
+        current_tag = ""
+        if existed:
+            try:
+                previous = target.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return json.dumps({"error": f"读取原文件失败: {exc}"}, ensure_ascii=False)
+            current_tag = _file_tag(target, previous)
+
+        # ① 显式 tag：模型声明「我改的是这一版」，与当前内容比对
+        if expected_tag and current_tag and expected_tag != current_tag:
+            return json.dumps({
+                "error": (
+                    f"tag 与文件当前内容不一致（提供 {expected_tag}，当前 {current_tag}）："
+                    "文件在你读取之后被改动过。请重新 akm_read_file 拿到新 tag 后再写"
+                ),
+                "current_tag": current_tag,
+            }, ensure_ascii=False)
+
+        # ② 覆盖已存在文件：要求先读（或用 tag 证明读过）
+        if (
+            existed
+            and mode == "overwrite"
+            and not expected_tag
+            and load_config().get("agent_write_requires_read", True)
+        ):
+            state = _observed_state(target)
+            if state is None:
+                return json.dumps({
+                    "error": (
+                        f"覆盖已存在文件 {path} 前必须先读取：先用 akm_read_file 读一次，"
+                        "或用 akm_edit_file 做定点修改（整文件覆盖会丢掉你没看过的内容）"
+                    ),
+                }, ensure_ascii=False)
+            if state.get("tag") and current_tag and state["tag"] != current_tag:
+                return json.dumps({
+                    "error": (
+                        f"{path} 在你读取之后已被改动（读到 {state['tag']}，当前 {current_tag}）："
+                        "请重新 akm_read_file 确认内容后再覆盖"
+                    ),
+                    "current_tag": current_tag,
+                }, ensure_ascii=False)
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if mode == "append":
+                # 追加无原子语义，直接以 O_APPEND 打开续写
+                with open(target, "a", encoding="utf-8") as fh:
+                    fh.write(payload)
+                new_text = (previous + payload) if existed else payload
+            else:
+                # 覆盖走原子替换，避免中断留下半个文件
+                _atomic_write_text(target, payload)
+                new_text = payload
+        except OSError as exc:
+            return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
+
+        # 写入后重新记录观察：本会话已知整文件内容，后续 edit 不再要求重读
+        new_tag = _record_observation(target, 1, max(1, len(new_text.splitlines())), text=new_text)
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "path": str(target),
+        "mode": mode,
+        "bytes_written": payload_bytes,
+        "lines": len(new_text.splitlines()),
+        "tag": new_tag,
+        "created": not existed,
+    }
+    if existed and mode == "overwrite":
+        diff = _text_diff(previous, payload)
+        if diff:
+            result["diff"] = diff
+    return json.dumps(result, ensure_ascii=False)
 
 
 async def _edit_file_tool(
@@ -933,18 +1588,24 @@ async def _edit_file_tool(
     start_line: int = 0,
     end_line: int = 0,
     new_content: str = "",
+    tag: str = "",
 ) -> str:
     """结构化编辑工作区内的文本文件。仅 agent_write_tools_enabled=true 时可用。
 
-    支持两种定位方式：
-    - 行号模式：传入 start_line（1-based），把 [start_line, end_line] 行区间
-      整体替换为 new_content；同时传 old_string 时作为锚点校验（确认原文
-      确实位于目标行区间内），防止模型行号漂移后改错位置。推荐在读完文件、
-      拿到精确行号后使用，比长字符串匹配更可靠。
-    - 内容模式（默认，兼容旧行为）：将 old_string 替换为 new_string，
-      replace_all 控制是否替换全部匹配。
+    两种定位方式：
+    - **行号模式**：传入 ``start_line``（1-based），把 ``[start_line, end_line]``
+      整体替换为 ``new_content``；同时传 ``old_string`` 时作为锚点校验（确认原文
+      确实位于目标行区间内），防止模型行号漂移后改错位置。行号与
+      ``akm_read_file`` 返回的行号完全一致（都是 1-based 绝对行号）。
+    - **内容模式**（默认）：把 ``old_string`` 替换为 ``new_string``。
+      ``old_string`` 必须**唯一匹配**；多处命中时要么补充上下文，要么显式传
+      ``replace_all=true``（早先实现会静默改掉第一处，是最容易改错位置的坑）。
 
-    返回 old_lines / new_lines 或 replaced，便于模型感知编辑后的行数变化。
+    版本与观察约束：
+    - ``tag`` 与文件当前内容不一致 → 拒绝（文件已被外部改动，需重读）；
+    - 未读过该文件（本会话没有任何 read 记录）→ 拒绝，提示先读；
+    - 行号模式要求目标区间与已读窗口有交集，避免「凭旧行号盲改没看过的行」；
+    - 成功后返回新 ``tag`` 与 unified ``diff``，模型可据此确认改动结果。
     """
     await _check_tool_enabled("agent_write_tools_enabled", "akm_edit_file")
     try:
@@ -953,41 +1614,142 @@ async def _edit_file_tool(
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     if not target.is_file():
         return json.dumps({"error": f"{path} 不是文件"}, ensure_ascii=False)
-    try:
-        content = target.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
 
-    # ── 行号模式：基于行区间的结构化编辑 ──
-    start_line = int(start_line or 0)
-    end_line = int(end_line or 0)
-    if start_line > 0:
-        if start_line < 1:
-            return json.dumps({"error": "start_line 必须 >= 1"}, ensure_ascii=False)
-        if end_line and end_line < start_line:
-            return json.dumps({"error": "end_line 不能小于 start_line"}, ensure_ascii=False)
-        lines = content.splitlines()
-        effective_end = end_line or start_line
-        if effective_end > len(lines):
-            return json.dumps(
-                {"error": f"行号越界：文件共 {len(lines)} 行，请求编辑到第 {effective_end} 行"},
-                ensure_ascii=False,
-            )
-        # 锚点校验：若同时提供 old_string，确认其恰好位于目标行区间内，
-        # 防止模型基于旧快照的行号漂移后改错位置
-        old_string = str(old_string or "")
-        if old_string:
-            target_slice = "\n".join(lines[start_line - 1:effective_end])
-            if old_string not in target_slice:
+    expected_tag = str(tag or "").strip().upper()
+    async with _path_lock(target):
+        # 全文读取前先做大小预检：早先直接 read_text 整个文件，没有上限校验，
+        # 与 read（50MB）和 write（10MB）的口径不一致。
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            return json.dumps({"error": f"读取文件信息失败: {exc}"}, ensure_ascii=False)
+        if size > _WORKSPACE_READ_MAX_FILE_BYTES:
+            return json.dumps({
+                "error": f"文件过大（{size} 字节），超过编辑上限 {_WORKSPACE_READ_MAX_FILE_BYTES}；"
+                         "请用 akm_run_shell 里的 sed/脚本处理大文件",
+            }, ensure_ascii=False)
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return json.dumps({"error": f"读取文件失败: {exc}"}, ensure_ascii=False)
+
+        current_tag = _file_tag(target, content)
+        if expected_tag and expected_tag != current_tag:
+            return json.dumps({
+                "error": (
+                    f"tag 与文件当前内容不一致（提供 {expected_tag}，当前 {current_tag}）："
+                    "文件在你读取之后被改动过，请重新 akm_read_file 拿到新 tag 再编辑"
+                ),
+                "current_tag": current_tag,
+            }, ensure_ascii=False)
+
+        state = _observed_state(target)
+        if state is None and load_config().get("agent_write_requires_read", True):
+            return json.dumps({
+                "error": (
+                    f"编辑 {path} 前必须先读取：先用 akm_read_file 看一遍目标内容"
+                    "（服务端需要确认你改的就是你看到的那几行）"
+                ),
+            }, ensure_ascii=False)
+        if state and state.get("tag") and current_tag and state["tag"] != current_tag:
+            return json.dumps({
+                "error": (
+                    f"{path} 在你读取之后已被改动（读到 {state['tag']}，当前 {current_tag}）："
+                    "请重新 akm_read_file 确认内容后再编辑"
+                ),
+                "current_tag": current_tag,
+            }, ensure_ascii=False)
+
+        # ── 行号模式：基于行区间的结构化编辑 ──
+        start_line = int(start_line or 0)
+        end_line = int(end_line or 0)
+        if start_line > 0:
+            lines = content.splitlines()
+            effective_end = end_line or start_line
+            if end_line and end_line < start_line:
+                return json.dumps({"error": "end_line 不能小于 start_line"}, ensure_ascii=False)
+            if effective_end > len(lines):
                 return json.dumps(
-                    {"error": f"锚点校验失败：old_string 未在第 {start_line}-{effective_end} 行区间内找到"},
+                    {"error": f"行号越界：文件共 {len(lines)} 行，请求编辑到第 {effective_end} 行"},
                     ensure_ascii=False,
                 )
-        new_lines = lines[: start_line - 1] + str(new_content or "").splitlines() + lines[effective_end:]
-        new_text = "\n".join(new_lines)
-        # 保留原文件尾部换行风格，避免无谓的全文件 diff
-        if content.endswith("\n") and not new_text.endswith("\n"):
-            new_text += "\n"
+            # 行区间 provenance：只允许改「本会话看过」的行（dsh 的 EDIT_LINES_UNSEEN 思路）
+            if state and not state.get("all"):
+                seen_from, seen_to = state.get("lines") or (1, 0)
+                if effective_end < seen_from or start_line > seen_to:
+                    return json.dumps({
+                        "error": (
+                            f"第 {start_line}-{effective_end} 行不在你本次读过的范围内"
+                            f"（已读第 {seen_from}-{seen_to} 行）：请先用 "
+                            f"akm_read_file(offset={start_line}) 读到这些行再编辑"
+                        ),
+                    }, ensure_ascii=False)
+            # 锚点校验：若同时提供 old_string，确认其确实位于目标行区间内，
+            # 防止模型基于旧快照的行号漂移后改错位置（两侧都做行尾空白归一化）
+            old_string = str(old_string or "")
+            if old_string:
+                target_slice = "\n".join(lines[start_line - 1:effective_end])
+                if (
+                    old_string not in target_slice
+                    and _normalize_tag_text(old_string) not in _normalize_tag_text(target_slice)
+                ):
+                    return json.dumps(
+                        {"error": f"锚点校验失败：old_string 未在第 {start_line}-{effective_end} 行区间内找到"},
+                        ensure_ascii=False,
+                    )
+            new_lines = lines[: start_line - 1] + str(new_content or "").splitlines() + lines[effective_end:]
+            new_text = "\n".join(new_lines)
+            # 保留原文件尾部换行风格，避免无谓的全文件 diff
+            if content.endswith("\n") and not new_text.endswith("\n"):
+                new_text += "\n"
+            if len(new_text.encode("utf-8")) > _WORKSPACE_WRITE_MAX_BYTES:
+                return json.dumps({
+                    "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
+                }, ensure_ascii=False)
+            try:
+                _atomic_write_text(target, new_text)
+            except OSError as exc:
+                return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
+            new_tag = _record_observation(
+                target, 1, max(1, len(new_text.splitlines())), text=new_text
+            )
+            result = {
+                "ok": True,
+                "path": str(target),
+                "mode": "line",
+                "old_lines": effective_end - start_line + 1,
+                "new_lines": len(str(new_content or "").splitlines()),
+                "tag": new_tag,
+            }
+            diff = _text_diff(content, new_text)
+            if diff:
+                result["diff"] = diff
+            return json.dumps(result, ensure_ascii=False)
+
+        # ── 内容模式：字符串替换（要求唯一匹配）──
+        old_string = str(old_string or "")
+        if not old_string:
+            return json.dumps(
+                {"error": "old_string 不能为空：内容模式需要提供要被替换的原文"},
+                ensure_ascii=False,
+            )
+        count = content.count(old_string)
+        if count == 0:
+            return json.dumps(
+                {"error": "old_string 未在文件中找到：请先 akm_read_file 确认原文（注意缩进与空白）"},
+                ensure_ascii=False,
+            )
+        if count > 1 and not replace_all:
+            return json.dumps({
+                "error": (
+                    f"old_string 在文件中出现了 {count} 次，无法确定要改哪一处："
+                    "请把上下文（相邻几行）一起写进 old_string 使其唯一，"
+                    "或显式传 replace_all=true 替换全部"
+                ),
+                "occurrences": count,
+            }, ensure_ascii=False)
+        replaced = count if replace_all else 1
+        new_text = content.replace(old_string, str(new_string or ""), replaced)
         if len(new_text.encode("utf-8")) > _WORKSPACE_WRITE_MAX_BYTES:
             return json.dumps({
                 "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
@@ -996,32 +1758,20 @@ async def _edit_file_tool(
             _atomic_write_text(target, new_text)
         except OSError as exc:
             return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
-        return json.dumps({
+        new_tag = _record_observation(
+            target, 1, max(1, len(new_text.splitlines())), text=new_text
+        )
+        result = {
             "ok": True,
             "path": str(target),
-            "old_lines": effective_end - start_line + 1,
-            "new_lines": len(str(new_content or "").splitlines()),
-        }, ensure_ascii=False)
-
-    # ── 内容模式：旧字符串替换（兼容原有行为）──
-    old_string = str(old_string or "")
-    if not old_string:
-        return json.dumps({"error": "old_string 不能为空"}, ensure_ascii=False)
-    count = content.count(old_string)
-    if count == 0:
-        return json.dumps({"error": "old_string 未在文件中找到"}, ensure_ascii=False)
-    if not replace_all:
-        count = 1
-    new_text = content.replace(old_string, str(new_string or ""), count)
-    if len(new_text.encode("utf-8")) > _WORKSPACE_WRITE_MAX_BYTES:
-        return json.dumps({
-            "error": f"编辑后文件过大（>{_WORKSPACE_WRITE_MAX_BYTES} 字节），拒绝写入",
-        }, ensure_ascii=False)
-    try:
-        _atomic_write_text(target, new_text)
-    except OSError as exc:
-        return json.dumps({"error": f"写入文件失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "path": str(target), "replaced": count}, ensure_ascii=False)
+            "mode": "content",
+            "replaced": replaced,
+            "tag": new_tag,
+        }
+        diff = _text_diff(content, new_text)
+        if diff:
+            result["diff"] = diff
+        return json.dumps(result, ensure_ascii=False)
 
 
 async def _make_dir_tool(path: str) -> str:
@@ -1043,7 +1793,7 @@ async def _delete_tool(path: str, recursive: bool = False) -> str:
 
     默认只删除单个文件；``recursive=true`` 时允许删除目录并递归清除其中
     所有内容（用于批量删除场景）。无论是否 recursive，都拒绝删除工作区
-    根目录本身。
+    根目录。返回值带上被删条目数，让模型能确认「删了多少东西」而不是只有 ok。
     """
     await _check_tool_enabled("agent_write_tools_enabled", "akm_delete_file")
     try:
@@ -1058,14 +1808,119 @@ async def _delete_tool(path: str, recursive: bool = False) -> str:
             {"error": "目标是一个目录，批量删除需设置 recursive=true；请确认后重试"},
             ensure_ascii=False,
         )
-    try:
+    async with _path_lock(target):
+        removed = 0
         if target.is_dir():
-            shutil.rmtree(target)
+            # 先统计条目数（封顶 10000，避免在超大目录上白跑一遍遍历）
+            removed = 0
+            try:
+                for removed, _ in enumerate(target.rglob("*"), start=1):
+                    if removed >= 10000:
+                        break
+            except OSError:
+                removed = 0
+            try:
+                shutil.rmtree(target)
+            except OSError as exc:
+                return json.dumps({"error": f"删除失败: {exc}"}, ensure_ascii=False)
         else:
-            target.unlink()
-    except OSError as exc:
-        return json.dumps({"error": f"删除失败: {exc}"}, ensure_ascii=False)
-    return json.dumps({"ok": True, "path": str(target)}, ensure_ascii=False)
+            try:
+                target.unlink()
+            except OSError as exc:
+                return json.dumps({"error": f"删除失败: {exc}"}, ensure_ascii=False)
+            removed = 1
+        _forget_observation(target)
+    result = {"ok": True, "path": str(target)}
+    if removed:
+        result["entries_removed"] = removed
+    return json.dumps(result, ensure_ascii=False)
+
+
+async def _move_file_tool(path: str, dest: str, overwrite: bool = False) -> str:
+    """在工作区内移动或重命名文件/目录。仅 agent_write_tools_enabled=true 时可用。
+
+    单独提供移动工具的原因：早先要挪动一个文件只能 read + write + delete 三步，
+    既费 token，又会在中间态丢掉权限位与 mtime。
+    """
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_move_file")
+    try:
+        source = _safe_resolve_workspace_path(path, must_exist=True)
+        target = _safe_resolve_workspace_path(dest, must_exist=False)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    root = _workspace_root()
+    if root is not None and source == root:
+        return json.dumps({"error": "不能移动工作区根目录"}, ensure_ascii=False)
+    if source == target:
+        return json.dumps({"error": "path 与 dest 相同，无需移动"}, ensure_ascii=False)
+    async with _path_lock(target):
+        if target.exists() and not overwrite:
+            return json.dumps(
+                {"error": f"目标已存在: {dest}（确需覆盖请显式传 overwrite=true）"},
+                ensure_ascii=False,
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+        except OSError as exc:
+            return json.dumps({"error": f"移动失败: {exc}"}, ensure_ascii=False)
+        # 旧路径的观察记录失效；新路径需要模型重新读一次（内容虽同，行号上下文已变）
+        _forget_observation(source)
+        _forget_observation(target)
+    return json.dumps({"ok": True, "path": str(source), "dest": str(target)}, ensure_ascii=False)
+
+
+def _copy_ignore(_dirpath, names):
+    """copytree 的忽略回调：跳过统一忽略目录与敏感文件。"""
+    return [
+        name
+        for name in names
+        if _is_ignored_dir_name(name) or _sensitive_path_reason(Path(name))
+    ]
+
+
+async def _copy_file_tool(
+    path: str,
+    dest: str,
+    recursive: bool = False,
+    overwrite: bool = False,
+) -> str:
+    """在工作区内复制文件或目录。仅 agent_write_tools_enabled=true 时可用。
+
+    复制目录需要 ``recursive=true``，复制时会跳过统一忽略目录（node_modules/.git
+    等）与敏感文件，避免把依赖树或密钥复制得到处都是。
+    """
+    await _check_tool_enabled("agent_write_tools_enabled", "akm_copy_file")
+    try:
+        source = _safe_resolve_workspace_path(path, must_exist=True)
+        target = _safe_resolve_workspace_path(dest, must_exist=False)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+    if source == target:
+        return json.dumps({"error": "path 与 dest 相同，无法复制"}, ensure_ascii=False)
+    if source.is_dir() and not recursive:
+        return json.dumps(
+            {"error": "源是目录，复制目录需设置 recursive=true"},
+            ensure_ascii=False,
+        )
+    async with _path_lock(target):
+        if target.exists() and not overwrite:
+            return json.dumps(
+                {"error": f"目标已存在: {dest}（确需覆盖请显式传 overwrite=true）"},
+                ensure_ascii=False,
+            )
+        try:
+            if source.is_dir():
+                shutil.copytree(
+                    source, target, dirs_exist_ok=bool(overwrite), ignore=_copy_ignore
+                )
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+        except OSError as exc:
+            return json.dumps({"error": f"复制失败: {exc}"}, ensure_ascii=False)
+        _forget_observation(target)
+    return json.dumps({"ok": True, "path": str(source), "dest": str(target)}, ensure_ascii=False)
 
 
 async def _run_workspace_argv(argv: list[str], root: Path, timeout: int, label: str) -> str:
@@ -3792,68 +4647,176 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
     return tools
 
 
-def build_workspace_tools() -> list[ToolDef]:
-    """创建工作区文件工具（读 + 写 + shell）。
+def _audit_arguments(arguments: dict, *, limit: int = 2000) -> dict:
+    """裁剪工具参数用于审计：超长字符串只留头部与长度。
+
+    模型写文件时 ``content`` 可能是几百 KB，整段落库既占空间又可能含敏感内容，
+    审计里只需要「改了哪个文件、大概什么内容」。
+    """
+    out: dict[str, Any] = {}
+    for key, value in (arguments or {}).items():
+        if isinstance(value, str) and len(value) > limit:
+            out[key] = f"{value[:limit]}...（共 {len(value)} 字符）"
+        else:
+            out[key] = value
+    return out
+
+
+def _audit_result_summary(result_text: str, *, limit: int = 1000) -> dict:
+    """生成工具结果摘要：小结果原样记录，大结果只记长度与前 500 字符。"""
+    text = str(result_text or "")
+    if len(text) <= limit:
+        return {"result": text}
+    return {"result_head": text[:500], "result_chars": len(text), "truncated": True}
+
+
+def _audit_wrap(app, tool_name: str, handler: Callable) -> Callable:
+    """给工作区工具包一层「工具调用级」审计。
+
+    为什么需要：``akm_render`` / ``akm_fetch_url`` 早就有工具级审计，但真正会
+    改动磁盘的读写工具反而没有——出问题时无法回答「谁在什么时候改了哪个文件」。
+    审计写失败绝不影响工具结果（日志是旁路）。
+    """
+    if app is None or not load_config().get("agent_tool_audit_enabled", True):
+        return handler
+
+    async def _wrapped(**kwargs):
+        started = time.perf_counter()
+        try:
+            if inspect.iscoroutinefunction(handler):
+                result = await handler(**kwargs)
+            else:
+                result = handler(**kwargs)
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            try:
+                await _submit_tool_call_audit(
+                    app,
+                    tool_name=tool_name,
+                    arguments=_audit_arguments(kwargs),
+                    result={"raised": f"{type(exc).__name__}: {exc}"},
+                    latency_ms=latency_ms,
+                    ok=False,
+                    error=str(exc),
+                )
+            except Exception as audit_exc:  # noqa: BLE001 - 审计失败不影响工具语义
+                logger.warning("[AgentTool] 工具审计写入失败 %s: %s", tool_name, audit_exc)
+            raise
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        error = ""
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("error"):
+                error = str(parsed["error"])
+        try:
+            await _submit_tool_call_audit(
+                app,
+                tool_name=tool_name,
+                arguments=_audit_arguments(kwargs),
+                result=_audit_result_summary(str(result)),
+                latency_ms=latency_ms,
+                ok=not error,
+                error=error,
+            )
+        except Exception as audit_exc:  # noqa: BLE001 - 审计失败不影响工具语义
+            logger.warning("[AgentTool] 工具审计写入失败 %s: %s", tool_name, audit_exc)
+        return result
+
+    return _wrapped
+
+
+def build_workspace_tools(app: FastAPI | None = None) -> list[ToolDef]:
+    """创建工作区文件工具（读 + 写 + 移动/复制 + shell + git）。
 
     安全设计：
     - 读工具（read/list/glob/grep/info）始终注册，但目标必须位于
       agent_workspace_root 工作区内；未配置工作区时执行返回明确错误。
-    - 写工具（write/edit/make_dir/delete）默认禁用，仅当 config.json
+    - 写工具（write/edit/make_dir/delete/move/copy）默认禁用，仅当 config.json
       设置 ``agent_write_tools_enabled=true`` 时才注册，模型不可见即不可调。
     - shell 工具默认禁用，仅当 ``agent_run_shell_enabled=true`` 时才注册；
       命令由模型直接传入，系统 shell 解释执行（cwd 固定为工作区根目录）。
+    - 敏感文件（.env / 私钥 / 凭据 / .git 内部文件）在路径解析层统一拦截。
+    - 传入 ``app`` 时给每个工具包一层调用级审计（``agent_tool_audit_enabled``
+      默认开启），审计写入失败不影响工具结果。
     """
+    def _wrap(name: str, handler: Callable) -> Callable:
+        """给 handler 挂审计（无 app 时原样返回，便于单测直接调用）。"""
+        return _audit_wrap(app, name, handler)
+
     tools: list[ToolDef] = [
         ToolDef(
             "akm_read_file",
-            "读取工作区内文本文件的内容（带行级分页与长度限制）。仅能访问 agent_workspace_root 配置的工作区目录",
+            "读取工作区内文本文件，返回「行号: 内容」的纯文本窗口与版本 tag。offset 为 1-based 起始行"
+            "（与 akm_edit_file 的 start_line 完全一致），limit 默认 2000 行、上限 4000；"
+            "窗口未读完时末尾直接给出下一次的 offset。仅能访问 agent_workspace_root 工作区内的文件",
             {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "工作区内的文件路径（绝对路径或相对工作区根目录的路径）"},
-                    "offset": {"type": "integer", "description": "起始行号（从 0 开始），默认 0"},
-                    "limit": {"type": "integer", "description": "返回的最大行数，-1 表示读到结尾，默认 -1"},
+                    "offset": {"type": "integer", "description": "起始行号（1-based），默认 1"},
+                    "limit": {"type": "integer", "description": "返回的最大行数，默认 2000，上限 4000；传 -1 表示尽量读到结尾"},
                 },
                 "required": ["path"],
             },
-            _read_file_tool,
+            _wrap("akm_read_file", _read_file_tool),
         ),
         ToolDef(
             "akm_list_dir",
-            "列出工作区内目录下的条目（名称、类型、大小），用于感知工作区结构",
+            "列出工作区内目录下的条目（名称、类型、大小），支持 offset/limit 分页（默认 500 条，上限 2000）",
             {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "工作区内的目录路径，留空表示工作区根目录"},
+                    "offset": {"type": "integer", "description": "分页起始序号（0-based），默认 0"},
+                    "limit": {"type": "integer", "description": "单页条目数，默认 500，上限 2000"},
                 },
             },
-            _list_dir_tool,
+            _wrap("akm_list_dir", _list_dir_tool),
+            max_result_chars=100_000,
         ),
         ToolDef(
             "akm_glob",
-            "在工作区内按 glob 模式匹配文件或目录路径（相对工作区根目录返回），如 **/*.py",
+            "在工作区内按 glob 模式匹配文件路径（相对工作区根目录返回，按修改时间倒序），如 **/*.py。"
+            "结果被 limit 截断时返回 truncated=true 与 notice",
             {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "glob 匹配模式，如 **/*.py"},
+                    "path": {"type": "string", "description": "限定遍历的子目录（工作区内），留空表示整个工作区"},
+                    "limit": {"type": "integer", "description": "返回条数上限，默认 100，上限 1000"},
                 },
                 "required": ["pattern"],
             },
-            _glob_tool,
+            _wrap("akm_glob", _glob_tool),
+            max_result_chars=100_000,
         ),
         ToolDef(
             "akm_grep",
-            "在工作区内按正则搜索文件内容，返回命中的文件、行号与行内容",
+            "在工作区内按正则搜索文件内容，返回命中的文件、行号与行内容；每个文件返回其全部命中行，"
+            "候选文件按修改时间倒序扫描。支持 include 过滤、output_mode 三种模式与 head_limit，"
+            "结果被截断时返回 truncated=true 与 notice",
             {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "要搜索的正则表达式"},
-                    "path": {"type": "string", "description": "限定搜索的目录或文件（工作区内），留空递归搜索整个工作区"},
+                    "pattern": {"type": "string", "description": "要搜索的正则表达式（Python re 语法）"},
+                    "path": {"type": "string", "description": "限定搜索的目录或单个文件（工作区内），留空递归搜索整个工作区"},
                     "case_sensitive": {"type": "boolean", "description": "是否区分大小写，默认 false"},
+                    "include": {"type": "string", "description": "只搜匹配该 glob 的文件；不含 / 时按文件名匹配，如 *.py"},
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "content 返回命中的行内容（默认）；files_with_matches 只返回文件列表；count 返回每个文件的命中数",
+                    },
+                    "head_limit": {"type": "integer", "description": "上限：content 模式按命中行数、其它模式按匹配文件数，默认 100，上限 4000"},
                 },
                 "required": ["pattern"],
             },
-            _grep_tool,
+            _wrap("akm_grep", _grep_tool),
+            max_result_chars=200_000,
         ),
         ToolDef(
             "akm_file_info",
@@ -3865,7 +4828,7 @@ def build_workspace_tools() -> list[ToolDef]:
                 },
                 "required": ["path"],
             },
-            _file_info_tool,
+            _wrap("akm_file_info", _file_info_tool),
         ),
     ]
 
@@ -3874,35 +4837,42 @@ def build_workspace_tools() -> list[ToolDef]:
         tools.extend([
             ToolDef(
                 "akm_write_file",
-                "新建或覆盖工作区内的文本文件（mode=overwrite 覆盖 / append 追加）。仅 agent_write_tools_enabled=true 时可用",
+                "新建或覆盖工作区内的文本文件（mode=overwrite 覆盖 / append 追加）。覆盖已存在文件前"
+                "必须先用 akm_read_file 读过（或用 tag 声明要改的版本），写入后返回新 tag 与 diff。"
+                "仅 agent_write_tools_enabled=true 时可用",
                 {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "工作区内的文件路径（相对工作区根目录的路径）"},
-                        "content": {"type": "string", "description": "要写入的文本内容"},
+                        "content": {"type": "string", "description": "要写入的完整文本内容"},
                         "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "overwrite 覆盖（默认）或 append 追加"},
+                        "tag": {"type": "string", "description": "可选：akm_read_file 返回的 4 位 tag；提供时会校验文件未被外部改动"},
                     },
                     "required": ["path", "content"],
                 },
-                _write_file_tool,
+                _wrap("akm_write_file", _write_file_tool),
             ),
             ToolDef(
                 "akm_edit_file",
-                "结构化编辑工作区内的文本文件，支持两种定位方式：行号模式传 start_line（1-based，可配 end_line）把行区间替换为 new_content，推荐先读文件拿到行号后用，另可配 old_string 做锚点校验防止改错位置；内容模式将 old_string 替换为 new_string。仅 agent_write_tools_enabled=true 时可用",
+                "结构化编辑工作区内的文本文件，编辑前需先 akm_read_file 读过该文件。两种定位方式："
+                "行号模式传 start_line（1-based，可配 end_line）把行区间替换为 new_content，推荐配 old_string 做锚点校验；"
+                "内容模式把 old_string 替换为 new_string，old_string 必须唯一匹配（多处命中时需补充上下文或传 replace_all=true）。"
+                "成功后返回新 tag 与 diff。仅 agent_write_tools_enabled=true 时可用",
                 {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "工作区内的文件路径"},
-                        "old_string": {"type": "string", "description": "行号模式下作为目标行区间的锚点校验内容（可选）；内容模式下为要被替换的原文片段"},
-                        "new_string": {"type": "string", "description": "内容模式下的替换文本，可留空表示删除（仅内容模式使用）"},
-                        "replace_all": {"type": "boolean", "description": "内容模式下是否替换所有匹配（默认只替换第一处）"},
-                        "start_line": {"type": "integer", "description": "行号模式起始行号（1-based）；传此字段进入行号模式，把 [start_line, end_line] 区间整体替换为 new_content"},
+                        "old_string": {"type": "string", "description": "行号模式下作为目标行区间的锚点校验内容（可选）；内容模式下为要被替换的原文片段（必须唯一匹配）"},
+                        "new_string": {"type": "string", "description": "内容模式下的替换文本，可留空表示删除"},
+                        "replace_all": {"type": "boolean", "description": "内容模式下是否替换所有匹配（默认 false，多处命中会报错要求收窄）"},
+                        "start_line": {"type": "integer", "description": "行号模式起始行号（1-based，与 akm_read_file 返回的行号一致）；传此字段进入行号模式"},
                         "end_line": {"type": "integer", "description": "行号模式结束行号（含，默认等于 start_line，只替换一行）"},
                         "new_content": {"type": "string", "description": "行号模式下的新内容（可多行），替换目标行区间"},
+                        "tag": {"type": "string", "description": "可选：akm_read_file 返回的 4 位 tag；提供时会校验文件未被外部改动"},
                     },
                     "required": ["path"],
                 },
-                _edit_file_tool,
+                _wrap("akm_edit_file", _edit_file_tool),
             ),
             ToolDef(
                 "akm_make_dir",
@@ -3914,11 +4884,12 @@ def build_workspace_tools() -> list[ToolDef]:
                     },
                     "required": ["path"],
                 },
-                _make_dir_tool,
+                _wrap("akm_make_dir", _make_dir_tool),
             ),
             ToolDef(
                 "akm_delete_file",
-                "删除工作区内的文件或目录。recursive=false（默认）只删除单个文件；recursive=true 可删除目录并递归清除其中所有内容。禁止删除工作区根目录。仅 agent_write_tools_enabled=true 时可用",
+                "删除工作区内的文件或目录。recursive=false（默认）只删除单个文件；recursive=true 可删除目录并递归清除其中所有内容。"
+                "禁止删除工作区根目录。仅 agent_write_tools_enabled=true 时可用",
                 {
                     "type": "object",
                     "properties": {
@@ -3927,13 +4898,45 @@ def build_workspace_tools() -> list[ToolDef]:
                     },
                     "required": ["path"],
                 },
-                _delete_tool,
+                _wrap("akm_delete_file", _delete_tool),
+            ),
+            ToolDef(
+                "akm_move_file",
+                "在工作区内移动或重命名文件/目录（跨目录改名一次完成，不需要 read+write+delete）。"
+                "目标已存在时需显式传 overwrite=true。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区内要移动的源文件或目录路径"},
+                        "dest": {"type": "string", "description": "目标路径（工作区内），目录不存在时自动创建父目录"},
+                        "overwrite": {"type": "boolean", "description": "目标已存在时是否覆盖，默认 false"},
+                    },
+                    "required": ["path", "dest"],
+                },
+                _wrap("akm_move_file", _move_file_tool),
+            ),
+            ToolDef(
+                "akm_copy_file",
+                "在工作区内复制文件或目录（复制目录需 recursive=true，会自动跳过 node_modules/.git 等忽略目录与敏感文件）。"
+                "目标已存在时需显式传 overwrite=true。仅 agent_write_tools_enabled=true 时可用",
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "工作区内要复制的源文件或目录路径"},
+                        "dest": {"type": "string", "description": "目标路径（工作区内）"},
+                        "recursive": {"type": "boolean", "description": "源是目录时必须为 true"},
+                        "overwrite": {"type": "boolean", "description": "目标已存在时是否覆盖，默认 false"},
+                    },
+                    "required": ["path", "dest"],
+                },
+                _wrap("akm_copy_file", _copy_file_tool),
             ),
         ])
     if load_config().get("agent_run_shell_enabled"):
         tools.append(ToolDef(
             "akm_run_shell",
-            "在工作区用 shell 执行命令字符串并返回 stdout+stderr（支持管道、通配符、重定向；cwd 固定为工作区根目录）。仅 agent_run_shell_enabled=true 时可用；属主机级进程执行能力，需配合插件策略使用",
+            "在工作区用 shell 执行命令字符串并返回 stdout+stderr（支持管道、通配符、重定向；cwd 固定为工作区根目录）。"
+            "仅 agent_run_shell_enabled=true 时可用；属主机级进程执行能力，需配合插件策略使用",
             {
                 "type": "object",
                 "properties": {
@@ -3942,12 +4945,14 @@ def build_workspace_tools() -> list[ToolDef]:
                 },
                 "required": ["command"],
             },
-            _run_shell_tool,
+            _wrap("akm_run_shell", _run_shell_tool),
+            max_result_chars=200_000,
         ))
     if load_config().get("agent_git_enabled"):
         tools.append(ToolDef(
             "akm_run_git",
-            "在工作区执行结构化 git 操作并返回输出与退出码。仅支持 status、diff、log、show、add、restore、reset、commit、branch；不接受自由命令字符串。仅 agent_git_enabled=true 时可用",
+            "在工作区执行结构化 git 操作并返回输出与退出码。仅支持 status、diff、log、show、add、restore、reset、commit、branch；"
+            "不接受自由命令字符串。仅 agent_git_enabled=true 时可用",
             {
                 "type": "object",
                 "properties": {
@@ -3962,6 +4967,7 @@ def build_workspace_tools() -> list[ToolDef]:
                 },
                 "required": ["operation"],
             },
-            _run_git_tool,
+            _wrap("akm_run_git", _run_git_tool),
+            max_result_chars=200_000,
         ))
     return tools
