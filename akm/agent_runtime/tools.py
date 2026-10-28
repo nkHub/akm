@@ -2139,9 +2139,13 @@ def _seatbelt_profile(root: Path) -> str:
         "(allow default)\n"
         "(deny file-write*)\n"
         f"(deny file-read* {deny_read})\n"
-        # 家目录的整体元数据列举（如 ls ~）也会泄露目录名，单独拒绝；
+        # 家目录本身的读取会泄露目录名，单独拒绝。这里必须用 literal 而不是
+        # subpath：subpath 会把整棵家目录树的 metadata 全部拦掉，导致 shell 里
+        # `cd ~/Desktop/xxx` 在解析中间那一级 home 时失败、报 "Not a directory"
+        # （cd 在切换前要对路径每一级做 metadata 检查，不像 stat 那样能直接定位
+        # 到被 allow 的末端路径）。literal 只挡 home 这一个路径，子路径不受影响。
         # 后面的 allow 会为工作区/临时目录重新放行对应 metadata 访问。
-        f'(deny file-read-metadata (subpath "{home}"))\n'
+        f'(deny file-read-data (literal "{home}"))\n'
         f"(allow file-write* {allow_write})\n"
         f"(allow file-read* {allow_read})\n"
         f'(allow file-read-metadata (subpath "{ws}") (subpath "{tmp}"))\n'
