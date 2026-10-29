@@ -2300,7 +2300,12 @@ def _get_stats(days: int) -> dict:
         provider = r.get("provider", "unknown")
         model = r.get("model", "unknown")
         source = extract_source(r.get("request_headers"))
-        ts = str(r.get("timestamp", ""))[:10]
+        # 时间桶粒度必须与「报错趋势」严格对齐：days=1 按小时（24 桶，key 为 "00".."23"），
+        # 其余按自然日（key 为 "YYYY-MM-DD"）。直接复用同一个 _error_key，避免两套口径
+        # 漂移——前端按同一批下标取成功率，日/小时粒度只要错了位，曲线就整体错一格。
+        # 1d 曾经恒按日聚合，整段只有「今天」一个桶，"每日用量"在 1d 视图里没有意义，
+        # 前端索性整块隐藏；这里改成小时桶后，1d 才能画出「每时用量」。
+        ts = _error_key(str(r.get("timestamp", "")))
 
         # 这里统一按归一化后的 token 列做减法：
         # - Chat/Responses: prompt_tokens 本就是总输入，cached_tokens 是其子集；
