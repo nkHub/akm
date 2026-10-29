@@ -248,7 +248,7 @@ async def test_fetch_stops_after_too_many_redirects(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_writes_tool_audit(monkeypatch):
-    """抓取是一次工具调用：审计里 provider=akm、工具名进 x-akm-tool、正文不进库。"""
+    """抓取是一次工具调用：审计里 provider 取真实供应商（无上下文时留空）、工具名进 x-akm-tool、正文不进库。"""
     audits = []
 
     async def fake_submit(app, data):
@@ -263,7 +263,8 @@ async def test_fetch_writes_tool_audit(monkeypatch):
 
     assert len(audits) == 1
     record = audits[0]
-    assert record["provider"] == "akm"
+    # 没有 AgentLoop 注入审计上下文时：provider 留空，绝不写死应用名 akm
+    assert record["provider"] == ""
     assert '"x-akm-tool": "akm_fetch_url"' in record["request_headers"]
     # 正文不进审计，只留状态摘要
     assert "hi" not in record["response_body"]

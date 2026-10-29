@@ -121,7 +121,7 @@ def _render_handler(app):
 
 @pytest.mark.asyncio
 async def test_render_tool_writes_tool_audit_record(monkeypatch):
-    """成功渲染后写一条 source=tool 的审计：provider=akm、model=akm_render、200。
+    """成功渲染后写一条 source=tool 的审计：provider 取真实供应商（无上下文时留空）、model=真实模型、200。
 
     akm_render 本身不发上游请求，若不单独记这一条，审计日志里就完全看不出
     模型调用过渲染工具、渲染了什么（正文里只剩卡片）。
@@ -150,7 +150,8 @@ async def test_render_tool_writes_tool_audit_record(monkeypatch):
     assert json.loads(text)["ok"] is True
     assert len(audits) == 1
     record = audits[0]
-    assert record["provider"] == "akm"
+    # 没有 AgentLoop 注入审计上下文时：provider 留空，绝不写死应用名 akm
+    assert record["provider"] == ""
     # 没有 AgentLoop 注入审计上下文时：model / key_alias 留空，绝不把工具名当模型
     assert record["key_alias"] == ""
     assert record["model"] == ""
@@ -169,7 +170,7 @@ async def test_render_tool_writes_tool_audit_record(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_render_tool_audit_uses_request_context(monkeypatch):
-    """AgentLoop 注入的审计上下文生效：model 是真实模型、key_alias 是实际用的 Key。
+    """AgentLoop 注入的审计上下文生效：model 是真实模型、provider 是真实供应商、key_alias 是实际用的 Key。
 
     这条钉住「不要把工具名当模型写进 model 列」——model 列要能参与模型分布统计，
     而工具名只出现在 x-akm-tool 里。
@@ -190,6 +191,7 @@ async def test_render_tool_audit_uses_request_context(monkeypatch):
     token = tools_module.set_request_audit_context(
         model="deepseek/deepseek-v4.1-flash",
         key_alias="opencode-main",
+        provider="commandcode",
         source="chat",
     )
     try:
@@ -201,6 +203,8 @@ async def test_render_tool_audit_uses_request_context(monkeypatch):
     record = audits[0]
     assert record["model"] == "deepseek/deepseek-v4.1-flash"
     assert record["key_alias"] == "opencode-main"
+    # 供应商列必须等于 Key 的供应商，不能是应用名 akm
+    assert record["provider"] == "commandcode"
     assert '"x-akm-source": "chat-tool"' in record["request_headers"]
     assert '"x-akm-tool": "akm_render"' in record["request_headers"]
 
