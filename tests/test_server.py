@@ -2705,6 +2705,59 @@ async def test_api_stats_includes_cost_when_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_stats_daily_uses_hour_buckets_on_1d(monkeypatch):
+    """days=1 时 daily 必须按小时分桶（"00".."23"），days=7 仍按自然日。
+
+    前端「每时用量」直接按两位小时取 daily[hh]。后端若退回按日聚合，1d 里只会剩
+    一个桶、曲线取不到值——这条断言把「粒度跟着时间范围走」的契约钉住。
+    """
+    from datetime import datetime
+
+    from akm import server as server_mod
+
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {
+            "stats_include_estimated_usage": False,
+            "cost_stats_enabled": False,
+            "log_request_body": False,
+            "log_response_body": False,
+        },
+    )
+    server_mod._stats_cache.clear()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = get_connection()
+    # 直接插库：write_log 的 timestamp 固定写 "now"，造不出两个不同小时。
+    for ts, total, prompt, cached in (
+        (f"{today} 09:15:00", 100, 60, 40),
+        (f"{today} 21:30:00", 200, 120, 80),
+    ):
+        conn.execute(
+            "INSERT INTO audit_logs (timestamp, provider, key_alias, model, request_body,"
+            " response_body, status_code, latency_ms, error, request_headers, prompt_tokens,"
+            " completion_tokens, total_tokens, cached_tokens, cache_creation_tokens)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, "openai", "k1", "gpt-4", "", "", 200, 10, "", "{}", prompt, 0, total, cached, 0),
+        )
+    conn.commit()
+    conn.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        hourly = (await client.get("/api/stats?days=1")).json()["daily"]
+        daily = (await client.get("/api/stats?days=7")).json()["daily"]
+
+    # 1d：key 是两位小时，且不同小时各自成桶（不能被合并成「今天」一个桶）
+    assert "09" in hourly and "21" in hourly, hourly
+    assert all(len(k) == 2 and k.isdigit() for k in hourly), hourly
+    assert hourly["09"]["total"] == 100
+    assert hourly["21"]["total"] == 200
+    # 7d：仍是自然日（YYYY-MM-DD）
+    assert all(len(k) == 10 and k.count("-") == 2 for k in daily), daily
+
+
+@pytest.mark.asyncio
 async def test_api_stats_ignores_estimated_usage_tokens_by_default(monkeypatch):
     monkeypatch.setattr(
         "akm.server.load_config",

@@ -88,7 +88,7 @@
   </div>
   <div id="daily-skeleton" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
     <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-      <div class="skeleton text-transparent text-xs font-medium shrink-0 select-none">每日用量</div>
+      <div id="daily-title-skeleton" class="skeleton text-transparent text-xs font-medium shrink-0 select-none">每日用量</div>
     </div>
     <div class="p-4" style="height:260px"><div class="skeleton h-full w-full"></div></div>
   </div>
@@ -99,7 +99,9 @@
     var days = 1;
     try { days = parseInt(localStorage.getItem('akm_dashboard_days') || '1', 10); } catch (e) {}
     if (days !== 1 && days !== 7 && days !== 30) days = 1;
-    if (days > 1) document.getElementById('daily-skeleton').classList.remove('hidden');
+    // 三档都显示用量区块（1d 画小时级「每时用量」），骨架屏占位必须同步显示，
+    // 否则 1d 首次进入时骨架屏比真实内容矮一整块，数据回来会往下顶
+    document.getElementById('daily-skeleton').classList.remove('hidden');
   })();
   </script>
 </div>
@@ -212,7 +214,7 @@
 </div>
 <div id="daily-section" class="mt-6 bg-surface-light border border-border rounded-lg overflow-hidden hidden">
   <div class="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-    <div class="text-xs font-medium text-gray-400 shrink-0">每日用量</div>
+    <div id="daily-title" class="text-xs font-medium text-gray-400 shrink-0">每日用量</div>
   </div>
   <!-- 卡片体锁 260px（与上面几张卡片等高），折线图整行铺开 -->
   <div class="p-4" style="height:260px">
@@ -657,11 +659,11 @@ function saveDaysFilter() {
   } catch (e) {}
 }
 
-// 骨架屏里的「每日用量」占位必须和真实区块同规则出现/隐藏（只有 7d / 30d 有），
-// 否则骨架屏会正好比真实内容矮一整块，数据回来时整页往下顶。
+// 骨架屏里的用量占位必须和真实区块同规则出现/隐藏，否则骨架屏会正好比真实内容矮一整块，
+// 数据回来时整页往下顶。1d 现在也有小时级曲线（每时用量），因此三档都显示。
 function syncDailySkeleton() {
   var el = document.getElementById('daily-skeleton');
-  if (el) el.classList.toggle('hidden', _currentDays <= 1);
+  if (el) el.classList.remove('hidden');
 }
 
 function switchDays(d) {
@@ -679,37 +681,54 @@ function switchDays(d) {
   loadDashboard();
 }
 
-// ── 每日用量 ──
-// 1d 只有今天一天，与上面的报错趋势 / 按来源重复，整块不显示；
-// 7d / 30d 改成整行折线图，三条线：总 Token（左轴）、成功率与缓存命中率（右轴，量程按数据自适应）；
-// 没有请求的自然日：成功率与缓存命中率都没有分母，传 null 让折线在该点断开（不再填 0 或 100 伪造数据），
-// 总 Token 那天真实的 0 用量照常画在基线。轴量程不再固定 0~100%，否则 99.7% 与 100% 的差异全挤在顶部。
-// 口径与后端一致：daily 与 errors.series 都是「最近 N 个自然日、升序」，
-// 因此按同一个下标取用量与成功率，不用做日期字符串对齐。
+// ── 用量趋势（1d 按小时 / 7d·30d 按自然日）──
+// 粒度跟着时间范围走：1d 画今天 24 个小时桶，标题是「每时用量」；7d / 30d 画自然日，标题是「每日用量」。
+// 三条线：总 Token（左轴）、成功率与缓存命中率（右轴，量程按数据自适应）。
+// 口径与后端严格一致：daily 与 errors.series 是**同一批桶、同一下标、升序**，直接按下标取
+// 用量与成功率，不必做日期字符串对齐。后端 days=1 时 daily 的 key 是 "00".."23"，其余是
+// "YYYY-MM-DD"——两处都由 server.py 的同一个 _error_key 生成，前端只按 isHourly 取不同 key。
+// 没有请求的时间桶：成功率与缓存命中率都没有分母，按「成功率 100%、缓存命中率 0」连线
+// （不做断线），总 Token 的真实 0 照常画在基线。
+// 轴量程不再固定 0~100%，否则 99.7% 与 100% 的差异全挤在顶部。
 function renderDailyChart(s) {
   var section = document.getElementById('daily-section');
   var chart = document.getElementById('daily-chart');
   if (!section || !chart) return;
-  if (_currentDays <= 1 || typeof chart.render !== 'function') {
+  if (typeof chart.render !== 'function') {
     section.classList.add('hidden');
     return;
   }
+  // 1d 走小时粒度；7d / 30d 走自然日粒度
+  var isHourly = _currentDays <= 1;
+  var titleEl = document.getElementById('daily-title');
+  if (titleEl) titleEl.textContent = isHourly ? '每时用量' : '每日用量';
+
   var trend = (s.errors && Array.isArray(s.errors.series)) ? s.errors.series : [];
   var daily = s.daily || {};
   var today = new Date();
   var labels = [], tokens = [], successRates = [], cacheRates = [];
-  for (var i = 0; i < _currentDays; i++) {
-    var d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (_currentDays - 1 - i));
-    var mm = ('0' + (d.getMonth() + 1)).slice(-2);
-    var dd = ('0' + d.getDate()).slice(-2);
-    labels.push(mm + '-' + dd);
-    var item = daily[d.getFullYear() + '-' + mm + '-' + dd] || null;
+  // 小时粒度固定 24 个点（00..23，即使还没到当天末尾也把整条轴铺满，避免图表随时钟变宽变窄）；
+  // 日粒度按 _currentDays 个点。
+  var bucketCount = isHourly ? 24 : _currentDays;
+  for (var i = 0; i < bucketCount; i++) {
+    var item;
+    if (isHourly) {
+      var hh = ('0' + i).slice(-2);
+      labels.push(hh + ':00');
+      item = daily[hh] || null;
+    } else {
+      var d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (_currentDays - 1 - i));
+      var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+      var dd = ('0' + d.getDate()).slice(-2);
+      labels.push(mm + '-' + dd);
+      item = daily[d.getFullYear() + '-' + mm + '-' + dd] || null;
+    }
     var prompt = item ? Number(item.prompt) || 0 : 0;
     var cached = item ? Number(item.cached) || 0 : 0;
     var inputTotal = prompt + cached;
     tokens.push(item ? Number(item.total) || 0 : 0);
-    // 无请求的自然日：率值没有分母，按「成功率 100%（当日无失败）、缓存命中率 0（无缓存可命中）」
-    // 连线绘制，不做断线；总 Token 的 0 是真实值照常画。日与日之间折线始��连续。
+    // 无请求的时间桶：率值没有分母，按「成功率 100%、缓存命中率 0」连线绘制，不做断线；
+    // 总 Token 的 0 是真实值照常画。相邻桶之间折线保持连续。
     var bucket = trend[i] || null;
     successRates.push(bucket && bucket.success_rate != null ? Number(bucket.success_rate) : 100);
     // 缓存命中率口径与费用 tooltip 一致：命中缓存 /（未命中输入 + 命中缓存）
