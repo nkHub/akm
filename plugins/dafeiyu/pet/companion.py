@@ -245,6 +245,18 @@ def call_chat(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    # 显式把 User-Agent 置为空串，阻止 urllib 自动补 `Python-urllib/<版本>`。
+    #
+    # 为什么必须显式置空：urllib 在请求头里找不到 User-Agent 时，会自己填上
+    # `Python-urllib/3.12`。而 AKM 开启 `use_native_user_agent` 后会把客户端
+    # 自带的 UA 原样透传给上游（见 akm/agent.py 的 `_resolve_user_agent`）。
+    # 这个默认 UA 是 Cloudflare 等 WAF 的典型爬虫特征，会被
+    # Error 1010（banned your access based on your browser's signature）直接拒绝。
+    #
+    # 置空后服务端收到的 UA 是空串，AKM 侧 `original_user_agent` 为空，
+    # 按既有逻辑回退成 `akm/<version>`——与「客户端没带 UA」的语义完全一致。
+    # 这样做不用在插件里硬编码版本号，避免 AKM 升级后版本号漂移。
+    headers["User-Agent"] = ""
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as resp:

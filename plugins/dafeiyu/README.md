@@ -208,6 +208,13 @@ AKM 只有请求生命周期，因此把 hook 事件压成 6 个状态：
   回车或点「发送」提交、Esc 取消。走 AKM 自己的 `/v1/chat/completions`
   （计费 / 审计 / 限流照常生效），回复进气泡并保持 8 秒不被状态文案覆盖。
   气泡因此加高到 124px：上面三行继续显示状态 / 结果 / 余额，底部留给输入行。
+  **回调时显式置空 `User-Agent`**：urllib 在请求头里找不到 UA 时会自动补
+  `Python-urllib/<版本>`，而 AKM 开启 `use_native_user_agent` 后会把客户端 UA
+  **原样透传给上游**。这个默认 UA 是 Cloudflare 等 WAF 的典型爬虫特征，会被
+  Error 1010（`banned your access based on your browser's signature`）直接拒绝，
+  表现是上游 403、AKM 侧最终合成本地 502。`call_chat()` 里置为空串后，AKM 侧
+  `original_user_agent` 为空，按既有逻辑回退 `akm/<version>`——与「客户端压根没带
+  UA」完全同语义，也无需在插件里硬编码版本号（避免 AKM 升级后版本号漂移）。
 - **碎碎念**：待机时按 `whisper_interval_s`（默认 180s）自动说一句，也可右键手动触发。
   **模型同时决定「说什么」和「配哪个动画」**：提示词要求输出
   `{"text": "...", "clip": "..."}`，`clip` 只能从 `WHISPER_CLIPS`
