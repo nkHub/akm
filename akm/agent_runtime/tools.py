@@ -157,18 +157,21 @@ _request_audit_context: ContextVar[dict[str, str]] = ContextVar(
 )
 
 
-def set_request_audit_context(*, model: str, key_alias: str, source: str):
+def set_request_audit_context(*, model: str, key_alias: str, source: str, provider: str = ""):
     """写入当前请求的审计上下文，返回用于恢复的 token。
 
     Args:
         model: 本次对话实际使用的模型名（写进审计的 model 列）。
         key_alias: 本轮上游请求实际使用的 Key 别名；未知时传空串。
         source: 触发来源（``chat`` / ``task``），审计来源标签据此变成 Chat Tool / Task Tool。
+        provider: 本轮上游请求实际使用的供应商（来自 Key 的 provider 字段）；
+            未知时传空串——审计页「供应商」列必须与 Key 的供应商一致，不能拿应用名顶替。
     """
     return _request_audit_context.set({
         "model": str(model or ""),
         "key_alias": str(key_alias or ""),
         "source": str(source or "chat"),
+        "provider": str(provider or ""),
     })
 
 
@@ -569,11 +572,13 @@ async def _submit_tool_call_audit(
       调用过它、渲染了什么内容（正文里只有卡片，没有原始 blocks）。
 
     字段口径（保证审计页与统计页仍然可读）：
-    - ``provider`` 固定 ``akm``、``key_alias`` 为空：说明这不是上游请求，也不是
-      某把 Key 的消耗，成本统计不会为它算钱；
-    - ``model`` 填工具名：审计页「模型」列因而显示 ``akm_render``，可直接过滤；
+    - ``provider`` / ``key_alias`` 取 AgentLoop 注入的真实值（这次对话实际用的
+      上游供应商与 Key）：审计页「供应商」列必须和 Key 的供应商一致，绝不能拿
+      应用名 ``akm`` 顶替，否则日志里会出现「Key 是 A 供应商、供应商列写 akm」的矛盾；
+    - 拿不到上下文时两者留空（不是本地消耗，成本统计自然算不出钱）；
+    - ``model`` 填真实模型名；工具名单独放 ``x-akm-tool``，不占用 model 列；
     - token 全为 0；``status_code`` 用 200 / 422 表示校验通过 / 未通过；
-    - 请求头带 ``x-akm-source: tool``，统计页「按来源」里单独成组。
+    - 请求头带 ``x-akm-source: {chat|task}-tool``，统计页「按来源」里单独成组。
 
     Args:
         app: FastAPI 实例，用于取审计队列（与 ``_submit_agent_tool_audit`` 一致）。
@@ -586,10 +591,13 @@ async def _submit_tool_call_audit(
     """
     from akm.server import _submit_audit_log
 
-    # 审计上下文由 AgentLoop 在执行工具前写入：model / key_alias 是「这次对话真正用的模型与 Key」，
-    # 而不是工具名——模型列必须只放真实模型，否则模型分布与成本统计会被 akm_render 这类假模型污染。
+    # 审计上下文由 AgentLoop 在执行工具前写入：model / provider / key_alias 是「这次对话真正用
+    # 的模型、供应商与 Key」，而不是工具名或应用名——model 列必须只放真实模型（否则模型分布与
+    # 成本统计会被 akm_render 这类假模型污染），provider 列必须只放真实供应商（否则与 Key 的
+    # 供应商对不上，用户会看到「Key 属于 A、供应商却写 akm」这类矛盾记录）。
     ctx = _request_audit_context.get() or {}
     model = str(ctx.get("model") or "")
+    provider = str(ctx.get("provider") or "")
     key_alias = str(ctx.get("key_alias") or "")
     source = str(ctx.get("source") or "chat")
     # 来源标签：chat / task 分别记 chat-tool / task-tool（审计页显示 Chat Tool / Task Tool），
@@ -614,7 +622,7 @@ async def _submit_tool_call_audit(
         response_body_for_log = _clip(json.dumps(result, ensure_ascii=False, default=str))
 
     await _submit_audit_log(app, {
-        "provider": "akm",
+        "provider": provider,
         "key_alias": key_alias,
         "model": model,
         "request_body": request_body_for_log,

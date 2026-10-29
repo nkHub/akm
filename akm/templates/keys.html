@@ -190,7 +190,7 @@ var _providerMap = {};
 /**
  * 把 agents（内置 + 自定义）与 models.dev 目录供应商合并成下拉候选。
  *
- * 分组顺序：内置 → 自定义 → models.dev（目录数据可能为空，此时只显示前两组）。
+ * 分组顺序：自定义…（手填）→ 自定义供应商 → models.dev（目录数据可能为空，此时只显示前两组）。
  * 目录供应商只带 api 作为 base_url 建议值，协议能力一律不自动带入。
  */
 function loadProviders() {
@@ -202,7 +202,10 @@ function loadProviders() {
 
     _agentsMap = {};
     _providerMap = {};
+    // 「自定义…」放在候选**最前面**：供应商目录有 200+ 条，排在末尾等于要滚到底才能找到，
+    // 而「目录里没有 / 想手填」恰恰是最常走的那条路。空值占位（未选择）仍排第一。
     var options = [{ value: '', label: '未选择' }];
+    options.push({ value: CUSTOM_PROVIDER, label: '自定义…（手填供应商名与 Base URL）', group: '' });
 
     // 内置供应商（openai / deepseek / anthropic）**不再单独成组**：
     // 它们在 models.dev 目录里同样存在，单独列一组既重复又占位置；
@@ -263,7 +266,7 @@ function loadProviders() {
     });
     catalogOptions.forEach(function(opt){ options.push(opt); });
 
-    options.push({ value: CUSTOM_PROVIDER, label: '自定义…（手填供应商名与 Base URL）', group: '' });
+    // 自定义项已在上面（紧接「未选择」）入列，这里不再重复追加到末尾。
 
     _providerOptions = options;
     var combo = document.getElementById('key-provider');

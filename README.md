@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.59**：修复 Agent 自测报告里的四个回归（v0.1.58 引入）——① **P0 文件 tag 死锁**：read 用解码后文本算 tag、edit 用 `utf-8/replace` 乱码算 tag，同一文件两个哈希，GB18030/GBK/Latin-1 文件「读得到、改不了」；现在 tag 只认**磁盘原始字节**，读与校验共用同一函数，并让写入（write/edit/append）**保持原文件编码**，编码解不干净时 edit 拒绝、write 仍可显式覆盖；② **P1 敏感名单拦不住 shell**：seatbelt 补上工作区内 `.env` / 私钥 / 证书的 `file-read-data` deny（与文件工具层同一份名单、位置在 allow 之后），并把 profile 里的路径统一 `realpath`——否则 `/var`、`/tmp` 下的工作区会让整份规则失配；③ **P2 大文件总行数错**：字节预算截断时 footer 把窗口行数当成文件总行数（5000 行报成 1225 行），现在继续数完真实行数；④ **P2 `.git` 拒绝文案**指向未注册的 `akm_run_git`，改为提示 `agent_git_enabled` 开关。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.59**：修复 Agent 自测报告里的四个回归（v0.1.58 引入）——① **P0 文件 tag 死锁**：read 用解码后文本算 tag、edit 用 `utf-8/replace` 乱码算 tag，同一文件两个哈希，GB18030/GBK/Latin-1 文件「读得到、改不了」；现在 tag 只认**磁盘原始字节**，读与校验共用同一函数，并让写入（write/edit/append）**保持原文件编码**，编码解不干净时 edit 拒绝、write 仍可显式覆盖；② **P1 敏感名单拦不住 shell**：seatbelt 补上工作区内 `.env` / 私钥 / 证书的 `file-read-data` deny（与文件工具层同一份名单、位置在 allow 之后），并把 profile 里的路径统一 `realpath`——否则 `/var`、`/tmp` 下的工作区会让整份规则失配；③ **P2 大文件总行数错**：字节预算截断时 footer 把窗口行数当成文件总行数（5000 行报成 1225 行），现在继续数完真实行数；④ **P2 `.git` 拒绝文案**指向未注册的 `akm_run_git`，改为提示 `agent_git_enabled` 开关；另修两处口径——审计日志里本地工具调用记录（`akm_render` / `akm_fetch_url`）的「供应商」列原先写死 `akm`，与本轮 Key 的供应商自相矛盾，现改记真实供应商（历史记录不重算），添加 Key 的供应商下拉把「自定义…」从列表末尾提到最前。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 

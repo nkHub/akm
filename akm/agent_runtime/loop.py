@@ -1445,6 +1445,7 @@ class AgentLoop:
         *,
         model: str = "",
         key_alias: str = "",
+        provider: str = "",
         source: str = "chat",
     ) -> str:
         """执行注册在 ToolRegistry 中的普通工具，期间注入请求级上下文。
@@ -1453,9 +1454,9 @@ class AgentLoop:
 
         - **工作区覆盖**：文件/写/shell 等工具通过 ``tools._workspace_root()`` 读取，
           使 /v1/agent 请求可以按请求指定工作区（如 CLI 指向当前目录）；
-        - **审计上下文**：``model`` / ``key_alias`` / ``source``，供工具内部的审计
-          （如 ``akm_render`` 记 ``source=chat-tool``）填**真实的模型与实际用的 Key**，
-          而不是把工具名当模型写进 model 列。
+        - **审计上下文**：``model`` / ``provider`` / ``key_alias`` / ``source``，供工具内部的审计
+          （如 ``akm_render`` 记 ``source=chat-tool``）填**真实的模型、供应商与实际用的 Key**，
+          而不是把工具名或应用名写进 model / provider 列。
 
         延迟导入 tools 避免循环依赖（tools 顶层导入本模块的 ToolDef）。
         """
@@ -1467,7 +1468,9 @@ class AgentLoop:
         )
 
         ws_token = set_request_workspace_root(workspace_root)
-        audit_token = set_request_audit_context(model=model, key_alias=key_alias, source=source)
+        audit_token = set_request_audit_context(
+            model=model, key_alias=key_alias, provider=provider, source=source
+        )
         try:
             return await self._tool_registry.execute(tc_name, tc_args)
         finally:
@@ -1788,6 +1791,7 @@ class AgentLoop:
                             workspace_root,
                             model=model,
                             key_alias=str(result.get("key_alias", "") or ""),
+                            provider=str(result.get("provider", "") or ""),
                             source=source,
                         )
                 tool_results.append({
@@ -2310,6 +2314,7 @@ class AgentLoop:
                             workspace_root,
                             model=model,
                             key_alias=str(result.get("key_alias", "") or ""),
+                            provider=str(result.get("provider", "") or ""),
                             source=source,
                         )
                 yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
