@@ -1027,6 +1027,10 @@ async def forward_request(
                 # request_context 必须回传：插件 bag（如 reverse_map）与改写后的
                 # request 都在 ctx 上；server 侧不能读入口原始 body。
                 # 流式成功：记录一次成功尝试（不读响应体，内容在 server 侧流转）。
+                # 这里的耗时口径是「发起上游请求 → 上游首字节到达」（proxy 已完成首字节
+                # 预读），与 attempts 内该次尝试的 latency_ms 完全一致。先算出变量再复用，
+                # 避免两次取时间导致两处数值不一致。
+                latency = int((time.time() - t0) * 1000)
                 _record_attempt({
                     "ok": True,
                     "phase": "upstream",
@@ -1034,7 +1038,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
-                    "latency_ms": int((time.time() - t0) * 1000),
+                    "latency_ms": latency,
                     "error": "",
                     "attempt": attempt,
                     "api_path": api_path,
@@ -1055,6 +1059,9 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    # 延迟随结果回传：调用方（如 agent 运行时直接调 forward_request）需要它
+                    # 写入审计日志的 latency_ms 列；此前该键缺失导致这类记录恒为 0ms。
+                    "latency_ms": latency,
                     "attempts": attempts,
                 }
 
