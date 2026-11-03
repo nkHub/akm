@@ -285,8 +285,9 @@ function renderErrorDetail(log) {
   var sc = 'status-err';
   if (code>=200&&code<300) sc='status-2xx'; else if(code>=400&&code<500) sc='status-4xx'; else if(code>=500) sc='status-5xx';
   var localErr = isLocalError(log);
-  var lat = log.latency_ms||0;
-  var ds = lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms';
+  // 顶部延迟与表格列同口径：没有实测值（latency_ms=0）显示 -，不要显示 0ms
+  var lat = Number(log.latency_ms || 0);
+  var ds = lat > 0 ? (lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms') : '-';
   var html = '';
   html += '<div class="mb-3 flex items-center gap-2 flex-wrap">';
   if (localErr) {
@@ -615,9 +616,12 @@ function renderLogTable() {
     var code = log.status_code;
     var sc = 'status-err';
     if (code>=200&&code<300) sc='status-2xx'; else if(code>=400&&code<500) sc='status-4xx'; else if(code>=500) sc='status-5xx';
-    var lat = log.latency_ms||0;
-    var ds = lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms';
-    var dc = lat>5000?'text-red-400':lat>2000?'text-yellow-400':'text-gray-400';
+    // 延迟展示：latency_ms 为 0 / 空表示「没有实测值」（如本地兜底 502、早期
+    // agent 流式记录未回传延迟），显示 - 而不是 0ms，避免被误读成极快响应。
+    var lat = Number(log.latency_ms || 0);
+    var hasLat = lat > 0;
+    var ds = !hasLat ? '<span class="text-gray-600">-</span>' : (lat>=1000?(lat/1000).toFixed(1)+'s':lat+'ms');
+    var dc = !hasLat ? 'text-gray-600' : (lat>5000?'text-red-400':lat>2000?'text-yellow-400':'text-gray-400');
     var detailCol = '<button onclick="openDrawer('+i+')" class="text-gray-400 hover:text-indigo-400 transition-colors cursor-pointer"><svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button>';  // 详情眼睛始终显示：即使 request/response_body 未落库，抽屉内仍可查看客户端请求头等字段。
     var pt = Number(log.prompt_tokens != null ? log.prompt_tokens : 0);
     var ct = Number(log.completion_tokens != null ? log.completion_tokens : 0);

@@ -970,6 +970,40 @@ async def test_forward_streaming_request_still_forces_upstream_sse(monkeypatch):
     assert json.loads(result["request_body_for_log"]) == json.loads(payload)
 
 
+
+@pytest.mark.asyncio
+async def test_forward_streaming_success_returns_latency_ms(monkeypatch):
+    """流式成功返回必须带 latency_ms，且与 attempts 中该次尝试的耗时一致。
+
+    背景：此前流式成功返回字典缺少 latency_ms 键，agent 运行时（loop._try_audit）
+    用 result.get("latency_ms", 0) 落库，导致审计表 latency_ms 列恒为 0ms，
+    日志页「延迟」列全部显示 0ms，而详情抽屉的逐次尝试却有真实耗时。
+    """
+
+    monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
+        "alias": "ok", "provider": "openai", "api_key": "sk-xxx",
+        "base_url": "https://api.openai.com",
+    }))
+
+    mock_client = AsyncMock()
+    _make_send_mock(mock_client, [FakeStreamResponse(200, '{"choices":[{"delta":{"content":"hi"}}]}')])
+
+    result = await forward_request(
+        body={"model": "gpt-4", "messages": [{"role": "user", "content": "hello"}], "stream": True},
+        client=mock_client,
+    )
+
+    assert result["stream"] is True
+    # 键必须存在（缺失会让调用方拿到默认值 0）
+    assert "latency_ms" in result
+    latency = result["latency_ms"]
+    assert isinstance(latency, int)
+    assert latency >= 0
+    # 与成功那次尝试记录的耗时完全一致（同一变量，不应有二次取时间的偏差）
+    ok_attempts = [a for a in result["attempts"] if a["status_code"] == 200]
+    assert ok_attempts, "流式成功应记录一次成功尝试"
+    assert ok_attempts[-1]["latency_ms"] == latency
+
 @pytest.mark.asyncio
 async def test_forward_embeddings_request_does_not_inject_stream(monkeypatch):
     """embeddings 转发不应强行注入 stream 字段，也不应走 SSE 请求。"""

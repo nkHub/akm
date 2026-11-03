@@ -61,6 +61,47 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
     assert response.closed is True
 
 
+
+@pytest.mark.asyncio
+async def test_run_stream_writes_upstream_latency_to_audit(monkeypatch):
+    """流式对话的审计记录应写入 forward_request 回传的 latency_ms。
+
+    背景：日志页「延迟」列取 audit_logs.latency_ms，而流式成功返回曾缺少该键，
+    agent 运行时按默认 0 落库，导致整列显示 0ms（逐次尝试却有真实耗时）。
+    """
+    response = FakeStreamResponse(200, [
+        _sse({"model": "test", "choices": [{"delta": {"content": "hi"}}]}),
+        _sse({"usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}),
+        "data: [DONE]\n\n",
+    ])
+
+    async def forward(*_args, **_kwargs):
+        return {
+            "stream": True,
+            "response": response,
+            "status_code": 200,
+            "provider": "test",
+            "key_alias": "key",
+            # 上游首字节耗时：应被原样写入审计 latency_ms
+            "latency_ms": 3210,
+            "attempts": [{"phase": "upstream", "status_code": 200, "key_alias": "key",
+                          "provider": "test", "error": "", "error_type": "",
+                          "latency_ms": 3210, "attempt": 0}],
+        }
+
+    audits = []
+
+    async def audit(record):
+        audits.append(record)
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=ToolRegistry(), audit_submitter=audit)
+    [item async for item in loop.run_stream([{"role": "user", "content": "hi"}])]
+
+    assert audits, "流式对话必须写审计"
+    assert audits[-1]["latency_ms"] == 3210
+    assert "3210" in audits[-1]["attempts"]
+
 @pytest.mark.asyncio
 async def test_run_stream_does_not_leak_upstream_json_when_content_null(monkeypatch):
     """模型仅输出思考（content 为 null、无 tool_calls）时，final 的 content 应为空串，
