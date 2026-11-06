@@ -1684,6 +1684,14 @@ class AgentLoop:
                 "content": None,
                 "tool_calls": [],
             }
+            # thinking 模式（DeepSeek V4 / Kimi K2 等）要求：带 tool_calls 的 assistant
+            # 消息必须在下一次请求里把本轮 reasoning_content 原样回传，否则上游直接
+            # 返回 400「The `reasoning_content` in the thinking mode must be passed
+            # back to the API」，工具轮之后的第二次调用必失败。本轮推理内容就在刚
+            # 收到的响应里；为空时不写该字段，避免给非 thinking 上游塞未知字段。
+            reasoning_content = _extract_reasoning_content(response_body)
+            if reasoning_content:
+                assistant_msg["reasoning_content"] = reasoning_content
             tool_results: list[dict] = []
             # 本轮工具失败信息（首个错误文本），用于自愈重试判断
             tool_error_text = ""
@@ -2198,6 +2206,12 @@ class AgentLoop:
                 "content": None,
                 "tool_calls": [],
             }
+            # 与非流式路径同理：thinking 模式上游要求工具轮的 assistant 消息回传
+            # reasoning_content，否则工具结果回传的第二次调用会被上游拒绝（400）。
+            # 流式路径的推理内容由 _SSEStreamAccumulator 累积，response_body 已重建。
+            reasoning_content = _extract_reasoning_content(response_body)
+            if reasoning_content:
+                assistant_msg["reasoning_content"] = reasoning_content
             tool_result_msgs: list[dict] = []
             # 本轮工具失败信息（首个错误文本），用于自愈重试判断
             tool_error_text = ""
