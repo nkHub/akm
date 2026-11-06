@@ -162,6 +162,70 @@ async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_stream_replays_reasoning_content_on_tool_call_turn(monkeypatch):
+    """thinking 模式上游（DeepSeek V4 等）要求工具轮的 assistant 消息回传 reasoning_content。
+
+    缺这个字段时上游会返回 400「The `reasoning_content` in the thinking mode must be
+    passed back to the API」，表现为 /v1/agent 每次调用工具后第二轮必失败：
+    测试通过第二轮的 request body 断言该字段被原样带回。
+    """
+    ToolRegistry.reset()
+    registry = ToolRegistry.instance()
+    registry.register(ToolDef("get_weather", "weather", {"type": "object"}, lambda city: {"temp": 25}))
+    first = FakeStreamResponse(200, [
+        _sse({"choices": [{"delta": {"reasoning_content": "先想一下"}}]}),
+        _sse({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"beijing\"}"}}]}}]}),
+    ])
+    second = FakeStreamResponse(200, [_sse({"choices": [{"delta": {"content": "晴天"}}]})])
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(json.loads(json.dumps(body)))
+        return {"stream": True, "response": [first, second][len(calls) - 1], "status_code": 200}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    loop = AgentLoop(http_client=None, tool_registry=registry)
+    [item async for item in loop.run_stream([{"role": "user", "content": "天气"}])]
+
+    assistant = calls[1]["messages"][-2]
+    assert assistant["role"] == "assistant"
+    assert assistant["reasoning_content"] == "先想一下"
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
+async def test_run_replays_reasoning_content_on_tool_call_turn(monkeypatch):
+    """非流式路径同样要回传工具轮的 reasoning_content（上游 400 的直接原因）。"""
+    ToolRegistry.reset()
+    registry = ToolRegistry()
+    registry.register(ToolDef("get_weather", "weather", {"type": "object"}, lambda city: {"temp": 25}))
+    responses = [
+        {"choices": [{"message": {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "先想一下",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"beijing\"}"}}],
+        }}]},
+        {"choices": [{"message": {"role": "assistant", "content": "晴天"}}]},
+    ]
+    calls = []
+
+    async def forward(body, *_args, **_kwargs):
+        calls.append(json.loads(json.dumps(body)))
+        return {"status_code": 200, "body": json.dumps(responses[len(calls) - 1], ensure_ascii=False)}
+
+    monkeypatch.setattr("akm.proxy.forward_request", forward)
+    result = await AgentLoop(http_client=None, tool_registry=registry).run([{"role": "user", "content": "天气"}])
+
+    assert result.ok is True
+    assistant = calls[1]["messages"][-2]
+    assert assistant["reasoning_content"] == "先想一下"
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    ToolRegistry.reset()
+
+
+@pytest.mark.asyncio
 async def test_run_stream_streams_content_realtime_then_tools(monkeypatch):
     """工具轮正文应实时以 model_delta 流出（自然顺序），工具事件随后，最终主体实时流式。"""
     ToolRegistry.reset()
