@@ -61,6 +61,20 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_subagent_list` | 列出全部子 Agent 任务（按创建时间倒序）：返回每个任务的 `task_id`、状态、嵌套层数、模型、工作区与创建时间 |
 | `akm_subagent_status` | 查询单个子 Agent 任务详情：返回状态、嵌套层数、模型、工作区、日志路径、退出码与日志尾部（最多 2000 字符，超长会截断并标记 `log_truncated`） |
 | `akm_ask_user` | 向用户提出澄清问题并等待回答：当用户请求信息不完整、存在歧义或缺少关键参数时调用，本轮立即中断并把问题返回给客户端，用户回答后携带上下文续跑。支持三种交互模式：不传 `options` 时用户自由文本回答；传 `options` 时用户从候选中单选（`multiple` 缺省 `false`）；传 `options` + `multiple: true` 时多选（详见「交互式澄清提问」） |
+| `akm_list_tools` | 查询工具清单（工具按需加载折叠生效时下发）：默认返回工具名 + 一句话描述；传 `name` 精确取回该工具的完整 `parameters`，`query` 按关键词筛选，`limit` 默认 20（上限 50）。只列出本次请求可用的工具，网关自身不在清单里 |
+| `akm_call_tool` | 执行一个被折叠的工具（折叠生效时下发）：`name` 取 `akm_list_tools` 返回的工具名，`arguments` 按该工具的 `parameters` 组织成 JSON 对象；只允许调用本次请求被折叠的工具——常驻工具、未启用的工具与网关自身一律拒绝 |
+
+### 工具按需加载（折叠长尾工具）
+
+默认注入会把注册表里所有可用工具逐轮下发给模型（本机实测 47 个工具、tools 声明约 23KB，且每一轮都要重复计费）。开启 `agent_tool_gateway_enabled`（默认开启）后，**未传 `tools`** 的默认注入与 `tool_options` 两条路径会按以下口径折叠：
+
+- 本次可下发的服务端工具数**超过 `agent_tool_gateway_threshold`（默认 10）**时才生效；工具本来就少时不折叠，避免白白多一轮交互；
+- 常用工具保持直连：文件/工作区工具（`akm_read_file` / `akm_list_dir` / `akm_glob` / `akm_grep` / `akm_file_info` / `akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_move_file` / `akm_copy_file`）、`akm_run_shell` / `akm_run_git`、`akm_render`、`akm_search_kb`、`akm_read_image`、`tavily_search`；
+- 其余长尾工具（flow / task / 调试查询 / 图片 / 原生系统 / 子 Agent 等）折叠成 `akm_list_tools` + `akm_call_tool`。实测本机 47 个工具 → 21 个，tools JSON 23024 → 13153 字节（省约 43%）：`akm_render` 与文件工具本身占大头，要再省只能牺牲常用工具的直连速度；
+- **显式传 `tools` 的白名单路径不折叠**：调用方已经明确列出了自己要的工具；
+- 折叠生效时服务端向 system 消息追加一段引导（提示先 `akm_list_tools` 查、再 `akm_call_tool` 调）。客户端无需改协议：工具调用仍是 `tool_call` / `tool_result` 事件，只是 `data.name` 变成 `akm_call_tool`，真实内层工具名放在 `data.inner_name`（旧前端忽略该字段不会坏）；
+- **越权边界**：`akm_call_tool` 只允许调用本次请求被折叠的工具——常驻工具（直接就能调）、被默认排除且未启用的工具（如搜索开关关闭时的 `tavily_search`）、网关自身都会被拒绝，避免它成为绕过 `tools` 声明与配置开关的后门；
+- 调用计数：一次 `akm_call_tool` 计入一次 `agent_max_tool_calls`，内层执行不额外计数。设 `agent_tool_gateway_enabled=false` 即完全回到改造前的行为。
 
 ## 配置
 
@@ -99,6 +113,8 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_email_smtp_ssl` | `true` | 是否使用 SSL 加密连接（`true`=SMTP_SSL/465；`false`=STARTTLS/587） |
 | `agent_max_tool_calls` | `30` | 单次 Agent 请求最多执行的工具调用数，超过上限的调用只返回错误，不会执行 |
 | `agent_tool_retry_max_retries` | `1` | Agent 工具失败后的最大自愈修正轮次（服务端注入修正提示强制模型重试；`0` 关闭） |
+| `agent_tool_gateway_enabled` | `true` | 工具按需加载总开关：开启且本次可下发工具数超过阈值时，长尾工具折叠为 `akm_list_tools` / `akm_call_tool`；设为 `false` 回到全量下发（见「工具按需加载」） |
+| `agent_tool_gateway_threshold` | `10` | 工具按需加载的触发阈值：本次可下发的服务端工具数**大于**该值才折叠，夹紧到 `[1, 100]` |
 | `agent_api_token` | `""` | `/v1/agent` 可选鉴权 token；留空不校验，配置后请求需带 `Authorization: Bearer <token>` 或 `X-Agent-Token` |
 | `agent_default_instructions` | KaTeX 返回公式指令 | Agent 默认系统指令，客户端未传 `instructions` 时注入；默认要求数学公式以 KaTeX 语法返回 |
 | `tavily_api_key` | `""` | Tavily 联网搜索 API Key（Agent 内置 `tavily_search` 工具使用） |
@@ -500,8 +516,8 @@ SSE 流式模式下，每次注入修正提示前会先下发 `tool_retry` 事�
 | `model_delta` | 可见正文片段，`data.turn` 为当前轮次，`data.content` 为增量内容；实时下发（含工具轮过程性正文与最终主体内容） |
 | `context_warning` | 上下文占用接近上限（估算 token 超过 `agent_max_context_tokens` × `agent_context_warning_ratio`）时下发，`data` 含 `estimated_tokens` / `max_tokens` / `remaining_tokens` / `ratio` / `compacted`，供客户端提前感知并提示 AI 调用 `akm_compact_context` 主动压缩 |
 | `turn_start` | 新一轮开始，`data.turn` 为当前轮次 |
-| `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments` |
-| `tool_result` | 工具执行结果，`data.name` / `data.result` |
+| `tool_call` | LLM 请求调用工具，`data.name` / `data.arguments`；按需加载折叠时 `data.name` 为 `akm_call_tool`，真实内层工具名在 `data.inner_name`（旧前端忽略该字段不影响） |
+| `tool_result` | 工具执行结果，`data.name` / `data.result`；按需加载折叠时 `data.name` 为 `akm_call_tool`，真实内层工具名在 `data.inner_name` |
 | `tool_retry` | 工具调用失败触发自愈重试（`agent_tool_retry_max_retries` > 0 时），`data` 含 `turn` / `retry_count` / `max_retries` / `error`；随后服务端注入 `system` 修正提示并强制模型修正参数后重新调用 |
 | `ask_user` | AI 调用 `akm_ask_user` 向用户澄清提问，本轮中断；`data` 含 `question` / `options` / `multiple`（`options` 为空数组表示自由文本回答，非空则单选或多选）/ `messages`（含本轮调用与 `awaiting_user` 结果，供续跑）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端展示问题与选择控件、用户回答后携带 messages 续跑 |
 | `client_tool_call` | 模型调用了客户端工具（请求 `client_tools` 或带 `x-akm-client-tool` 标记的 `tools` 声明），本轮中断；`data` 含 `tool_call_id` / `name` / `arguments` / `messages`（已含本轮 `tool_calls` 与待执行的占位 tool 消息，供续跑回填）/ `turns` / `usage`；随后本轮结束，不再下发 `final`，客户端本地执行后按 `tool_call_id` 把结果回填进占位 tool 消息（勿追加新 tool 消息，见「客户端工具执行」） |

@@ -100,6 +100,8 @@ DEFAULTS = {
     "agent_email_smtp_ssl": True,       # 是否使用 SSL 加密连接（True=SMTP_SSL/465；False=STARTTLS/587）
     "agent_max_tool_calls": 30,         # 单次 Agent 请求最多执行的工具调用数，限制循环与资源消耗
     "agent_tool_retry_max_retries": 1,  # Agent 工具失败后的最大自愈修正轮次（0 关闭：失败结果照常回传，模型自主决定）
+    "agent_tool_gateway_enabled": True,  # 工具按需加载：注册工具数超过阈值时，只下发常用工具 + akm_list_tools/akm_call_tool 两个网关工具（默认开启，设 false 回到全量下发）
+    "agent_tool_gateway_threshold": 10,  # 工具按需加载的触发阈值：本次可下发的服务端工具数大于该值时才折叠（1~100）
     "agent_api_token": "",              # /v1/agent 请求鉴权 token（Bearer）；留空表示不校验
     "agent_default_instructions": (
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
@@ -156,6 +158,8 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_email_smtp_ssl",
     "agent_max_tool_calls",
     "agent_tool_retry_max_retries",
+    "agent_tool_gateway_enabled",
+    "agent_tool_gateway_threshold",
     "agent_api_token",
     "agent_default_instructions",
     "tavily_api_key",
@@ -327,6 +331,10 @@ def load_config() -> dict:
     merged["agent_email_smtp_port"] = max(1, _safe_int(merged.get("agent_email_smtp_port"), 465))
     merged["agent_max_tool_calls"] = max(1, _safe_int(merged.get("agent_max_tool_calls"), 30))
     merged["agent_tool_retry_max_retries"] = max(0, _safe_int(merged.get("agent_tool_retry_max_retries"), 1))
+    # 工具按需加载（网关）：默认开启，仅显式设 false 关闭；阈值夹紧到 [1, 100]，
+    # 防止非法值把「折叠」变成恒定行为或彻底失效。
+    merged["agent_tool_gateway_enabled"] = merged.get("agent_tool_gateway_enabled") is not False
+    merged["agent_tool_gateway_threshold"] = max(1, min(100, _safe_int(merged.get("agent_tool_gateway_threshold"), 10)))
     # Key 管理
     merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列
@@ -411,6 +419,8 @@ def save_config(data: dict) -> None:
     current["agent_email_smtp_port"] = max(1, _safe_int(current.get("agent_email_smtp_port"), 465))
     current["agent_max_tool_calls"] = max(1, _safe_int(current.get("agent_max_tool_calls"), 30))
     current["agent_tool_retry_max_retries"] = max(0, _safe_int(current.get("agent_tool_retry_max_retries"), 1))
+    current["agent_tool_gateway_enabled"] = current.get("agent_tool_gateway_enabled") is not False
+    current["agent_tool_gateway_threshold"] = max(1, min(100, _safe_int(current.get("agent_tool_gateway_threshold"), 10)))
     # Key 管理
     current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列

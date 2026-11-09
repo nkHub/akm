@@ -27,6 +27,7 @@ write_kb_file 按文本写入/覆盖文档（写入后需重建索引）。
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import quote as _urlencode
 
@@ -405,7 +406,11 @@ async def _call_maintenance(name: str, args: dict[str, Any]) -> str:
             value = str(args.get(key) or "").strip()
             if not value:
                 raise ValueError(f"{key} 不能为空")
-            endpoint = endpoint.replace("{" + key + "}", _urlencode(value))
+            # 只把 basename 放进 URL 路径：插件侧 _find_doc_entry 本来就只认
+            # Path(file_name).name，传入 "docs/x.md" 或绝对路径时应等同 "x.md"。
+            # 若原样内插，quote() 默认 safe="/" 不编码斜杠，URL 会被撑成多段
+            # （files/docs/x.md、files//Users/...），路由 {name} 匹配失败直接 404。
+            endpoint = endpoint.replace("{" + key + "}", _urlencode(Path(value).name))
     # GET 请求的过滤参数（如 list_kb_files 的 workspace_root）拼成 query string；
     # url_params 是路径内插参数，不重复进 query。
     query_parts = {

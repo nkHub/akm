@@ -123,3 +123,40 @@ def test_dashboard_card_maps_memory_stats():
     card = plugin.dashboard_card()
     values = {m["label"]: m["value"] for m in card["metrics"]}
     assert values == {"记忆条目": 12, "平均记忆值": 0.66, "累计命中": 99, "高值(>0.5)": 5}
+
+
+def test_read_file_route_forwards_workspace_and_doc_id(monkeypatch):
+    """GET /files/{name} 必须把 workspace_root / doc_id 透传给插件。
+
+    背景：MCP 工具 read_kb_file 与插件 README 都声明支持这两个参数，但路由 handler
+    曾经只接收 name，FastAPI 于是把 query 参数静默丢弃——同名文档（不同工作目录各
+    一份）只能拿到 409，无法按工作区或 doc_id 读取。这条测试钉住「参数确实传下去了」。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    captured: dict = {}
+
+    class _FakePlugin:
+        """只实现被路由调用的 read_file_content，用于捕获参数。"""
+
+        def read_file_content(self, file_name, workspace_root="", doc_id=""):
+            captured.update(
+                file_name=file_name, workspace_root=workspace_root, doc_id=doc_id
+            )
+            return {"ok": True}
+
+    monkeypatch.setattr(_mk_index, "_get_plugin", lambda: _FakePlugin())
+    app = FastAPI()
+    app.include_router(_mk_index.router, prefix="/api/markdown-kb")
+    resp = TestClient(app).get(
+        "/api/markdown-kb/files/notes.md",
+        params={"workspace_root": "/workspace/proj", "doc_id": "doc-1"},
+    )
+
+    assert resp.status_code == 200
+    assert captured == {
+        "file_name": "notes.md",
+        "workspace_root": "/workspace/proj",
+        "doc_id": "doc-1",
+    }

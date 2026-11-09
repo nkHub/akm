@@ -569,6 +569,48 @@ async def test_mcp_maintenance_read_kb_file_url_interpolation(monkeypatch):
     # 路径内插 + workspace_root 作为 query 参数（斜杠在 query value 中保留，属合法字符）
     assert captured["endpoint"] == "files/notes.md?workspace_root=/proj"
 
+@pytest.mark.asyncio
+async def test_mcp_maintenance_read_kb_file_strips_path_segments(monkeypatch):
+    """file_name 带路径时必须只取 basename，否则路径里的斜杠会把 URL 撑成多段导致 404。
+
+    背景：agent 常把检索结果或文件路径原样传进来（如 docs/notes.md、
+    /abs/notes.md）。插件侧 _find_doc_entry 只认 Path(file_name).name，
+    但 MCP 层此前原样内插且 quote() 默认 safe="/"，生成的
+    files/docs/notes.md 不匹配路由 {name}，表现为「read_kb_file 总是 404」。
+    """
+    captured = {}
+
+    async def fake_call(endpoint, payload, timeout=120.0, method="POST"):
+        captured["endpoint"] = endpoint
+        return {"ok": True, "file_name": "notes.md", "content": "# 标题"}
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 相对路径：应退化成 notes.md，斜杠不进 URL
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {
+                "name": "read_kb_file",
+                "arguments": {"file_name": "docs/notes.md", "workspace_root": "/proj"},
+            },
+        )
+        assert resp.status_code == 200
+        assert captured["endpoint"] == "files/notes.md?workspace_root=/proj"
+
+        # 绝对路径同样只取 basename
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {
+                "name": "read_kb_file",
+                "arguments": {"file_name": "/tmp/kb/notes.md"},
+            },
+        )
+        assert resp.status_code == 200
+        assert captured["endpoint"] == "files/notes.md"
 
 @pytest.mark.asyncio
 async def test_mcp_maintenance_read_kb_file_requires_name(monkeypatch):

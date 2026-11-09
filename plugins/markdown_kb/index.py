@@ -1298,10 +1298,16 @@ async def list_markdown_files(workspace_root: str = ""):
 
 
 @router.get("/files/{name}")
-async def read_markdown_file(name: str):
-    """读取单个 Markdown 文件的全文内容（需先有该文件的清单条目）。"""
+async def read_markdown_file(name: str, workspace_root: str = "", doc_id: str = ""):
+    """读取单个 Markdown 文件的全文内容（需先有该文件的清单条目）。
+
+    workspace_root / doc_id 与 list_kb_files / delete_kb_file 的同名参数语义一致：
+    同名文档在不同工作目录下各有一份时必须靠它们消歧，否则 _find_doc_entry 会返回 409。
+    此前这两个参数只写进了 MCP 工具 schema、在 HTTP 层被直接丢弃，等于「按工作区读」
+    实际不可用（传了也当没传）。
+    """
     plugin = _get_plugin()
-    return plugin.read_file_content(name)
+    return plugin.read_file_content(name, workspace_root=workspace_root, doc_id=doc_id)
 
 
 @router.post("/files/write")

@@ -119,7 +119,81 @@ _AGENT_CONTEXT_TOOLS: list[dict] = [
         },
     },
 ]
+
+# ── 工具网关（按需加载）────────────────────────────────────────────────────
+# 注册表工具数超过 agent_tool_gateway_threshold 时，只把「常用工具」直接写进 tools，
+# 其余长尾工具折叠成两个网关工具：
+#   akm_list_tools  查询工具名/描述，按 name 取完整 parameters
+#   akm_call_tool   按名字执行一个被折叠的工具
+# 为什么值得折叠：tools 声明是每次上游请求的固定前缀（当前 44 个工具约 22KB），
+# 长尾工具的 schema 只有真被调用时才需要进入上下文。常驻名单刻意选「每一步都可能
+# 用到」的工具——把它们也折叠会让每个基础操作多花 list+call 两轮，反而更慢更贵。
+_TOOL_GATEWAY_LIST_NAME: str = "akm_list_tools"
+_TOOL_GATEWAY_CALL_NAME: str = "akm_call_tool"
+_TOOL_GATEWAY_NAMES: frozenset[str] = frozenset({
+    _TOOL_GATEWAY_LIST_NAME,
+    _TOOL_GATEWAY_CALL_NAME,
+})
+
+#: 折叠后仍然直接下发的工具名：文件/工作区/shell/git、渲染、知识库、读图、联网搜索。
+#: 名字必须与 tools.py 里注册的工具名一致；改名时两处要同步（`akm_render` 与
+#: render_schema 的一致性由 tests/test_agent_tool_gateway.py 兜住）。
+_GATEWAY_PINNED_TOOLS: frozenset[str] = frozenset({
+    "akm_read_file",
+    "akm_list_dir",
+    "akm_glob",
+    "akm_grep",
+    "akm_file_info",
+    "akm_write_file",
+    "akm_edit_file",
+    "akm_make_dir",
+    "akm_delete_file",
+    "akm_move_file",
+    "akm_copy_file",
+    "akm_run_shell",
+    "akm_run_git",
+    "akm_render",
+    "akm_search_kb",
+    "akm_read_image",
+    "tavily_search",
+})
+
+#: 折叠生效时追加给模型的系统指引。不写这段，模型看到工具清单里没有某个能力，
+#: 会直接回答「我做不到」，而不是先去 akm_list_tools 查一次。
+_TOOL_GATEWAY_GUIDE = """
+## 工具按需加载
+
+为了控制上下文体积，本次对话只直接列出常用工具，其余工具已折叠——**不在工具清单里
+不代表没有这个能力**。需要用到清单外的能力时：
+
+1. 先调 `akm_list_tools`：传 `query` 关键词找工具名，或传 `name` 取该工具的完整参数结构；
+2. 再调 `akm_call_tool`：`name` 填工具名，`arguments` 按上一步的 `parameters` 组织。
+
+不要因为工具没有直接出现就回答「做不到」，也不要用 shell / 写文件去绕过本来存在的工具。
+"""
+
+
+def _inject_tool_gateway_guide(working_messages: list[dict]) -> None:
+    """把按需加载引导追加到 system 消息（就地修改；没有 system 消息时插到最前）。"""
+    if not working_messages:
+        return
+    first = working_messages[0]
+    if isinstance(first, dict) and first.get("role") == "system":
+        first["content"] = str(first.get("content", "")) + "\n\n" + _TOOL_GATEWAY_GUIDE
+    else:
+        working_messages.insert(0, {"role": "system", "content": _TOOL_GATEWAY_GUIDE})
 #: 工具模式（akm_render）开启时追加给模型的系统指引。
+
+
+def _gateway_inner_name(tc_name: str, tc_args: object) -> str:
+    """网关调用时返回内层工具名，其余情况返回空串。
+
+    仅用于 SSE 事件与日志展示：模型看到的工具是 ``akm_call_tool``，但用户真正关心的是
+    它内层执行了哪个工具。事件里额外带一个 ``inner_name`` 字段，旧前端忽略它也不会坏。
+    """
+    if tc_name != _TOOL_GATEWAY_CALL_NAME or not isinstance(tc_args, dict):
+        return ""
+    return str(tc_args.get("name") or "").strip()
 #: 不注入这段，模型默认只会用 markdown 描述，基本不会主动调用渲染工具。
 #: 只写「什么时候用 / 一次几块 / 别重复正文」三件事，避免把 system prompt 撑长。
 _RENDER_GUIDE = """
@@ -1302,7 +1376,7 @@ class AgentLoop:
         tools: list[dict] | None,
         tool_options: dict | None,
         client_tools: list[dict] | None = None,
-    ) -> tuple[list[dict], set[str], set[str], set[str]]:
+    ) -> tuple[list[dict], set[str], set[str], set[str], frozenset[str] | None]:
         """规划本次请求实际下发给模型的工具，并区分服务端/客户端工具。
 
         工具注入策略：调用方显式传 ``tools`` 时只注入调用方声明的工具（未声明的
@@ -1333,14 +1407,29 @@ class AgentLoop:
 
         Returns:
             ``(deduped_tools, allowed_tool_names, client_tool_names,
-            unregistered_tool_names)``：去重后的工具定义、本次请求的执行授权名单、
-            由客户端执行的工具名集合、未注册且未打客户端标记的工具名集合（用于
-            在模型试图调用时给出可操作的报错）。
+            unregistered_tool_names, folded_tool_names)``：去重后的工具定义、本次请求的
+            执行授权名单、由客户端执行的工具名集合、未注册且未打客户端标记的工具名集合
+            （用于在模型试图调用时给出可操作的报错）、被工具网关折叠掉的工具名集合
+            （``None`` 表示本次未折叠）。
+
+        工具网关（按需加载）：默认注入与 ``tool_options`` 两条自动注入路径下，若可下发的
+        服务端工具数超过 ``agent_tool_gateway_threshold``，长尾工具会被折叠，只下发常用
+        工具 + ``akm_list_tools`` / ``akm_call_tool``（见 ``_fold_tools_with_gateway``）。
+        显式传 ``tools`` 的白名单路径不折叠——调用方已经明确列出了自己要的工具。
         """
         registered_tools = self._tool_registry.list_tools()
         registered_names = {
             (tool.get("function", {}) or {}).get("name", "") for tool in registered_tools
         }
+        # 两个网关工具不参与「普通工具」注入：未折叠时它们不该白占声明，折叠时由
+        # _fold_tools_with_gateway 按需追加（白名单路径仍允许客户端显式声明它们）。
+        injectable_tools = [
+            tool
+            for tool in registered_tools
+            if (tool.get("function", {}) or {}).get("name", "") not in _TOOL_GATEWAY_NAMES
+        ]
+        # 被折叠的工具名集合；None 表示本次没有折叠（网关执行上下文与授权提示据此区分）。
+        gateway_tool_names: frozenset[str] | None = None
         client_tool_names: set[str] = set()
         # 未注册又没打客户端标记的声明：名字不可执行（既不进授权名单，也不会被
         # 误当作客户端工具），只用于识别模型是否试图调用它，从而给出可操作的报错。
@@ -1380,7 +1469,7 @@ class AgentLoop:
             search_enabled = bool(tool_options.get("search", False))
             image_enabled = bool(tool_options.get("image", False))
             all_tools = []
-            for tool in registered_tools:
+            for tool in injectable_tools:
                 name = (tool.get("function", {}) or {}).get("name", "")
                 if name in _CHAT_OPTIONAL_TOOLS:
                     if name == "tavily_search" and not search_enabled:
@@ -1388,14 +1477,20 @@ class AgentLoop:
                     if name != "tavily_search" and not image_enabled:
                         continue
                 all_tools.append(tool)
+            all_tools, gateway_tool_names = self._fold_tools_with_gateway(
+                all_tools, registered_tools
+            )
             all_tools.extend(_AGENT_CONTEXT_TOOLS)
         else:
             all_tools = [
                 t
-                for t in registered_tools
+                for t in injectable_tools
                 if (t.get("function", {}) or {}).get("name", "")
                 not in _DEFAULT_EXCLUDED_TOOLS
             ]
+            all_tools, gateway_tool_names = self._fold_tools_with_gateway(
+                all_tools, registered_tools
+            )
             all_tools.extend(_AGENT_CONTEXT_TOOLS)
 
         # 顶层 client_tools：与 tools 相互独立的客户端工具声明，在上述任一注入策略
@@ -1435,8 +1530,82 @@ class AgentLoop:
             (tool.get("function", {}) or {}).get("name", "") for tool in _AGENT_CONTEXT_TOOLS
         }
         executable_names = set(registered_names) | client_tool_names | framework_names
-        return deduped_tools, seen_names & executable_names, client_tool_names, unregistered_tool_names
+        return (
+            deduped_tools,
+            seen_names & executable_names,
+            client_tool_names,
+            unregistered_tool_names,
+            gateway_tool_names,
+        )
 
+    def _fold_tools_with_gateway(
+        self,
+        base_tools: list[dict],
+        registered_tools: list[dict],
+    ) -> tuple[list[dict], frozenset[str] | None]:
+        """把长尾工具折叠成两个网关工具（按需加载）。
+
+        折叠口径：
+        - 只作用于「服务端自动注入」的两条路径（默认注入 / tool_options），白名单
+          （调用方显式传 ``tools``）保持原样——调用方已经明确列出了自己要什么；
+        - ``_GATEWAY_PINNED_TOOLS`` 里的常用工具始终直接下发，避免每个基础操作
+          都要多花 ``akm_list_tools`` + ``akm_call_tool`` 两轮；
+        - 可下发工具数未超过 ``agent_tool_gateway_threshold`` 时不折叠（工具本来就少，
+          折叠只会增加一轮交互）。
+
+        Args:
+            base_tools: 本次准备直接下发的注册工具（已按 tool_options 过滤）。
+            registered_tools: 注册表全量工具定义，用于取两个网关工具的 schema。
+
+        Returns:
+            ``(tools, folded_names)``：折叠后的工具定义，以及被折叠的工具名集合；
+            ``None`` 表示本次未折叠（开关关闭、未超阈值、网关未注册或没有可折叠项）。
+        """
+        try:
+            cfg = load_config()
+        except Exception:  # noqa: BLE001 - 配置读取异常绝不能影响请求本身
+            return base_tools, None
+        # 默认开启：只有显式设 false 才回到全量下发。
+        if cfg.get("agent_tool_gateway_enabled") is False:
+            return base_tools, None
+        try:
+            threshold = int(cfg.get("agent_tool_gateway_threshold", 10) or 10)
+        except (TypeError, ValueError):
+            threshold = 10
+        if len(base_tools) <= max(1, threshold):
+            return base_tools, None
+
+        gateway_defs: dict[str, dict] = {}
+        for tool in registered_tools:
+            name = (tool.get("function", {}) or {}).get("name", "")
+            if name in _TOOL_GATEWAY_NAMES:
+                gateway_defs[name] = tool
+        # 网关工具没注册（例如自定义 registry）时不折叠：宁可全量下发，也不能让模型
+        # 看到 akm_call_tool 却执行不了任何被折叠的工具。
+        if len(gateway_defs) != len(_TOOL_GATEWAY_NAMES):
+            return base_tools, None
+
+        kept: list[dict] = []
+        folded_names: set[str] = set()
+        for tool in base_tools:
+            name = (tool.get("function", {}) or {}).get("name", "")
+            if name in _GATEWAY_PINNED_TOOLS:
+                kept.append(tool)
+            elif name:
+                folded_names.add(name)
+        # 没有可折叠的长尾工具：保持原样，避免白加两个声明。
+        if not folded_names:
+            return base_tools, None
+        # 顺序固定（list 在前、call 在后），让每轮 tools 前缀稳定，便于上游 prompt 缓存命中。
+        kept.append(gateway_defs[_TOOL_GATEWAY_LIST_NAME])
+        kept.append(gateway_defs[_TOOL_GATEWAY_CALL_NAME])
+        logger.info(
+            "[AgentLoop] 工具按需加载：%d 个直连 + %d 个折叠（%s）",
+            len(kept) - len(_TOOL_GATEWAY_NAMES),
+            len(folded_names),
+            ", ".join(sorted(folded_names)),
+        )
+        return kept, frozenset(folded_names)
     async def _execute_registered_tool(
         self,
         tc_name: str,
@@ -1447,23 +1616,28 @@ class AgentLoop:
         key_alias: str = "",
         provider: str = "",
         source: str = "chat",
+        gateway_tools: frozenset[str] | None = None,
     ) -> str:
         """执行注册在 ToolRegistry 中的普通工具，期间注入请求级上下文。
 
-        注入两样东西，都在 ``finally`` 里恢复，避免泄漏到并发请求：
+        注入三样东西，都在 ``finally`` 里恢复，避免泄漏到并发请求：
 
         - **工作区覆盖**：文件/写/shell 等工具通过 ``tools._workspace_root()`` 读取，
           使 /v1/agent 请求可以按请求指定工作区（如 CLI 指向当前目录）；
         - **审计上下文**：``model`` / ``provider`` / ``key_alias`` / ``source``，供工具内部的审计
           （如 ``akm_render`` 记 ``source=chat-tool``）填**真实的模型、供应商与实际用的 Key**，
-          而不是把工具名或应用名写进 model / provider 列。
+          而不是把工具名或应用名写进 model / provider 列；
+        - **工具网关上下文**：本次请求被折叠的工具名集合 + 执行用的注册表，供
+          ``akm_call_tool`` 校验「只能调用被折叠的工具」并按同一份注册表执行。
 
         延迟导入 tools 避免循环依赖（tools 顶层导入本模块的 ToolDef）。
         """
         from akm.agent_runtime.tools import (
             reset_request_audit_context,
+            reset_request_gateway_context,
             reset_request_workspace_root,
             set_request_audit_context,
+            set_request_gateway_context,
             set_request_workspace_root,
         )
 
@@ -1471,9 +1645,18 @@ class AgentLoop:
         audit_token = set_request_audit_context(
             model=model, key_alias=key_alias, provider=provider, source=source
         )
+        # 工具网关上下文：只在本次请求确实折叠了工具时写入。``None`` 表示没有折叠，
+        # akm_call_tool 会拒绝执行内层工具，避免它变成绕过 tools 声明的后门。
+        gateway_token = (
+            set_request_gateway_context(tool_names=gateway_tools, registry=self._tool_registry)
+            if gateway_tools
+            else None
+        )
         try:
             return await self._tool_registry.execute(tc_name, tc_args)
         finally:
+            if gateway_token is not None:
+                reset_request_gateway_context(gateway_token)
             reset_request_audit_context(audit_token)
             reset_request_workspace_root(ws_token)
 
@@ -1551,7 +1734,13 @@ class AgentLoop:
             allowed_tool_names,
             client_tool_names,
             unregistered_tool_names,
+            folded_tool_names,
         ) = self._plan_tools(tools, tool_options, client_tools)
+
+        # 折叠生效时补一段「按需加载」指引：不写这段，模型看到工具清单里没有某个
+        # 能力会直接回答「做不到」，而不是先去 akm_list_tools 查一次。
+        if folded_tool_names:
+            _inject_tool_gateway_guide(working_messages)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
@@ -1729,10 +1918,24 @@ class AgentLoop:
                     )
                 elif tc_name not in allowed_tool_names:
                     tool_call_count += 1
-                    tool_result = json.dumps(
-                        {"error": f"工具未获本次请求授权: {tc_name}"},
-                        ensure_ascii=False,
-                    )
+                    if folded_tool_names and tc_name in folded_tool_names:
+                        # 工具确实存在，只是被按需加载折叠：直接告诉模型怎么调，
+                        # 比「未获授权」更容易被纠正（少一次自愈重试）。
+                        tool_result = json.dumps(
+                            {
+                                "error": (
+                                    f"工具已折叠，未直接下发: {tc_name}；请改用 "
+                                    f"{_TOOL_GATEWAY_CALL_NAME}，"
+                                    f'传 name="{tc_name}" 与对应的 arguments'
+                                )
+                            },
+                            ensure_ascii=False,
+                        )
+                    else:
+                        tool_result = json.dumps(
+                            {"error": f"工具未获本次请求授权: {tc_name}"},
+                            ensure_ascii=False,
+                        )
                 elif tc_name in unregistered_tool_names:
                     # 声明了但既没注册也没打客户端标记：给出可操作的报错，而不是
                     # 让它掉进 ToolRegistry 的「未找到工具」这种无法定位原因的提示。
@@ -1801,6 +2004,7 @@ class AgentLoop:
                             key_alias=str(result.get("key_alias", "") or ""),
                             provider=str(result.get("provider", "") or ""),
                             source=source,
+                            gateway_tools=folded_tool_names,
                         )
                 tool_results.append({
                     "role": "tool",
@@ -1977,7 +2181,12 @@ class AgentLoop:
             allowed_tool_names,
             client_tool_names,
             unregistered_tool_names,
+            folded_tool_names,
         ) = self._plan_tools(tools, tool_options, client_tools)
+
+        # 与非流式路径一致：折叠生效时补一段「按需加载」指引。
+        if folded_tool_names:
+            _inject_tool_gateway_guide(working_messages)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
@@ -2233,7 +2442,12 @@ class AgentLoop:
                 except (json.JSONDecodeError, TypeError):
                     tc_args = {}
 
-                yield _sse_event("tool_call", {"name": tc_name, "arguments": tc_args})
+                # 网关调用额外带 inner_name：前端据此显示真实工具名，旧前端忽略该字段。
+                inner_tool_name = _gateway_inner_name(tc_name, tc_args)
+                tool_call_event: dict[str, Any] = {"name": tc_name, "arguments": tc_args}
+                if inner_tool_name:
+                    tool_call_event["inner_name"] = inner_tool_name
+                yield _sse_event("tool_call", tool_call_event)
 
                 assistant_msg["tool_calls"].append({
                     "id": tc_id,
@@ -2251,10 +2465,24 @@ class AgentLoop:
                     )
                 elif tc_name not in allowed_tool_names:
                     tool_call_count += 1
-                    tool_result = json.dumps(
-                        {"error": f"工具未获本次请求授权: {tc_name}"},
-                        ensure_ascii=False,
-                    )
+                    if folded_tool_names and tc_name in folded_tool_names:
+                        # 工具确实存在，只是被按需加载折叠：直接告诉模型怎么调，
+                        # 比「未获授权」更容易被纠正（少一次自愈重试）。
+                        tool_result = json.dumps(
+                            {
+                                "error": (
+                                    f"工具已折叠，未直接下发: {tc_name}；请改用 "
+                                    f"{_TOOL_GATEWAY_CALL_NAME}，"
+                                    f'传 name="{tc_name}" 与对应的 arguments'
+                                )
+                            },
+                            ensure_ascii=False,
+                        )
+                    else:
+                        tool_result = json.dumps(
+                            {"error": f"工具未获本次请求授权: {tc_name}"},
+                            ensure_ascii=False,
+                        )
                 elif tc_name == _AGENT_ASK_USER_TOOL:
                     # akm_ask_user：AI 需要向用户澄清提问。中断本轮编排，把问题及
                     # 候选选项记入工具结果，下发 ask_user 事件并等待用户回答后继续。
@@ -2330,8 +2558,12 @@ class AgentLoop:
                             key_alias=str(result.get("key_alias", "") or ""),
                             provider=str(result.get("provider", "") or ""),
                             source=source,
+                            gateway_tools=folded_tool_names,
                         )
-                yield _sse_event("tool_result", {"name": tc_name, "result": tool_result})
+                tool_result_event: dict[str, Any] = {"name": tc_name, "result": tool_result}
+                if inner_tool_name:
+                    tool_result_event["inner_name"] = inner_tool_name
+                yield _sse_event("tool_result", tool_result_event)
                 # 记录工具失败信息，供自愈重试注入修正提示（只保留第一个错误文本）
                 if not tool_error_text:
                     tool_error_text = self._tool_error_text(tool_result)

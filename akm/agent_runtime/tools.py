@@ -179,6 +179,39 @@ def reset_request_audit_context(token) -> None:
     """恢复 set_request_audit_context 之前的上下文。"""
     _request_audit_context.reset(token)
 
+
+#: 工具网关（按需加载）的请求级上下文：本次请求允许通过网关调用的工具名集合 + 负责执行它们的注册表。
+#:
+#: 为什么必须是请求级：``akm_call_tool`` 的 handler 签名由工具 schema 决定（模型只按 schema
+#: 传参），拿不到「本次请求把哪些工具折叠了」；而折叠集合又必须按请求隔离（并发请求可能用
+#: 不同模型/客户端，下发集合不同）。由 ``AgentLoop._execute_registered_tool`` 在执行工具前
+#: 写入、执行后恢复，与工作区覆盖、审计上下文同构。
+#:
+#: ``None`` 表示本次请求没有启用工具网关：此时 ``akm_call_tool`` 一律拒绝执行，避免它变成
+#: 「绕过 tools 声明与默认排除策略、直接调用任意已注册工具」的后门（例如客户端没开联网搜索，
+#: 模型却能通过网关调 tavily_search）。
+_request_gateway_context: ContextVar[dict[str, Any] | None] = ContextVar(
+    "agent_request_tool_gateway", default=None
+)
+
+
+def set_request_gateway_context(*, tool_names, registry):
+    """写入本次请求的工具网关上下文，返回用于恢复的 token。
+
+    Args:
+        tool_names: 本次请求允许通过网关调用的工具名集合（即被折叠的工具）。
+        registry: 执行内层工具用的 ToolRegistry 实例（与 AgentLoop 用同一份，避免两套注册表）。
+    """
+    return _request_gateway_context.set({
+        "tool_names": frozenset(str(name) for name in (tool_names or ()) if str(name)),
+        "registry": registry,
+    })
+
+
+def reset_request_gateway_context(token) -> None:
+    """恢复 set_request_gateway_context 之前的网关上下文。"""
+    _request_gateway_context.reset(token)
+
 def _workspace_root() -> Path | None:
     """返回当前请求的 Agent 工作区沙箱根目录（已展开 ~、已 resolve），未配置时返回 None。
 
@@ -4237,6 +4270,142 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             return {"ok": True, "app": None, "message": "当前无前台应用（无活跃 GUI 会话）"}
         return {"ok": True, "app": info}
 
+    # ── 工具网关（按需加载）──────────────────────────────────────────────
+    # 注册表工具数超过 agent_tool_gateway_threshold 时，AgentLoop 只下发常用工具 +
+    # 下面两个网关工具，把长尾工具的 schema 从每次请求的 tools 前缀里省掉：
+    #   akm_list_tools → 查询工具名 / 描述，按 name 取完整参数 schema
+    #   akm_call_tool  → 按名字执行一个因折叠而没有直接下发的工具
+    # 工具名常量定义在 loop.py（规划方），这里延迟导入避免模块级循环依赖。
+    from akm.agent_runtime.loop import (
+        _TOOL_GATEWAY_CALL_NAME,
+        _TOOL_GATEWAY_LIST_NAME,
+        _TOOL_GATEWAY_NAMES,
+    )
+
+    def _gateway_tool_summary(fn: dict[str, Any]) -> dict[str, str]:
+        """把工具定义压成「名字 + 一句话描述」，供清单视图使用（不带 schema，省 token）。"""
+        description = " ".join(str(fn.get("description") or "").split())
+        if len(description) > 160:
+            description = description[:160] + "…"
+        return {"name": str(fn.get("name") or ""), "description": description}
+
+    async def list_gateway_tools(query: str = "", name: str = "", limit: int = 20) -> dict[str, Any]:
+        """查询可用工具清单：支持关键词筛选，或用 name 精确取回完整参数结构。"""
+        from akm.agent_runtime.loop import ToolRegistry
+
+        ctx = _request_gateway_context.get() or {}
+        registry = ctx.get("registry")
+        if registry is None:
+            registry = ToolRegistry.instance()
+        # 允许集合来自本次请求的折叠结果；直接调用（无请求上下文）时展示全部已注册工具。
+        allowed = ctx.get("tool_names")
+
+        all_functions: list[dict[str, Any]] = []
+        for item in registry.list_tools():
+            fn = item.get("function", {}) or {}
+            tool_name = str(fn.get("name") or "")
+            if not tool_name or tool_name in _TOOL_GATEWAY_NAMES:
+                continue
+            if allowed is not None and tool_name not in allowed:
+                continue
+            all_functions.append(fn)
+        all_functions.sort(key=lambda fn: str(fn.get("name") or ""))
+
+        exact = str(name or "").strip()
+        if exact:
+            matched = [fn for fn in all_functions if fn.get("name") == exact]
+            if not matched:
+                return {
+                    "ok": False,
+                    "error": f"未找到工具: {exact}（可先用 query 关键词查询清单）",
+                    "total": len(all_functions),
+                }
+            fn = matched[0]
+            return {
+                "ok": True,
+                "total": len(all_functions),
+                "returned": 1,
+                "tools": [{
+                    "name": str(fn.get("name") or ""),
+                    "description": str(fn.get("description") or ""),
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                }],
+                "hint": f"用 {_TOOL_GATEWAY_CALL_NAME} 执行：arguments 按上面的 parameters 组织",
+            }
+
+        keyword = str(query or "").strip().lower()
+        pool = all_functions
+        if keyword:
+            pool = [
+                fn for fn in all_functions
+                if keyword in str(fn.get("name") or "").lower()
+                or keyword in str(fn.get("description") or "").lower()
+            ]
+        try:
+            max_items = max(1, min(50, int(limit)))
+        except (TypeError, ValueError):
+            max_items = 20
+        shown = [_gateway_tool_summary(fn) for fn in pool[:max_items]]
+        result: dict[str, Any] = {
+            "ok": True,
+            "total": len(pool),
+            "returned": len(shown),
+            "tools": shown,
+            "hint": (
+                f"清单只含名字与描述；要拿到某个工具的完整参数结构，传 name 精确查询。"
+                f"执行用 {_TOOL_GATEWAY_CALL_NAME}（name + arguments）"
+            ),
+        }
+        if len(pool) > len(shown):
+            result["truncated"] = True
+            result["notice"] = f"共 {len(pool)} 个匹配，只返回前 {len(shown)} 个；可用 query 缩小范围或调大 limit"
+        return result
+
+    async def call_gateway_tool(name: str, arguments: dict[str, Any] | None = None) -> Any:
+        """通过网关执行一个工具：只允许本次请求折叠掉的工具，其余一律拒绝。"""
+        from akm.agent_runtime.loop import ToolRegistry
+
+        target = str(name or "").strip()
+        if not target:
+            return {"ok": False, "error": f"缺少 name 参数：请先调用 {_TOOL_GATEWAY_LIST_NAME} 查询工具名"}
+        if target in _TOOL_GATEWAY_NAMES:
+            return {"ok": False, "error": f"{target} 是网关自身，不能通过 {_TOOL_GATEWAY_CALL_NAME} 调用"}
+
+        ctx = _request_gateway_context.get()
+        if ctx is None:
+            return {
+                "ok": False,
+                "error": (
+                    f"工具网关未启用：本次请求没有折叠工具，请直接调用目标工具，"
+                    f"不要使用 {_TOOL_GATEWAY_CALL_NAME}"
+                ),
+            }
+        allowed = ctx.get("tool_names") or frozenset()
+        registry = ctx.get("registry")
+        if registry is None:
+            registry = ToolRegistry.instance()
+
+        if target not in allowed:
+            # 两种可能：① 该工具是常驻工具（直接就能调用，不需要走网关）；
+            # ② 该工具根本没下发给本次请求（例如联网搜索开关关闭），网关不能成为绕过它的后门。
+            if registry.get_definition(target) is not None:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"{target} 未折叠，无需通过 {_TOOL_GATEWAY_CALL_NAME} 调用；"
+                        f"若它不在当前工具清单里，说明本次请求未启用它"
+                    ),
+                }
+            return {"ok": False, "error": f"未找到工具: {target}（可调用 {_TOOL_GATEWAY_LIST_NAME} 查询）"}
+        if registry.get_definition(target) is None:
+            return {"ok": False, "error": f"未找到工具: {target}"}
+
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return {"ok": False, "error": "arguments 必须是 JSON 对象（按 parameters 组织）"}
+        # 直接复用注册表执行：结果裁剪、异常兜底与「直接调用」完全一致。
+        return await registry.execute(target, arguments)
     empty_object = {"type": "object", "properties": {}}
     tools: list[ToolDef] = [
         ToolDef("akm_get_status", "读取 AKM 服务健康、审计队列和插件运行状态", empty_object, get_status),
@@ -4803,6 +4972,61 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             },
             fetch_url_tool,
         ))
+        # 两个网关工具始终注册（schema 单一真源）；是否下发给模型由 AgentLoop._plan_tools
+        # 决定：工具数超过阈值时才追加它们，并把长尾工具从 tools 声明里折叠掉。
+        tools.extend([
+            ToolDef(
+            _TOOL_GATEWAY_LIST_NAME,
+            (
+                "查询当前可用的工具清单。默认返回工具名与一句话描述；传 name 可精确取回"
+                "某个工具的完整参数结构（parameters）。需要用到工具清单里没有直接列出的"
+                "能力时，先用本工具查名字与参数，再用 "
+                f"{_TOOL_GATEWAY_CALL_NAME} 执行"
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "关键词，匹配工具名与描述（不区分大小写）；留空返回全部工具摘要",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "精确工具名：返回该工具的完整参数结构，用于构造 arguments",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数上限，默认 20，范围 1~50",
+                    },
+                },
+            },
+            list_gateway_tools,
+        ),
+        ToolDef(
+            _TOOL_GATEWAY_CALL_NAME,
+            (
+                "执行一个没有直接下发的工具。参数 name 取 "
+                f"{_TOOL_GATEWAY_LIST_NAME} 返回的工具名，arguments 按该工具的 parameters "
+                "组织成 JSON 对象。直接可用的工具请直接调用，不必经过本工具"
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": f"要执行的工具名（先由 {_TOOL_GATEWAY_LIST_NAME} 查询确认）",
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "目标工具的参数对象，结构见该工具的 parameters",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["name"],
+            },
+            call_gateway_tool,
+            ),
+        ])
     return tools
 
 
