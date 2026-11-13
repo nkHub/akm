@@ -770,13 +770,118 @@ fetch('/api/plugin-metas')
 
 ### 9.3 插件页主题跟随（前端约定）
 
-管理台支持主题切换（浅色 / 深色 / 跟随系统，见 `docs/design/web-components.md` 的「主题与配色 token」）。插件自己的前端页面跑在 `/plugins/{name}` 的 iframe 里，**不继承**父页面的 CSS 变量，因此需要插件页自己跟随。当前 `markdown_kb` 已按下面的约定实现，其它插件可按同样方式接入：
+管理台支持主题切换（浅色 / 深色 / 跟随系统，见 `docs/design/web-components.md` 的「主题与配色 token」）。插件前端页面跑在 `/plugins/{name}` 的 iframe 里，**不继承**父页面的 CSS 变量，因此主题必须由插件页自己跟随。**这是 `app` 类插件的强制要求**：任何自带 `views/` 页面或独立站点的插件都要接，否则用户在浅色模式下会看到一块深色孤岛。
 
-1. **同一份主题值**：插件页与管理台同源，直接读同一个本地存储键 `localStorage['akm.theme']`（取值 `dark` / `light` / `system`，缺失按 `dark`），无需新增接口。
-2. **首次绘制前落地**：在插件页 `<head>` 的内联脚本里解析并写 `document.documentElement.dataset.theme`（`system` 时按 `prefers-color-scheme` 解析，并监听其 `change`），避免先按深色画一遍再跳浅色。
-3. **两套 token**：插件页自带 CSS 变量（`:root` 深色默认 + `html[data-theme="light"]` 覆盖），页面里不写死颜色；建议语义档位与管理台保持一致（浅色下强调色/语义色压到 600~700 档，淡底用 100~300 档或降低透明度的同色）。
-4. **切换即时同步**：管理台切换主题时，`window.__akmTheme.apply()` 会广播 `akm:theme` 事件，`plugin_host.html` 监听后在 iframe 的 `load` 与主题变化时各发一次 `postMessage({ type: 'akm:theme', theme })`；插件页据此更新。同源 `storage` 事件是第二条通道（覆盖 iframe 不在宿主页监听范围内的场景）。
-5. **不改宿主壳**：插件页只负责自己那块内容的配色，外层卡片、圆角、边框仍由 `plugin_host.html` 用管理台 token 渲染。
+#### 9.3.1 三条同步通道（缺一不可）
+
+插件页拿到「当前该用哪套配色」有三条来源，分别覆盖不同时机：
+
+| 通道 | 时机 | 做法 |
+|---|---|---|
+| `localStorage['akm.theme']` | 页面首次加载、同源标签页切换 | 读键，取值 `dark` / `light` / `system`（缺失按 `dark`） |
+| `postMessage({type:'akm:theme'})` | 管理台切主题、iframe 加载完成 | 宿主 `plugin_host.html` 在 `load` 与 `akm:theme` 事件时各推一次 |
+| `storage` 事件 | 同源其它标签页改了主题 | 监听 `event.key === 'akm.theme'` 重新读键 |
+
+`system` 还需监听 `matchMedia('(prefers-color-scheme: light)')` 的 `change`，在系统外观变化时重新解析。
+
+#### 9.3.2 可复制的最小实现
+
+把下面这段放进插件页 `<head>` 的**最前面**（在 `<style>` 与任何框架脚本之前），保证首帧就是正确配色、不会先闪深色再跳浅色：
+
+```html
+<script>
+  /* 主题跟随管理台：与宿主同源，直接读同一个 localStorage 键（akm.theme），
+     在首次绘制前把 data-theme 落到 <html>，避免闪色。 */
+  (function () {
+    var KEY = 'akm.theme';
+    var stored = 'dark';
+    try { stored = localStorage.getItem(KEY) || 'dark'; } catch (e) {}
+
+    function resolved() {
+      if (stored !== 'system') return stored;
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+        ? 'light' : 'dark';
+    }
+    function apply() {
+      var v = resolved();
+      document.documentElement.setAttribute('data-theme', v);
+      document.documentElement.style.colorScheme = v;
+    }
+    window.__akmPluginTheme = {
+      get: function () { return stored; },
+      set: function (v) { stored = (v === 'light' || v === 'system') ? v : 'dark'; apply(); },
+      apply: apply
+    };
+    apply();
+    // 通道三：同源其它标签页改了主题
+    window.addEventListener('storage', function (e) {
+      if (e && e.key && e.key !== KEY) return;
+      try { stored = localStorage.getItem(KEY) || 'dark'; } catch (err) {}
+      apply();
+    });
+    // 通道二：宿主 postMessage
+    window.addEventListener('message', function (e) {
+      var d = e && e.data;
+      if (d && d.type === 'akm:theme') window.__akmPluginTheme.set(d.theme);
+    });
+    // system 模式下跟随系统外观变化
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: light)');
+      var onChange = function () { if (stored === 'system') apply(); };
+      if (mq.addEventListener) mq.addEventListener('change', onChange);
+      else if (mq.addListener) mq.addListener(onChange);
+    }
+  })();
+</script>
+```
+
+样式侧只用 CSS 变量，**页面里不写死颜色**：
+
+```css
+/* 深色为默认，浅色只覆盖变量，不改结构 */
+:root {
+  color-scheme: dark;
+  --bg: #1e1e2e;
+  --surface: #262637;
+  --border: #33334d;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #818cf8;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --border: #e5e7eb;
+  --text: #111827;
+  --muted: #6b7280;
+  --accent: #4f46e5;   /* 浅色下压到 600 档，保证对比度 */
+}
+```
+
+#### 9.3.3 验收清单
+
+接完后按这五条自查（全部通过才算兼容）：
+
+1. 管理台切到浅色 → 插件页**不刷新**即变浅色（走 `postMessage`）。
+2. 插件页被直接打开（不经过 iframe）→ 仍按 `localStorage` 正确显示。
+3. 选择「跟随系统」后改 macOS 外观 → 插件页跟着变。
+4. 浅色下刷新页面 → **不出现深色闪帧**（首帧脚本生效）。
+5. 浅色下正文、辅助文字、边框、徽标都能看清（正文对比度 ≥ 4.5，参考管理台 `--c-gray-600` 的取值）。
+
+#### 9.3.4 当前兼容状态（v0.1.59）
+
+逐个核对仓库内全部插件的 `views/` 与 `dist/`：
+
+| 插件 | 类型 | 主题接入 | 说明 |
+|---|---|---|---|
+| `markdown_kb` | 有菜单 app | 已兼容 | 三条通道齐全，含浅色 token 覆盖与首帧脚本 |
+| `dafeiyu` | 有菜单 app | 已兼容 | 同上 |
+| `prompt_booster` | 有菜单 app | 已兼容 | v0.1.59 补齐：首帧主题脚本 + 浅色 token 覆盖，原先写死的语义色抽成变量 |
+| `agent_chat` | 无菜单 app（构建产物） | **部分接入** | `dist/index.html` 只按 `prefers-color-scheme` 判断，不读 `akm.theme`，管理台选浅色时聊天页仍按系统外观走 |
+| 其余 20 个插件 | 纯 hook，无前端界面 | 不适用 | 无需处理 |
+
+> `agent_chat` 是当前唯一已知未完全兼容项（其产物由独立前端仓库构建，需在该仓库接 `akm.theme` 后重新构建）。新插件提交前请对照 9.3.3 自查。
 
 ## 十、插件开发示例
 

@@ -14,4 +14,53 @@ function toggleSidebar() {
   applySidebarState(collapsed);
   localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
 }
+
+/*
+ * 侧边栏点击当前页时不再整页刷新。
+ *
+ * 侧边栏条目是普通 <a href>（模板渲染、无 SPA 路由），点已选中的菜单会触发一次
+ * 完整页面加载：重新请求 HTML 与静态资源，正在填写的表单、滚动位置、展开状态全部
+ * 丢失，用户看到的是「页面闪一下又回到顶部」。这里在 document 上以捕获阶段拦截，
+ * 命中「同源 + 路径与当前页一致」的侧边栏链接时阻止默认跳转。
+ *
+ * 判定细则：
+ *   - 只处理 #sidebar 内的链接，页面其它地方的同链接（如插件卡片「查看 ›」）保持
+ *     原有行为，点击仍会正常刷新；
+ *   - 忽略带 target（新窗口打开）、download、修饰键点击与右键，这些是用户明确的
+ *     另开/下载意图；
+ *   - 比较 pathname 而非整条 href：sidebar 里没有查询串，但插件宿主页可能带 ?tab=，
+ *     此时同路径不同参数仍算「当前路由」，不该刷新；
+ *   - 末尾斜杠统一去掉再比，避免 /plugins/ 与 /plugins 判成两个路由。
+ */
+function normalizeSidebarPath(pathname) {
+  var p = String(pathname || '/');
+  if (p.length > 1 && p.charAt(p.length - 1) === '/') {
+    p = p.slice(0, -1);
+  }
+  return p;
+}
+
+document.addEventListener('click', function (event) {
+  // 只处理主键单击；修饰键（新标签页 / 下载等）交给浏览器默认行为
+  if (event.defaultPrevented || event.button !== 0) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
+  var link = event.target && event.target.closest ? event.target.closest('#sidebar a[href]') : null;
+  if (!link) return;
+  if (link.target && link.target !== '_self') return;
+  if (link.hasAttribute('download')) return;
+
+  var url;
+  try {
+    url = new URL(link.href, window.location.href);
+  } catch (e) {
+    return;
+  }
+  if (url.origin !== window.location.origin) return;
+  if (normalizeSidebarPath(url.pathname) !== normalizeSidebarPath(window.location.pathname)) return;
+
+  // 已是当前路由：不刷新页面，只把焦点交回链接本身（键盘用户需要这个反馈）
+  event.preventDefault();
+  link.focus({ preventScroll: true });
+}, true);
 </script>

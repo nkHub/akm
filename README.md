@@ -205,9 +205,11 @@ akm-menubar
   </tbody>
 </table>
 
-管理台支持**主题切换**：右上角三个图标按钮分别是「跟随系统 / 浅色 / 深色」，默认深色（也就是原来的配色，深色下所有色值未变），选择存在 `localStorage` 的 `akm.theme`，切换即时生效、刷新后保持；「跟随系统」会随系统的浅色/深色偏好实时切换。实现是两套 CSS 变量 token（`akm/templates/_styles.html` 里的 `html` 与 `html[data-theme="light"]`），再由 `akm/templates/_layout.html` 的 tailwind.config 把 `surface` / `border` / `gray-*` / 各强调色的文字档映射到这些 token，因此模板里不出现 `dark:` 变体，后续新增页面只要沿用同一套类名就自动跟随主题；首屏前会在 `<head>` 里先把 `data-theme` 落到 `<html>` 上，避免闪一下深色。注意：插件自带的前端页面不在管理台布局内，需要各自接入——`markdown_kb`（知识库页）已跟随：插件页自带一套与管理台同档位的 CSS 变量（`:root` 深色 + `html[data-theme="light"]`），直接读同一个 `akm.theme` 键并在首屏前落到 `<html>` 上，管理台切换主题时通过 `postMessage` 与同源 `storage` 事件即时同步（接入约定见 `docs/design/plugin-system.md` 的「插件页主题跟随」）；其余插件前端仍使用各自配色。
+管理台支持**主题切换**：右上角三个图标按钮分别是「跟随系统 / 浅色 / 深色」，默认深色（也就是原来的配色，深色下所有色值未变），选择存在 `localStorage` 的 `akm.theme`，切换即时生效、刷新后保持；「跟随系统」会随系统的浅色/深色偏好实时切换。实现是两套 CSS 变量 token（`akm/templates/_styles.html` 里的 `html` 与 `html[data-theme="light"]`），再由 `akm/templates/_layout.html` 的 tailwind.config 把 `surface` / `border` / `gray-*` / 各强调色的文字档映射到这些 token，因此模板里不出现 `dark:` 变体，后续新增页面只要沿用同一套类名就自动跟随主题；首屏前会在 `<head>` 里先把 `data-theme` 落到 `<html>` 上，避免闪一下深色。注意：插件自带的前端页面不在管理台布局内，需要各自接入——插件页自带一套与管理台同档位的 CSS 变量（`:root` 深色 + `html[data-theme="light"]`），直接读同一个 `akm.theme` 键并在首屏前落到 `<html>` 上，管理台切换主题时通过 `postMessage` 与同源 `storage` 事件即时同步（三条通道的完整实现与验收清单见 `docs/design/plugin-system.md` 的 9.3 节）。当前 `markdown_kb`、`dafeiyu`、`prompt_booster` 三个有菜单插件已接入；`agent_chat` 的构建产物仍只按系统外观判断，是唯一已知未完全兼容项。
 
 浅色主题的视觉细节（2026-11 修正）：① **字体**不再全局用等宽——`body` 走系统 UI 字体栈（`-apple-system` / `PingFang SC` / `Microsoft YaHei`），等宽只留给 `code` / `pre` / 模型名，数字对齐靠 `.token-number` 的 `tabular-nums`；② **卡片阴影**由 `.bg-surface-light.border.border-border` 统一注入 `--c-card-shadow`（浅色两段叠加、深色极弱），侧栏不浮起；③ **状态徽标**（`.status-2xx` 等 7 个类）浅色下覆盖成「浅底深字」淡色标签，不再沿用深色主题的深底浅字；④ 浅色最淡一档灰 `--c-gray-600` 压到 `111 118 131`，在白卡上从 2.54 提到 4.57（达标 WCAG AA）。
+
+**侧边栏导航**：侧栏条目是普通链接（整页加载，无 SPA 路由）。点击当前已选中的菜单项时不会再触发整页刷新——`akm/templates/_toggle_sidebar.html` 在 document 捕获阶段拦截「同源且 pathname 与当前页一致」的 `#sidebar` 链接，只把焦点交回该项；带 `target` / `download` / 修饰键（Cmd、Ctrl、Shift、Alt）点击一律放行，保留用户另开标签页的意图。判断用 pathname 而非整条 href，因此插件宿主页带 `?tab=` 参数时点同一菜单也不会刷新。
 
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉、设置卡片和折线图（`akm-line-chart`）、环形图（`akm-donut-chart`）等基础壳组件，供后续页面复用。
 

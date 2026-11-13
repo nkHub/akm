@@ -1261,7 +1261,10 @@ class SqliteKbIndexStore(IndexStore):
 
 
 @router.get("/status")
-async def plugin_status():
+# 注意：本路由内全部是同步阻塞 IO（glob / stat / sqlite），**刻意声明为 def 而非 async def**。
+# FastAPI 会把 def 端点放到线程池执行，async def 则直接跑在事件循环线程上——后者会让
+# 一次读状态（本机实测 0.7s）把整个 uvicorn 循环卡住，期间点击任何其它左侧菜单都要排队。
+def plugin_status():
     """返回插件当前最小状态。
 
     第一版只返回：
@@ -1291,14 +1294,16 @@ async def upload_markdown(
 
 
 @router.get("/files")
-async def list_markdown_files(workspace_root: str = ""):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def list_markdown_files(workspace_root: str = ""):
     """列出当前知识库中的 Markdown 文件；传入 workspace_root 时仅返回绑定到该目录的文件。"""
     plugin = _get_plugin()
     return plugin.list_files(workspace_root=workspace_root)
 
 
 @router.get("/files/{name}")
-async def read_markdown_file(name: str, workspace_root: str = "", doc_id: str = ""):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def read_markdown_file(name: str, workspace_root: str = "", doc_id: str = ""):
     """读取单个 Markdown 文件的全文内容（需先有该文件的清单条目）。
 
     workspace_root / doc_id 与 list_kb_files / delete_kb_file 的同名参数语义一致：
@@ -1311,6 +1316,8 @@ async def read_markdown_file(name: str, workspace_root: str = "", doc_id: str = 
 
 
 @router.post("/files/write")
+# 这个端点必须保持 async def：内部 await 的是 write_markdown_content（含索引重建），
+# 改成 def 会报 'await' outside async function。
 async def write_markdown_file(payload: dict = Body(...)):
     """按文本内容写入（新建或覆盖）单个 Markdown 文件，并同步重建其索引。"""
     plugin = _get_plugin()
@@ -1322,7 +1329,8 @@ async def write_markdown_file(payload: dict = Body(...)):
 
 
 @router.post("/files/bind-workspace")
-async def bind_markdown_file_workspace(payload: dict = Body(...)):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def bind_markdown_file_workspace(payload: dict = Body(...)):
     """为单个 Markdown 文件绑定工作目录。"""
     plugin = _get_plugin()
     return plugin.bind_file_workspace(
@@ -1333,14 +1341,16 @@ async def bind_markdown_file_workspace(payload: dict = Body(...)):
 
 
 @router.delete("/files/{name}")
-async def delete_markdown_file(name: str):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def delete_markdown_file(name: str):
     """删除指定 Markdown 文件，并同步移除其索引条目。"""
     plugin = _get_plugin()
     return plugin.delete_file(name)
 
 
 @router.post("/files/delete")
-async def delete_markdown_file_by_payload(payload: dict = Body(...)):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def delete_markdown_file_by_payload(payload: dict = Body(...)):
     """按 doc_id 或 (file_name, workspace_root) 删除 Markdown 文件。"""
     plugin = _get_plugin()
     return plugin.delete_file(
@@ -1416,35 +1426,40 @@ async def scan_sessions_route(payload: dict = Body(...)):
 
 
 @router.post("/clear")
-async def clear_markdown_kb(payload: dict = Body(default={})):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def clear_markdown_kb(payload: dict = Body(default={})):
     """清空索引，并可选删除原始 Markdown 文档。"""
     plugin = _get_plugin()
     return plugin.clear_index(bool((payload or {}).get("delete_docs", False)))
 
 
 @router.get("/health")
-async def markdown_kb_health():
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def markdown_kb_health():
     """返回知识库健康/漂移检查结果。"""
     plugin = _get_plugin()
     return plugin.health_check()
 
 
 @router.get("/memory-stats")
-async def markdown_kb_memory_stats():
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def markdown_kb_memory_stats():
     """返回记忆系统详细统计，包含按文档聚合和 top-N 高记忆 chunk。"""
     plugin = _get_plugin()
     return plugin.get_memory_stats()
 
 
 @router.get("/projects")
-async def list_project_memories():
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def list_project_memories():
     """列出全部项目级 context/memory 记忆（按工作区根目录聚合）。"""
     plugin = _get_plugin()
     return {"ok": True, "count": len(plugin.list_project_memories()), "projects": plugin.list_project_memories()}
 
 
 @router.get("/project-context")
-async def read_project_memory(workspace_root: str = ""):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def read_project_memory(workspace_root: str = ""):
     """读取单个工作区的项目上下文与最近修改记忆全文。"""
     plugin = _get_plugin()
     data = plugin.read_project_memory(workspace_root)
@@ -1454,7 +1469,8 @@ async def read_project_memory(workspace_root: str = ""):
 
 
 @router.post("/projects/init")
-async def init_project_memories(payload: dict = Body(default={})):
+# 同步阻塞 IO，刻意用 def（FastAPI 放线程池），理由见 plugin_status 上方注释
+def init_project_memories(payload: dict = Body(default={})):
     """初始化/回填项目记忆：为已有工作区绑定补齐 context.md / memory.md。
 
     请求体可选传入 `workspace_roots` 列表限定范围；缺省时扫描知识库中全部已绑定根目录
