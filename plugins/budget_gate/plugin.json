@@ -1,6 +1,6 @@
 {
   "name": "budget_gate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "has_menu": false,
   "category": "filter",
   "description": "预算闸门：按全局/模型/用户累计估算费用，超过日预算或滚动窗口预算后阻断新请求（不能替代供应商账单）",

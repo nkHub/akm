@@ -1,6 +1,6 @@
 {
   "name": "prompt_booster",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "has_menu": true,
   "category": "filter",
   "description": "附加提示词注入：在请求发送到 AI 供应商之前注入自定义 system prompt 或指令",
