@@ -33,6 +33,8 @@
     --c-quote-text: 153 153 153;
     --c-skeleton: 42 42 58;
     --c-chart-dot: 30 30 46;
+    /* 卡片阴影：深色下靠明暗差已经能分层，阴影只需极弱（避免在深底上显脏） */
+    --c-card-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
     /* 悬浮提示 / 通知卡：本身是浮层，深色下维持原来的深底浅字 */
     --c-tooltip-bg: 17 24 39;
     --c-tooltip-border: 55 65 81;
@@ -83,7 +85,10 @@
     --c-gray-300: 55 65 81;
     --c-gray-400: 75 85 99;
     --c-gray-500: 107 114 128;
-    --c-gray-600: 156 163 175;
+    /* 最淡一档灰：原来用 156 163 175，在浅色白卡片上只有 2.54 对比度（低于 AA 的 4.5），
+       “更新时间 / 首页 / 上一页”这类辅助文字看不清。压到 111 118 131 后为 4.57，
+       既达标又仍比 gray-500（107 114 128）略浅，保留层次。 */
+    --c-gray-600: 111 118 131;
     --c-switch-off: 148 163 184;
     --c-scrollbar: 203 210 220;
     --c-overlay-weak: 0 0 0;
@@ -93,6 +98,9 @@
     --c-quote-text: 107 114 128;
     --c-skeleton: 229 231 235;
     --c-chart-dot: 255 255 255;
+    /* 卡片阴影：浅色下卡片白、页面浅灰，明暗差不足以分层，靠阴影补出浮起感。
+       两段叠加（近处 1px 硬边 + 远处 8px 柔化）比单段更像真实投影。 */
+    --c-card-shadow: 0 1px 2px rgb(16 24 40 / 0.06), 0 2px 8px rgb(16 24 40 / 0.04);
     --c-tooltip-bg: 255 255 255;
     --c-tooltip-border: 223 227 234;
     --c-tooltip-text: 55 65 81;
@@ -129,7 +137,25 @@
     --c-yellow-400: 202 138 4;
     --c-blue-400: 37 99 235;
   }
-  body { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
+  /* 字体：正文用系统 UI 字体栈，不再全局用等宽字体。
+     原先 body 是 'SF Mono' 等宽栈，深色下像终端还能接受，浅色下等宽字的宽方字形
+     在小字号里显得松散粗糙、中文尤其明显（等宽字体基本没有为中文做过字形优化）。
+     现在正文走 -apple-system 系列，数字/模型名/代码这类需要对齐的地方用 font-mono
+     单独标注（Tailwind 默认 font-mono 仍然可用，本文件未覆盖 fontFamily）。
+     中文优先 PingFang SC，Windows 回落微软雅黑，Linux 回落 Noto。 */
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+                 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* 等宽档单独保留：只留给代码与模型名这类真正需要等宽对齐的内容。
+     注意别把 .token-number 放进来 —— 它原本只表示「数字等宽对齐」，
+     靠 font-variant-numeric: tabular-nums 就够了（见文件末尾的同名规则），
+     套上等宽字体会让统计页的 24px 大数字变成终端风、和正文割裂。 */
+  code, pre, kbd, samp, [data-model-chip] {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+  }
   /* 统计页折线图 / 环形图已整体迁移到 ApexCharts（akm/static/akm-chart.js）。
      ApexCharts 的浮层默认样式依赖它自己的 CSS 文件，我们没引，这里用主题变量补齐：
      配色跟随 --c-tooltip-*（深浅主题自动切换），限宽防止报错详情把浮层撑出屏幕 */
@@ -162,6 +188,37 @@
   .status-active { background: #166534; color: #86efac; }
   .status-disabled { background: #991b1b; color: #fecaca; }
   .status-rate_limited { background: #854d0e; color: #fde68a; }
+  /* 状态徽标：上面 7 条是深色主题的取值（深底浅字）。浅色下沿用会在白卡片上
+     留下一块很重的深色块（实测深绿底 vs 白卡对比度 7.13），与整体轻盈的浅色
+     页面冲突。这里换成「浅底 + 深字」：底与白卡的差异仅 1.1~1.2，看着是淡色
+     标签；文字对比度 6.3~7.4，远高于 AA。语义色相保持不变（绿/黄/红/紫）。 */
+  html[data-theme="light"] .status-2xx,
+  html[data-theme="light"] .status-active {
+    background: #dcfce7; color: #166534;
+  }
+  html[data-theme="light"] .status-4xx,
+  html[data-theme="light"] .status-rate_limited {
+    background: #fef3c7; color: #92400e;
+  }
+  html[data-theme="light"] .status-5xx,
+  html[data-theme="light"] .status-disabled {
+    background: #fee2e2; color: #991b1b;
+  }
+  html[data-theme="light"] .status-err {
+    background: #f3e8ff; color: #6b21a8;
+  }
+  /* 卡片浮起感：卡片统一是「bg-surface-light + border border-border + rounded-*」，
+     模板里散落 51 处，逐个加 shadow class 既啰嗦又容易漏。这里按属性组合一次性
+     补 box-shadow（颜色来自 --c-card-shadow，深浅主题各自取值）。
+     不用 Tailwind 的 shadow-* 是为了让两套主题共用同一套声明、只换变量。 */
+  .bg-surface-light.border.border-border {
+    box-shadow: var(--c-card-shadow);
+  }
+  /* 侧栏也是表面色，但它是固定区域、不该“浮起”，显式压掉阴影 */
+  aside.bg-surface-light,
+  #sidebar {
+    box-shadow: none;
+  }
   .sidebar-transition { transition: width 0.2s ease; }
   html.sidebar-collapsed #sidebar { width: 60px !important; }
   html.sidebar-collapsed .sidebar-label,

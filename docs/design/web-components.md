@@ -117,7 +117,10 @@
   3. 开关未打开用 `bg-switch-off`（不要用 `bg-gray-600`，浅色下那个档位是给暗淡文字用的）。
   4. 组件内部的 SVG（图表网格线、刻度文字、图例、数据点圆环）用 `_styles.html` 里的 `.akm-chart-*` 类，不要在内联属性里写死颜色；序列色属于强调色，可以继续内联（如 `#818cf8`）。
   5. 浮层（tooltip / 通知卡）用 `rgb(var(--c-tooltip-bg))` 一类 token；Shadow DOM 组件（`akm-json-viewer` / `akm-chat-viewer`）直接引用 `var(--c-*)`，CSS 变量会继承进 Shadow DOM，并带一份深色兜底值以便脱离管理台单独使用时也能看。
-  6. 不需要 `dark:` 变体：主题切换只换 token 值，模板与组件里不应出现 `dark:` 前缀类。
+  6. **字体**：正文走系统 UI 字体栈（`body` 上的 `-apple-system` / `PingFang SC` / `Microsoft YaHei` 系列），**不要全局再改回等宽**——等宽字的宽方字形在小字号下显粗糙，中文尤其明显。只有 `code` / `pre` / `kbd` / `samp` / `[data-model-chip]` 用等宽栈；数字对齐靠 `.token-number` 的 `font-variant-numeric: tabular-nums`，**不要把 `.token-number` 加进等宽字体的选择器**，否则 24px 的统计大数字会变成终端风、与正文割裂。
+  7. **卡片阴影**：卡片统一写 `bg-surface-light border border-border`，阴影由 `_styles.html` 里 `.bg-surface-light.border.border-border { box-shadow: var(--c-card-shadow); }` 一次性注入，深浅主题各自取值（浅色两段叠加补浮起感，深色极弱避免显脏）。新增卡片沿用这组类名即自动带阴影，**不要**再逐个加 Tailwind 的 `shadow-*`。侧栏（`aside` / `#sidebar`）显式压掉阴影，它是固定区域、不该浮起。
+  8. **状态徽标**：`.status-2xx` / `.status-4xx` / `.status-5xx` / `.status-err` / `.status-active` / `.status-disabled` / `.status-rate_limited` 的基色是深色主题的「深底浅字」；浅色主题下由 `html[data-theme="light"] .status-*` 覆盖成「浅底深字」（淡色标签，文字对比度 6.3~7.4）。新增状态类时必须**同时**给出浅色覆盖，否则会在白卡片上留下一块很重的深色块。
+  9. 不需要 `dark:` 变体：主题切换只换 token 值，模板与组件里不应出现 `dark:` 前缀类。
 
 ## 使用原则
 
