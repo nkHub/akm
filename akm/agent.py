@@ -6,11 +6,16 @@
 
 import json
 import os
+import re
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from akm import __version__
 from akm.config import get as config_get
 
+
+# 末尾版本段的判定：v1 / v4 / v1beta 这类都算「地址已经到版本层」。
+# 覆盖范围：单个 v+数字，允许再接 -/后缀（如 v1beta、v1-alpha），大小写不敏感。
+_BASE_ENDS_WITH_VERSION_RE = re.compile(r"/v\d+[a-z0-9.\-]*$", re.IGNORECASE)
 
 @dataclass
 class Agent:
@@ -59,7 +64,10 @@ class Agent:
             # 最终落到 /anthropic/v1/messages。
             return f"{base_norm}/v1/{api_path}"
 
-        if base.endswith("/v1"):
+        # 末尾已带版本段（/v1、/v4、/v1beta 等）时直接拼接路径，不能再补一次 /v1。
+        # 只判 `/v1` 不够：Z.AI 的根地址是 `https://api.z.ai/api/paas/v4`，
+        # 照旧逻辑会拼出 `/api/paas/v4/v1/chat/completions`（多一层、请求必然 404）。
+        if _BASE_ENDS_WITH_VERSION_RE.search(base):
             return f"{base}/{api_path}"
         return f"{base}/v1/{api_path}"
 
@@ -132,10 +140,22 @@ class Agent:
 # 保留下面的硬编码值，保证离线/首次启动也能正常工作）。
 
 #: 目录里 `api` 为空时的 base_url 兜底（也是目录不可用时的默认值）
+#:
+#: 除原有的 openai / deepseek / anthropic，这里补了 Kimi、Z.AI、Xiaomi、xAI、Qwen
+#: 五家常用国内/海外供应商：它们都是 OpenAI 兼容的 Chat 通道，注册成内置项的
+#: **唯一目的**是让「添加 Key」选中它们时能拿到正确的默认 base_url 与协议能力。
+#: 若只在前端下拉里列名字而不在这里注册，`get_agent()` 会按未知供应商回落到
+#: OpenAI，Key 未填 base_url 时请求会被发到 `api.openai.com`（静默走错地址）。
+#: 注意 xai 在 models.dev 目录里 `api` 为空，必须靠这里的兜底值。
 _BUILTIN_BASE_URL_FALLBACK: dict[str, str] = {
     "openai": "https://api.openai.com",
     "deepseek": "https://api.deepseek.com",
     "anthropic": "https://api.anthropic.com",
+    "moonshotai": "https://api.moonshot.ai",
+    "zai": "https://api.z.ai/api/paas/v4",
+    "xiaomi": "https://api.xiaomimimo.com",
+    "xai": "https://api.x.ai",
+    "alibaba": "https://dashscope-intl.aliyuncs.com/compatible-mode",
 }
 
 
@@ -166,6 +186,30 @@ def _build_builtin_agents() -> dict[str, Agent]:
             default_base_url=_BUILTIN_BASE_URL_FALLBACK["anthropic"],
             supports_messages=True,
             supports_chat=False,
+        ),
+        # 以下五家是 OpenAI 兼容的 Chat 通道（models.dev 目录里 npm 均为
+        # `@ai-sdk/openai-compatible` / `@ai-sdk/xai`，只支持 Chat），
+        # 注册成内置项是为了让「添加 Key」下拉选中时能拿到正确 base_url，
+        # 避免 get_agent() 按未知供应商回落到 OpenAI 的地址。
+        "moonshotai": Agent(
+            name="moonshotai",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["moonshotai"],
+        ),
+        "zai": Agent(
+            name="zai",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["zai"],
+        ),
+        "xiaomi": Agent(
+            name="xiaomi",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["xiaomi"],
+        ),
+        "xai": Agent(
+            name="xai",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["xai"],
+        ),
+        "alibaba": Agent(
+            name="alibaba",
+            default_base_url=_BUILTIN_BASE_URL_FALLBACK["alibaba"],
         ),
     }
     try:
