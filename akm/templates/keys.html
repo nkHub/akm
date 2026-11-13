@@ -35,7 +35,22 @@
   </div>
 </akm-modal>
 
-<akm-modal id="test-result-modal" title="Key 测试结果" max-width="max-w-2xl" body-class="p-4 space-y-4 max-h-[80vh] overflow-y-auto">
+<!-- Key 测试抽屉：分两段。第一段选「请求类型 + 请求模型」，点「开始测试」后
+     同一抽屉内展开第二段展示上次的返回信息（不另开弹窗，避免两个浮层叠着）。 -->
+<akm-drawer id="key-test-drawer" title="Key 测试" max-width="max-w-2xl">
+  <div class="p-4 space-y-4">
+    <!-- 第一段：请求参数（单选）。候选由服务端的供应商能力决定 -->
+    <section id="key-test-params">
+      <div class="text-xs text-gray-500 mb-2">选择请求类型与请求模型，再开始测试。</div>
+      <div class="text-xs text-gray-400 mb-1">请求类型</div>
+      <div id="key-test-api-path-tabs" class="flex flex-wrap items-center gap-2 mb-3"></div>
+      <div class="text-xs text-gray-400 mb-1">请求模型</div>
+      <p id="key-test-model-hint" class="text-[11px] text-gray-500 mb-1 hidden"></p>
+      <akm-combobox id="key-test-model" placeholder="选择请求模型" host-class="block"></akm-combobox>
+    </section>
+
+    <!-- 第二段：测试结果（初始隐藏，测试完成后展开并滚动到可见位置） -->
+    <section id="key-test-result" class="hidden space-y-3 border-t border-border pt-4">
       <div id="test-result-banner" class="rounded-lg border px-3 py-2 text-sm"></div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
         <div class="bg-surface border border-border rounded-lg p-3">
@@ -67,8 +82,28 @@
         <div class="text-xs text-gray-500 mb-1">响应体</div>
         <pre id="test-result-response" class="bg-surface border border-border rounded-lg p-3 text-xs text-gray-300 overflow-x-auto whitespace-pre-wrap break-words min-h-[96px]">-</pre>
       </div>
+    </section>
+  </div>
+  <div data-modal-footer class="px-4 py-3 border-t border-border flex items-center gap-2 shrink-0">
+    <span id="key-test-msg" class="text-xs text-gray-500"></span>
+    <div class="flex items-center gap-2 ml-auto">
+      <button type="button" onclick="closeKeyTestDrawer()" class="bg-surface border border-border text-gray-400 hover:text-gray-200 text-sm px-4 py-2 rounded transition-colors cursor-pointer">取消</button>
+      <button type="button" id="key-test-run-btn" onclick="runKeyTest()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">开始测试</button>
+    </div>
+  </div>
+</akm-drawer>
+
+<!-- 删除 Key 确认框：替代原生 confirm()，与插件页的确认弹窗同一套做法 -->
+<akm-modal id="key-delete-modal" title="删除 Key" max-width="max-w-md">
+  <div class="px-1 py-1">
+    <h3 id="key-delete-title" class="text-sm font-semibold text-strong mb-2">确认删除 Key</h3>
+    <p id="key-delete-text" class="text-xs text-gray-400"></p>
+  </div>
   <div data-modal-footer>
-    <div class="flex w-full justify-end"><button type="button" onclick="closeTestResultModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-sm px-4 py-2 rounded transition-colors cursor-pointer">关闭</button></div>
+    <div class="flex items-center justify-end gap-2 px-4 py-3">
+      <button type="button" onclick="document.getElementById('key-delete-modal').close()" class="text-xs px-3 py-1.5 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer">取消</button>
+      <button type="button" id="key-delete-ok" onclick="onKeyDeleteConfirmOk()" class="text-xs px-3 py-1.5 rounded bg-red-600 hover:bg-red-500 text-white transition-colors cursor-pointer">确认删除</button>
+    </div>
   </div>
 </akm-modal>
 
@@ -427,7 +462,9 @@ function renderKeys() {
     }
 
     // 用量 / 余额行（含手动刷新按钮）—— 前端执行 extractor 解析 raw_response
-    var usageInfoLine = k.usage_query_interval_m > 0 ? usageLineHtml(k) : '';
+    // 用量行按「开关」渲染，不再看间隔：关闭开关后间隔仍保留原值，
+    // 用间隔判断会让已关掉的 Key 继续显示用量行与刷新按钮。
+    var usageInfoLine = k.usage_query_enabled ? usageLineHtml(k) : '';
 
     html += '<div class="border border-border rounded-lg bg-surface-light/50 overflow-hidden min-w-0">'+
       '<div class="flex items-center justify-between px-4 py-3 flex-wrap gap-2">'+
@@ -650,14 +687,111 @@ function setKeySubmitLoading(loading) {
   else btn.classList.remove('opacity-60', 'cursor-wait');
 }
 
-function closeTestResultModal() {
-  var modal = document.getElementById('test-result-modal');
-  if (modal) modal.close();
+// ── Key 测试抽屉（两段式：参数选择 → 结果展示） ──────────────
+
+// 请求类型候选：value 是后端 api_path，还带一个请求体的简短说明。
+var KEY_TEST_API_PATHS = [
+  { value: 'chat/completions', label: 'Chat', desc: 'messages' },
+  { value: 'responses', label: 'Responses', desc: 'input' },
+  { value: 'messages', label: 'Messages', desc: 'anthropic' }
+];
+
+// 当前抽屉里选中的请求类型与模型（抽屉关闭后保留，方便反复测试同一组合）
+var _keyTestState = { alias: '', apiPath: '', model: '' };
+
+function closeKeyTestDrawer() {
+  var drawer = document.getElementById('key-test-drawer');
+  if (drawer) drawer.close();
 }
 
-function showTestResultModal(alias, data) {
+/**
+ * 按供应商能力计算可用的请求类型。
+ *
+ * 用 supports_* 过滤而不是把三种全列出来：给只支持 chat 的供应商显示
+ * 「Messages」会让用户点到必然失败的选项，而失败原因是「供应商不支持」，
+ * 很容易被误读成 Key 有问题。
+ */
+function _keyTestApiPathOptions(provider) {
+  var agent = _agentsMap[provider] || {};
+  var allowed = [];
+  if (agent.supports_chat !== false) allowed.push('chat/completions');
+  if (agent.supports_responses) allowed.push('responses');
+  if (agent.supports_messages) allowed.push('messages');
+  // 接口没返回能力字段时（自定义供应商刚建的）保底给 chat
+  if (!allowed.length) allowed.push('chat/completions');
+  return KEY_TEST_API_PATHS.filter(function(item) { return allowed.indexOf(item.value) >= 0; });
+}
+
+function _renderKeyTestApiPathTabs(options, current) {
+  var host = document.getElementById('key-test-api-path-tabs');
+  if (!host) return;
+  // 单选：用 akm-range-tabs（与管理台其它分段选择器同一交互）
+  if (!host._tabs) {
+    host.innerHTML = '<akm-range-tabs id="key-test-api-path"></akm-range-tabs>';
+    host._tabs = host.querySelector('akm-range-tabs');
+  }
+  var tabs = host._tabs;
+  if (!tabs || typeof tabs.setOptions !== 'function') return;
+  tabs.setOptions(options.map(function(item) {
+    return { value: item.value, label: item.label, title: item.label + '（' + item.desc + '）' };
+  }), current, 'onKeyTestApiPathChange');
+}
+
+/** 分段选择器的回调（akm-range-tabs 通过 window 上的函数名调用） */
+function onKeyTestApiPathChange(value) {
+  _keyTestState.apiPath = String(value || '');
+  _renderKeyTestModelHint();
+}
+
+function _renderKeyTestModelHint() {
+  var hint = document.getElementById('key-test-model-hint');
+  if (!hint) return;
+  if (!_keyTestState.apiPath) { hint.classList.add('hidden'); return; }
+  var item = null;
+  KEY_TEST_API_PATHS.forEach(function(x) { if (x.value === _keyTestState.apiPath) item = x; });
+  hint.textContent = '将按 ' + (item ? item.desc : _keyTestState.apiPath) + ' 请求体格式发起一次最小调用。';
+  hint.classList.remove('hidden');
+}
+
+/** 把该 Key 的模型列表注入模型下拉；列表为空时允许手填（见下方 openKeyTestDrawer） */
+function _fillKeyTestModels(key) {
+  var box = document.getElementById('key-test-model');
+  if (!box || typeof box.setOptions !== 'function') return;
+  var models = (key && Array.isArray(key.model_list)) ? key.model_list.filter(Boolean) : [];
+  box.setOptions(models.map(function(m) { return { value: String(m), label: String(m) }; }));
+  // 默认选第一条：多数场景就是想测「这个 Key 现在能不能用」
+  if (models.length && models.indexOf(_keyTestState.model) < 0) {
+    _keyTestState.model = String(models[0]);
+  }
+  if (_keyTestState.model) box.setValue(_keyTestState.model, true);
+}
+
+function openKeyTestDrawer(alias) {
+  var key = (_keysData || []).find(function(k) { return k.alias === alias; });
+  var drawer = document.getElementById('key-test-drawer');
+  if (!drawer) return;
+  _keyTestState.alias = alias;
+  _keyTestState.model = '';
+  drawer.setTitle('Key 测试 - ' + alias);
+
+  // 每次打开都回到第一段：结果区是「上一次的」，不该自动带进来
+  var resultSection = document.getElementById('key-test-result');
+  if (resultSection) resultSection.classList.add('hidden');
+  var msg = document.getElementById('key-test-msg');
+  if (msg) { msg.textContent = ''; msg.className = 'text-xs text-gray-500'; }
+
+  var options = _keyTestApiPathOptions(key ? key.provider : '');
+  _keyTestState.apiPath = options.length ? options[0].value : 'chat/completions';
+  _renderKeyTestApiPathTabs(options, _keyTestState.apiPath);
+  _renderKeyTestModelHint();
+  _fillKeyTestModels(key);
+
+  drawer.open();
+}
+
+/** 渲染结果（第二段）。与拆开前同一套字段，只是容器从弹窗换成了抽屉里的 section */
+function showKeyTestResult(data) {
   var ok = !!data.ok;
-  document.getElementById('test-result-modal').setSubtitle(alias ? ('别名: ' + alias) : '');
   document.getElementById('test-result-api-path').textContent = data.api_path || '-';
   document.getElementById('test-result-model').textContent = data.model || '-';
   document.getElementById('test-result-url').textContent = data.url || '-';
@@ -669,13 +803,57 @@ function showTestResultModal(alias, data) {
   var banner = document.getElementById('test-result-banner');
   if (ok) {
     banner.className = 'rounded-lg border px-3 py-2 text-sm border-green-500/30 bg-green-500/10 text-green-300';
-    banner.textContent = '连接成功，当前 key 的主测试接口可正常访问。';
+    banner.textContent = '连接成功，所选请求类型与模型均可用。';
   } else {
     banner.className = 'rounded-lg border px-3 py-2 text-sm border-red-500/30 bg-red-500/10 text-red-300';
     banner.textContent = '连接失败，请根据状态码、错误信息和响应体继续排查。';
   }
 
-  document.getElementById('test-result-modal').open();
+  var section = document.getElementById('key-test-result');
+  if (section) {
+    section.classList.remove('hidden');
+    // 结果区在抽屉底部，展开后滚过去，否则用户以为没反应
+    if (section.scrollIntoView) section.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function setKeyTestLoading(loading) {
+  var btn = document.getElementById('key-test-run-btn');
+  if (!btn) return;
+  btn.disabled = !!loading;
+  btn.textContent = loading ? '测试中...' : '开始测试';
+  if (loading) btn.classList.add('opacity-60', 'cursor-wait');
+  else btn.classList.remove('opacity-60', 'cursor-wait');
+}
+
+function runKeyTest() {
+  var alias = _keyTestState.alias;
+  if (!alias) return;
+  var box = document.getElementById('key-test-model');
+  var model = box ? String(box.value || '').trim() : '';
+  var msg = document.getElementById('key-test-msg');
+  if (!model) {
+    if (msg) { msg.textContent = '请先选择请求模型'; msg.className = 'text-xs text-red-400'; }
+    return;
+  }
+  if (msg) { msg.textContent = ''; msg.className = 'text-xs text-gray-500'; }
+  _keyTestState.model = model;
+
+  setKeyTestLoading(true);
+  fetch('/api/keys/' + encodeURIComponent(alias) + '/test', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ api_path: _keyTestState.apiPath, model: model })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { showKeyTestResult(d || {}); })
+    .catch(function(e) {
+      showKeyTestResult({
+        ok: false, api_path: _keyTestState.apiPath, model: model, url: '',
+        status_code: '', latency_ms: 0, error: '请求失败: ' + e.message, response_body: ''
+      });
+    })
+    .finally(function() { setKeyTestLoading(false); });
 }
 
 /**
@@ -769,29 +947,47 @@ function toggleStatus(alias, currentStatus) {
     .then(function(r){ if(r.ok) loadKeys(); }).catch(function(e){ console.error(e); });
 }
 
+// ── 删除 Key（akm-modal 确认框，替代原生 confirm） ──────────
+
+// 待删除的 alias。确认按钮点击时才真正发请求，回调存在这里
+var _pendingDeleteAlias = '';
+
 function deleteKey(alias) {
-  if (!confirm('确认删除 Key "'+alias+'"?')) return;
-  fetch('/api/keys/'+encodeURIComponent(alias), { method:'DELETE' })
-    .then(function(r){ if(r.ok) loadKeys(); }).catch(function(e){ console.error(e); });
+  var modal = document.getElementById('key-delete-modal');
+  var textEl = document.getElementById('key-delete-text');
+  if (!modal) return;
+  _pendingDeleteAlias = alias;
+  if (textEl) {
+    textEl.textContent = '将删除 Key「' + alias + '」及其用量查询配置，此操作不可撤销。确认继续？';
+  }
+  modal.open();
 }
 
-function testConnect(alias) {
-  fetch('/api/keys/'+encodeURIComponent(alias)+'/test', { method:'POST' })
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      showTestResultModal(alias, d || {});
-    }).catch(function(e){
-      showTestResultModal(alias, {
-        ok: false,
-        api_path: '',
-        model: '',
-        url: '',
-        status_code: '',
-        latency_ms: 0,
-        error: '请求失败: ' + e.message,
-        response_body: ''
-      });
+function onKeyDeleteConfirmOk() {
+  var alias = _pendingDeleteAlias;
+  var modal = document.getElementById('key-delete-modal');
+  var okBtn = document.getElementById('key-delete-ok');
+  if (!alias) { if (modal) modal.close(); return; }
+  if (okBtn) {
+    okBtn.disabled = true;
+    okBtn.textContent = '删除中...';
+  }
+  fetch('/api/keys/' + encodeURIComponent(alias), { method: 'DELETE' })
+    .then(function(r) { if (r.ok) loadKeys(); })
+    .catch(function(e) { console.error(e); })
+    .finally(function() {
+      _pendingDeleteAlias = '';
+      if (okBtn) {
+        okBtn.disabled = false;
+        okBtn.textContent = '确认删除';
+      }
+      if (modal) modal.close();
     });
+}
+
+// 测试按钮：打开抽屉（第一段选参数），不再直接发请求
+function testConnect(alias) {
+  openKeyTestDrawer(alias);
 }
 
 function exportKeys() {
@@ -885,7 +1081,15 @@ function _usageToggleState(enabled) {
 function toggleUsageEnabled() {
   var toggle = document.getElementById('usage-toggle');
   var current = toggle.getAttribute('data-enabled') === '1';
-  _usageToggleState(!current);
+  var next = !current;
+  _usageToggleState(next);
+  _syncUsageIntervalDisabled(next);
+  // 打开开关时如果间隔是 0（历史遗留配置），给一个可用默认值，
+  // 否则用户打开后仍然不会自动查询
+  if (next) {
+    var input = document.getElementById('usage-interval');
+    if (input && (!input.value || parseInt(input.value, 10) <= 0)) input.value = 5;
+  }
 }
 
 // 将存储的 JSON 转为展示格式（request 在前，extractor 以实际函数展示，用分隔符隔离）
@@ -910,10 +1114,13 @@ function openUsageConfigModal(alias, provider) {
     .then(function(json) {
       var data = (json && json.data) || {};
       document.getElementById('usage-alias').value = alias;
-      var intervalM = (data.interval_m != null) ? data.interval_m : 0;
-      var enabled = intervalM > 0;
+      // 开关与间隔是两个独立字段：enabled 只来自后端 enabled，
+      // 间隔保持库里的原值（关闭时不再被清零，重开就是上次的值）
+      var intervalM = (data.interval_m != null) ? data.interval_m : 5;
+      var enabled = !!data.enabled;
       _usageToggleState(enabled);
       document.getElementById('usage-interval').value = intervalM;
+      _syncUsageIntervalDisabled(enabled);
       var raw = data.script || _defaultUsageScript(provider);
       try { raw = _usageScriptDisplay(raw); } catch(e) {}
       document.getElementById('usage-script').value = raw;
@@ -924,13 +1131,30 @@ function openUsageConfigModal(alias, provider) {
       console.error('Usage config:', e);
       document.getElementById('usage-alias').value = alias;
       _usageToggleState(false);
-      document.getElementById('usage-interval').value = 0;
+      // 请求失败时给一个可用的默认值（与新建 Key 的初始间隔一致），
+      // 不要写 0——0 会让用户打开开关后仍不查询，且看起来像「没配」
+      document.getElementById('usage-interval').value = 5;
+      _syncUsageIntervalDisabled(false);
       var raw = _defaultUsageScript(provider);
       try { raw = _usageScriptDisplay(raw); } catch(e) {}
       document.getElementById('usage-script').value = raw;
       document.getElementById('usage-config-modal').setTitle('用量查询配置 - ' + alias);
       document.getElementById('usage-config-modal').open();
     });
+}
+
+/**
+ * 按开关状态切换「自动查询间隔」输入框的可编辑性。
+ *
+ * 关闭状态下置灰但**保留数值**：这是本次解耦的核心——用户关掉自动查询，
+ * 间隔不该被抹掉，下次打开还是原来那个数。
+ */
+function _syncUsageIntervalDisabled(enabled) {
+  var input = document.getElementById('usage-interval');
+  if (!input) return;
+  input.disabled = !enabled;
+  input.classList.toggle('opacity-50', !enabled);
+  input.classList.toggle('cursor-not-allowed', !enabled);
 }
 
 function closeUsageConfigModal() {
@@ -945,7 +1169,10 @@ function closeUsageConfigModal() {
 function saveUsageConfig() {
   var alias = document.getElementById('usage-alias').value;
   var enabled = document.getElementById('usage-toggle').getAttribute('data-enabled') === '1';
-  var intervalM = enabled ? (parseInt(document.getElementById('usage-interval').value) || 5) : 0;
+  // 间隔与开关解耦：无论开还是关都按输入框的值提交（关闭时输入框置灰，
+  // 值保持不变），这样关掉自动查询不会把间隔清零
+  var intervalM = parseInt(document.getElementById('usage-interval').value, 10);
+  if (isNaN(intervalM) || intervalM < 0) intervalM = 5;
   var scriptRaw = document.getElementById('usage-script').value.trim();
 
   try {
@@ -965,7 +1192,8 @@ function saveUsageConfig() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       script: scriptRaw,
-      interval_m: intervalM
+      interval_m: intervalM,
+      enabled: enabled
     })
   })
   .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })

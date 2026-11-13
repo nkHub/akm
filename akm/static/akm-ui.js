@@ -529,7 +529,11 @@ if (!customElements.get('akm-drawer')) {
     render() {
       var width = this.getAttribute('max-width') || 'max-w-3xl';
       var title = this.getAttribute('title') || '';
-      var bodyNodes = this.collectNodes(false).bodyNodes;
+      // 与 akm-modal 一致：带 data-modal-footer 的节点拆到独立底栏，
+      // 不随正文滚动。没有 footer 的既有调用方行为不变（footer 容器留空隐藏）。
+      var collected = this.collectNodes(true);
+      var bodyNodes = collected.bodyNodes;
+      var footerNodes = collected.footerNodes;
       this.innerHTML = '' +
         '<div data-overlay class="hidden fixed inset-0 z-40 bg-black/50"></div>' +
         '<div data-panel class="hidden fixed top-0 right-0 z-50 h-full w-full ' + width + ' bg-surface-light border-l border-border shadow-2xl flex flex-col overflow-hidden" style="transform:translateX(100%); transition: transform 0.25s ease">' +
@@ -540,15 +544,19 @@ if (!customElements.get('akm-drawer')) {
             '</button>' +
           '</div>' +
           '<div data-body class="flex flex-col flex-1 min-h-0 min-w-0 overflow-auto"></div>' +
+          '<div data-footer class="hidden shrink-0"></div>' +
         '</div>';
       this.overlay = this.querySelector('[data-overlay]');
       this.panel = this.querySelector('[data-panel]');
       this.titleEl = this.querySelector('[data-title]');
       this.bodyEl = this.querySelector('[data-body]');
+      this.footerEl = this.querySelector('[data-footer]');
       this.setTitle(title);
       this.style.display = 'contents';
       var self = this;
       bodyNodes.forEach(function(node) { self.bodyEl.appendChild(node); });
+      footerNodes.forEach(function(node) { self.footerEl.appendChild(node); });
+      if (footerNodes.length) this.footerEl.classList.remove('hidden');
     }
 
     bindEvents() {

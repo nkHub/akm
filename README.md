@@ -184,7 +184,7 @@ akm-menubar
     </tr>
     <tr>
       <td style="white-space: nowrap;">管理</td>
-      <td>Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试、自定义测试结果弹窗、一键导出备份、一键刷新提供商模型列表、模型标签点击复制（卡片内最多展示 2 行，尾部「查看全部」按钮弹窗列出完整模型列表（弹窗最高 85vh，超出时模型区内部滚动、标题栏与底部操作区固定，不会冲出屏幕）；渲染后按量到的真实宽度分几轮收敛，样式未就绪/卡片不可见时保持现状并稍后重算，避免 Tailwind 异步注入样式期间量错宽度而误展开；收敛所需的尺寸（卡片网格列数、标签盒 flex 换行与 gap、标签 padding/边框/行高）同时写进页面自带的 `_styles.html` 兜底（Tailwind 注入后同值覆盖），同一宽度下不重复展开再收起，因此反复刷新时列表不再「先多留一行、再收回去」地抖动）、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示）；只要该 Key 配了用量查询，卡片上就显示「余额 / 用量」一行：行首是 sync 图标（与卡片内容左边线对齐、和余额文字中线齐平），点它立刻手动重查一次 —— 查询中图标旋转且按钮禁用，完成后只替换这一行、不整列表重渲染，行内文案与右下角提示给出结果；没查过的显示「未查询」，该行与下面模型标签之间留 10px 间距）</td>
+      <td>Key 增删改查、启用/禁用、优先级排序、最近 10 次成功请求平均延迟展示、连通性测试（点闪电图标打开「Key 测试」抽屉，分两段：先单选「请求类型」（按供应商能力只列支持的 Chat/Responses/Messages）与「请求模型」，「开始测试」后在同一抽屉内展开上一次的返回信息——不另开弹窗叠加）、删除确认走 akm-modal（替原生 confirm）、一键导出备份、一键刷新提供商模型列表、模型标签点击复制（卡片内最多展示 2 行，尾部「查看全部」按钮弹窗列出完整模型列表（弹窗最高 85vh，超出时模型区内部滚动、标题栏与底部操作区固定，不会冲出屏幕）；渲染后按量到的真实宽度分几轮收敛，样式未就绪/卡片不可见时保持现状并稍后重算，避免 Tailwind 异步注入样式期间量错宽度而误展开；收敛所需的尺寸（卡片网格列数、标签盒 flex 换行与 gap、标签 padding/边框/行高）同时写进页面自带的 `_styles.html` 兜底（Tailwind 注入后同值覆盖），同一宽度下不重复展开再收起，因此反复刷新时列表不再「先多留一行、再收回去」地抖动）、展示提供商模型列表、每页 12 条分页、用量查询配置弹窗（新建 Key 默认关闭自动查询；**开关与自动查询间隔是两个独立字段**——关掉开关只是停止定时查询，间隔数值保留且输入框置灰，重新打开即沿用上次的值，不会清零要用户重填；支持自定义 JS extractor 脚本、自动定时查询、查询结果展示）；只要该 Key 打开了用量查询开关，卡片上就显示「余额 / 用量」一行：行首是 sync 图标（与卡片内容左边线对齐、和余额文字中线齐平），点它立刻手动重查一次 —— 查询中图标旋转且按钮禁用，完成后只替换这一行、不整列表重渲染，行内文案与右下角提示给出结果；没查过的显示「未查询」，该行与下面模型标签之间留 10px 间距）</td>
     </tr>
     <tr>
       <td style="white-space: nowrap;">插件</td>
@@ -455,11 +455,11 @@ Key 和日志数据存储在 `~/.akm/akm.db`（SQLite）。另外，Key 的增�
 | PUT | `/api/keys/{alias}` | 编辑 Key |
 | PATCH | `/api/keys/{alias}/status` | 启用/禁用 Key |
 | DELETE | `/api/keys/{alias}` | 删除 Key |
-| POST | `/api/keys/{alias}/test` | 测试连通性 |
+| POST | `/api/keys/{alias}/test` | 测试连通性（可选 body `{"api_path":"chat/completions\|responses\|messages","model":"…"}` 指定请求类型与模型；不传则按供应商能力选主接口、取模型列表首项） |
 | POST | `/api/keys/refresh-models` | 批量刷新所有 Key 的提供商模型列表 |
 | GET | `/api/keys/export` | 导出 Key 配置（含完整密钥） |
-| GET | `/api/keys/{alias}/usage-config` | 获取用量查询配置 |
-| PATCH | `/api/keys/{alias}/usage-config` | 设置用量查询配置（脚本/间隔） |
+| GET | `/api/keys/{alias}/usage-config` | 获取用量查询配置（返回 `enabled` 开关与 `interval_m` 间隔两个独立字段） |
+| PATCH | `/api/keys/{alias}/usage-config` | 设置用量查询配置（`enabled` / `script` / `interval_m` 各自独立，关闭开关不会清空间隔） |
 | POST | `/api/keys/{alias}/usage-query` | 手动触发一次用量查询 |
 | POST | `/api/keys/usage-query-all` | 批量触发所有已配置自动查询的 Key |
 | GET | `/api/logs` | 审计日志（支持 status/days/key_alias 筛选；days 按自然日区间；可选 `hide_empty=true` 仅保留含请求体/响应体内容的可回放记录——判定任一请求体/响应体列有内容；可选 `hide_est=true` 隐藏 `usage_estimated_light` 且低延迟/低 completion 的元数据请求；费用估算开启时返回每条 `estimated_cost` 与 `cost_detail` 明细；每条附后端推导的 `source_label` 来源标签） |

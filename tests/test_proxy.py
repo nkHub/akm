@@ -2327,3 +2327,105 @@ async def test_forward_client_headers_reach_ctx_in_on_request_hook(monkeypatch):
         "user-agent": "opencode/1.18.26",
         "x-stainless-lang": "typescript",
     }
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_respects_explicit_api_path_and_model(monkeypatch):
+
+
+    """显式指定 api_path / model 时只测这一条路径、只用这个模型。
+
+    管理台「Key 测试」抽屉让用户自选请求类型与请求模型；如果仍按供应商能力
+    自动挑路径，用户选 messages 可能被 chat/completions 抢先成功，测到的
+    并不是他选的那个协议。
+    """
+    called = {}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called["url"] = url
+            called["body"] = json
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await check_key_connectivity(
+        {
+            "alias": "k",
+            "provider": "openai",   # 内置供应商默认只走 chat/completions
+            "api_key": "sk-test",
+            "base_url": "https://example.com",
+            "models": "gpt-4o",
+        },
+        api_path="messages",
+        model="claude-3-7-sonnet",
+    )
+
+    assert result["ok"] is True
+    assert result["api_path"] == "messages"
+    # 只尝试用户选的那一条，不做兼容回退
+    assert result["attempted_paths"] == ["messages"]
+    assert called["url"] == "https://example.com/v1/messages"
+    # 模型用用户选的，而不是该 Key 模型列表的第一项
+    assert called["body"]["model"] == "claude-3-7-sonnet"
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_explicit_model_without_key_models(monkeypatch):
+    """Key 没有模型列表时，显式指定模型仍然可以测试。"""
+    called = {}
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json=None, headers=None, timeout=None):
+            called["body"] = json
+            return FakeTestResponse(200, '{"id":"ok"}')
+
+    monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
+
+    result = await check_key_connectivity(
+        {
+            "alias": "k",
+            "provider": "openai",
+            "api_key": "sk-test",
+            "base_url": "https://example.com",
+            "models": "",   # 没有可用模型列表
+        },
+        model="gpt-4o-mini",
+    )
+
+    assert result["ok"] is True
+    assert called["body"]["model"] == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_test_key_connectivity_without_models_and_model_reports_error(monkeypatch):
+    """既没有模型列表、也没指定模型时，仍然给出明确的错误提示。"""
+    result = await check_key_connectivity(
+        {
+            "alias": "k",
+            "provider": "openai",
+            "api_key": "sk-test",
+            "base_url": "https://example.com",
+            "models": "",
+        }
+    )
+    assert result["ok"] is False
+    assert "没有可用模型列表" in result["error"]

@@ -88,6 +88,10 @@ class _UsageQueryScheduler:
         now = asyncio.get_running_loop().time()
         for key in keys:
             interval_m = int(key.get("usage_query_interval_m", 0) or 0)
+            # 开关与间隔已拆成两列：只有开关打开、且填了正的间隔才自动查询。
+            # 关闭开关不再清空间隔，所以这里必须两个条件都判。
+            if int(key.get("usage_query_enabled", 0) or 0) != 1:
+                continue
             if interval_m <= 0:
                 continue
             alias = key["alias"]
@@ -1271,6 +1275,8 @@ async def api_list_keys():
         k["usage_queried_at"] = k.pop("usage_queried_at", "") or ""
         k["usage_error"] = k.pop("usage_error", "") or ""
         k["usage_query_interval_m"] = int(k.pop("usage_query_interval_m", 0) or 0)
+        # 用量查询开关独立返回：前端据此决定是否渲染用量行、以及开关的初始状态
+        k["usage_query_enabled"] = bool(int(k.pop("usage_query_enabled", 0) or 0))
     return {"data": keys}
 
 
@@ -1388,12 +1394,26 @@ async def api_delete_key(alias: str):
 
 
 @app.post("/api/keys/{alias:path}/test")
-async def api_test_key(alias: str):
-    """测试 key 连通性"""
+async def api_test_key(alias: str, request: Request):
+    """测试 key 连通性。
+
+    可选 body：{"api_path": "chat/completions|responses|messages", "model": "..."}。
+    不传时保持原行为（按供应商能力选主接口、取模型列表第一项）。
+    """
     key = get_key(alias)
     if key is None:
         return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
-    result = await test_key_connectivity(key)
+    api_path = None
+    model = None
+    # body 是可选的：老调用方不带 body 也能正常工作
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict):
+        api_path = str(body.get("api_path") or "").strip() or None
+        model = str(body.get("model") or "").strip() or None
+    result = await test_key_connectivity(key, api_path=api_path, model=model)
     return result
 
 
@@ -1470,7 +1490,7 @@ async def api_get_usage_config(alias: str):
 
 @app.patch("/api/keys/{alias:path}/usage-config")
 async def api_set_usage_config(alias: str, request: Request):
-    """设置指定 key 的用量查询配置（脚本 / 查询间隔）"""
+    """设置指定 key 的用量查询配置（开关 / 脚本 / 查询间隔）"""
     existing = get_key(alias)
     if existing is None:
         return JSONResponse(status_code=404, content={"detail": f"Key '{alias}' 不存在"})
@@ -1478,7 +1498,17 @@ async def api_set_usage_config(alias: str, request: Request):
     script = body.get("script") if "script" in body else None
     interval_m = body.get("interval_m") if "interval_m" in body else None
     query_endpoint = body.get("query_endpoint") if "query_endpoint" in body else None
-    set_usage_query_config(alias, script=script, interval_m=interval_m, query_endpoint=query_endpoint)
+    # enabled 与 interval_m 互不影响：前端关掉开关时不再顺手把间隔写成 0
+    enabled = body.get("enabled") if "enabled" in body else None
+    if enabled is not None:
+        enabled = bool(enabled)
+    set_usage_query_config(
+        alias,
+        script=script,
+        interval_m=interval_m,
+        query_endpoint=query_endpoint,
+        enabled=enabled,
+    )
     config = get_usage_query_config(alias)
     return {"ok": True, "data": config}
 
@@ -1548,6 +1578,10 @@ async def api_query_all_keys_usage():
     for key in keys:
         config = get_usage_query_config(key["alias"])
         if config is None or not config.get("script"):
+            continue
+        # 只批量刷新「开关已打开」的 Key（开关与间隔已拆成两列，
+        # 间隔 > 0 但开关关掉的 Key 不应被内部批量查询带上）
+        if not config.get("enabled"):
             continue
         interval_m = config.get("interval_m", 0)
         if interval_m <= 0:

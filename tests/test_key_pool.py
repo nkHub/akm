@@ -150,3 +150,77 @@ def test_pick_key_prefers_exact_match_before_wildcard_provider_models(setup):
     key = pick_key(model="gpt-4")
     assert key is not None
     assert key["alias"] == "exact"
+
+
+# ── 用量查询：开关与自动查询间隔解耦 ────────────────────────
+
+def test_usage_query_toggle_is_independent_from_interval(setup):
+    """关闭开关不得把自动查询间隔清零。
+
+    历史实现把「开关」和「间隔」挤在 usage_query_interval_m 一个字段上
+    （>0 视为开启），于是关掉开关只能把间隔写成 0，用户再打开就得重填。
+    现在拆成 usage_query_enabled + usage_query_interval_m 两列。
+    """
+    from akm.key_pool import get_usage_query_config, set_usage_query_config
+
+    add_key("k", "openai", "sk-k")
+    # 新建 Key：默认关闭、间隔 0
+    cfg = get_usage_query_config("k")
+    assert cfg["enabled"] is False
+    assert cfg["interval_m"] == 0
+
+    # 打开开关并设置间隔
+    set_usage_query_config("k", interval_m=30, enabled=True)
+    cfg = get_usage_query_config("k")
+    assert cfg["enabled"] is True
+    assert cfg["interval_m"] == 30
+
+    # 关闭开关：enabled 变 False，但 interval_m 必须保留 30
+    set_usage_query_config("k", enabled=False)
+    cfg = get_usage_query_config("k")
+    assert cfg["enabled"] is False
+    assert cfg["interval_m"] == 30
+
+    # 重新打开：间隔仍是 30，不需要用户重填
+    set_usage_query_config("k", enabled=True)
+    cfg = get_usage_query_config("k")
+    assert cfg["enabled"] is True
+    assert cfg["interval_m"] == 30
+
+
+def test_usage_query_interval_update_does_not_change_enabled(setup):
+    """只改间隔不能顺带把开关改掉（两个字段互相独立）。"""
+    from akm.key_pool import get_usage_query_config, set_usage_query_config
+
+    add_key("k", "openai", "sk-k")
+    set_usage_query_config("k", interval_m=10, enabled=False)
+    cfg = get_usage_query_config("k")
+    assert cfg["enabled"] is False
+    assert cfg["interval_m"] == 10
+
+    # 只改间隔
+    set_usage_query_config("k", interval_m=20)
+    cfg = get_usage_query_config("k")
+    assert cfg["enabled"] is False, "只改间隔不应把开关打开"
+    assert cfg["interval_m"] == 20
+
+
+def test_usage_query_enabled_backfilled_from_interval_on_migration(setup):
+    """升级回填：拆列前「间隔 > 0」代表已开启，迁移后应搬到 enabled。"""
+    from akm.db import _migrate_key_usage_columns
+    from akm.key_pool import get_usage_query_config
+
+    add_key("old-on", "openai", "sk-1")
+    add_key("old-off", "openai", "sk-2")
+    conn = setup
+    # 模拟拆列前的老数据：间隔 15 表示开启，间隔 0 表示关闭
+    conn.execute("UPDATE keys SET usage_query_interval_m = 15, usage_query_enabled = 0 WHERE alias = 'old-on'")
+    conn.execute("UPDATE keys SET usage_query_interval_m = 0, usage_query_enabled = 0 WHERE alias = 'old-off'")
+    conn.commit()
+
+    _migrate_key_usage_columns(conn)
+    conn.commit()
+
+    assert get_usage_query_config("old-on")["enabled"] is True
+    assert get_usage_query_config("old-on")["interval_m"] == 15
+    assert get_usage_query_config("old-off")["enabled"] is False

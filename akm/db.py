@@ -208,6 +208,11 @@ def _migrate_key_usage_columns(conn: sqlite3.Connection) -> None:
         ("usage_data", "TEXT", "''"),
         ("usage_error", "TEXT", "''"),
         ("usage_query_endpoint", "TEXT", "''"),
+        # 用量查询开关。早期版本把「开关」和「自动查询间隔」挤在
+        # usage_query_interval_m 一个字段上（>0 视为开启），于是关闭开关时只能把
+        # 间隔一起写成 0，用户再打开就得重新填一次间隔。现在拆成两列：
+        # enabled 只表示开关状态，interval_m 只表示间隔，互不覆盖。
+        ("usage_query_enabled", "INTEGER", "0"),
     ]:
         try:
             conn.execute(f"ALTER TABLE keys ADD COLUMN {col} {col_type} DEFAULT {default}")
@@ -219,6 +224,21 @@ def _migrate_key_usage_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE keys SET usage_query_interval_m = 0 WHERE usage_query_interval_m = 5 AND (usage_query_script IS NULL OR usage_query_script = '')"
     )
+    # 拆列后的一次性回填：升级前「间隔 > 0」就是「已开启」，据此把状态搬到
+    # usage_query_enabled。只在首次新增该列后写一次（用新增列的默认值占比判断，
+    # 避免每次启动都覆盖用户已经关掉的开关）。
+    try:
+        total = conn.execute("SELECT COUNT(*) AS c FROM keys").fetchone()["c"]
+        enabled_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM keys WHERE usage_query_enabled = 1"
+        ).fetchone()["c"]
+        # 全部都是默认值 0，且确实存在「间隔>0」的老配置 → 视为从未回填过
+        if enabled_count == 0 and total > 0:
+            conn.execute(
+                "UPDATE keys SET usage_query_enabled = 1 WHERE usage_query_interval_m > 0"
+            )
+    except (sqlite3.OperationalError, TypeError):
+        pass
 
 
 # ── 定时任务（scheduled_tasks）CRUD 辅助 ─────────────────────

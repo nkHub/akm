@@ -47,7 +47,9 @@
   - 用途：右侧滑出详情面板
   - 无障碍处理与 `akm-modal` 完全一致（同一基类 `AkmOverlayPanelElement`）；初始化时会调用 `close(true)`，该路径不会触发 `inert` 清理与焦点归还，调用方无需特殊处理。
   - 常用属性：`title`、`max-width`
-  - 常用方法：`open()`、`close()`、`setTitle(text)`
+  - 常用方法：`open()`、`close(immediate?)`、`setTitle(text)`
+  - 底栏：与 `akm-modal` 同一约定——带 `data-modal-footer` 的子节点会被拆到独立的 `[data-footer]` 容器里，**不随正文滚动**（正文是 `overflow-auto`）。没有 footer 节点时该容器保持 `hidden`，既有调用方行为不变。`AKM` 实测用例：Key 测试抽屉、日志详情抽屉
+  - 适用场景：内容较长、需要常驻底部操作区（如「开始测试」/「关闭」）的详层面板。两段式交互（先选参数、再在同面板内展开结果）比连续弹两个浮层更好用——第二个浮层会叠在第一个上面，用户容易迷失层级
 
 - `akm-combobox`
   - 交互形态对齐 shadcn / Radix Select：触发器是 `<button type="button" data-combobox-trigger>`（**不是输入框**），文案在 `[data-combobox-value]`；菜单 `role="listbox"`、选项 `role="option"`，每条选项为「`.akm-cb__label` 占满剩余宽度 + `.akm-cb__check` 固定 14px 在最右」两栏，未选中也留同宽空位，选中时文字不会左右跳动

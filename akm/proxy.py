@@ -1185,10 +1185,21 @@ async def forward_request(
     }
 
 
-async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict:
-    """测试单个 key 的连通性，按供应商能力选择主接口。
+async def test_key_connectivity(
+    key: dict,
+    allow_fallback: bool = False,
+    api_path: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """测试单个 key 的连通性。
 
     allow_fallback 为 true 时，允许按兼容协议继续尝试；默认关闭。
+
+    api_path 与 model 用于管理台让用户自选「请求类型 + 请求模型」：
+    - api_path 显式指定时只用它（不再按供应商能力自动选主接口），
+      并由调用方负责保证该类型受供应商支持；
+    - model 显式指定时优先用它，即使它不在该 Key 的模型列表里
+      （常见场景：验证新模型是否已对该 Key 开放）。
 
     返回: {"ok": bool, "url": str, "model": str, "api_path": str,
            "status_code": int, "latency_ms": int, "error": str,
@@ -1198,7 +1209,8 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
     agent = get_agent(key.get("provider", "openai"))
 
     resolved_models = key_model_list(key)
-    if not resolved_models:
+    explicit_model = str(model or "").strip()
+    if not resolved_models and not explicit_model:
         return {
             "ok": False,
             "url": "",
@@ -1211,7 +1223,7 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
             "attempted_paths": [],
             "fallback_used": False,
         }
-    model = str(resolved_models[0] or "").strip()
+    model = explicit_model or str(resolved_models[0] or "").strip()
 
     is_custom_agent = agent.name not in BUILTIN_AGENTS
     if is_custom_agent:
@@ -1249,6 +1261,12 @@ async def test_key_connectivity(key: dict, allow_fallback: bool = False) -> dict
         candidate_paths = ["messages"]
     else:
         candidate_paths = ["chat/completions"]
+
+    # 用户显式指定请求类型时只测这一条：不再自动尝试兼容协议，
+    # 否则「测 messages」可能被 chat/completions 抢先成功，测的不是用户选的那个。
+    explicit_path = str(api_path or "").strip()
+    if explicit_path:
+        candidate_paths = [explicit_path]
 
     attempted_paths: list[str] = []
 

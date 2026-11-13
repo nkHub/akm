@@ -213,13 +213,15 @@ def add_key(
     normalized_provider_models = _normalize_provider_models(provider_models)
     conn = get_connection()
     try:
-        # 显式写入 usage_query_interval_m = 0 确保新建 Key 默认关闭用量自动查询。
+        # 显式写入 usage_query_interval_m = 0 / usage_query_enabled = 0：
+        # 新建 Key 默认关闭用量自动查询，且不预设间隔。打开开关时前端会给
+        # 一个可用默认值（5 分钟），所以这里保持 0 不影响「打开即能查」。
         # SQLite ALTER TABLE ADD COLUMN 的 DEFAULT 一旦设定就无法修改；
         # 已迁移到旧版本（DEFAULT=5）的数据库，ALTER TABLE ADD COLUMN DEFAULT 0
-        # 会因“列已存在”静默跳过，导致新 Key 仍拿到旧默认值 5。
+        # 会因“列已存在”静默跳过，因此这里始终显式写入两列值。
         conn.execute(
-            """INSERT INTO keys (alias, provider, api_key, base_url, models, provider_models, auth_header, priority, usage_query_interval_m)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            """INSERT INTO keys (alias, provider, api_key, base_url, models, provider_models, auth_header, priority, usage_query_interval_m, usage_query_enabled)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""",
             (alias, provider, enc_key, base_url, models, normalized_provider_models, auth_header, priority),
         )
         conn.commit()
@@ -538,21 +540,29 @@ async def pick_wildcard_key_async(model: str = "", exclude_aliases: list[str] | 
 # ── 用量查询配置 ─────────────────────────────────────────────
 
 def get_usage_query_config(alias: str, provider: str = "") -> dict | None:
-    """获取指定 key 的用量查询配置（脚本 + 间隔 + 最近结果）"""
+    """获取指定 key 的用量查询配置（开关 + 脚本 + 间隔 + 最近结果）"""
     conn = get_connection()
     row = conn.execute(
-        "SELECT usage_query_script, usage_query_interval_m, usage_queried_at, usage_data, usage_error, usage_query_endpoint FROM keys WHERE alias = ?",
+        "SELECT usage_query_script, usage_query_interval_m, usage_query_enabled, usage_queried_at, usage_data, usage_error, usage_query_endpoint FROM keys WHERE alias = ?",
         (alias,),
     ).fetchone()
     conn.close()
     if row is None:
         return None
     script_raw = row["usage_query_script"] or ""
+    interval_m = int(row["usage_query_interval_m"] or 0)
+    # 老库没有 usage_query_enabled 列时的兜底：此时只能按「间隔>0」判断开启，
+    # 与拆列前的语义一致，避免升级瞬间把所有配置判成关闭。
+    try:
+        enabled = bool(int(row["usage_query_enabled"] or 0))
+    except (IndexError, KeyError, TypeError):
+        enabled = interval_m > 0
     return {
         "alias": alias,
         "script": script_raw if script_raw else get_default_usage_script(provider),
         "script_is_default": not script_raw,
-        "interval_m": int(row["usage_query_interval_m"] or 0),
+        "enabled": enabled,
+        "interval_m": interval_m,
         "queried_at": row["usage_queried_at"] or "",
         "data": _safe_json_parse(row["usage_data"]),
         "error": row["usage_error"] or "",
@@ -560,13 +570,28 @@ def get_usage_query_config(alias: str, provider: str = "") -> dict | None:
     }
 
 
-def set_usage_query_config(alias: str, script: str | None = None, interval_m: int | None = None, query_endpoint: str | None = None) -> None:
-    """设置 key 的用量查询配置（脚本 / 查询间隔(分钟) / 自定义端点）"""
+def set_usage_query_config(
+    alias: str,
+    script: str | None = None,
+    interval_m: int | None = None,
+    query_endpoint: str | None = None,
+    enabled: bool | None = None,
+) -> None:
+    """设置 key 的用量查询配置（开关 / 脚本 / 查询间隔(分钟) / 自定义端点）。
+
+    ``enabled`` 与 ``interval_m`` 是两个独立字段：关闭开关**不会**把间隔改成 0，
+    用户下次重新打开时仍是上次填的值。
+    """
     conn = get_connection()
     if script is not None:
         conn.execute("UPDATE keys SET usage_query_script = ? WHERE alias = ?", (script, alias))
     if interval_m is not None:
         conn.execute("UPDATE keys SET usage_query_interval_m = ? WHERE alias = ?", (int(interval_m or 0), alias))
+    if enabled is not None:
+        conn.execute(
+            "UPDATE keys SET usage_query_enabled = ? WHERE alias = ?",
+            (1 if enabled else 0, alias),
+        )
     if query_endpoint is not None:
         conn.execute("UPDATE keys SET usage_query_endpoint = ? WHERE alias = ?", (query_endpoint, alias))
     conn.commit()
