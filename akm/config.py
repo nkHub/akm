@@ -31,7 +31,12 @@ DEFAULTS = {
     "image_supported_models": "gpt-image-2",  # 图片生成/编辑支持的模型列表（逗号分隔，首项作为默认值）
     "image_request_timeout_sec": 300,  # 图片生成/编辑请求超时（秒），默认比聊天接口更宽松
     "wake_recover_delay_sec": 8,  # 菜单栏应用在系统唤醒后等待网络/VPN恢复的秒数
-    "use_native_user_agent": False,  # 是否透传客户端原始 User-Agent 并携带客户端业务头到上游
+    # 是否透传客户端原始 User-Agent 并携带客户端业务头到上游。
+    # v0.1.59 起默认 True：中转场景下游多是 Claude Code / Codex / pi-desktop 这类客户端，
+    # 它们靠 UA 触发上游的特定行为（如 Anthropic 的 OAuth 分支、Cloudflare 的放行策略），
+    # 统一改写成 akm/<version> 反而容易被 WAF 拦或走进不同计费/能力分支。
+    # 置 False 会回退为固定 akm/<version>。
+    "use_native_user_agent": True,
     # 出站 HTTP 代理：仅作用于 AKM 访问上游供应商的请求，不是系统 VPN
     "http_proxy_enabled": False,
     "http_proxy_url": "",  # 例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080

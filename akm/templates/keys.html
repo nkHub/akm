@@ -227,8 +227,11 @@ function buildProviderOptions(agents) {
 function renderProviderOptions(options) {
   var box = document.getElementById('key-provider');
   if (!box || typeof box.setOptions !== 'function') return;
-  var list = [{ value: '', label: '选择供应商' }];
+  // 不再塞一条 value='' 的「选择供应商」：占位符由 placeholder 承担，
+  // 候选里出现一条能被勾中的空项会让用户以为「未选择」是个真实选项。
+  var list = [];
   (options || []).forEach(function(o) {
+    if (!o || o.value === '') return;
     list.push({ value: o.value, label: o.label });
   });
   box.setOptions(list);

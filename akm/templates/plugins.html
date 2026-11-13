@@ -251,12 +251,15 @@ function renderDataFilterRuleRow(type, row) {
   }
   return '<div class="grid grid-cols-[1fr_110px_auto] gap-2 items-center mb-2 data-filter-row" data-row-type="response">'
     + '<input type="text" data-col="pattern" value="' + esc(row.pattern || '') + '" placeholder="高风险正则" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
-    + '<select data-col="action" class="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">'
-    + '<option value="default"' + ((row.action || 'default') === 'default' ? ' selected' : '') + '>跟随全局</option>'
-    + '<option value="warn"' + (row.action === 'warn' ? ' selected' : '') + '>warn</option>'
-    + '<option value="mask"' + (row.action === 'mask' ? ' selected' : '') + '>mask</option>'
-    + '<option value="block"' + (row.action === 'block' ? ' selected' : '') + '>block</option>'
-    + '</select>'
+    // 行内的动作下拉同样用 akm-combobox；候选在 renderPluginConfigModalBody 之后
+    // 由 hydrateDynamicSelectOptions 按 data-static-options 注入。
+    + '<akm-combobox data-col="action" data-static-options="' + esc(JSON.stringify([
+        { value: 'default', label: '跟随全局' },
+        { value: 'warn', label: 'warn' },
+        { value: 'mask', label: 'mask' },
+        { value: 'block', label: 'block' }
+      ])) + '" data-current-value="' + esc(row.action || 'default') +
+      '" placeholder="动作" host-class="block"></akm-combobox>'
     + '<button type="button" onclick="removeDataFilterRuleRow(this)" class="text-red-400 hover:text-red-300 text-xs cursor-pointer">删除</button>'
     + '</div>';
 }
@@ -310,11 +313,12 @@ function renderDataFilterStructuredEditor(p) {
   responseSection += '</label>';
   responseSection += '<label class="block">';
   responseSection += '<div class="text-xs text-gray-300 mb-1">响应处理模式</div>';
-  responseSection += '<select data-plugin="' + name + '" data-key="response_guard_mode" data-type="string" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">';
-  responseSection += '<option value="warn"' + (cfg.response_guard_mode === 'warn' ? ' selected' : '') + '>warn</option>';
-  responseSection += '<option value="mask"' + (cfg.response_guard_mode === 'mask' ? ' selected' : '') + '>mask</option>';
-  responseSection += '<option value="block"' + ((cfg.response_guard_mode || 'block') === 'block' ? ' selected' : '') + '>block</option>';
-  responseSection += '</select>';
+  // 与表单里的 select 走同一条路径：akm-combobox + data-static-options，
+  // 候选由 hydrateDynamicSelectOptions 注入，保存时按 data-key 读 value。
+  responseSection += '<akm-combobox data-plugin="' + name + '" data-key="response_guard_mode" data-type="string"';
+  responseSection += ' data-static-options="' + esc(JSON.stringify(['warn', 'mask', 'block'])) + '"';
+  responseSection += ' data-current-value="' + esc(cfg.response_guard_mode || 'block') + '"';
+  responseSection += ' placeholder="响应处理模式" host-class="block"></akm-combobox>';
   responseSection += '</label>';
   responseSection += '<label class="block">';
   responseSection += '<div class="text-xs text-gray-300 mb-1">流式缓存长度</div>';
@@ -390,6 +394,10 @@ function addDataFilterRuleRow(pluginName, type) {
   if (!container) return;
   var row = type === 'response' ? {pattern:'', action:'default'} : {left:'', right:''};
   container.insertAdjacentHTML('beforeend', renderDataFilterRuleRow(type, row));
+  // 新增行里的 akm-combobox 是刚插入的空组件：候选必须再注入一次，
+  // 否则这行会是一个没有选项的下拉（原生 <option> 内联在 HTML 里时不需要这一步）。
+  var added = container.lastElementChild;
+  if (added) hydrateComboboxIn(added);
 }
 
 function removeDataFilterRuleRow(btn) {
@@ -491,19 +499,6 @@ function renderPluginConfigModalBody(plugin) {
 
 var _modalModelOptionsCache = [];
 
-function buildModelSelectOptions(models, selectedValue, allowEmpty, emptyLabel) {
-  var html = '';
-  var value = String(selectedValue || '').trim();
-  if (allowEmpty) html += '<option value="">' + esc(emptyLabel || '未设置') + '</option>';
-  if (value && models.indexOf(value) < 0) {
-    html += '<option value="' + esc(value) + '">' + esc(value) + '（当前配置）</option>';
-  }
-  models.forEach(function(model){
-    html += '<option value="' + esc(model) + '">' + esc(model) + '</option>';
-  });
-  return html;
-}
-
 function fetchAvailableModelsForModal() {
   return fetch('/v1/models')
     .then(function(r){ return r.ok ? r.json() : {data: []}; })
@@ -516,17 +511,71 @@ function fetchAvailableModelsForModal() {
       return _modalModelOptionsCache;
     });
 }
-
-function hydrateDynamicSelectOptions(plugin) {
-  if (!plugin) return;
-  var models = _modalModelOptionsCache || [];
-  document.querySelectorAll('#plugin-config-modal-body [data-plugin="' + plugin.name + '"][data-options-source="/v1/models"]').forEach(function(node){
+/**
+ * 给指定元素（或其内部）的 akm-combobox 注入候选项。
+ *
+ * 供两条路径复用：弹窗整体渲染（hydrateDynamicSelectOptions）与数据过滤规则行
+ * 动态新增（addDataFilterRuleRow）。akm-combobox 的候选是组件内部状态，
+ * 只能通过 setOptions 注入，不能再拼 <option>。
+ */
+function hydrateComboboxIn(root) {
+  if (!root) return;
+  var nodes = [];
+  if (root.matches && root.matches('akm-combobox')) nodes.push(root);
+  if (root.querySelectorAll) {
+    nodes = nodes.concat(Array.prototype.slice.call(root.querySelectorAll('akm-combobox')));
+  }
+  nodes.forEach(function(node){
+    if (typeof node.setOptions !== 'function') return;
     var currentValue = String(node.getAttribute('data-current-value') || '').trim();
+    if (node.__akmHydrated) {
+      // 已经注入过候选（例如弹窗整体 hydrate 已覆盖），只回填当前值
+      if (currentValue && node.value !== currentValue) node.setValue(currentValue, true);
+      return;
+    }
     var allowEmpty = node.getAttribute('data-allow-empty') === '1';
     var emptyLabel = node.getAttribute('data-empty-label') || '未设置';
-    node.innerHTML = buildModelSelectOptions(models, currentValue, allowEmpty, emptyLabel);
-    node.value = currentValue;
+    var isDynamic = node.getAttribute('data-options-source') === '/v1/models';
+    var list = [];
+    if (allowEmpty) list.push({ value: '', label: emptyLabel });
+    if (isDynamic) {
+      // 配置里的值可能已不在候选里（模型下线 / 换了 Key），补一条并标注来源，
+      // 否则回显会变成占位符、一保存就把它冲掉。
+      if (currentValue && _modalModelOptionsCache.indexOf(currentValue) < 0) {
+        list.push({ value: currentValue, label: currentValue + '（当前配置）' });
+      }
+      (_modalModelOptionsCache || []).forEach(function(model){
+        list.push({ value: String(model), label: String(model) });
+      });
+    } else {
+      var staticOptions = [];
+      try { staticOptions = JSON.parse(node.getAttribute('data-static-options') || '[]'); } catch (e) {}
+      (Array.isArray(staticOptions) ? staticOptions : []).forEach(function(option){
+        // 允许两种写法：纯字符串数组，或 {value,label} 对象数组
+        if (option && typeof option === 'object') {
+          list.push({ value: String(option.value), label: String(option.label == null ? option.value : option.label) });
+        } else {
+          list.push({ value: String(option), label: String(option) });
+        }
+      });
+    }
+    node.setOptions(list, currentValue);
+    node.__akmHydrated = true;
   });
+}
+
+
+/**
+ * 给配置弹窗里所有 akm-combobox 填充候选。
+ *
+ * 具体注入逻辑在 hydrateComboboxIn（与「数据过滤规则行动态新增」共用一份），
+ * 这里只负责按插件名圈定范围，避免误伤弹窗外的同名控件。
+ */
+function hydrateDynamicSelectOptions(plugin) {
+  if (!plugin) return;
+  var body = document.getElementById('plugin-config-modal-body');
+  if (!body) return;
+  hydrateComboboxIn(body);
 }
 
 function renderPluginSettingsFormBody(p) {
@@ -554,12 +603,18 @@ function renderPluginSettingsFormBody(p) {
       html += '</div>';
     } else if (def.type === 'select') {
       html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
-      var staticOptions = Array.isArray(def.options) ? def.options : [];
-      var optionHtml = staticOptions.map(function(option){
-        var optionValue = String(option);
-        return '<option value="' + esc(optionValue) + '"' + (optionValue === String(value || '') ? ' selected' : '') + '>' + esc(optionValue) + '</option>';
-      }).join('');
-      html += '<select data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="string" data-options-source="' + esc(def.options_source || '') + '" data-allow-empty="' + (def.allow_empty_option ? '1' : '0') + '" data-empty-label="' + esc(def.empty_option_label || '') + '" data-current-value="' + esc(value || '') + '" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + optionHtml + '</select>';
+      // 用管理台的 akm-combobox 而不是原生 <select>：原生下拉的弹出层由系统绘制，
+      // 深浅色、圆角、层级都不受控（模型候选可达数百条时也无法搜索）。
+      // 候选由 hydrateDynamicSelectOptions 用 setOptions 注入（静态选项与 /v1/models
+      // 走同一条路径），保存时按 [data-key] 节点读 node.value（combobox 实现了 value getter）。
+      html += '<akm-combobox data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) +
+        '" data-type="string" data-options-source="' + esc(def.options_source || '') +
+        '" data-allow-empty="' + (def.allow_empty_option ? '1' : '0') +
+        '" data-empty-label="' + esc(def.empty_option_label || '') +
+        '" data-static-options="' + esc(JSON.stringify(def.options || [])) +
+        '" data-current-value="' + esc(value || '') +
+        '" placeholder="' + esc(def.placeholder || ('选择' + (def.label || def.key))) +
+        '" host-class="block"></akm-combobox>';
     } else if (def.type === 'text') {
       html += '<div class="text-xs text-gray-300 mb-1">' + esc(def.label || def.key) + '</div>';
       html += '<textarea data-plugin="' + esc(p.name) + '" data-key="' + esc(def.key) + '" data-type="text" rows="3" class="w-full bg-surface border border-border rounded px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">' + esc(value || '') + '</textarea>';
@@ -589,13 +644,19 @@ function openPluginConfigModal(name) {
   body.innerHTML = renderPluginConfigModalBody(plugin);
   msg.textContent = '';
   msg.className = 'text-xs text-gray-500';
-  if (plugin.settings && plugin.settings.some(function(def){ return def && def.options_source === '/v1/models'; })) {
+  var needsModels = !!(plugin.settings && plugin.settings.some(function(def){
+    return def && def.options_source === '/v1/models';
+  }));
+  // 无论有没有动态模型选项，都要 hydrate：akm-combobox 的候选是组件内部状态，
+  // 不在渲染时注入就会是一个空下拉（原生 <select> 时代候选直接写在 HTML 里，没这问题）。
+  if (needsModels) {
     fetchAvailableModelsForModal().then(function(){
       hydrateDynamicSelectOptions(plugin);
       modal.open();
     });
     return;
   }
+  hydrateDynamicSelectOptions(plugin);
   modal.open();
 }
 

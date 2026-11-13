@@ -50,12 +50,14 @@
   - 常用方法：`open()`、`close()`、`setTitle(text)`
 
 - `akm-combobox`
-  - 用途：可搜索下拉，替代原生 `<select>`（原生下拉的弹出层由系统绘制，深浅色/圆角不受控，视觉割裂）
-  - 常用属性：`placeholder`、`host-class`
-  - 常用方法：`setOptions([{value,label,desc?,group?}], currentValue?, ...)`、`setValue(v)`；`value` 可读写；`change` 事件照常触发
-  - 约定：候选存在**组件内部**（`_options`），不能用 `querySelector('option')` 或 `sel.options` 读写；程序设值必须走 `setValue` / `setOptions`
+  - 交互形态对齐 shadcn / Radix Select：触发器是 `<button type="button" data-combobox-trigger>`（**不是输入框**），文案在 `[data-combobox-value]`；菜单 `role="listbox"`、选项 `role="option"`，每条选项为「`.akm-cb__label` 占满剩余宽度 + `.akm-cb__check` 固定 14px 在最右」两栏，未选中也留同宽空位，选中时文字不会左右跳动
+  - 常用属性：`placeholder`（关闭且无值时显示在触发器上，**不作为候选项**）、`host-class`
+  - 常用方法：`setOptions([{value,label,desc?,group?}], currentValue?)`、`setValue(v, silent?)`；`value` 可读写；`change` 事件照常触发
+  - 约定：`setOptions` **不过滤空字符串**候选项，只丢弃 `value` 为 `null`/`undefined` 的项。空字符串在插件配置里是真实选项（`reranker_model` 的「不启用 rerank」、`chat_model` 的「不启用对话与碎碎念」）；不需要「未选择」项时由调用方自行过滤（`keys.html` 的供应商下拉即如此）
+  - 约定：候选存在**组件内部**（`_options`），不能用 `querySelector('option')` 或 `sel.options` 读写；程序设值必须走 `setValue` / `setOptions`。`setOptions` 的第二个参数一次性设初值（静默，不派发 `change`）
+  - 键盘：`Enter` / `Space` 在关闭时展开、展开时确认高亮项；`ArrowUp` / `ArrowDown` / `Home` / `End` / `Escape` / `Tab` 齐备；展开后打可打印字符直接进入过滤（补齐系统下拉只能首字母跳转的不足）
   - 约定：下拉菜单挂在 `<body>` 上（绕开弹窗滚动容器裁剪），层级、定位、配色全部用**内联样式**而非 Tailwind 工具类——插件页只加载 preflight、没有 utilities，`z-[60]` 这类类名在那里完全不生效（曾因此被后续按钮盖住）。选项行的内边距等由 `ensureComboboxStyles()` 注入的样式表兜底
-  - 使用方：Key 管理页的供应商选择（八家固定供应商 + 接口返回的其余供应商，可选可搜）、`prompt_booster` 插件的注入位置
+  - 使用方：Key 管理页的供应商选择（八家固定供应商 + 接口返回的其余供应商，可选可搜）、`prompt_booster` 插件的注入位置、插件配置弹窗内全部下拉（通用 `select` 配置项、`data_filter_guard` 响应规则动作列、`response_guard_mode`，候选由 `hydrateComboboxIn()` 注入）
 - `akm-tooltip`
   - 用途：包裹任意触发行内元素（如信息图标），hover 时在页面级显示多行说明浮层
   - 常用属性：`content`（提示文本，支持 `\n` 换行）
