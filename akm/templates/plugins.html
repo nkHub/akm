@@ -38,6 +38,20 @@
   </div>
 </akm-modal>
 
+<!-- 市场安装/更新的确认框：替代原生 confirm()，样式与管理台一致 -->
+<akm-modal id="market-confirm-modal" title="确认操作" max-width="max-w-md">
+  <div class="px-1 py-1">
+    <h3 id="market-confirm-title" class="text-sm font-semibold text-strong mb-2">确认安装插件</h3>
+    <p id="market-confirm-text" class="text-xs text-gray-400"></p>
+  </div>
+  <div data-modal-footer>
+    <div class="flex items-center justify-end gap-2 px-4 py-3">
+      <button type="button" onclick="document.getElementById('market-confirm-modal').close()" class="text-xs px-3 py-1.5 rounded bg-surface border border-border text-gray-300 hover:text-strong transition-colors cursor-pointer">取消</button>
+      <button type="button" id="market-confirm-ok" onclick="onMarketConfirmOk()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">确认安装</button>
+    </div>
+  </div>
+</akm-modal>
+
 <akm-modal id="plugin-config-modal" title="插件配置" max-width="max-w-3xl" panel-class="max-h-[80vh] flex flex-col" body-class="p-4 overflow-y-auto flex-1 min-h-0">
   <div id="plugin-config-modal-body"></div>
   <div data-modal-footer>
@@ -630,6 +644,37 @@ function loadMarket() {
   });
 }
 
+// 单张市场卡片的右侧状态区 HTML。
+// 抽成函数是为了让「首次渲染」与「安装完成后就地更新」共用同一份判定逻辑，
+// 避免两处各写一遍导致状态显示不一致。
+function marketStateHtml(p) {
+  var name = esc(p.name);
+  var btnCls = 'text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer';
+  if (p.installed && p.has_update) {
+    return '<button type="button" data-market-name="' + name + '" onclick="installMarketPlugin(\'' + name + '\', this)" class="' + btnCls + '">更新</button>';
+  }
+  if (p.installed) {
+    return '<span class="text-xs text-gray-500">已安装 v' + esc(p.installed_version || p.version) + '</span>';
+  }
+  return '<button type="button" data-market-name="' + name + '" onclick="installMarketPlugin(\'' + name + '\', this)" class="' + btnCls + '">安装</button>';
+}
+
+// 安装完成后只替换该插件卡片的状态区，不重建弹窗内容。
+// 之前是 loadMarket() + loadPlugins()，前者会把整个弹窗 body 换回「拉取插件市场...」
+// 骨架并重置到第 1 页，用户正在看的第 N 页会被打断、体感是「弹窗重新 loading」。
+// 现在：本地更新 _marketList / _marketByName 里的该条记录 → 只重写这一张卡片的状态节点。
+function applyMarketInstalled(name) {
+  var item = _marketByName[name];
+  if (!item) return;
+  var fromVersion = item.version;
+  item.installed = true;
+  item.installed_version = fromVersion;
+  item.has_update = false;
+  var card = document.querySelector('[data-market-card="' + name + '"]');
+  var state = card ? card.querySelector('[data-market-state]') : null;
+  if (state) state.innerHTML = marketStateHtml(item);
+}
+
 function renderMarket() {
   var body = document.getElementById('plugin-market-modal-body');
   var pagination = document.getElementById('plugin-market-pagination');
@@ -648,15 +693,10 @@ function renderMarket() {
   var html = '<div class="grid grid-cols-1 lg:grid-cols-2 gap-3">';
   pageItems.forEach(function(p) {
     var cat = CATEGORY_LABELS[p.category] || p.category || '未分类';
-    var state;
-    if (p.installed && p.has_update) {
-      state = '<button type="button" data-market-name="' + esc(p.name) + '" onclick="installMarketPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">更新</button>';
-    } else if (p.installed) {
-      state = '<span class="text-xs text-gray-500">已安装 v' + esc(p.installed_version || p.version) + '</span>';
-    } else {
-      state = '<button type="button" data-market-name="' + esc(p.name) + '" onclick="installMarketPlugin(\'' + esc(p.name) + '\', this)" class="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer">安装</button>';
-    }
-    html += '<div class="bg-surface-light border border-border rounded-lg p-4">';
+    var state = marketStateHtml(p);
+    // 每张卡片的状态区带独立 data-market-state，安装完成后只替换这一个节点，
+    // 不重建整页列表（用户明确要求：不要弹窗重新 loading）。
+    html += '<div class="bg-surface-light border border-border rounded-lg p-4" data-market-card="' + esc(p.name) + '">';
     html += '<div class="flex items-start justify-between gap-3">';
     html += '<div class="flex-1 min-w-0">';
     html += '<div class="flex items-center gap-2 mb-1 flex-wrap">';
@@ -673,7 +713,7 @@ function renderMarket() {
       html += '<p class="text-xs text-gray-500 line-clamp-2">' + esc(p.description) + '</p>';
     }
     html += '</div>';
-    html += '<div class="shrink-0">' + state + '</div>';
+    html += '<div class="shrink-0" data-market-state>' + state + '</div>';
     html += '</div>';
     html += '</div>';
   });
@@ -725,9 +765,38 @@ function setMarketInstalling(name, intro, on) {
   });
 }
 
+// 安装/更新确认框：用 akm-ui 的 akm-modal 而不是原生 confirm（原生 confirm 在不同
+// 平台样式不一、且阻塞整个页面）。弹窗内容随 intro 变化，回调由 _marketConfirmCb 承接。
+function askMarketConfirm(intro, name, cb) {
+  var modal = document.getElementById('market-confirm-modal');
+  var titleEl = document.getElementById('market-confirm-title');
+  var textEl = document.getElementById('market-confirm-text');
+  var okBtn = document.getElementById('market-confirm-ok');
+  if (!modal || !okBtn) { cb(); return; }
+  if (titleEl) titleEl.textContent = '确认' + intro + '插件';
+  if (textEl) textEl.textContent = '将从 GitHub 市场' + intro + '插件「' + name + '」，确认继续？';
+  okBtn.textContent = '确认' + intro;
+  _marketConfirmCb = cb;
+  modal.open();
+}
+
+var _marketConfirmCb = null;
+
+function onMarketConfirmOk() {
+  var cb = _marketConfirmCb;
+  _marketConfirmCb = null;
+  var modal = document.getElementById('market-confirm-modal');
+  if (modal) modal.close();
+  if (typeof cb === 'function') cb();
+}
+
 function installMarketPlugin(name, btn) {
+  if (_marketInstalling[name]) return;
   var intro = (_marketByName[name] && _marketByName[name].has_update) ? '更新' : '安装';
-  if (!confirm('确认从 GitHub 市场' + intro + '插件 "' + name + '"？')) return;
+  askMarketConfirm(intro, name, function() { startMarketInstall(name, intro); });
+}
+
+function startMarketInstall(name, intro) {
   if (_marketInstalling[name]) return;
   _marketInstalling[name] = true;
   setMarketInstalling(name, intro, true);
@@ -754,18 +823,20 @@ function installMarketPlugin(name, btn) {
     setMarketInstalling(name, intro, false);
     if (data.ok) {
       window.akmNotify.update(notifId, { type: 'success', title: intro + '插件 ' + name + ' 成功', message: data.message || '操作完成' });
-      loadMarket();
+      // **不重载弹窗**：只在本地把该插件标记为已安装并替换这一张卡片的状态区，
+      // 用户当前所在页码、其它卡片、滚动位置都不动。
+      applyMarketInstalled(name);
+      // 已加载插件列表要跟着刷新（市场弹窗在下层，重新渲染它不影响当前可见的列表，
+      // 也不会让市场弹窗进入 loading 状态）。
       loadPlugins();
     } else {
       window.akmNotify.update(notifId, { type: 'error', title: intro + '插件 ' + name + ' 失败', message: data.error || '拉取失败' });
-      loadMarket();
     }
   }).catch(function(e){
     clearInterval(pollTimer);
     delete _marketInstalling[name];
     setMarketInstalling(name, intro, false);
     window.akmNotify.update(notifId, { type: 'error', title: '网络错误', message: e.message });
-    loadMarket();
   });
 }
 

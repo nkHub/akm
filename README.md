@@ -211,6 +211,10 @@ akm-menubar
 
 **侧边栏导航**：侧栏条目是普通链接（整页加载，无 SPA 路由）。点击当前已选中的菜单项时不会再触发整页刷新——`akm/templates/_toggle_sidebar.html` 在 document 捕获阶段拦截「同源且 pathname 与当前页一致」的 `#sidebar` 链接，只把焦点交回该项；带 `target` / `download` / 修饰键（Cmd、Ctrl、Shift、Alt）点击一律放行，保留用户另开标签页的意图。判断用 pathname 而非整条 href，因此插件宿主页带 `?tab=` 参数时点同一菜单也不会刷新。
 
+**组件优先原则**：管理台交互统一优先用 `akm-ui.js` 里的自建组件（`akm-modal` / `akm-drawer` / `akm-combobox` / `akm-notify` / `akm-switch` / `akm-pagination` 等），少用原生 `alert` / `confirm` / `prompt` 与原生 `<select>`——原生控件的弹出层由系统绘制，深浅色、圆角、层级都不受页面控制，在浅色主题下尤其割裂。插件页（`/plugins/{name}/raw`）由宿主自动注入带版本号的 `akm-ui.js`，因此插件同样可以直接使用这些组件，接入说明见 `docs/design/plugin-system.md` 的 9.4 节。
+
+**插件市场安装不再让弹窗重新 loading**：此前安装/更新成功后调 `loadMarket()`，整个弹窗会被换回「拉取插件市场…」骨架并重置到第 1 页。现在成功后只在本地把该插件标记为已安装、**只替换这一张卡片的状态区**（`data-market-state`）为「已安装 vX.Y.Z」，当前页码、其它卡片与滚动位置都不动；进度仍由右上角通知的进度条展示。安装确认也从原生 `confirm()` 换成 `akm-modal`（带 `role="dialog"` 与焦点管理）。
+
 管理台内部的通用 Web Component 约定见 `docs/design/web-components.md`，当前统一沉淀了开关、分页、分段按钮、空态、弹窗、抽屉、设置卡片和折线图（`akm-line-chart`）、环形图（`akm-donut-chart`）等基础壳组件，供后续页面复用。
 
 仓库当前还提供一个**默认关闭**的 `markdown_kb` 插件，提供 Markdown 知识库、RAG 检索增强生成能力。其「自动注入」也**默认关闭**：开启插件并开启插件配置里的 `auto_inject` 后，才会对 `chat / messages / responses` 三类文本请求自动抽取最后一个用户问题检索并注入参考资料；关闭时可使用管理台 query / ask 或 `/api/markdown-kb/query`、`ask` 手动使用知识库。v0.1.3 起插件还新增了独立开关 `inject_project_context`（同样默认关闭）：开启后为每个绑定过工作区的项目在插件数据目录下自动维护 `context.md` / `memory.md`（项目级上下文 + 最近修改记忆，不进知识库索引，与 `auto_inject` 互不影响），带工作区信号的请求会在会话首轮注入项目上下文、后续轮次仅在记忆版本更新时轻量刷新（若希望每个请求都带全量项目上下文，可再开启 `inject_project_context_each_turn`，默认关闭）；老项目可在插件加载时自动回填，也可调用 `POST /api/markdown-kb/projects/init` 手动补齐；`context.md` 的“首次生成 / 增量更新”由本地模型完成（只依据一次性读取的真实仓库材料，≤150 行固定章节，1 天冷却，无模型时保留现状）。v0.1.4 起信号抽取做了严格化与目录防御：只认会话开头少量消息里的完整环境块 / 系统级工作目录信号，对话正文里的 `Working directory:` 字样不再触发，且自动建项目只面向真实存在的目录，避免产生垃圾项目与无意义生成。该插件的检索接口还以 **MCP（HTTP）** 方式暴露，配置为 `{"type": "http", "url": "http://127.0.0.1:{port}/api/markdown-kb/mcp"}` 即可接入支持 HTTP 的 MCP 客户端（如 Claude Desktop / Cursor）。详见 [plugins/markdown_kb/README.md](plugins/markdown_kb/README.md)。

@@ -127,7 +127,11 @@
       letter-spacing: 0.05em;
       margin-bottom: 6px;
     }
-    textarea {
+    /* Tailwind 的 preflight 里有 `textarea{...margin:0;padding:0}`，/static/tailwindcss.js
+       在本 <style> 之后加载，同优先级下会反过来盖掉下面的 `padding:10px 12px`
+       （用户看到的就是「输入框没有内边距」）。用「元素 + id」提高特异性压回去，
+       不依赖样式加载顺序。 */
+    textarea#prompt-text {
       width: 100%;
       min-height: 160px;
       background: var(--surface-light);
@@ -241,10 +245,9 @@
 
       <div style="margin-bottom: 20px;">
         <label for="position">注入位置</label>
-        <select id="position">
-          <option value="before">加在原有内容前面</option>
-          <option value="after">追加到原有内容末尾</option>
-        </select>
+        <!-- 用管理台的 akm-combobox（akm-ui.js 由宿主注入到插件页），不用原生 <select>：
+             原生下拉的弹出层由系统绘制，深浅色与圆角都不受页面控制，视觉上很割裂。 -->
+        <akm-combobox id="position" placeholder="选择注入位置" host-class="relative block"></akm-combobox>
       </div>
 
       <div style="display: flex; align-items: center; gap: 12px;">
@@ -275,6 +278,17 @@
     var statusEl = document.getElementById('status');
     var textEl = document.getElementById('prompt-text');
     var posEl = document.getElementById('position');
+
+    // 注入位置候选：akm-combobox 的候选是组件内部状态，必须用 setOptions 注入。
+    // akm-ui.js 由宿主注入到插件页（见 akm/server.py 的 _inject_plugin_host_assets），
+    // 因此这里可以直接用组件，无需插件自带脚本引用。
+    var POSITION_OPTIONS = [
+      { value: 'before', label: '加在原有内容前面' },
+      { value: 'after',  label: '追加到原有内容末尾' }
+    ];
+    if (posEl && typeof posEl.setOptions === 'function') {
+      posEl.setOptions(POSITION_OPTIONS, 'before');
+    }
     var countEl = document.getElementById('char-count');
 
     textEl.addEventListener('input', function() {

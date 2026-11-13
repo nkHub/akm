@@ -3025,9 +3025,39 @@ async def plugin_view(name: str, request: Request):
     ))
 
 
+def _inject_plugin_host_assets(html: str) -> str:
+    """为插件页 HTML 注入管理台的通用前端资源（当前为 akm-ui.js）。
+
+    为什么由宿主注入而不是让插件自己写 <script>：插件页可能是纯静态 HTML（没有
+    模板引擎可用），没法带版本号做缓存击穿；而管理台静态资源用 `?v=<version>` 破缓存，
+    插件硬编码版本号必然随 AKM 升级而漂移。由宿主注入可保证：
+    - 路径与版本号始终与当前内核一致；
+    - 页面自身不需要任何构建步骤就能用到组件库。
+
+    插入位置在 </head> 之前（没有 </head> 则插到文档最前），保证组件在 body 脚本
+    执行前完成注册。重复调用不会注入两次（按标记注释判断）。
+    """
+    marker = "<!-- akm-plugin-host-assets -->"
+    if marker in html:
+        return html
+    script = (
+        marker
+        + f'<script src="/static/akm-ui.js?v={__version__}"></script>'
+    )
+    lower = html.lower()
+    idx = lower.rfind("</head>")
+    if idx != -1:
+        return html[:idx] + script + html[idx:]
+    return script + html
+
+
 @app.get("/plugins/{name}/raw")
 async def plugin_view_raw(name: str, request: Request):
-    """返回插件原始前端文件，供宿主页 iframe 加载。"""
+    """返回插件原始前端文件，供宿主页 iframe 加载。
+
+    返回前注入管理台通用资源（akm-ui.js），插件页因此可以直接使用
+    `akm-modal` / `akm-combobox` / `akm-switch` 等组件，无需自带脚本引用。
+    """
     pm = request.app.state.plugin_manager
     plugin = pm.plugins.get(name)
     if not plugin or not plugin.enabled:
@@ -3035,7 +3065,12 @@ async def plugin_view_raw(name: str, request: Request):
     index_path = plugin._static_dir / "index.html"
     if not index_path.exists():
         return JSONResponse({"error": "该插件无前端界面"}, status_code=404)
-    return FileResponse(str(index_path))
+    try:
+        html = index_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        # 读不出来时退回原始文件直传，不要因为注入失败而打不开插件页
+        return FileResponse(str(index_path))
+    return HTMLResponse(_inject_plugin_host_assets(html))
 
 
 @app.get("/v1/models")

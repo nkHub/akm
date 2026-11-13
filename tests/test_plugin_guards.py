@@ -2068,3 +2068,33 @@ async def test_data_filter_match_log_map_unavailable_records_tags(tmp_path):
     assert records[0]["event"] == "restore_miss"
     assert records[0]["tag"] == "api_key"
     assert records[0]["reason"].startswith("map_unavailable")
+
+
+def test_plugin_raw_view_injects_host_assets_once():
+    """插件页 HTML 必须注入一次 akm-ui.js（带版本号），重复调用不重复注入。
+
+    插件页是纯静态 HTML，自己没法带版本号做缓存击穿；由宿主在 </head> 前注入，
+    插件才能直接用 akm-modal / akm-combobox 等组件。
+    """
+    from akm.server import _inject_plugin_host_assets, __version__
+
+    html = "<html><head><title>x</title></head><body>hi</body></html>"
+    once = _inject_plugin_host_assets(html)
+    assert once.count("akm-plugin-host-assets") == 1
+    assert f"/static/akm-ui.js?v={__version__}" in once
+    # 注入点在 </head> 之前，保证组件先注册再执行页面脚本
+    assert once.index("akm-ui.js") < once.index("</head>")
+
+    # 幂等：已经注入过就不再插第二次
+    twice = _inject_plugin_host_assets(once)
+    assert twice.count("akm-plugin-host-assets") == 1
+    assert twice == once
+
+
+def test_plugin_raw_view_injects_when_no_head_tag():
+    """没有 </head> 的极简 HTML 也要注入（插到文档最前）。"""
+    from akm.server import _inject_plugin_host_assets
+
+    out = _inject_plugin_host_assets("<div>bare</div>")
+    assert out.startswith("<!-- akm-plugin-host-assets -->")
+    assert "/static/akm-ui.js" in out

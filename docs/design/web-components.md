@@ -49,6 +49,13 @@
   - 常用属性：`title`、`max-width`
   - 常用方法：`open()`、`close()`、`setTitle(text)`
 
+- `akm-combobox`
+  - 用途：可搜索下拉，替代原生 `<select>`（原生下拉的弹出层由系统绘制，深浅色/圆角不受控，视觉割裂）
+  - 常用属性：`placeholder`、`host-class`
+  - 常用方法：`setOptions([{value,label,desc?,group?}], currentValue?, ...)`、`setValue(v)`；`value` 可读写；`change` 事件照常触发
+  - 约定：候选存在**组件内部**（`_options`），不能用 `querySelector('option')` 或 `sel.options` 读写；程序设值必须走 `setValue` / `setOptions`
+  - 约定：下拉菜单挂在 `<body>` 上（绕开弹窗滚动容器裁剪），层级、定位、配色全部用**内联样式**而非 Tailwind 工具类——插件页只加载 preflight、没有 utilities，`z-[60]` 这类类名在那里完全不生效（曾因此被后续按钮盖住）。选项行的内边距等由 `ensureComboboxStyles()` 注入的样式表兜底
+  - 使用方：Key 管理页的供应商选择（八家固定供应商 + 接口返回的其余供应商，可选可搜）、`prompt_booster` 插件的注入位置
 - `akm-tooltip`
   - 用途：包裹任意触发行内元素（如信息图标），hover 时在页面级显示多行说明浮层
   - 常用属性：`content`（提示文本，支持 `\n` 换行）

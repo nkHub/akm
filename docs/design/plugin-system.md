@@ -883,6 +883,43 @@ html[data-theme="light"] {
 
 > `agent_chat` 是当前唯一已知未完全兼容项（其产物由独立前端仓库构建，需在该仓库接 `akm.theme` 后重新构建）。新插件提交前请对照 9.3.3 自查。
 
+### 9.4 插件页使用管理台组件库（akm-ui.js）
+
+插件页（`views/index.html`）可以通过宿主提供的 `/plugins/{name}/raw` 直接使用管理台的全部自定义组件，**不需要自己写 `<script src>`、也不需要构建步骤**。
+
+#### 9.4.1 注入方式
+
+宿主在返回 `/plugins/{name}/raw` 时，会在 `</head>` 之前插入一行（带当前内核版本号，自动跟随升级）：
+
+```html
+<!-- akm-plugin-host-assets --><script src="/static/akm-ui.js?v=0.1.59"></script>
+```
+
+为什么由宿主注入而不是插件自己引：插件页是纯静态 HTML，没有模板引擎可用，**没法带版本号做缓存击穿**；硬编码版本号又会随 AKM 升级而漂移，用户升级后可能一直命中旧缓存。
+
+实现见 `akm/server.py` 的 `_inject_plugin_host_assets()`：按标记注释判重（幂等）、没有 `</head>` 时插到文档最前、读取失败时退回原始文件直传，保证注入出问题也不会让插件页打不开。
+
+#### 9.4.2 可直接使用的组件
+
+| 组件 | 用途 |
+|---|---|
+| `akm-modal` | 居中弹窗（自带 `role="dialog"`、焦点移入/归还、背景 `inert`） |
+| `akm-drawer` | 右侧抽屉，无障碍行为同 `akm-modal` |
+| `akm-combobox` | 可搜索下拉，替代原生 `<select>` |
+| `akm-switch` | 开关 |
+| `akm-range-tabs` | 分段按钮 |
+| `akm-pagination` | 分页 |
+| `akm-empty-state` | 空态 |
+| `akm-tooltip` | 悬浮提示 |
+| `window.akmNotify(cfg)` | 右上角通知（`update(id, patch)` / `close(id)`，支持进度条） |
+
+#### 9.4.3 注意事项
+
+1. **不要用原生 `alert` / `confirm` / `prompt`**：它们由系统绘制，样式不受页面控制，与深浅色主题割裂，而且会阻塞整个页面。确认操作用 `akm-modal`，提示用 `window.akmNotify`。
+2. **优先用 `akm-combobox` 而不是 `<select>`**：原生下拉的弹出层同样由系统绘制，浅色主题下会出现截图里那种灰底高亮的系统样式。
+3. **Tailwind utilities 在插件页不完整**：插件页通常只引入 `/static/tailwindcss.js` 的 preflight，没有生成 utilities（`px-3` / `text-sm` / `bg-surface-hover` 这类类名不存在）。`akm-ui.js` 内部已对关键组件（如 combobox 菜单）做了不依赖 Tailwind 的内联样式与注入样式兜底；但**自己的页面样式不要指望 Tailwind 类生效**，用自带 CSS。
+4. **`<style>` 与 Tailwind preflight 的顺序**：preflight 会把 `textarea` / `input` 等的 `padding`、`margin` 归零，且它在本页 `<style>` 之后加载。表单控件样式请用「元素 + id」这类更高特异性选择器（例：`textarea#prompt-text`），否则 `padding` 会被静默覆盖成 0。
+
 ## 十、插件开发示例
 
 ### 10.1 有菜单插件：模型映射（操作数据库）

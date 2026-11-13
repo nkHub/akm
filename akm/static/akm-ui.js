@@ -906,11 +906,46 @@ function akmFloatingTip() {
  * 交互：输入即过滤（同时匹配 label 与 value，忽略大小写）；↑↓ 移动高亮；
  * Enter 选中；Esc 关闭；点击组件外部自动收起。
  */
+/**
+ * 给 akm-combobox 注入一份不与 Tailwind 冲突的兜底样式。
+ *
+ * 组件被用在两类环境：管理台页面（Tailwind utilities 齐全）与插件 iframe
+ * （只加载了 tailwindcss.js 的 preflight，没有生成任何 utilities）。
+ * 后者里 `px-3 py-1.5` / `text-sm` / `truncate` / `bg-surface-hover` 全部不存在，
+ * 实测结果是「选项挤成一坨、无内边距、高亮不可见」。
+ *
+ * 这里只声明管理台**没有**的属性（内边距、字号、背景色兜底、高亮），
+ * 不覆盖 `color` —— 让 Tailwind 的 `text-indigo-300` / `text-gray-300`
+ * 在管理台继续生效；插件页没有这些类时由 `color` 兜底规则接管，
+ * 因此不需要跟 `_styles.html` 的规则比优先级。
+ */
+function ensureComboboxStyles() {
+  if (typeof document === 'undefined' || document.getElementById('akm-combobox-style')) return;
+  var style = document.createElement('style');
+  style.id = 'akm-combobox-style';
+  style.textContent = [
+    '[data-combobox-menu]{box-sizing:border-box}',
+    '[data-combobox-index]{display:block;width:100%;box-sizing:border-box;',
+    '  padding:6px 12px;font-size:13px;line-height:1.5;text-align:left;',
+    '  border:0;background:transparent;cursor:pointer}',
+    '[data-combobox-index]:hover{background:rgb(var(--c-surface-hover,64 64 96) / 0.5)}',
+    '/* 高亮类由 JS 切；Tailwind 缺失时用它兜底 */',
+    '[data-combobox-index].bg-surface-hover{background:rgb(var(--c-surface-hover,64 64 96) / 0.9)}',
+    '/* 选中/高亮文字色兜底：只在 Tailwind 颜色类未生效时可见地生效 */',
+    '[data-combobox-index].text-indigo-300,[data-combobox-index].text-gray-300{color:rgb(var(--c-gray-300,209 213 219))}',
+    '/* 选项文案过长时截断 */',
+    '[data-combobox-index] > span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+  ].join('');
+  document.head.appendChild(style);
+}
+
 if (!customElements.get('akm-combobox')) {
   customElements.define('akm-combobox', class extends HTMLElement {
     connectedCallback() {
       if (this.__mounted) return;
       this.__mounted = true;
+      // 组件可能被用在没有 Tailwind utilities 的插件页，先补一份兜底样式
+      ensureComboboxStyles();
       // DOM 移动（弹窗重渲染）会走 disconnected → connected：此时 _options / _value
       // 是调用方之前设好的，**不能清空**，否则重新挂载后下拉变空、选中值丢失。
       if (!Array.isArray(this._options)) this._options = [];
@@ -957,10 +992,22 @@ if (!customElements.get('akm-combobox')) {
       // 菜单元素建一次、挂在 body 上复用；不用时只是 hidden
       this._menu = document.createElement('div');
       this._menu.setAttribute('data-combobox-menu', '');
-      this._menu.className = 'hidden z-[60] overflow-y-auto bg-surface-light border border-border rounded-lg shadow-xl py-1';
-      // position 用内联样式写死：只靠 Tailwind 的 `fixed` 类在没加载该类的环境
-      // （独立预览页、样式尚未就绪的首帧）会退化成 static，菜单就跑到文档流里去了。
+      this._menu.className = 'hidden overflow-y-auto bg-surface-light border border-border rounded-lg shadow-xl py-1';
+      // 层级、定位、配色全部用内联样式写死，**不依赖 Tailwind 工具类**：
+      // 组件会被用在两类环境里——管理台页面（有完整 utilities）和插件 iframe
+      // （插件只引入了 tailwindcss.js 的 preflight，没有生成 utilities）。
+      // 后者里 `z-[60]` 不是合法类选择器、`shadow-xl`/`rounded-lg` 也不存在，
+      // 实测下拉菜单被后面的按钮盖住、且没有圆角阴影 —— 所以关键属性一律内联。
       this._menu.style.position = 'fixed';
+      this._menu.style.zIndex = '1000';
+      this._menu.style.boxSizing = 'border-box';
+      // 配色同样内联兜底：管理台用 CSS 变量 token，插件页没有这套 token，
+      // 用 var() 并提供中性回退，两边都不会出现「无背景/无边框」的白板下拉。
+      this._menu.style.background = 'var(--menu-bg, rgb(var(--c-surface-light, 38 38 55)))';
+      this._menu.style.border = '1px solid var(--menu-border, rgb(var(--c-border, 51 51 77)))';
+      this._menu.style.borderRadius = '8px';
+      this._menu.style.boxShadow = '0 8px 24px rgb(0 0 0 / 0.28)';
+      this._menu.style.padding = '4px 0';
       // 下拉菜单挂在 body 上是为了绕开弹窗滚动容器的裁剪（见上方说明），
       // 所以它不是弹窗的子节点；打 data-akm-popup 让弹窗的 inert 逻辑跳过它，
       // 否则弹窗里的 combobox 一点下拉就会被 inert 屏蔽、选项点不动。
@@ -1218,8 +1265,10 @@ if (!customElements.get('akm-combobox')) {
       var spaceAbove = rect.top;
       var flipUp = spaceBelow < MENU_MIN_SPACE && spaceAbove > spaceBelow;
       var avail = Math.max(120, Math.min(256, (flipUp ? spaceAbove : spaceBelow) - 12));
+      // 宽度跟随输入框，但不超过视口（插件页/窄容器里输入框可能贴边，
+      // 加 padding/border 后会溢出画面）。
       this._menu.style.left = rect.left + 'px';
-      this._menu.style.width = rect.width + 'px';
+      this._menu.style.width = Math.min(rect.width, window.innerWidth - 16) + 'px';
       this._menu.style.maxHeight = avail + 'px';
       if (flipUp) {
         // 朝上：菜单底边贴输入框顶边
