@@ -40,9 +40,12 @@
   - 约定：底部操作区用 `data-modal-footer`
   - 使用方：连接池页「重建连接池 / 关闭路由池」确认弹窗（页面保留 `_poolPendingAction`，确认按钮再发起 `POST /api/pool/action`）
   - 约定：内容可能超长时加 `panel-class="max-h-[85vh] flex flex-col"` 与 `body-class="... overflow-y-auto flex-1 min-h-0"`，让弹窗整体限高、内容区内部滚动，标题栏与底部操作区保持固定（模型列表、用量查询配置、插件配置等弹窗均用此写法）
+  - **无障碍（open/close 自动处理，调用方无需关心）**：打开时给浮层容器加 `role="dialog"` + `aria-modal="true"`，可访问名优先用 `data-title` 元素（生成唯一 id 后由 `aria-labelledby` 引用）。**两属性互斥**：标题为空时（`akm-drawer` 的标题由页面 `setTitle` 填入，可能晚于渲染）改挂 `aria-label` 兜底并移除 `aria-labelledby`——ARIA 里 `labelledby` 优先级高于 `label`，指向空元素会让名字整体变空。对 `<body>` 下除自身外的兄弟节点设 `inert` 屏蔽背景（纯展示脚本节点与带 `data-akm-popup` 的功能性浮层跳过）；焦点移入浮层（优先 `[autofocus]`，其次首个可聚焦元素，都没有则聚焦容器）；关闭时清 `inert` 并把焦点还给打开前的元素。**因为没走原生 `<dialog>`，这些语义必须自建**，否则 Tab 会逃到背后的侧栏。滚动锁定**不再**用 `body{overflow:hidden}`（body 本身是 `h-screen overflow-hidden`，增删会破坏布局，且会移除根滚动条导致横向位移）。
+  - 新增挂在 `<body>` 上的浮层组件时，**必须**给节点加 `data-akm-popup`，否则弹窗打开时会被 `inert` 连坐屏蔽（`akm-combobox` 下拉正是这样被豁免的——它挂在 body 上是为了绕开弹窗滚动容器裁剪）。
 
 - `akm-drawer`
   - 用途：右侧滑出详情面板
+  - 无障碍处理与 `akm-modal` 完全一致（同一基类 `AkmOverlayPanelElement`）；初始化时会调用 `close(true)`，该路径不会触发 `inert` 清理与焦点归还，调用方无需特殊处理。
   - 常用属性：`title`、`max-width`
   - 常用方法：`open()`、`close()`、`setTitle(text)`
 

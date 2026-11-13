@@ -12,6 +12,10 @@ function initializeComponentWhenParsed(element, init) {
   setTimeout(run, 0);
 }
 
+/* 自建浮层的无障碍支持：弹窗标题需要唯一 id 供 aria-labelledby 引用，这里用递增序号生成。
+   放在文件顶部是因为 akm-modal / akm-drawer 的基类方法会引用它。 */
+var AKM_DIALOG_SEQ = 0;
+
 if (!customElements.get('akm-switch')) {
   customElements.define('akm-switch', class extends HTMLElement {
     connectedCallback() {
@@ -206,6 +210,124 @@ class AkmOverlayPanelElement extends HTMLElement {
     });
   }
 
+  /**
+   * 打开弹窗/抽屉时的无障碍处理（P0 四项之一，作用于 akm-modal 与 akm-drawer 基类）。
+   *
+   * 为什么要有这些：本项目是自建遮罩（没有用原生 <dialog>），而原生 modal 由浏览器
+   * 白送的三件事——dialog 语义、焦点移入并限制在浮层内、关闭后焦点归还——都得自己补。
+   * 实测改造前：打开「添加 Key」后焦点仍停在 BODY，弹窗内 11 个可聚焦元素之外还有
+   * 71 个，Tab 越过最后一个按钮会落回背后的侧栏链接。
+   *
+   * 做法对齐无障碍指南的「自建浮层」分支：给容器 role="dialog" + aria-modal，
+   * 用 inert 屏蔽兄弟内容（不手写焦点陷阱），并把焦点移进浮层。
+   */
+
+  /** 记录打开前的焦点来源，关闭后归还（指南：关闭后焦点回到触发元素） */
+  _captureFocusOrigin() {
+    this._focusOrigin = document.activeElement;
+  }
+
+  /**
+   * 给浮层加 dialog 语义并按可见标题建立可访问名。
+   *
+   * 弹窗容器本身就是浮层容器，role 加在它上面即可；标题用 data-title 里的元素，
+   * 有标题时用 aria-labelledby 指向它（标题文案会随 setTitle 变化，用引用比复制文案稳）。
+   * 没有可见标题时退回 aria-label 兜底，避免出现「有 role 但没有可访问名」。
+   */
+  _applyDialogSemantics(container, fallbackLabel) {
+    if (!container) return;
+    container.setAttribute('role', 'dialog');
+    container.setAttribute('aria-modal', 'true');
+    var titleEl = this.querySelector('[data-title]');
+    if (titleEl) {
+      // 标题需要 id 才能被 aria-labelledby 引用；同一个标题元素只生成一次
+      if (!titleEl.id) {
+        titleEl.id = 'akm-dialog-title-' + (++AKM_DIALOG_SEQ);
+      }
+      // 标题文案可能要到 open() 前后才由调用方填入（akm-drawer 由页面先 setTitle 再
+      // open，也有调用方干脆没设）。空标题时**不能**留着 aria-labelledby：ARIA 里
+      // labelledby 优先级高于 label，指向空元素会让可访问名整体变空（实测 getAttribute
+      // 两者都在、但算出来的名字是空串），所以此时改挂 aria-label 兜底，两属性互斥。
+      if (titleEl.textContent.trim()) {
+        container.setAttribute('aria-labelledby', titleEl.id);
+        container.removeAttribute('aria-label');
+      } else {
+        container.removeAttribute('aria-labelledby');
+        container.setAttribute('aria-label', fallbackLabel || '对话框');
+      }
+    } else {
+      container.removeAttribute('aria-labelledby');
+      container.setAttribute('aria-label', fallbackLabel || '对话框');
+    }
+  }
+
+  /**
+   * 对浮层之外的同级节点设置 inert，让它们无法被键盘/指针/辅助技术访问。
+   *
+   * 关键点：inert 必须加在浮层的**兄弟**上，绝不能加到浮层的祖先（父级 inert 会连带
+   * 把浮层本身也屏蔽掉）。本项目弹窗元素是 <body> 的直接子节点，与侧栏、内容区、
+   * 折叠脚本同级，因此按「body 子节点中排除浮层自身」来界定范围。
+   *
+   * 同时排除挂在 body 上的功能性浮层（combobox 下拉菜单等）：它们视觉上属于浮层内部、
+   * 需要保持可交互，误设 inert 会直接让下拉点不动。这类节点由组件创建时打上
+   * data-akm-popup 标记，这里跳过。
+   */
+  _setSiblingsInert(active) {
+    if (typeof document === 'undefined' || !document.body) return;
+    var self = this;
+    Array.prototype.forEach.call(document.body.children, function(el) {
+      if (el === self || el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'LINK') return;
+      if (el.hasAttribute('data-akm-popup')) return;
+      if (active) {
+        // 记下原本就 inert 的节点，关闭时只恢复我们自己动过的，避免误清
+        if (el.hasAttribute('inert')) {
+          el.setAttribute('data-akm-inert-keep', '1');
+        } else {
+          el.setAttribute('inert', '');
+        }
+      } else {
+        if (el.hasAttribute('data-akm-inert-keep')) {
+          el.removeAttribute('data-akm-inert-keep');
+        } else {
+          el.removeAttribute('inert');
+        }
+      }
+    });
+  }
+
+  /**
+   * 把焦点移进浮层。
+   *
+   * 优先聚焦 [autofocus] 标注的元素，其次第一个可聚焦元素；都没有时聚焦容器本身
+   * （给容器临时 tabindex="-1"，保证读屏软件能落到这个 dialog 上）。
+   * 延迟到下一帧：调用方通常在 open() 里刚移除 hidden，标签此时才可聚焦。
+   */
+  _focusIntoOverlay(container) {
+    if (!container) return;
+    var self = this;
+    var focusables = '[autofocus],a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+    requestAnimationFrame(function() {
+      var target = container.querySelector('[autofocus]') || container.querySelector(focusables);
+      if (!target) {
+        if (!container.hasAttribute('tabindex')) {
+          container.setAttribute('tabindex', '-1');
+        }
+        target = container;
+      }
+      try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); }
+    });
+  }
+
+  /** 关闭后清 inert 并把焦点还给打开前的元素 */
+  _releaseOverlayA11y() {
+    this._setSiblingsInert(false);
+    var origin = this._focusOrigin;
+    this._focusOrigin = null;
+    if (origin && typeof origin.focus === 'function' && document.contains(origin)) {
+      try { origin.focus({ preventScroll: true }); } catch (e) { origin.focus(); }
+    }
+  }
+
   setTitle(text) {
     if (this.titleEl) this.titleEl.textContent = text || '';
   }
@@ -362,13 +484,26 @@ if (!customElements.get('akm-modal')) {
     }
 
     open() {
+      if (!this.overlay) return;
+      // 记录触发元素，关闭后焦点归还给它（指南：关闭后焦点回到打开它的元素）
+      this._captureFocusOrigin();
       this.overlay.classList.remove('hidden');
-      document.body.classList.add('overflow-hidden');
+      // 语义：容器＝浮层容器，标题＝可访问名
+      this._applyDialogSemantics(this.overlay, this.getAttribute('title') || '对话框');
+      // 屏蔽浮层之外的兄弟节点（比手写焦点陷阱可靠，也不会有 Tab 逃逸）
+      this._setSiblingsInert(true);
+      this._focusIntoOverlay(this.overlay);
+      // 滚动锁定：**不再**给 body 加 overflow-hidden。
+      // body 本身是 h-screen + overflow-hidden（布局需要），这里再加/再删会把它原本的
+      // 隐藏滚动行为一起破坏；且指南明确不要用 html/body 的 overflow 锁滚动（会移除根
+      // 滚动条、导致布局横向位移）。浮层是 fixed 定位盖住页面，背后内容已 inert 且
+      // 滚动手势由背景层吞掉，无需额外锁。
     }
 
     close() {
+      var wasOpen = this.isOpen();
       if (this.overlay) this.overlay.classList.add('hidden');
-      document.body.classList.remove('overflow-hidden');
+      if (wasOpen) this._releaseOverlayA11y();
     }
     setSubtitle(text) {
       if (!this.subtitleEl) return;
@@ -429,8 +564,14 @@ if (!customElements.get('akm-drawer')) {
 
     open() {
       var self = this;
+      if (!this.overlay || !this.panel) return;
+      // 与 akm-modal 同一套：记录焦点来源 → dialog 语义 → 屏蔽兄弟 → 焦点移入
+      this._captureFocusOrigin();
       this.overlay.classList.remove('hidden');
       this.panel.classList.remove('hidden');
+      this._applyDialogSemantics(this.panel, this.getAttribute('title') || '抽屉');
+      this._setSiblingsInert(true);
+      this._focusIntoOverlay(this.panel);
       this.panel.style.transform = 'translateX(100%)';
       requestAnimationFrame(function() {
         requestAnimationFrame(function() {
@@ -442,16 +583,19 @@ if (!customElements.get('akm-drawer')) {
     close(immediate) {
       var self = this;
       if (!this.panel || !this.overlay) return;
+      // 初始化时会调用 close(true)，那时并未真正打开过，不能去释放 inert / 抢焦点
+      var wasOpen = this.isOpen();
       this.panel.style.transform = 'translateX(100%)';
-      if (immediate) {
-        this.panel.classList.add('hidden');
-        this.overlay.classList.add('hidden');
-        return;
-      }
-      setTimeout(function() {
+      var finish = function() {
         self.panel.classList.add('hidden');
         self.overlay.classList.add('hidden');
-      }, 250);
+        if (wasOpen) self._releaseOverlayA11y();
+      };
+      if (immediate) {
+        finish();
+        return;
+      }
+      setTimeout(finish, 250);
     }
   });
 }
@@ -489,6 +633,9 @@ if (!customElements.get('akm-tooltip')) {
           'white-space:pre-line;text-align:left;color:rgb(var(--c-tooltip-text));' +
           'background:rgb(var(--c-tooltip-bg));border:1px solid rgb(var(--c-tooltip-border));border-radius:6px;' +
           'box-shadow:0 8px 24px rgba(0,0,0,.4);';
+        // data-akm-popup：标记这是挂在 body 上的功能性浮层，弹窗打开做 inert 时要跳过它，
+        // 否则提示类浮层会被连坐屏蔽（combobox 下拉更是会直接点不动）。
+        tip.setAttribute('data-akm-popup', '');
         document.body.appendChild(tip);
         this._tipEl = tip;
       }
@@ -534,6 +681,7 @@ function akmFloatingTip() {
         'white-space:pre-line;text-align:left;color:rgb(var(--c-tooltip-text));' +
         'background:rgb(var(--c-tooltip-bg));border:1px solid rgb(var(--c-tooltip-border));border-radius:6px;' +
         'box-shadow:0 8px 24px rgba(0,0,0,.4);';
+      el.setAttribute('data-akm-popup', '');
       document.body.appendChild(el);
     }
     return el;
@@ -727,6 +875,7 @@ function akmFloatingTip() {
         notifyHost = document.querySelector('akm-notification');
         if (!notifyHost) {
           notifyHost = document.createElement('akm-notification');
+          notifyHost.setAttribute('data-akm-popup', '');
           document.body.appendChild(notifyHost);
         }
       }
@@ -812,6 +961,10 @@ if (!customElements.get('akm-combobox')) {
       // position 用内联样式写死：只靠 Tailwind 的 `fixed` 类在没加载该类的环境
       // （独立预览页、样式尚未就绪的首帧）会退化成 static，菜单就跑到文档流里去了。
       this._menu.style.position = 'fixed';
+      // 下拉菜单挂在 body 上是为了绕开弹窗滚动容器的裁剪（见上方说明），
+      // 所以它不是弹窗的子节点；打 data-akm-popup 让弹窗的 inert 逻辑跳过它，
+      // 否则弹窗里的 combobox 一点下拉就会被 inert 屏蔽、选项点不动。
+      this._menu.setAttribute('data-akm-popup', '');
       document.body.appendChild(this._menu);
       this._toggle = this.querySelector('[data-combobox-toggle]');
 
