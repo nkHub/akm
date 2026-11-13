@@ -4,6 +4,27 @@
 
 各版本“改了什么”的说明统一归档在 [logs.md](logs.md)（新版本追加在最上方）；本节只规定版本号本身如何统一与同步。当前版本 **v0.1.59**。
 
+### 发布前版本号校验（v0.1.59 起）
+
+**每次发布前必须先跑校验，不能凭本地版本号直接发**：
+
+```bash
+./scripts/check_version.py app       # 应用
+./scripts/check_version.py plugins   # 插件
+```
+
+它解决三类真实事故：**跳版本号**（线上 0.1.56、本地写成 0.1.70，用户端版本序列断层）、**版本倒挂**（本地低于等于线上，`version_greater(latest, current)` 恒为假，已安装用户收不到更新）、**插件重复发布**（同名 zip 被 `--clobber` 覆盖，`sha256` 变了但版本号没动）。判定规则与用法见「二、打包流程」的「1.5 校验版本号」。
+
+**bump 级别按功能更新大小决定（人判断，脚本只建议）**：
+
+| 改动性质 | 级别 | 示例 |
+|---|---|---|
+| 修 bug、小改动、文案 | patch（最后一段 +1） | 0.1.59 → 0.1.60 |
+| 新增功能、行为/字段变化 | minor（中间段 +1，末段归零） | 0.1.59 → 0.2.0 |
+| 不兼容改动 | major（第一段 +1） | 0.1.59 → 1.0.0 |
+
+插件同理，但按单个插件的改动范围独立判断——**只有改动过的插件才需要 bump**，脚本用「插件目录是否在插件市场索引最后一次提交之后有改动」来区分「本次无需发布」与「改过但漏 bump」（后者判错）。
+
 发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 **0.1.19**，包含已重建的相对路径资源产物，续跑改为按 `tool_call_id` 回填占位 tool 消息；该序列随后续版本累积推进到 0.1.19，涵盖过程时间线、AG-UI 卡片与暗色适配、markdown 代码块语法高亮、挂起引导「立即发送 / 撤回输入框」等 chat 侧改动）；v0.1.54 修复连接池代理探测与 Key 连通性测试的代理路径，只改现有 Python 模块、测试与说明，无新增模板 / 静态文件；v0.1.55 修正 `logo.icns` 按 Apple 规范补足透明边距（仅替换图标文件）并统一侧边栏动态菜单 hover 样式（只改 `akm/server.py` 一处 class），无新增模板 / 静态文件；v0.1.56 统计页折线图迁移 ApexCharts，`setup.py` 的 `DATA_FILES` 新增 `akm/static/akm-chart.js` 与 `akm/static/apexcharts.min.js` 两个静态文件（无新增模板）；同一版本新增运行时数据文件 `akm/agent_runtime/render_schema.json`（`akm_render` 的组件 schema 真源），已登记在 `DATA_FILES` 的 `lib/python3.12/akm/agent_runtime` 目标下——这类非 Python 资源 py2app 不会按 import 关系收集，漏登记时打包后读不到文件，工具描述会退化成一句「渲染结构化卡片」，模型不知道该填哪些块；同一版本另含过程时间线改动：`akm/agent_runtime/loop.py` 的 `_sse_event` 统一注入 `ts` 毫秒时间戳（只增字段），chat 前端新增分组/文案/时间线三处模块并重建 `plugins/agent_chat/dist/`，无新增模板 / 静态文件；v0.1.56 起 `scripts/build_app.sh` 增加**打包环境守卫**：强制使用项目 `.venv` 解释器（断言 `sys.prefix` 指向 `.venv`），并在 py2app 之后断言包内 `fastapi` 版本与 venv 一致，不一致立即中止——起因是一次用 pyenv 全局解释器（fastapi 0.136.3）打包，而 `akm/plugins/plugin_manager.py` 需要 0.142+ 的 `routing._IncludedRouter`，打出「启动即 ImportError」的包；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。v0.1.57 新增运行时模块 `akm/models_dev.py`，已登记在 `setup.py` 的 `includes`；同版本 `audit_logs` 增加 `response_model` / `model_mismatch` 两列、新增 `models_dev_providers` / `models_dev_models` / `models_dev_meta` 三张表，全部由 `akm/db.py` 的 `init_db` 在启动时 `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE` 自动补齐，**老库无需手工迁移**；`akm-ui.js` 增加 `akm-combobox` 组件（已登记文件，无新增静态文件）；`plugins/agent_chat/dist` 按 `VITE_BASE='./' VITE_AKM_API_URL='' npm run build` 重建（前端改为请求 `/v1/models?capability=chat`），产物需同步 `ccs/plugins/agent_chat/dist` 与 `~/.akm/plugins/agent_chat/dist` 两处，自检 `grep -c 'akm-api' dist/assets/*.js` 为 0。
 
 同一 v0.1.57 序列内另含两项改动，均**无新增模板 / 静态文件**：① Agent 审计覆盖面补齐——`akm/agent_runtime/tools.py` 为 `akm_render` 补一条工具调用级审计（`provider=akm`、`model=工具名`、token 为 0），`akm/agent_runtime/layout_agent.py` 增加可选 `on_attempt` 回调、`akm/agent_runtime/loop.py` 用它把后置布局小模型与上下文摘要写进审计，`akm/request_source.py` 新增 `layout` / `summary` / `tool` 三个来源映射（`audit_logs` 表结构不变，老库无需迁移）；② `akm_render` 新增 `flow` 流程图块，块白名单从 15 种收敛到 11 种（`render_schema.json` / `layout_schema.py` / `loop.py` 的 `_AGUI_SPEC` / 前端 `AGUIRenderer` 四处同步），并新增前端渲染组件 `chat/src/components/agui/flow-diagram.tsx`（自绘 SVG，无新增 npm 依赖）；`plugins/agent_chat/dist` 已按上述同一条构建命令重建并同步两处 `dist`，插件包版本仍为 **0.1.19**（本次未单独发插件包）。发布本版本前请按「二、打包流程」照常走一遍资源登记自查：这两项都只改已登记的 Python 模块与已存在的 `dist` 产物。
@@ -297,6 +318,31 @@ git status
 
 > 发布时以 `akm/__init__.py` 中的 `__version__` 为主版本源；若同时维护 `pyproject.toml` 的包元数据版本，两者也应保持一致。例如本次发布若版本号为 `0.1.14`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.14` 保持一致。
 
+1.5 **校验版本号（必做，防止跳版本号 / 版本倒挂）**
+
+```bash
+# 应用：比对本地 akm/__init__.py 与线上 GitHub Releases latest 的 tag
+./scripts/check_version.py app
+
+# 插件：逐个比对 plugins/*/plugin.json 与 Release plugin-market 上的 zip 资产
+./scripts/check_version.py plugins
+```
+
+判定规则（应用与插件共用一套）：
+
+| 本地 vs 线上 | 结果 | 说明 |
+|---|---|---|
+| 本地 **低于** 线上 | ✗ 错误 | 版本倒挂，必须先修 |
+| 本地 **等于** 线上 | ✗ 错误 | 未 bump；重复发布会让 zip 覆盖同名资产，`sha256` 变了但版本号没变，已安装用户永远收不到更新 |
+| 本地 **高于** 线上 | ✓ 通过 | 输出差异定位与 bump 级别建议，由人决定实际级别 |
+
+**「按功能更新大小增加版本号」由人决定，脚本只校验 + 建议，不自动改版本号。** 建议口径：只动最后一段 → patch（修 bug / 小改动）；动了中间段 → minor（新增功能 / 行为变化）；动了第一段 → major（不兼容改动）。
+
+插件还多一层「是否需要重发」判断：版本号与线上相同、但该插件目录在插件市场索引最后一次提交之后**没有任何改动**时，视为「本次无需发布」，跳过而不报错——避免每次全量发布都把没变的插件重新打包、白白改掉 `sha256`。反之「代码改过但版本号没动」会被判成错误，这正是最容易漏的一类。
+
+其他参数：`--warn-only` 只提示不失败（本地开发用，发布不要加）；`--offline` 跳过网络、只用本地 git tag 兜底；`--emit-pending FILE` 把需要发布的插件名逐行输出（`publish_plugins.sh` 用它决定打包范围）。
+
+**两个发布脚本已内置校验**：`./scripts/build_app.sh` 默认只警告（日常迭代要能自由打包），加 `--release` 或 `AKM_RELEASE=1` 改为硬失败；`bash scripts/publish_plugins.sh` 始终严格校验，不通过直接退出、不打包不上传。
 2. **构建分发包（Apple Silicon DMG + zip）**
 
 ```bash

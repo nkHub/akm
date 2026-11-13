@@ -16,6 +16,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── 版本号校验 ────────────────────────────────────────────────────────────────
+# 打包前先比对本地版本号与线上（GitHub Releases latest）：本地低于或等于线上时，
+# 这个包一旦发布就会造成版本倒挂 / 重复版本，用户端永远收不到更新。
+# 默认只**警告不阻断**——日常迭代需要频繁打包验证，不能因为没 bump 就打不出包；
+# 正式发布时加 `AKM_RELEASE=1`（或 `--release`）改为硬失败。
+VERSION_STRICT=0
+if [[ "${AKM_RELEASE:-0}" == "1" ]]; then
+  VERSION_STRICT=1
+fi
+for arg in "$@"; do
+  [[ "$arg" == "--release" ]] && VERSION_STRICT=1
+done
+
+# 解释器固定用项目 venv（与下方打包环境守卫同一口径），
+# 避免调用方 PATH 里没有 python 时这段校验被静默跳过。
+CHECK_PY="$ROOT_DIR/.venv/bin/python"
+if [[ -f "scripts/check_version.py" && -x "$CHECK_PY" ]]; then
+  if [[ "$VERSION_STRICT" == "1" ]]; then
+    echo "[版本] 发布模式：校验版本号（不通过则中止打包）"
+    "$CHECK_PY" scripts/check_version.py app
+  else
+    echo "[版本] 校验版本号（仅提示；发布请用 ./scripts/build_app.sh --release）"
+    "$CHECK_PY" scripts/check_version.py app --warn-only || true
+  fi
+fi
+
 if [[ -f "pyproject.toml" && ! -f "pyproject.toml.bak" ]]; then
   mv "pyproject.toml" "pyproject.toml.bak"
   PYPROJECT_MOVED=1

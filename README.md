@@ -35,11 +35,20 @@ mv pyproject.toml.bak pyproject.toml
 # 推荐：先创建/复用一个稳定签名身份（幂等；已存在则只校验，不重建）
 ./scripts/make_signing_cert.sh
 
-# 推荐：使用脚本打包（自动处理 pyproject 备份恢复）
+# 发布前必做：校验版本号（比对本地与 GitHub Releases latest，防止跳版本号/倒挂）
+./scripts/check_version.py app
+./scripts/check_version.py plugins
+
+# 推荐：使用脚本打包（自动处理 pyproject 备份恢复；默认只提示版本号，
+# 加 --release 或 AKM_RELEASE=1 则版本号不通过时中止打包）
 ./scripts/build_app.sh
+./scripts/build_app.sh --release
 
 # 发布 arm64 DMG 与自动更新 zip（会清理旧 build/dist，并复用 build_app.sh）
 ./scripts/build_m1_dmg.sh
+
+# 发布插件市场（内置严格版本号校验；只重打包版本号确实提升或首次发布的插件）
+bash scripts/publish_plugins.sh
 
 # 可选：清理构建缓存后重新打包
 rm -rf build dist

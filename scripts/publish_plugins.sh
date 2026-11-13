@@ -34,14 +34,30 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── 前置检查 ──
-if ! command -v gh >/dev/null 2>&1; then
-  echo "错误: 未找到 gh，请先执行: brew install gh && gh auth login"
-  exit 1
+# gh 只在真正上传时需要；--no-upload 是「只打包 + 生成索引」的验证路径，
+# 不该因为没装 gh 就跑不起来（否则无法本地验证校验逻辑）。
+if [[ "$UPLOAD" == "1" ]]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "错误: 未找到 gh，请先执行: brew install gh && gh auth login"
+    exit 1
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "错误: 请先登录 GitHub CLI: gh auth login"
+    exit 1
+  fi
 fi
 
-if [[ "$UPLOAD" == "1" ]] && ! gh auth status >/dev/null 2>&1; then
-  echo "错误: 请先登录 GitHub CLI: gh auth login"
-  exit 1
+# ── 版本号校验（发布前必须通过）──
+# 只有「本地版本号 > 线上版本号」的插件才允许重新发布。否则会出现：
+# - 版本倒挂 / 等于线上：zip 覆盖同名资产、sha256 变了但版本号没变，
+#   已安装用户的市场判断 version_greater 为假，永远收不到这次修复；
+# - 跳版本号：中间版本在 Release 上不存在，用户端版本序列断层。
+# 这里用严格模式（不带 --warn-only），不通过直接退出，不打包、不上传。
+# 解释器固定用项目 venv，避免调用方 PATH 里没有 python 时校验被跳过
+CHECK_PY="$ROOT_DIR/.venv/bin/python"
+if [[ -f "scripts/check_version.py" && -x "$CHECK_PY" ]]; then
+  echo "[0/4] 校验插件版本号"
+  "$CHECK_PY" scripts/check_version.py plugins
 fi
 
 # ── 1. 扫描插件目录 ──
@@ -57,7 +73,22 @@ if [[ ${#PLUGINS[@]} -eq 0 ]]; then
   echo "错误: plugins/ 下未找到任何带 plugin.json 的插件"
   exit 1
 fi
-echo "[1/4] 发现 ${#PLUGINS[@]} 个插件: ${PLUGINS[*]}"
+# 只打包「版本号高于线上 或 首次发布」的插件。版本号没变且代码没改的插件
+# 不重新打包——重复上传同名 zip 会把 sha256 换掉而版本号不动，
+# 已安装用户的 version_greater 判断为假，反而收不到更新。
+PENDING_FILE="$(mktemp)"
+"$CHECK_PY" scripts/check_version.py plugins --emit-pending "$PENDING_FILE"
+if [[ -s "$PENDING_FILE" ]]; then
+  # shellcheck disable=SC2207
+  PLUGINS=($(cat "$PENDING_FILE"))
+fi
+rm -f "$PENDING_FILE"
+
+if [[ ${#PLUGINS[@]} -eq 0 ]]; then
+  echo "[1/4] 没有需要发布的插件（所有插件版本号都已与线上一致且代码未改动）"
+  exit 0
+fi
+echo "[1/4] 本次需要发布 ${#PLUGINS[@]} 个插件: ${PLUGINS[*]}"
 
 # ── 2. 确保 Release 存在 ──
 if [[ "$UPLOAD" == "1" ]]; then
