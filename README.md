@@ -57,7 +57,7 @@ python setup.py py2app
 
 应用图标由 `logo.icns` 提供，通过 `setup.py` 中的 `iconfile` 选项配置。当前 `py2app` 打包入口也已显式包含 `sqlite_vec`，避免菜单栏应用里因为动态导入丢包而让 `markdown_kb` 退回到非 vec 路径。
 
-打包签名：`scripts/build_app.sh` 按 `AKM_SIGN_IDENTITY` 环境变量 → 本机自签证书「AKM Local Signing」→ ad-hoc 的顺序选取签名身份，回退 ad-hoc 时会打印告警。自签证书用 `scripts/make_signing_cert.sh` 创建（幂等：已存在且有效只做校验，同名但缺信任只补信任，都不重建），证书与私钥默认在 `~/Library/Application Support/AKM/signing`（目录 `0700`、私钥与 `.p12` 为 `0600`），**不在仓库内**，请随 `~/.akm` 一并备份。固定身份的原因：ad-hoc 签名的指定要求（designated requirement）是 cdhash，每次重建都被 macOS 当成「新 App」，于是「访问桌面/文稿/下载」这类授权会反复弹窗；同一张证书的指定要求只绑定 bundle id 与证书，重建与自动更新后身份不变，用户点过一次「允许」即长期有效。应用访问这些目录的原因是插件工作区可能位于其中（例如知识库绑定的项目就在桌面上），用途声明见 `setup.py` 里的 `NSDesktopFolderUsageDescription` 等字段。
+打包签名：`scripts/build_app.sh` 按 `AKM_SIGN_IDENTITY` 环境变量 → 本机自签证书「AKM Local Signing」→ ad-hoc 的顺序选取签名身份，回退 ad-hoc 时会打印告警。自签证书用 `scripts/make_signing_cert.sh` 创建（幂等：已存在且有效只做校验，同名但缺信任只补信任，都不重建），证书与私钥默认在 `~/Library/Application Support/AKM/signing`（目录 `0700`、私钥与 `.p12` 为 `0600`），**不在仓库内**，请随 `~/.akm` 一并备份。注意脚本里**生成证书用 PATH 中的 `openssl`，导出 `.p12` 固定用 `/usr/bin/openssl`（LibreSSL）**：Homebrew OpenSSL 3.x 默认导出 AES-256-CBC + PBKDF2 的 p12，macOS 的 `security import` 读不了，只会报一句误导性的 `MAC verification failed ... (wrong password?)`；LibreSSL 又不认 3.x 的 `-legacy`，所以不能合到一处。固定身份的原因：ad-hoc 签名的指定要求（designated requirement）是 cdhash，每次重建都被 macOS 当成「新 App」，于是「访问桌面/文稿/下载」这类授权会反复弹窗；同一张证书的指定要求只绑定 bundle id 与证书（可用 `codesign -d --requirements - <app>` 确认是 `identifier ... and certificate root = H"…"` 而不是 cdhash），重建与自动更新后身份不变，用户点过一次「允许」即长期有效。应用访问这些目录的原因是插件工作区可能位于其中（例如知识库绑定的项目就在桌面上），用途声明见 `setup.py` 里的 `NSDesktopFolderUsageDescription` 等字段。
 
 打包与更新：`build_m1_dmg.sh` 会同时生成 `dist/AI Key Manager-${VERSION}-arm64.dmg` 与 `-arm64.zip`（zip 为自动更新下载源，根目录直接包含 `.app`）。应用支持 GitHub Release 自动更新（默认开启，设置页可关）：发现新版本后按**本机架构**（arm64/x86_64）匹配 zip 资产下载，解压后在替换旧 `.app` 前做架构校验——新包主可执行架构与本机不符时中止安装并原位保留旧版，不会出现「装错架构、启动即崩」；Release 未提供本机架构的 zip 时不做自动更新，由用户到 Release 页面手动下载对应架构的安装包。校验通过后替换并自动重启（静默更新会避让进行中的转发请求，检测到在途请求/流式响应时每隔 30 秒重试、替换前等待请求排空最长 300 秒再重启）；菜单栏「检查更新」可手动检查，有更新时在自定义弹窗内展示可滚动 Release Note，确认后同一弹窗实时显示下载/安装进度，下载期间右侧按钮变「取消更新」可中断并重试，无更新则弹窗提示已是最新；检查失败（如 GitHub 匿名限流 403）会如实提示「检查更新失败」，不会误报「已是最新」。详细打包规范、版本号管理及更新方案见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -619,7 +619,9 @@ akm 核心仅保留请求转发与审计日志，协议转换、模型匹配、�
 | `provider_health_probe` | app | | 可选供应商健康探测：提供 Key 连通性批量探测与脱敏状态快照 API |
 | `frontend_static_server` | app | | 可选前端静态站点托管：访问 Vue/React 构建产物，支持自定义挂载路径与 SPA History 路由 |
 | `agent_chat` | app | | 可选 `/v1/agent` Web 聊天界面：内置 AetherAI 对话窗口产物，启用后访问 `/chat` 即聊（思考/工具步骤聚合为可折叠的过程时间线，每步有人话标题与耗时） |
-| `agent-tools` | app | | 可选离线工具箱：内置纯前端工具产物（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询等），启用后访问 `/tools` 即用 |
+| `agent-tools` | app | | 可选离线工具箱：内置纯前端工具产物（JSON/YAML 格式化、时间戳、哈希、二维码、IP 查询、HTTP 请求调试等），启用后访问 `/tools` 即用 |
+
+> `agent_chat` 与 `agent-tools` 的 `dist/` 由**仓库同级的前端项目**（`../chat` / `../tools`）构建，产物不进 git，重建与同步口径（构建命令、需同步的两处目录、`plugin.json` 改动后需重载）见 [docs/design/plugin-system.md](docs/design/plugin-system.md) 第二章。
 
 插件位于 `akm/plugins/`（内置）、项目根目录 `plugins/`（项目本地）或 `~/.akm/plugins/`（第三方），通过管理台「插件」页面启用/禁用/上传，也可通过「插件市场」直接从 GitHub 仓库 `plugins/` 目录安装或更新（点击「选择 .zip 文件」旁的「插件市场」按钮，弹窗分页列出市场插件；已安装的第三方插件低于市场版本时，插件卡片上显示「更新」按钮，点击即从市场拉取最新 zip 覆盖 `~/.akm/plugins/{name}/`，下载过程以右侧通知组件进度条实时展示，已加载第三方插件覆盖后执行**热重载**即时生效、无需重启）。`error_handler`、`model_matcher` 为项目本地插件，首次加载默认开启，可随时禁用或从插件市场安装更新；model→key 的核心匹配在内核 `key_pool`，不受插件禁用影响。启用、禁用、安装、删除与第三方插件市场更新默认**热生效**；手工修改已加载插件源码后可通过插件卡片「重载」按钮（或 `POST /api/plugins/{name}/reload`、`akm plugin reload <名称>`）热重载即时生效，同样无需重启。单个插件导入或初始化失败只会跳过该插件。
 

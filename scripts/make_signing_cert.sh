@@ -23,6 +23,20 @@ if ! command -v openssl >/dev/null 2>&1; then
   exit 1
 fi
 
+# p12 导出固定用 macOS 自带的 LibreSSL（/usr/bin/openssl），**不要**用 PATH 里的
+# Homebrew OpenSSL 3.x：后者导出的 p12 默认是 AES-256-CBC + PBKDF2 + SHA-256
+# （3.x 的默认），`security import` 读不了，会报
+#   SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong password?)
+# 密码是对的、证书也生成了，只是算法不被系统 PKCS12 解析器接受；
+# openssl 3.x 要加 `-legacy` 才回溯到 RC2/3DES，而 LibreSSL 本身就是传统算法，无此参数。
+# 因此两者分开：生成证书/私钥用 PATH 里的 openssl（3.x 的 -addext 更好用），
+# 导出 p12 优先用 /usr/bin/openssl。
+P12_OPENSSL="/usr/bin/openssl"
+if [[ ! -x "$P12_OPENSSL" ]]; then
+  P12_OPENSSL="$(command -v openssl)"
+  echo "WARN: 未找到 /usr/bin/openssl，改用 $P12_OPENSSL；若 p12 导入失败请安装 Xcode 命令行工具。" >&2
+fi
+
 identity_line() {
   # 一次性取回身份列表再本地匹配，避免 `security | grep` 在 set -o pipefail 下被 SIGPIPE 影响
   local ids
@@ -77,12 +91,20 @@ openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
   -out "$SIGN_DIR/akm-local-signing.crt" \
   -config "$SIGN_DIR/ext.cnf"
 
-openssl pkcs12 -export \
+"$P12_OPENSSL" pkcs12 -export \
   -inkey "$SIGN_DIR/akm-local-signing.key" \
   -in "$SIGN_DIR/akm-local-signing.crt" \
   -out "$SIGN_DIR/akm-local-signing.p12" \
   -name "$IDENTITY_NAME" -passout "pass:$P12_PASS"
 chmod 600 "$SIGN_DIR/akm-local-signing.key" "$SIGN_DIR/akm-local-signing.p12"
+
+# 导入前先验一次：p12 能打开且 MAC 校验通过，再交给钥匙串。
+# 跳过这一步时，OpenSSL 版本不对只会在 `security import` 阶段报
+# "MAC verification failed ... (wrong password?)"，而密码其实是对的，很难定位。
+if ! "$P12_OPENSSL" pkcs12 -info -in "$SIGN_DIR/akm-local-signing.p12" -passin "pass:$P12_PASS" -noout 2>&1 | grep -q "MAC verified OK"; then
+  echo "ERROR: 生成的 p12 无法通过 MAC 校验（$P12_OPENSSL），请检查 openssl 版本。" >&2
+  exit 1
+fi
 
 echo "导入钥匙串：$KEYCHAIN"
 # -A 允许任意程序使用该私钥，换取 codesign 免交互；想更严格可改成
