@@ -39,7 +39,9 @@
 
 `agent_chat` 对 `inner_name` 的消费约定（v0.1.59 起）：`/v1/agent` 的「工具按需加载」把长尾工具折叠到 `akm_list_tools` / `akm_call_tool` 后，`tool_call` / `tool_result` 事件会额外带 `inner_name`（内层真实执行的工具名；普通工具与旧服务端不带该字段）。前端过程时间线必须**优先用 `inner_name`** 生成动作标签与状态文案，否则用户看到的是 `call_tool` 这种网关名字而不是「检索知识库」「读取文件」；`src/lib/step-labels.ts` 另外收录 `akm_list_tools` / `akm_call_tool` 两条兜底（`akm_call_tool` 在没有内层名时才会显示）。缺 `inner_name` 时回落到事件的 `name`，因此对旧后端保持兼容。chat 主流程**不传 `tools`**（只传 `client_tools` 与 `tool_options`），走的是会被折叠的自动注入路径；定时任务页 `automation.tsx` 显式传 `tools` 白名单，按设计不折叠、不受影响。
 
-`agent-tools` 是与 `agent_chat` 同构的**内置产物型** `app` 插件：把同级 `tools` 项目的构建产物打进插件目录 `dist/`，`on_load` 挂载到 `route_prefix`（默认 `/tools`），启用即用。它是纯前端离线工具箱（JSON/YAML 格式化、时间戳转换、哈希、二维码、颜色、正则、IP 查询等），除 IP 查询工具调用 ipapi.co / ipify / ipwho.is 等公共 API 外不依赖任何后端接口。产物同样以 `base: './'`（即 `VITE_BASE_PATH='./'`）相对路径构建，可在任意子路径下运行。
+`agent-tools` 是与 `agent_chat` 同构的**内置产物型** `app` 插件：把同级 `tools` 项目的构建产物打进插件目录 `dist/`，`on_load` 挂载到 `route_prefix`（默认 `/tools`），启用即用。它是纯前端离线工具箱（JSON/YAML 格式化、时间戳转换、哈希、二维码、颜色、正则、IP 查询、HTTP 请求调试等），除 IP 查询工具调用 ipapi.co / ipify / ipwho.is 等公共 API 外不依赖任何后端接口。产物同样以 `base: './'`（即 `VITE_BASE_PATH='./'`）相对路径构建，可在任意子路径下运行。
+
+**两个产物型插件的重建与同步口径**（手工更新时按此走）：① 前端源码**不在本仓库**，分别在仓库同级的 `../chat` 与 `../tools`；② 两个插件的 `dist/` 都被 `.gitignore` 忽略（本仓库 `plugins/*/dist` 不存在时只能用已安装副本），因此「重打包插件」必须先拿到源码仓库、`npm ci` 后再构建；③ 构建命令——`agent_chat` 为 `VITE_BASE='./' VITE_AKM_API_URL='' npm run build`（缺任一个就会资源 404 或请求打到 `/akm-api`），`agent-tools` 为 `VITE_BASE='./' npm run build`（`basename` 仍取 `.env.production` 的 `VITE_BASE_PATH=/tools/`）；④ 产物需同步**两处**：仓库 `plugins/{name}/dist` 与运行时实际加载的 `~/.akm/plugins/{name}/dist`，用 `diff -rq` 校验；⑤ 只换 `dist` 内容时刷新页面即生效；但覆盖了 `plugin.json`（版本、description、settings）后，`/api/plugins` 返回的仍是进程内缓存的旧 `PluginMeta`，需要重启 AKM 或走 `POST /api/plugins/{name}/reload` 热重载；⑥ 重建后跑 `pytest tests/test_agent_chat_plugin.py tests/test_agent_tools.py`（会把真实 `dist` 复制到临时目录，断言 `index.html` 用 `./assets/...` 相对引用、产物内 `akm-api` 命中为 0）。
 
 `dafeiyu`（大肥鱼桌宠）是项目本地 `app` 插件里**唯一带原生窗口子进程**的特例，它演示了两种此前没有的能力边界：
 
