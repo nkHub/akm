@@ -1248,7 +1248,7 @@ async def test_data_filter_reverse_handles_json_unicode_lt_escape():
     state2 = plugin.reverse_stream_state()
     out_a = plugin.reverse_stream_chunk("前缀\\u00", state2, reverse_map=rmap)
     out_b = plugin.reverse_stream_chunk(
-        f"3cAKM-SEC:t8098e2@1:2273f4/\\u003e 后缀",
+        "3cAKM-SEC:t8098e2@1:2273f4/\\u003e 后缀",
         state2,
         reverse_map=rmap,
     )

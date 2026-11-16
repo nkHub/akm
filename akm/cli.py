@@ -497,7 +497,7 @@ def secret_status(probe, as_json):
         crypto._load_cipher()   # 先加载主密钥（首次运行会生成），保证报告与实际生效状态一致
         info = crypto.custody_status(probe=probe)
     except crypto.SecretStoreError as exc:
-        raise click.ClickException(str(exc))
+        raise click.ClickException(str(exc)) from exc
 
     if as_json:
         click.echo(json.dumps(info, ensure_ascii=False, indent=2))
@@ -559,7 +559,7 @@ def secret_migrate(target, purge_file, no_update_config):
     try:
         result = crypto.migrate_backend(target, purge_file=purge_file)
     except crypto.SecretStoreError as exc:
-        raise click.ClickException(str(exc))
+        raise click.ClickException(str(exc)) from exc
 
     click.echo(f"迁移完成：{result['source']} → {result['target']}")
     for action in result["actions"]:
@@ -587,7 +587,7 @@ def secret_rotate(drop_previous, no_reencrypt):
     try:
         info = crypto.rotate(keep_previous=not drop_previous)
     except crypto.SecretStoreError as exc:
-        raise click.ClickException(str(exc))
+        raise click.ClickException(str(exc)) from exc
 
     click.echo(f"主密钥已轮换（轮换前来源：{info['previous_source']}）")
     for target in info["targets"]:
@@ -626,7 +626,7 @@ def secret_purge_file(yes):
     try:
         result = crypto.purge_file_keys()
     except crypto.SecretStoreError as exc:
-        raise click.ClickException(str(exc))
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"已删除 {len(result['removed'])} 个明文密钥文件（校验来源：{result['verified_by']}）")
     for path in result["removed"]:
         click.echo(f"  · {path}")
@@ -1070,7 +1070,7 @@ def key_test(alias, health, fallback):
     if result["ok"]:
         click.echo(f"  结果     : ✅ 连接成功 ({result['latency_ms']}ms)")
     else:
-        click.echo(f"  结果     : ❌ 失败")
+        click.echo("  结果     : ❌ 失败")
         click.echo(f"  状态码   : {result['status_code']}")
         click.echo(f"  错误     : {result['error']}")
         if result["response_body"]:
@@ -1125,7 +1125,7 @@ def key_usage_query(alias):
     try:
         script_cfg = json.loads(script_raw)
     except json.JSONDecodeError:
-        raise click.ClickException("用量查询脚本 JSON 解析失败")
+        raise click.ClickException("用量查询脚本 JSON 解析失败") from None
 
     from akm.usage_query import execute_query_script
 
@@ -1185,7 +1185,7 @@ def key_set_usage_script(alias):
     try:
         json.loads(new_script)
     except json.JSONDecodeError as e:
-        raise click.ClickException(f"JSON 格式错误: {e}")
+        raise click.ClickException(f"JSON 格式错误: {e}") from e
 
     set_usage_query_config(alias, script=new_script)
     click.echo(f"Key '{alias}' 用量查询脚本已更新")

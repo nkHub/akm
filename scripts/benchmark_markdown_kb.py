@@ -19,7 +19,6 @@
 import argparse
 import asyncio
 import hashlib
-import json
 import math
 import shutil
 import sys

@@ -6,7 +6,6 @@ patchPreview）。遍历有边界限制：跳过常见依赖/构建目录、只�
 """
 
 import os
-from typing import Any
 
 # 跳过目录（依赖/构建产物）
 SKIP_DIRS = {

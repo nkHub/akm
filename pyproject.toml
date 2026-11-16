@@ -18,6 +18,18 @@ dependencies = [
     "python-multipart>=0.0.5",
     "jieba3>=1.0.2",
     "sqlite-vec>=0.1.6",
+    # akm/db.py 直接 import croniter 解析定时任务的 cron 表达式，
+    # 之前靠间接依赖混进来，干净环境会 ImportError，这里显式声明。
+    "croniter>=2.0.0",
+]
+
+[project.optional-dependencies]
+# 开发/CI 用：ruff 静态检查 + pytest 测试
+dev = [
+    "ruff>=0.17",
+    "pytest>=9",
+    "pytest-asyncio>=1.0",
+    "pytest-timeout>=2.0",
 ]
 
 [project.scripts]
@@ -29,3 +41,47 @@ where = ["."]
 
 [tool.setuptools.package-data]
 akm = ["templates/*.html", "static/*.js", "plugins/**/*.json", "plugins/**/*.html"]
+
+# ── 测试 ────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+# 主套件在 tests/，另外 plugins/protocol_converter 下自带一份可独立运行的适配器测试，
+# 二者都必须在默认收集范围内（否则这两处覆盖会静默丢掉）。
+testpaths = ["tests", "plugins/protocol_converter"]
+norecursedirs = [".venv*", "build", "dist", "node_modules", "plugins/*/_vendor"]
+asyncio_mode = "auto"
+filterwarnings = [
+    # 第三方库自身的弃用告警（httpx2 / starlette testclient）不影响本仓代码
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore::DeprecationWarning:fastapi.*",
+]
+
+# ── 静态检查 ────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["akm", "plugins", "tests", "scripts"]
+extend-exclude = [
+    ".venv",
+    ".venv-sqlite-vec",
+    "build",
+    "dist",
+    "plugins/markdown_kb/_vendor",
+]
+
+[tool.ruff.lint]
+# 只启用基础规则集：未使用导入/变量、未定义名字、语法级错误与常见 bug 模式
+select = ["F", "E9", "B"]
+ignore = [
+    # FastAPI 的 Depends/Query/File/Body/Header 必须以函数调用的形式出现在默认参数里，
+    # 这是框架要求，不是「默认参数里做函数调用」的缺陷。
+    "B008",
+    # 闭包在循环体内定义、但在同一轮迭代内立即消费（不逃逸到下一轮）时是安全的。
+    # 本仓此类写法均已人工确认，普遍出现在「每轮拼一个只在本轮调用的 lambda/函数」场景。
+    "B023",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 包级 __init__ 只做再导出
+"*/__init__.py" = ["F401"]
+# 测试里允许用 assert 做副作用检查、以及有意保留的宽松结构
+"tests/*" = ["B011"]

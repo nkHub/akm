@@ -553,7 +553,6 @@ class _KeychainBridge:
 
     def accounts(self) -> list[str]:
         """列出本服务下的所有 account（用于找历史密钥）。"""
-        import ctypes
 
         query = self._dict([
             (self._sym("kSecClass"), self._sym("kSecClassGenericPassword")),

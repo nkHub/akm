@@ -443,7 +443,7 @@ async def test_read_image_audit_without_body_logging(monkeypatch, tmp_path):
     tool = _read_tool(app)
     await tool.handler(image_path=str(img))
 
-    assert len(auds := audits) == 1
+    assert len(audits) == 1
     record = audits[0]
     assert record["request_body"] == ""
     assert record["response_body"] == ""

@@ -11,7 +11,6 @@ import re
 import shutil
 import signal
 import subprocess
-from typing import Any
 
 def _pi_timeout_ms() -> int:
     """解析 pi 编码节点超时（毫秒）。
@@ -324,7 +323,7 @@ async def _run_pi_cli(opts: dict, timeout_ms: int, model_ref: str | None) -> dic
                 "tokensOut": max(len(partial) // 4, 1),
                 "mode": "cli",
             }
-        raise TimeoutError(f"Pi CLI timed out after {timeout_ms}ms")
+        raise TimeoutError(f"Pi CLI timed out after {timeout_ms}ms") from None
     finally:
         if not settled:
             for t in reader_tasks:

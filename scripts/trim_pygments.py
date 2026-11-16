@@ -47,7 +47,7 @@ def main() -> int:
             removed.append(base)
 
     # 同步清理已删除模块的 .pyc 缓存（py2app 会生成 __pycache__）
-    for root, dirs, files in os.walk(lexers_dir):
+    for root, dirs, _files in os.walk(lexers_dir):
         for name in dirs:
             if name == "__pycache__":
                 pycache = os.path.join(root, name)

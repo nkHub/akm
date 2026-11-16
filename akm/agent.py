@@ -7,7 +7,7 @@
 import json
 import os
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from typing import Optional
 from akm import __version__
 from akm.config import get as config_get

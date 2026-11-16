@@ -22,7 +22,6 @@ import subprocess
 import time
 import traceback
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 import httpx
 

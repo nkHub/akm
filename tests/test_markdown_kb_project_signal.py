@@ -11,7 +11,6 @@
 4. 自动刷新任务在没有 KB 材料时不产生 LLM 调用。
 """
 import asyncio
-import json
 import pathlib
 import sys
 import tempfile

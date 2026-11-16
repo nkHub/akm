@@ -388,7 +388,9 @@ class TestResponsesAdapterRequest:
         assert RESPONSES_PARALLEL_TOOL_CALLS_NOT_MAPPED in warns
 
 
-class TestResponsesAdapterResponse:
+# 注意：不要与下方 620 行的 TestResponsesAdapterResponse 同名——同名类会静默覆盖，
+# 导致这里 9 个用例一个都不会被 pytest 收集执行（历史遗留缺陷，已在此修复）。
+class TestResponsesAdapterRequestAndHelpers:
 
     def test_convert_response_from_chat_sse_text(self):
         """验证 responses 非流式路径可直接消费 Chat SSE 原文并完成聚合转换"""

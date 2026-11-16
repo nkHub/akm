@@ -9,7 +9,6 @@
 """
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse

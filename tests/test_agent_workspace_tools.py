@@ -1,6 +1,5 @@
 """Agent 工作区文件工具与安全边界测试。"""
 
-import asyncio
 import json
 import os
 from pathlib import Path

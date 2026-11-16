@@ -149,7 +149,6 @@ def test_load_cipher_reuses_process_cache(tmp_path, monkeypatch):
         with open(tmp_path / "secret.key", "rb") as f:
             return f.read().strip()
 
-    original_load = crypto._load_cipher
     monkeypatch.setattr(crypto, "_cipher", None)
     # 直接验证：第二次调用走后只读一次文件
     monkeypatch.setattr(crypto, "_get_secret_path", lambda: str(tmp_path / "secret.key"))

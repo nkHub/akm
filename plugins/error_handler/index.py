@@ -93,7 +93,7 @@ class Plugin(PluginBase):
             if attempt < self.max_retries:
                 self.logger.info(f"5xx 错误 (attempt {attempt + 1}/{self.max_retries})，重试")
                 return "retry"
-            self.logger.warning(f"5xx 错误超过重试上限，切换 key")
+            self.logger.warning("5xx 错误超过重试上限，切换 key")
             return "switch"
 
         # 连接错误 / 超时 → 指数退避重试，超过上限后切换

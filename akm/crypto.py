@@ -147,7 +147,7 @@ class _MiniFernet:
         try:
             raw = base64.urlsafe_b64decode(token + b"=" * (-len(token) % 4))
         except Exception:
-            raise InvalidToken
+            raise InvalidToken from None
         if len(raw) < 73 or raw[0] != 0x80:
             raise InvalidToken
         iv, ct, mac = raw[9:25], raw[25:-32], raw[-32:]

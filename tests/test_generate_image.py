@@ -5,7 +5,6 @@ import json
 import pytest
 from fastapi import FastAPI
 
-from akm.agent_runtime.loop import ToolDef
 from akm.agent_runtime import tools as tools_module
 from akm.agent_runtime.tools import build_builtin_tools
 
@@ -140,7 +139,7 @@ async def test_generate_image_defaults_model_and_omits_empty(monkeypatch):
     monkeypatch.setattr("akm.proxy.forward_request", fake_forward)
 
     tool = _image_tool(app)
-    text = await tool.handler(prompt="cat")
+    await tool.handler(prompt="cat")
     assert captured["body"] == {"model": "gpt-image-2", "prompt": "cat"}
 
 
@@ -489,7 +488,6 @@ async def test_edit_image_path_fallback_to_upload_dir(edit_app, monkeypatch, tmp
     /data/agent-uploads/xxx.png），此时只要文件名一致，回退逻辑应命中
     真实落盘文件。
     """
-    from pathlib import Path
 
     app, _ = edit_app
     app.state.http_client = FakePool(client=FakeImageClient())
@@ -532,7 +530,6 @@ async def test_edit_image_path_fallback_to_upload_dir(edit_app, monkeypatch, tmp
 @pytest.mark.asyncio
 async def test_edit_image_path_fallback_ignores_wrong_directory(edit_app, monkeypatch, tmp_path):
     """回退查找丢弃传入路径的目录部分，只取文件名在 agent_upload_dir 内查找。"""
-    from pathlib import Path
 
     app, _ = edit_app
     upload_dir = tmp_path / "uploads"
@@ -625,7 +622,6 @@ async def test_edit_image_base64_data_url(edit_app, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_edit_image_base64_bare(edit_app, monkeypatch, tmp_path):
     """传入无前缀的裸 base64 时按 image/png 处理。"""
-    from pathlib import Path
 
     app, _ = edit_app
     app.state.http_client = FakePool(client=FakeImageClient())

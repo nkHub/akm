@@ -17,8 +17,6 @@ import os
 import re
 import shutil
 import signal
-import subprocess
-from typing import Any
 
 
 def _codex_timeout_ms() -> int:
@@ -251,7 +249,7 @@ async def _run_codex_cli(opts: dict, timeout_ms: int, model_ref: str | None) -> 
                 "tokensOut": max(len(partial) // 4, 1),
                 "mode": "cli",
             }
-        raise TimeoutError(f"Codex CLI timed out after {timeout_ms}ms")
+        raise TimeoutError(f"Codex CLI timed out after {timeout_ms}ms") from None
     finally:
         if not settled:
             for t in reader_tasks:

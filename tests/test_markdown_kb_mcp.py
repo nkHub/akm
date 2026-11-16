@@ -1,13 +1,11 @@
 """akm.markdown_kb_mcp 的 MCP streamable HTTP 端点测试。"""
 
-import json
 from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from akm import markdown_kb_mcp
-from akm.markdown_kb_mcp import router as mcp_router
 from akm.server import app
 
 

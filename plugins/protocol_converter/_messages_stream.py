@@ -134,7 +134,7 @@ def finalize_messages_sse(adapter, state: dict) -> list[str]:
     cached_tokens = state["cached_tokens"]
     thinking_block_sent = state["thinking_block_sent"]
     thinking_block_index = state["thinking_block_index"]
-    thinking_text = state["thinking_text"]
+    # 本函数不读 thinking 累积文本（只在 reasoning 分支里累加），无需取出
     text_block_sent = state["text_block_sent"]
     text_block_emitted = state["text_block_emitted"]
     text_block_index = state["text_block_index"]

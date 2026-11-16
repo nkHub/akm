@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from datetime import datetime, timezone
@@ -538,7 +537,7 @@ def provider_exists(provider_id: str) -> bool:
 def common_prefix(a: str, b: str) -> int:
     """两个模型名的公共前缀长度（用于在同 family 候选里挑最贴近的一个）。"""
     n = 0
-    for x, y in zip(str(a or ""), str(b or "")):
+    for x, y in zip(str(a or ""), str(b or ""), strict=False):
         if x != y:
             break
         n += 1

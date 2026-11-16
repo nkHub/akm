@@ -26,7 +26,7 @@ def _setup_tmp_env(monkeypatch):
 
 def test_key_test_default_mode(monkeypatch):
     """默认模式继续走模型连通性测试，避免改变既有 CLI 语义。"""
-    tmpdir = _setup_tmp_env(monkeypatch)
+    _setup_tmp_env(monkeypatch)
 
     conn = get_connection()
     init_db(conn)
@@ -62,7 +62,7 @@ def test_key_test_default_mode(monkeypatch):
 
 def test_key_test_health_mode(monkeypatch):
     """health 模式只请求 /health，适合快速验证共享网关是否在线。"""
-    tmpdir = _setup_tmp_env(monkeypatch)
+    _setup_tmp_env(monkeypatch)
 
     conn = get_connection()
     init_db(conn)
@@ -95,7 +95,7 @@ def test_key_test_health_mode(monkeypatch):
 
 def test_key_test_prints_fallback_chain(monkeypatch):
     """显式启用 fallback 时，CLI 应展示尝试链路。"""
-    tmpdir = _setup_tmp_env(monkeypatch)
+    _setup_tmp_env(monkeypatch)
 
     conn = get_connection()
     init_db(conn)
@@ -453,80 +453,78 @@ def test_image_generate_includes_non_json_response_preview(monkeypatch):
     assert "Bad Gateway from upstream" in result.output
 
 
-def test_image_edit_outputs_raw_json(monkeypatch):
+def test_image_edit_outputs_raw_json(monkeypatch, tmp_path):
     """image edit 成功时应透传 JSON，方便外部工具直接消费。"""
     _setup_tmp_env(monkeypatch)
 
     runner = CliRunner()
-    with runner.isolated_filesystem():
-        Path("cat.png").write_bytes(b"fake-image")
-        Path("mask.png").write_bytes(b"fake-mask")
+    (Path(tmp_path) / "cat.png").write_bytes(b"fake-image")
+    (Path(tmp_path) / "mask.png").write_bytes(b"fake-mask")
 
-        async def fake_edit_image_via_local_service(form_data, file_specs, timeout=120.0):
-            assert form_data == {
-                "prompt": "remove background",
-                "model": "gpt-image-2",
-                "size": "1024x1024",
-                "n": "1",
-            }
-            assert timeout == 30.0
-            assert file_specs[0][0] == "image"
-            assert file_specs[0][1][0] == "cat.png"
-            assert file_specs[0][1][1] == b"fake-image"
-            assert file_specs[1][0] == "mask"
-            assert file_specs[1][1][0] == "mask.png"
-            assert file_specs[1][1][1] == b"fake-mask"
-            return {
-                "created": 456,
-                "data": [{"url": "https://example.com/edited-cat.png"}],
-            }
+    async def fake_edit_image_via_local_service(form_data, file_specs, timeout=120.0):
+        assert form_data == {
+            "prompt": "remove background",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "n": "1",
+        }
+        assert timeout == 30.0
+        assert file_specs[0][0] == "image"
+        assert file_specs[0][1][0] == "cat.png"
+        assert file_specs[0][1][1] == b"fake-image"
+        assert file_specs[1][0] == "mask"
+        assert file_specs[1][1][0] == "mask.png"
+        assert file_specs[1][1][1] == b"fake-mask"
+        return {
+            "created": 456,
+            "data": [{"url": "https://example.com/edited-cat.png"}],
+        }
 
-        monkeypatch.setattr("akm.cli._edit_image_via_local_service", fake_edit_image_via_local_service)
+    monkeypatch.setattr("akm.cli._edit_image_via_local_service", fake_edit_image_via_local_service)
 
-        result = runner.invoke(
-            main,
-            [
-                "image", "edit", "cat.png",
-                "--prompt", "remove background",
-                "--mask", "mask.png",
-                "--model", "gpt-image-2",
-                "--size", "1024x1024",
-                "--n", "1",
-                "--timeout", "30",
-            ],
-        )
+    result = runner.invoke(
+        main,
+        [
+            "image", "edit", str(tmp_path / "cat.png"),
+            "--prompt", "remove background",
+            "--mask", str(tmp_path / "mask.png"),
+            "--model", "gpt-image-2",
+            "--size", "1024x1024",
+            "--n", "1",
+            "--timeout", "30",
+        ],
+    )
 
     assert result.exit_code == 0
     assert json.loads(result.output.strip())["data"][0]["url"] == "https://example.com/edited-cat.png"
 
 
-def test_image_edit_uses_configured_default_timeout(monkeypatch):
+def test_image_edit_uses_configured_default_timeout(monkeypatch, tmp_path):
     """未显式传 --timeout 时，图片编辑应读取 image_request_timeout_sec。"""
     _setup_tmp_env(monkeypatch)
     monkeypatch.setattr("akm.cli.config_module.load_config", lambda: {"image_request_timeout_sec": 300, "server_port": 8800})
 
     runner = CliRunner()
-    with runner.isolated_filesystem():
-        Path("cat.png").write_bytes(b"fake-image")
+    (Path(tmp_path) / "cat.png").write_bytes(b"fake-image")
 
-        async def fake_edit_image_via_local_service(form_data, file_specs, timeout=120.0):
-            assert timeout == 300.0
-            return {"created": 456, "data": [{"url": "https://example.com/edited-cat.png"}]}
+    async def fake_edit_image_via_local_service(form_data, file_specs, timeout=120.0):
+        assert timeout == 300.0
+        return {"created": 456, "data": [{"url": "https://example.com/edited-cat.png"}]}
 
-        monkeypatch.setattr("akm.cli._edit_image_via_local_service", fake_edit_image_via_local_service)
+    monkeypatch.setattr("akm.cli._edit_image_via_local_service", fake_edit_image_via_local_service)
 
-        result = runner.invoke(
-            main,
-            [
-                "image", "edit", "cat.png",
-                "--prompt", "remove background",
-            ],
-        )
+    result = runner.invoke(
+        main,
+        [
+            "image", "edit", str(tmp_path / "cat.png"),
+            "--prompt", "remove background",
+        ],
+    )
 
     assert result.exit_code == 0
 
 
-def test_image_edit_includes_non_json_response_preview(monkeypatch):
+def test_image_edit_includes_non_json_response_preview(monkeypatch, tmp_path):
     """image edit 遇到非 JSON 错误页时也应保留响应摘要，避免只能看到笼统报错。"""
     _setup_tmp_env(monkeypatch)
 
@@ -559,9 +557,8 @@ def test_image_edit_includes_non_json_response_preview(monkeypatch):
     monkeypatch.setattr("akm.cli.httpx.AsyncClient", FakeAsyncClient)
 
     runner = CliRunner()
-    with runner.isolated_filesystem():
-        Path("cat.png").write_bytes(b"fake-image")
-        result = runner.invoke(main, ["image", "edit", "cat.png", "--prompt", "remove background"])
+    (Path(tmp_path) / "cat.png").write_bytes(b"fake-image")
+    result = runner.invoke(main, ["image", "edit", str(tmp_path / "cat.png"), "--prompt", "remove background"])
 
     assert result.exit_code != 0
     assert "HTTP 502" in result.output

@@ -656,14 +656,14 @@ class ProjectMemory:
         try:
             raw_content = str(data["choices"][0]["message"]["content"] or "").strip()
         except (KeyError, IndexError, TypeError):
-            raise RuntimeError("digest chat 返回结构不符合预期")
+            raise RuntimeError("digest chat 返回结构不符合预期") from None
         raw_content = re_sub_fence(raw_content)
         if not raw_content:
             return ""
         try:
             parsed = json.loads(raw_content)
         except json.JSONDecodeError:
-            raise RuntimeError("digest chat 未返回合法 JSON")
+            raise RuntimeError("digest chat 未返回合法 JSON") from None
         if not isinstance(parsed, dict):
             raise RuntimeError("digest chat 返回结构不符合预期")
         return _safe_text(parsed.get("digest_markdown"), 2000)
@@ -835,7 +835,7 @@ class ProjectMemory:
         try:
             raw_content = str(data["choices"][0]["message"]["content"] or "").strip()
         except (KeyError, IndexError, TypeError):
-            raise RuntimeError("context chat 返回结构不符合预期")
+            raise RuntimeError("context chat 返回结构不符合预期") from None
         return re_sub_fence(raw_content).strip()
 
     @staticmethod
@@ -890,7 +890,6 @@ class ProjectMemory:
         if workspace_root == "/" or not root.is_dir():
             return ""
         lines: list[str] = []
-        total = 0
         limit = CONTEXT_SURVEY_MAX_CHARS
         used = 0
 

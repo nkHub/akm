@@ -35,7 +35,7 @@ def version_greater(a: str, b: str) -> bool:
 
     na, sa = _split(a)
     nb, sb = _split(b)
-    for x, y in zip(na, nb):
+    for x, y in zip(na, nb, strict=False):  # 版本段数可能不等，短的一侧先结束由下方长度判断兜底
         if x != y:
             return x > y
     if len(na) != len(nb):

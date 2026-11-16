@@ -12,7 +12,6 @@ import contextvars
 import time
 from collections import OrderedDict
 from copy import deepcopy
-from pathlib import Path
 from typing import AsyncIterator
 from akm.plugins import PluginBase
 
@@ -73,7 +72,8 @@ class Plugin(PluginBase):
         # 请求级上下文，避免并发请求互相覆盖 source_format/adapter 状态
         self._ctx_source_format = contextvars.ContextVar("protocol_converter_source_format", default="chat")
         self._ctx_active_adapter = contextvars.ContextVar("protocol_converter_active_adapter", default=None)
-        self._ctx_request_messages = contextvars.ContextVar("protocol_converter_request_messages", default=[])
+        # 默认值用 None 而不是 []：可变默认对象会被上下文共享；读取处已统一 `get() or []`。
+        self._ctx_request_messages = contextvars.ContextVar("protocol_converter_request_messages", default=None)
         self._ctx_request_provider = contextvars.ContextVar("protocol_converter_request_provider", default="")
         self._response_sessions = OrderedDict()
         self._session_ttl_sec = 60 * 60 * 24
@@ -147,7 +147,7 @@ class Plugin(PluginBase):
 
         adapter = self._ctx_active_adapter.get()
         if adapter is not None and provider is not None:
-            setattr(adapter, "_request_provider", str(provider or ""))
+            adapter._request_provider = str(provider or "")
 
     # ── 请求转换 ──
 
@@ -167,7 +167,7 @@ class Plugin(PluginBase):
             self._conversion_warnings = []
             self._ctx_source_format.set("responses")
             self._ctx_active_adapter.set(adapter)
-            setattr(adapter, "_request_provider", self._ctx_request_provider.get() or "")
+            adapter._request_provider = self._ctx_request_provider.get() or ""
             restored_body = self._restore_response_history(body)
             converted = adapter.convert_request(restored_body)
             converted.pop("previous_response_id", None)
@@ -181,7 +181,7 @@ class Plugin(PluginBase):
             self._conversion_warnings = []
             self._ctx_source_format.set("messages")
             self._ctx_active_adapter.set(adapter)
-            setattr(adapter, "_request_provider", self._ctx_request_provider.get() or "")
+            adapter._request_provider = self._ctx_request_provider.get() or ""
             self._ctx_request_messages.set([])
             return adapter.convert_request(body)
         else:
@@ -192,7 +192,7 @@ class Plugin(PluginBase):
             self._conversion_warnings = []
             self._ctx_source_format.set("chat")
             self._ctx_active_adapter.set(adapter)
-            setattr(adapter, "_request_provider", self._ctx_request_provider.get() or "")
+            adapter._request_provider = self._ctx_request_provider.get() or ""
             self._ctx_request_messages.set([])
             return adapter.convert_request(body)
 

@@ -927,7 +927,7 @@ class PetWindowController(NSObject):
         ``typewriter=True`` 时第 0 行用打字机效果逐字显示（对话/碎碎念回复），
         其余行立即写入。逐字推进由 ``_tickTypewriter`` 在 tick 里驱动。
         """
-        for index, (label, text) in enumerate(zip(self.bubble_rows, lines)):
+        for index, (label, text) in enumerate(zip(self.bubble_rows, lines, strict=False)):
             text = text or ""
             if index == 0 and typewriter and text:
                 self._startTypewriter(text)
@@ -1890,7 +1890,6 @@ class PetWindowController(NSObject):
             self.bubble.setHidden_(False)
             self._resizeWindow()
 
-        bubble_h = self._bubbleHeight()
         width = BASE_PET_W * self.scale
         pad = 10.0
 

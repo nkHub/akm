@@ -11,10 +11,15 @@ import os
 import struct
 import zipfile
 
+# 本文件的用例依赖 akm.menubar，而它顶层 import rumps（仅 macOS 可用）。
+# 在 Linux CI 上没有 rumps 时整模块跳过，避免收集阶段 ImportError 把整轮 CI 标红；
+# macOS 本机仍会完整执行这些用例。
 import pytest
 
-import akm.menubar as menubar_mod
-from akm.menubar import AKMApp
+pytest.importorskip("rumps", reason="menubar 仅 macOS 可用（依赖 rumps / AppKit）")
+
+import akm.menubar as menubar_mod  # noqa: E402  —— 必须在 importorskip 之后导入
+from akm.menubar import AKMApp  # noqa: E402
 
 
 def _asset(name: str) -> dict:

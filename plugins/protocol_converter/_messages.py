@@ -18,7 +18,6 @@ from akm.agent import get_agent_profile
 from akm.plugins.protocol_converter._ir import chat_message_to_ir, ir_to_messages_content
 from akm.plugins.protocol_converter._messages_codec import (
     sse_chat_to_json,
-    messages_sse_event as _messages_sse_event,
 )
 from akm.plugins.protocol_converter._messages_stream import (
     build_rescue_messages_sse,

@@ -1,4 +1,3 @@
-import os
 import tempfile
 import pytest
 from akm.db import get_connection, init_db
@@ -11,7 +10,6 @@ from akm.key_pool import (
     set_status,
     mark_rate_limited,
     pick_key,
-    clear_expired_rate_limits,
 )
 
 

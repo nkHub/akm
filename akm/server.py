@@ -27,7 +27,7 @@ from akm.key_pool import (
     list_keys, add_key, get_key, set_api_key,
     set_priority, set_base_url, set_status, remove_key,
     set_provider, set_models, set_auth_header, set_provider_models, key_model_list,
-    get_usage_query_config, set_usage_query_config, update_usage_data, _safe_json_parse, get_default_usage_script,
+    get_usage_query_config, set_usage_query_config, update_usage_data, _safe_json_parse,
 )
 from akm.audit import (
     write_log_async,
@@ -37,7 +37,7 @@ from akm.audit import (
     clean_log_bodies_async,
     AuditLogQueue,
 )
-from akm.config import load_config, save_config, get as config_get, resolve_http_proxy_url
+from akm.config import load_config, save_config, resolve_http_proxy_url
 from akm.agent import register_agent, unregister_agent, list_agents, load_custom_agents, get_agent
 from akm.http_client_pool import HttpClientPoolManager
 from akm.plugins.plugin_manager import PluginManager
@@ -85,7 +85,6 @@ class _UsageQueryScheduler:
     async def _check_and_query(self) -> None:
         """扫描所有 key，对到期未查询的执行用量查询，存储原始响应供前端 extractor 解析"""
         keys = list_keys()
-        now = asyncio.get_running_loop().time()
         for key in keys:
             interval_m = int(key.get("usage_query_interval_m", 0) or 0)
             # 开关与间隔已拆成两列：只有开关打开、且填了正的间隔才自动查询。

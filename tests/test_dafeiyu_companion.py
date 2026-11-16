@@ -8,7 +8,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
 
 _PET_DIR = Path(__file__).resolve().parents[1] / "plugins" / "dafeiyu" / "pet"
 if str(_PET_DIR) not in sys.path:

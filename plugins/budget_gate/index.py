@@ -13,7 +13,10 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # 仅用于类型注解（quoted annotation），运行期仍靠函数内局部导入
+    from akm.cost_estimate import PriceResolver
 
 from fastapi import APIRouter
 

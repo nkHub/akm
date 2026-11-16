@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import platform
-import shutil
 import subprocess
 import sys
 import time
@@ -35,7 +34,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import APIRouter
 
 from akm.plugins import PluginBase

@@ -112,7 +112,7 @@ def test_builtin_time_tool_returns_current_time_fields():
     # ISO 时间可解析，且 unix 时间戳与当前时刻偏差在合理范围内
     import datetime
 
-    parsed = datetime.datetime.fromisoformat(result["iso"])
+    datetime.datetime.fromisoformat(result["iso"])  # 不合法会直接抛 ValueError
     assert result["utc_iso"].endswith("+00:00")
     assert abs(result["unix"] - datetime.datetime.now().timestamp()) < 60
 
@@ -265,7 +265,6 @@ class _FakeKbClient:
 
 def _install_fake_kb_client(monkeypatch, payload, status_code=200):
     """把 tools.httpx.AsyncClient 换成 fake，返回客户端实例供断言。"""
-    import httpx as real_httpx
 
     client = _FakeKbClient(payload, status_code)
     monkeypatch.setattr(
@@ -579,9 +578,7 @@ def test_builtin_task_tools_validate(monkeypatch, tmp_path):
 
 def _workspace_handlers(monkeypatch, tmp_path, *, write_tools=True):
     """构造工作区文件工具 handlers，并注入 tmp_path 作为请求级工作区。"""
-    import json as _json
 
-    from pathlib import Path
 
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
@@ -635,7 +632,6 @@ async def test_builtin_read_file_paginates_and_truncates(tmp_path, monkeypatch):
 async def test_builtin_glob_skips_symlink_escaping_workspace(tmp_path, monkeypatch):
     """glob 命中工作区内指向外部文件的软链接时必须跳过，不得泄露外部文件名。"""
     import json as _json
-    import os
 
     ws, token, handlers = _workspace_handlers(monkeypatch, tmp_path)
     try:
@@ -858,7 +854,8 @@ async def test_send_notification_falls_back_to_rumps(monkeypatch):
         lambda: {"agent_notify_enabled": True},
     )
     called = []
-    import rumps
+    # rumps 仅 macOS 可用；Linux CI 上该回退分支不可达，只跳过本用例
+    rumps = pytest.importorskip("rumps", reason="rumps 回退分支仅 macOS 可达")
 
     monkeypatch.setattr(rumps, "notification", lambda t, s, m: called.append((t, s, m)))
     app = SimpleNamespace(state=SimpleNamespace(host_notify=None))

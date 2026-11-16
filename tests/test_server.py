@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import pytest
 import shutil
-from pathlib import Path
 from httpx import ASGITransport, AsyncClient
 
 from akm.audit import AuditLogQueue, write_log, list_logs
@@ -2036,7 +2035,6 @@ async def test_api_update_key_from_wildcard_to_explicit_models_clears_provider_m
 async def test_api_refresh_key_provider_models(monkeypatch):
     """批量刷新 provider 模型列表接口应返回成功/失败统计。"""
 
-    add_key = get_connection().execute
     conn = get_connection()
     conn.execute(
         "INSERT INTO keys (alias, provider, api_key, base_url, models, auth_header, priority, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2581,7 +2579,7 @@ async def test_api_add_agent_persists_protocol_capability_fields(tmp_path, monke
 @pytest.mark.asyncio
 async def test_http_proxy_config_rebuilds_client(tmp_path, monkeypatch):
     """保存出站代理配置后应标记连接池重建，且 config 规范化 host:port。"""
-    from akm.config import normalize_http_proxy_url, save_config, load_config, CONFIG_PATH
+    from akm.config import normalize_http_proxy_url, save_config, load_config
     assert normalize_http_proxy_url("127.0.0.1:7890") == "http://127.0.0.1:7890"
 
     cfg_path = tmp_path / "config.json"

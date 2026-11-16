@@ -10,7 +10,7 @@ import json
 import pytest
 
 from akm import models_dev
-from akm.cost_estimate import PriceResolver, match_price, parse_pricing
+from akm.cost_estimate import PriceResolver
 from akm.db import get_connection
 
 

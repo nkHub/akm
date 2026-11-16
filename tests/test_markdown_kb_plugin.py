@@ -3,7 +3,6 @@
 当前覆盖 `_embed_texts` 的批量分组逻辑：AKM embedding 网关对单次请求
 超过 10 条会返回 502，插件需按每批 10 条拆分并顺序合并结果。
 """
-import asyncio
 import pathlib
 import sys
 import tempfile

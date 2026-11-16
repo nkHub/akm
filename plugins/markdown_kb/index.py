@@ -239,6 +239,7 @@ class IndexStore(ABC):
 
     def update_memory(self, upserts: dict[str, dict], cap: float = 1.0) -> None:
         """更新 chunk 记忆；无记忆后端保持无操作，维持统一调用契约。"""
+        return None  # 有意保留为空实现（默认后端无记忆能力），不是漏写 @abstractmethod
 
     def cleanup_expired_memory(self) -> int:
         """清理过期记忆；无记忆后端没有可清理记录。"""
@@ -246,6 +247,7 @@ class IndexStore(ABC):
 
     def clear_memory(self) -> None:
         """清空记忆；无记忆后端保持无操作。"""
+        return None  # 有意保留为空实现（默认后端无记忆能力），不是漏写 @abstractmethod
 
     def get_learn_doc_memory_stats(self) -> list[dict]:
         """获取 learn 文档记忆统计；无记忆后端返回空集合。"""
@@ -2125,7 +2127,7 @@ class Plugin(PluginBase):
         if not a or not b or len(a) != len(b):
             return 0.0
         import math
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(x * x for x in b))
         if norm_a == 0.0 or norm_b == 0.0:
@@ -2173,7 +2175,7 @@ class Plugin(PluginBase):
             raise HTTPException(status_code=502, detail="embedding 返回数量与 chunks 数量不一致")
 
         now = _utc_now_iso()
-        for item, embedding in zip(chunks, embeddings):
+        for item, embedding in zip(chunks, embeddings, strict=True):
             item["embedding"] = embedding
             item["indexed_at"] = now
 
@@ -2496,7 +2498,7 @@ class Plugin(PluginBase):
 
         now = _utc_now_iso()
         documents = []
-        for item, embedding in zip(chunks, embeddings):
+        for item, embedding in zip(chunks, embeddings, strict=True):
             item["embedding"] = embedding
             item["indexed_at"] = now
             documents.append(item)
@@ -3096,7 +3098,11 @@ class Plugin(PluginBase):
         except Exception:
             return
 
-        now_ts = datetime.utcnow()
+        # 统一用带时区的 UTC 时间：manifest 里的 created_at 由 _utc_now_iso() 写成
+        # 带 offset 的 ISO 串（如 2026-01-01T00:00:00+00:00），若这里用旧的
+        # datetime.utcnow()（naive），下面 now_ts - created_ts 会抛 TypeError，
+        # 而该异常被 except 吞掉后会把文档直接判为过期删除，因此必须保持 aware。
+        now_ts = datetime.now(timezone.utc)
         stale_docs = []
         for stat in stats:
             if stat["chunk_count"] == 0:
@@ -3120,6 +3126,11 @@ class Plugin(PluginBase):
                 created_str = str(doc_info.get("created_at") or "")
                 try:
                     created_ts = datetime.fromisoformat(created_str)
+                    # 历史 manifest 可能存的是不带时区的串，统一按 UTC 补上时区，
+                    # 否则与上面的 aware now_ts 相减会抛 TypeError，被下面吞掉后
+                    # 会把仍在保留期内的文档误判为过期删除。
+                    if created_ts.tzinfo is None:
+                        created_ts = created_ts.replace(tzinfo=timezone.utc)
                     age_days = (now_ts - created_ts).total_seconds() / 86400
                     if age_days < keep_days:
                         continue
@@ -3463,7 +3474,6 @@ class Plugin(PluginBase):
                         segments.append(("para", para_lines))
             # 将 list 段按 chunk_size 分组打包
             current_batch_lines: list[str] = []
-            current_batch_length = 0
 
             for seg_type, seg_data in segments:
                 if seg_type == "para":
@@ -3503,18 +3513,15 @@ class Plugin(PluginBase):
                     candidate_len = len("\n".join(candidate_lines))
                     if candidate_len <= chunk_size:
                         current_batch_lines = candidate_lines
-                        current_batch_length = candidate_len
                     else:
                         if current_batch_lines:
                             all_chunks.append(_make_chunk(current_batch_lines, h_path, title, level))
                         current_batch_lines = list(item_lines)
-                        current_batch_length = len(item_text)
 
                 # 排空最后一批
                 if current_batch_lines:
                     all_chunks.append(_make_chunk(current_batch_lines, h_path, title, level))
                     current_batch_lines = []
-                    current_batch_length = 0
 
         def _flatten_section(node: dict):
             """递归展开标题树节点为 chunk。"""
@@ -4175,8 +4182,6 @@ class Plugin(PluginBase):
         parent_bonus_map = parent_bonus_map or {}
         # 计算记忆分映射
         memory_map = memory_map or {}
-        decay_lambda = math.log(2) / 24.0
-        now = _utc_now_iso()
 
         def _get_memory(chunk_id: str) -> float:
             stored = memory_map.get(chunk_id, 0.0)
@@ -5841,7 +5846,7 @@ class Plugin(PluginBase):
         """计算两个向量的余弦相似度。"""
         if not a or not b or len(a) != len(b):
             return 0.0
-        numerator = sum(x * y for x, y in zip(a, b))
+        numerator = sum(x * y for x, y in zip(a, b, strict=False))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(y * y for y in b))
         if norm_a <= 0 or norm_b <= 0:

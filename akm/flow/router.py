@@ -142,7 +142,6 @@ async def instantiate_template(template_id: str, request: Request):
     if blocked:
         return blocked
     # 按模板名或序号匹配
-    names = [t["name"] for t in flow_templates.TEMPLATES]
     if template_id.isdigit():
         idx = int(template_id)
         if idx < 0 or idx >= len(flow_templates.TEMPLATES):

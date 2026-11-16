@@ -241,7 +241,6 @@ def test_cost_pricing_has_no_handwritten_default_table():
     手填表需要人工维护、容易漏配（历史日志里 5814 次请求因缺条目被算成 $0）。
     """
     import akm.config as config_mod
-    import akm.cost_estimate as cost_mod
 
     assert not hasattr(config_mod, "DEFAULT_PRICING_TABLE")
     # 配置默认值里不再有 cost_pricing_table

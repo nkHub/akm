@@ -20,10 +20,8 @@ from datetime import datetime
 from typing import Any
 
 from akm.db import (
-    get_task,
     list_tasks,
     update_task,
-    delete_task,
 )
 from akm.config import load_config
 from akm.key_pool import list_keys, key_model_list

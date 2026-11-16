@@ -226,7 +226,7 @@ def add_key(
         )
         conn.commit()
     except Exception:
-        raise ValueError(f"Key 别名 '{alias}' 已存在")
+        raise ValueError(f"Key 别名 '{alias}' 已存在") from None
     finally:
         conn.close()
 

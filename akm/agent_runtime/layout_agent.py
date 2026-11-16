@@ -19,7 +19,7 @@ import logging
 import re
 from typing import Any
 
-from akm.agent_runtime.layout_schema import LAYOUT_VERSION, validate_layout
+from akm.agent_runtime.layout_schema import validate_layout
 
 logger = logging.getLogger(__name__)
 

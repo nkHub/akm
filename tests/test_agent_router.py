@@ -176,7 +176,6 @@ async def test_multipart_image_degraded_for_no_vision_model(monkeypatch, tmp_pat
     assert "/agent-uploads/" in content
     assert "cache" not in content
     # 图片仍落盘，供 akm_read_image 读取
-    import pathlib
     saved = [p for p in (tmp_path / "cache").iterdir() if p.suffix == ".png"]
     assert len(saved) == 1
     assert saved[0].read_bytes() == png_bytes

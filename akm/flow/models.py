@@ -6,7 +6,6 @@ flow 原本通过 HTTP 拉取 AKM 网关的 /v1/models；并入 AKM 后改为直
 """
 
 import re
-from typing import Any
 
 from akm.key_pool import key_model_list, list_keys
 

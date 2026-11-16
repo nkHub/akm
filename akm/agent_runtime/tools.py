@@ -152,8 +152,10 @@ def reset_request_workspace_root(token) -> None:
 #: 为什么用 ContextVar 而不是函数参数：工具 handler 的签名由 ``ToolDef.parameters``
 #: 决定（模型只按 schema 传参），塞不进额外参数；而并发请求之间又必须隔离。
 #: 由 ``AgentLoop._execute_registered_tool`` 在执行工具前写入、执行后恢复。
-_request_audit_context: ContextVar[dict[str, str]] = ContextVar(
-    "agent_request_audit_context", default={}
+#: 默认值用 None 而不是 {}：可变默认对象会被 ContextVar 在各上下文间共享，
+#: 这里虽然只读不写，但改成 None 更安全；读取处统一走 `_request_audit_context.get() or {}`。
+_request_audit_context: ContextVar[dict[str, str] | None] = ContextVar(
+    "agent_request_audit_context", default=None
 )
 
 
@@ -231,7 +233,7 @@ def _workspace_root() -> Path | None:
     try:
         requested_root.relative_to(configured_root)
     except ValueError:
-        raise ValueError("请求级 workspace_root 必须位于 agent_workspace_root 内")
+        raise ValueError("请求级 workspace_root 必须位于 agent_workspace_root 内") from None
     return requested_root
 
 
@@ -485,7 +487,7 @@ def _safe_resolve_workspace_path(raw: str, *, must_exist: bool = True) -> Path:
     try:
         candidate.relative_to(root)
     except ValueError:
-        raise ValueError(f"路径 {raw} 超出工作区范围，禁止访问")
+        raise ValueError(f"路径 {raw} 超出工作区范围，禁止访问") from None
     if must_exist and not candidate.exists():
         raise ValueError(f"路径 {raw} 不存在")
     # 敏感文件（.env / 私钥 / 凭据 / .git 内部文件）即使在沙箱内也拒绝，
@@ -736,7 +738,7 @@ def _read_image_file(path: str) -> tuple[str, bytes, str]:
     try:
         file_size = file_path.stat().st_size
     except OSError as exc:
-        raise OSError(f"读取图片文件信息失败: {exc}")
+        raise OSError(f"读取图片文件信息失败: {exc}") from exc
     if file_size > _AGENT_IMAGE_MAX_INPUT_BYTES:
         raise ValueError(
             f"图片文件超过 {_AGENT_IMAGE_MAX_INPUT_BYTES // (1024 * 1024)}MB 限制"
@@ -776,7 +778,7 @@ def _decode_image_base64(raw: str) -> tuple[str, bytes, str]:
     try:
         data = base64.b64decode(text, validate=True)
     except Exception:
-        raise ValueError("图片 base64 解码失败，请检查数据是否完整")
+        raise ValueError("图片 base64 解码失败，请检查数据是否完整") from None
     if not data:
         raise ValueError("图片 base64 数据为空")
     if len(data) > _AGENT_IMAGE_MAX_INPUT_BYTES:
@@ -2225,7 +2227,7 @@ def _seatbelt_available() -> bool:
         return _seatbelt_api_ok
     try:
         _seatbelt_lib = ctypes.CDLL("libSystem.dylib")
-        getattr(_seatbelt_lib, "sandbox_init_with_parameters")
+        _ = _seatbelt_lib.sandbox_init_with_parameters  # 仅探测符号是否存在，缺失会抛 AttributeError
         _seatbelt_api_ok = True
     except (AttributeError, OSError):
         _seatbelt_lib = None
@@ -3295,7 +3297,6 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
                 传 0（默认）或其它值时返回 1、7、30 三个窗口。
         """
         # 延迟导入：tools 在 server 启动阶段注册，避免模块级循环依赖。
-        from akm.cost_estimate import pricing_snapshot
         from akm.server import _get_stats
 
         cfg = load_config()
@@ -3939,7 +3940,6 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
         pool = getattr(app.state, "http_client", None)
         if pool is None or not getattr(pool, "is_route_pool", False):
             return json.dumps({"error": "HTTP 连接池未就绪"}, ensure_ascii=False)
-        cfg = load_config()
         if not str(model or "").strip():
             model = _image_default_model()
         body: dict[str, Any] = {"model": model, "prompt": prompt}

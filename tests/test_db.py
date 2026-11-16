@@ -1,4 +1,3 @@
-import os
 import tempfile
 import pytest
 from akm.db import get_db_path, get_connection, init_db

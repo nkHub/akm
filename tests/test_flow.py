@@ -480,7 +480,6 @@ async def test_engine_human_auto_approve_by_default(_monkey_forward):
 @pytest.mark.asyncio
 async def test_engine_human_waits_and_resume_approve(_monkey_forward, monkeypatch):
     """flow_human_auto_approve=false 时 human 节点挂起，resume approve 后续跑成功。"""
-    import akm.flow.engine as fe
 
     monkeypatch.setattr(
         "akm.config.load_config",
@@ -512,7 +511,6 @@ async def test_engine_human_waits_and_resume_approve(_monkey_forward, monkeypatc
 @pytest.mark.asyncio
 async def test_engine_human_resume_reject_fails_run(_monkey_forward, monkeypatch):
     """resume reject 时 run 置 failed。"""
-    import akm.flow.engine as fe
 
     monkeypatch.setattr(
         "akm.config.load_config",
@@ -538,7 +536,6 @@ async def test_engine_human_resume_reject_fails_run(_monkey_forward, monkeypatch
 @pytest.mark.asyncio
 async def test_engine_human_resume_wrong_state(_monkey_forward, monkeypatch):
     """非 waiting_human 状态 resume 应抛错。"""
-    import akm.flow.engine as fe
 
     monkeypatch.setattr(
         "akm.config.load_config",
@@ -548,7 +545,6 @@ async def test_engine_human_resume_wrong_state(_monkey_forward, monkeypatch):
     app = _fake_app()
     engine = WorkflowEngine(app)
     run = await engine.start(wf, "修复 bug")
-    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
     for _ in range(50):
         cur = engine.get_run(run["id"])
         if cur["status"] == "waiting_human":
@@ -826,7 +822,7 @@ def test_engine_recover_stale_runs_marks_failed(_isolated_db):
     }
     flow_db.insert_run(run)
 
-    engine = WorkflowEngine(_fake_app())
+    WorkflowEngine(_fake_app())
     restored = flow_db.get_run("run_stale01")
     assert restored is not None
     assert restored["status"] == "failed"

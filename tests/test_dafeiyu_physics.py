@@ -9,7 +9,6 @@
 不依赖 AppKit，纯函数测试。
 """
 
-import math
 import sys
 from pathlib import Path
 

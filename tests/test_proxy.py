@@ -796,7 +796,7 @@ async def test_forward_records_upstream_raw_response_before_conversion(monkeypat
     }))
 
     mock_client = AsyncMock()
-    send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"raw":"upstream"}')])
+    _make_send_mock(mock_client, [FakeStreamResponse(200, '{"raw":"upstream"}')])
 
     result = await forward_request(
         body={"model": "claude-3", "input": "hi", "stream": False},

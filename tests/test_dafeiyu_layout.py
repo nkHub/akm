@@ -169,7 +169,7 @@ def test_layout_constants_match_implementation():
     # BUBBLE_H 在实现里是推导式（BUBBLE_LINE_H * 3 + 边距），不是字面量，
     # 所以校验它的两个来源：行高常量 + 推导公式。
     assert f"BUBBLE_LINE_H = {LINE_H}" in src, "BUBBLE_LINE_H 与测试的 LINE_H 不一致"
-    assert f"BUBBLE_H = int(BUBBLE_LINE_H * 3 + 20)" in src, "BUBBLE_H 推导公式变了"
+    assert "BUBBLE_H = int(BUBBLE_LINE_H * 3 + 20)" in src, "BUBBLE_H 推导公式变了"
     # 交叉验证：推导结果应等于测试里写死的 BUBBLE_H
     assert int(LINE_H * 3 + 20) == BUBBLE_H, (
         f"BUBBLE_H 推导结果 {int(LINE_H * 3 + 20)} != 测试常量 {BUBBLE_H}"

@@ -9,7 +9,6 @@ import json
 import inspect
 import logging
 import time
-from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 from akm.config import load_config

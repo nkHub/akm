@@ -1,6 +1,5 @@
 """/v1/tasks 定时任务接口与后台调度器的测试。"""
 
-import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -232,7 +231,6 @@ async def test_tasks_require_token_when_configured(monkeypatch):
 @pytest.mark.asyncio
 async def test_scheduler_runs_due_task(monkeypatch, tmp_path):
     """调度器 _check_due_tasks 应执行到期任务并推进状态。"""
-    from akm.tasks.scheduler import TaskScheduler
 
     task_id = db.create_task(
         name="到期任务",
@@ -259,7 +257,6 @@ async def test_scheduler_runs_due_task(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_scheduler_advances_interval_task():
     """循环任务执行后应把 next_run_at 滚动到下一时间点，保持启用。"""
-    from akm.tasks.scheduler import TaskScheduler
 
     task_id = db.create_task(
         name="循环任务",

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from akm.db import get_connection
 
 logger = logging.getLogger("akm.audit")
@@ -322,7 +322,7 @@ def clean_logs(before: str) -> int:
     try:
         datetime.strptime(before, "%Y-%m-%d")
     except ValueError:
-        raise ValueError(f"日期格式错误: {before}，需要 YYYY-MM-DD")
+        raise ValueError(f"日期格式错误: {before}，需要 YYYY-MM-DD") from None
     conn = get_connection()
     cursor = conn.execute(
         "DELETE FROM audit_logs WHERE timestamp < ?", (before,)
@@ -380,7 +380,8 @@ def auto_cleanup_logs() -> bool:
     if retention_days <= 0:
         logger.info("log_retention_days 为 0，永久保留日志")
         return False
-    threshold = (datetime.utcnow() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+    # 用带时区的 UTC 时间，替换已弃用的 datetime.utcnow()
+    threshold = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y-%m-%d")
     try:
         count = clean_logs(threshold)
         if count > 0:

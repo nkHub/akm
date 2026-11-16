@@ -1,6 +1,5 @@
 """py2app 打包脚本 — 生成 macOS .app 应用"""
 
-import os
 import re
 from pathlib import Path
 from setuptools import setup
