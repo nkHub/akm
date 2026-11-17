@@ -29,7 +29,7 @@ python -m ruff check .
 python -m pytest -q
 ```
 
-仓库内置 GitHub Actions（`.github/workflows/ci.yml`），在 Linux runner 上跑上述 ruff 与 pytest 两项检查；打包、签名与 DMG 生成依赖 macOS 与本地证书，不在 CI 内。
+上述两项检查在提交前本地跑完（`ruff check .` + `pytest -q`）。仓库当前**没有**接入 GitHub Actions：CI 配置需要推送方具备 `workflow` scope，本地凭据不满足，故未入库；打包、签名与 DMG 生成依赖 macOS 与本地证书，本来也不适合放在 CI 里。
 
 ## 打包为 macOS 应用
 

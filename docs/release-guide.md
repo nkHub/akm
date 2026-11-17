@@ -448,7 +448,7 @@ gh release create "$TAG" "$DMG" "$ZIP" --title "$TAG" --generate-notes
 ## 五、发布清单（每版发布前检查）
 
 - [ ] `akm/__init__.py` 与 `pyproject.toml` 版本号已更新并保持一致
-- [ ] 本地检查全绿：`python -m ruff check .` 与 `python -m pytest -q` 均无失败（CI 同口径，见 `.github/workflows/ci.yml`）；依赖有增减时 `uv.lock` 已刷新
+- [ ] 本地检查全绿：`python -m ruff check .` 与 `python -m pytest -q` 均无失败（当前无 CI，这两项是唯一门禁）；依赖有增减时 `uv.lock` 已刷新
 - [ ] 功能开发完成，本地测试通过
 - [ ] 已检查并同步文档：`README.md`；版本变更追加到 `docs/logs.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`；如涉及组件同步 `docs/design/web-components.md`
 - [ ] 新增的模板 / 静态文件已登记进 `setup.py` 的 `DATA_FILES`（用「二、打包流程」里的差集脚本自查，脚本会顺带列出 `.DS_Store`，那是无害噪音）；新增的核心运行时模块已登记进 `setup.py` 的 `includes`
