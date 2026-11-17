@@ -620,6 +620,9 @@ class _SSEStreamAccumulator:
         self._content_parts: list[str] = []  # 文本增量累积
         self._reasoning_parts: list[str] = []  # 推理内容增量累积 (delta.reasoning_content)
         self._pending_reasoning: list[str] = []  # 本段 feed 新到的推理增量，供 drain_reasoning_deltas 取走
+        # 当前处于开启状态的段名（``reasoning`` / ``text`` / None），用于结算段边界：
+        # 推理与正文互斥，切段时必须先关旧段再开新段，客户端才能拿到准确的段耗时。
+        self._open_segment_name: str | None = None
         self._tool_calls: dict[int, dict] = {}  # index → 累积后的 tool_call
         self._usage: dict = {}
         self._model = ""
@@ -634,36 +637,82 @@ class _SSEStreamAccumulator:
         self._pending_reasoning = []
         return deltas
 
-    def feed(self, text: str) -> list[str]:
-        """喂入一段 SSE 文本，返回本段新解析出的可见文本增量。"""
+    def feed(self, text: str) -> list[tuple[str, str | None]]:
+        """喂入一段 SSE 文本，返回本段产生的**有序**流事件。
+
+        返回 ``(事件名, 文本增量)`` 序列，事件名取值 ``reasoning_start`` /
+        ``reasoning_delta`` / ``reasoning_end`` / ``text_start`` / ``model_delta`` /
+        ``text_end``；段边界事件的增量为 None。
+
+        段边界由累加器自己结算（推理段与正文段互斥，切段时先关旧段再开新段），
+        客户端只需原样下发。此前不发边界事件，客户端只能靠「下一个事件是正文还是
+        思考」反推上一段何时结束 —— 思考段尤其缺结束时刻，只能拿后续事件的 ``ts``
+        凑，段耗时因此带误差。
+        """
         self._line_buf += text
-        return self._extract_lines()
+        return self._extract_stream_events()
 
-    def finish(self) -> list[str]:
-        """处理流结束时未以换行结尾的最后一个 SSE 数据行。"""
-        if not self._line_buf:
+    def finish(self) -> list[tuple[str, str | None]]:
+        """处理流结束时未以换行结尾的最后一个 SSE 数据行，并结算仍在开启的段。"""
+        events: list[tuple[str, str | None]] = []
+        if self._line_buf:
+            self._line_buf += "\n"
+            events += self._extract_stream_events()
+        events += self._close_open_segment()
+        return events
+
+    def _open_segment(self, kind: str) -> list[tuple[str, str | None]]:
+        """确保 ``kind`` 段已开启。
+
+        ``kind`` 为 ``reasoning`` 或 ``text``。与当前开启的段不同则先结算旧段
+        （``*_end``）再开新段（``*_start``），保证同一时刻最多一个段处于开启状态。
+        """
+        if kind == self._open_segment_name:
             return []
-        self._line_buf += "\n"
-        return self._extract_lines()
+        events: list[tuple[str, str | None]] = []
+        if self._open_segment_name is not None:
+            events.append((f"{self._open_segment_name}_end", None))
+        self._open_segment_name = kind
+        events.append((f"{kind}_start", None))
+        return events
 
-    def _extract_lines(self) -> list[str]:
-        deltas: list[str] = []
+    def _close_open_segment(self) -> list[tuple[str, str | None]]:
+        """结算仍在开启的段：流结束时调用，保证每个 ``*_start`` 都有对应的 ``*_end``。"""
+        if self._open_segment_name is None:
+            return []
+        kind = self._open_segment_name
+        self._open_segment_name = None
+        return [(f"{kind}_end", None)]
+
+    def _extract_stream_events(self) -> list[tuple[str, str | None]]:
+        """解析缓冲区中的完整 SSE 行，产出有序的流事件（含段边界）。
+
+        每行先取推理增量、再取正文增量，与「先思考后正文」的输出顺序一致；
+        哪一侧有内容就先开启（必要时结算）对应段，因此不依赖上游把两种增量
+        放在不同帧里 —— 同帧同时出现时也能得到正确的段边界。
+        """
+        events: list[tuple[str, str | None]] = []
         while "\n" in self._line_buf:
             idx = self._line_buf.index("\n")
             line = self._line_buf[:idx].rstrip("\r")
             self._line_buf = self._line_buf[idx + 1 :]
             line = line.strip()
-            if line.startswith("data: "):
-                data_str = line[6:].strip()
-                if data_str == "[DONE]":
-                    continue
-                try:
-                    delta = self._process_chunk(json.loads(data_str))
-                    if delta:
-                        deltas.append(delta)
-                except json.JSONDecodeError:
-                    pass
-        return deltas
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                continue
+            try:
+                content = self._process_chunk(json.loads(data_str))
+            except json.JSONDecodeError:
+                continue
+            for reasoning in self.drain_reasoning_deltas():
+                events += self._open_segment("reasoning")
+                events.append(("reasoning_delta", reasoning))
+            if content:
+                events += self._open_segment("text")
+                events.append(("model_delta", content))
+        return events
 
     def _update_usage(self, usage: dict) -> None:
         """兼容三种协议的字段名，且保留上游给出的 total_tokens。"""
@@ -2113,7 +2162,13 @@ class AgentLoop:
         """运行 Agent Loop 并流式返回 SSE 事件
 
         事件类型：
+        - ``reasoning_start`` / ``reasoning_end`` — 思考段的起止边界，data 仅含 turn。
+                                段边界由服务端结算（同一时刻最多一个段开启），客户端
+                                据此得到精确的段耗时，不必再「看下一个事件反推」。
         - ``reasoning_delta`` — LLM 思考（推理）过程片段，实时下发，先于同段正文
+        - ``text_start`` / ``text_end`` — 正文段的起止边界，data 仅含 turn。
+                                工具边界（tool_call / tool_result / turn_start）与每轮
+                                流结束都会结算当前段，保证每个 ``*_start`` 都有 ``*_end``。
         - ``model_delta``     — 可见正文片段，实时下发（含工具轮过程性正文与最终主体内容）
         - ``turn_start``      — 新一轮开始（检测到工具调用时）
         - ``tool_call``       — 单个工具调用
@@ -2140,8 +2195,9 @@ class AgentLoop:
         - ``error``           — 错误结束，含 error / turns / usage
 
         顺序约定：思考（reasoning_delta）与正文（model_delta）按模型输出顺序
-        实时流式下发；工具调用轮在正文之后出现 turn_start / tool_call /
-        tool_result 事件；最终主体内容同样实时下发，最后以 final 收尾。
+        实时流式下发，并按 ``*_start`` / ``*_end`` 显式标注段边界；工具调用轮在
+        正文之后出现 turn_start / tool_call / tool_result 事件；最终主体内容同样
+        实时下发，最后以 final 收尾。
 
         每轮 LLM 调用以 ``stream: True`` 发送。上游协议帧只在服务端解析，
         客户端始终收到统一的 Agent SSE 事件。
@@ -2277,13 +2333,27 @@ class AgentLoop:
                     # 复用 proxy 预读时创建的 aiter 生成器继续读流，并先补发预读缓存。
                     prefetched = result.get("first_chunk") if isinstance(result, dict) else None
                     upstream_aiter = result.get("aiter")
+
+                    def _stream_event_frames(stream_events) -> list[str]:
+                        """把累加器结算出的有序流事件转成已格式化的 SSE 帧。
+
+                        段边界事件（``*_start`` / ``*_end``）不带 content，其余事件
+                        带本帧的文本增量。边界由服务端结算，客户端不再反推。
+                        """
+                        frames: list[str] = []
+                        for event_name, delta in stream_events:
+                            payload: dict[str, Any] = {"turn": turn}
+                            if delta is not None:
+                                payload["content"] = delta
+                            frames.append(_sse_event(event_name, payload))
+                        return frames
+
                     if prefetched:
-                        text = prefetched.decode("utf-8", errors="replace")
-                        contents = acc.feed(text)
-                        for reasoning in acc.drain_reasoning_deltas():
-                            yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
-                        for content in contents:
-                            yield _sse_event("model_delta", {"turn": turn, "content": content})
+                        # proxy 预读的首块同样走累加器，边界与后续流一致。
+                        for frame in _stream_event_frames(
+                            acc.feed(prefetched.decode("utf-8", errors="replace"))
+                        ):
+                            yield frame
 
                     stream_source = upstream_aiter if upstream_aiter is not None else resp.aiter_bytes()
                     # ── 读取上游流前检查取消：客户端已停止时不再继续消费
@@ -2296,19 +2366,13 @@ class AgentLoop:
                         })
                         return
                     async for chunk in stream_source:
-                        text = chunk.decode("utf-8", errors="replace")
-                        contents = acc.feed(text)
-                        # 思考（推理）增量先于正文下发，保证「先思考后正文」
-                        for reasoning in acc.drain_reasoning_deltas():
-                            yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
-                        # 正文增量实时下发，保证最终主体逐字流式输出
-                        for content in contents:
-                            yield _sse_event("model_delta", {"turn": turn, "content": content})
-                    contents = acc.finish()
-                    for reasoning in acc.drain_reasoning_deltas():
-                        yield _sse_event("reasoning_delta", {"turn": turn, "content": reasoning})
-                    for content in contents:
-                        yield _sse_event("model_delta", {"turn": turn, "content": content})
+                        for frame in _stream_event_frames(
+                            acc.feed(chunk.decode("utf-8", errors="replace"))
+                        ):
+                            yield frame
+                    # finish() 会结算仍在开启的段，保证每个 *_start 都有 *_end。
+                    for frame in _stream_event_frames(acc.finish()):
+                        yield frame
                 finally:
                     await resp.aclose()
 

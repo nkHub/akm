@@ -48,13 +48,22 @@ async def test_run_stream_emits_agent_deltas_and_preserves_upstream_total_usage(
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert [event["event"] for event in events] == ["reasoning_delta", "model_delta", "reasoning_delta", "model_delta", "turn_pause", "final"]
-    assert [event["data"]["content"] for event in events[:4]] == ["先", "你", "思考", "好"]
+    # 段边界由服务端结算：每段思考/正文各自带 start/end，客户端无需反推。
+    assert [event["event"] for event in events] == [
+        "reasoning_start", "reasoning_delta", "reasoning_end",
+        "text_start", "model_delta", "text_end",
+        "reasoning_start", "reasoning_delta", "reasoning_end",
+        "text_start", "model_delta", "text_end",
+        "turn_pause", "final",
+    ]
+    # 边界事件不带 content，增量事件保持「先思考后正文」的顺序
+    assert [event["data"]["content"] for event in events if "content" in event["data"]] == ["先", "你", "思考", "好"]
     # 停顿点：final 下发前先通知客户端「本轮输出已完整」并携带完整消息快照
-    assert events[4]["event"] == "turn_pause"
-    assert events[4]["data"]["turn"] == 1
-    assert events[4]["data"]["messages"][-1] == events[-1]["data"]["final_message"]
-    assert events[4]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
+    pause_event = events[-2]
+    assert pause_event["event"] == "turn_pause"
+    assert pause_event["data"]["turn"] == 1
+    assert pause_event["data"]["messages"][-1] == events[-1]["data"]["final_message"]
+    assert pause_event["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
     assert events[-1]["data"]["final_message"]["content"] == "你好"
     assert events[-1]["data"]["final_message"]["reasoning_content"] == "先思考"
     assert events[-1]["data"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 10}
@@ -147,7 +156,11 @@ async def test_run_stream_reassembles_tool_call_before_next_turn(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=registry)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "天气"}])])
 
-    assert [event["event"] for event in events] == ["turn_start", "tool_call", "tool_result", "turn_pause", "model_delta", "turn_pause", "final"]
+    assert [event["event"] for event in events] == [
+        "turn_start", "tool_call", "tool_result", "turn_pause",
+        "text_start", "model_delta", "text_end",
+        "turn_pause", "final",
+    ]
     # 事件统一带 ts（毫秒时间戳），比对工具载荷前先摘除时间戳字段。
     assert events[1]["data"].pop("ts") > 0
     assert events[1]["data"] == {"name": "get_weather", "arguments": {"city": "beijing"}}
@@ -246,13 +259,16 @@ async def test_run_stream_streams_content_realtime_then_tools(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=registry)
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "北京天气"}])])
 
-    # 顺序：思考 → 工具轮正文(model_delta) → 工具 → 停顿点 → 最终主体(model_delta) → 停顿点 → final
+    # 顺序：思考段 → 工具轮正文段 → 工具 → 停顿点 → 最终主体段 → 停顿点 → final
     assert [event["event"] for event in events] == [
-        "reasoning_delta", "model_delta", "turn_start", "tool_call", "tool_result", "turn_pause", "model_delta", "turn_pause", "final",
+        "reasoning_start", "reasoning_delta", "reasoning_end",
+        "text_start", "model_delta", "text_end",
+        "turn_start", "tool_call", "tool_result", "turn_pause",
+        "text_start", "model_delta", "text_end",
+        "turn_pause", "final",
     ]
-    assert events[0]["data"]["content"] == "用户想查天气"
-    assert events[1]["data"]["content"] == "我来查一下天气"
-    assert events[-3]["data"]["content"] == "北京晴天"
+    deltas = [event["data"]["content"] for event in events if "content" in event["data"]]
+    assert deltas == ["用户想查天气", "我来查一下天气", "北京晴天"]
     assert events[-1]["data"]["final_message"]["content"] == "北京晴天"
     assert events[-1]["data"]["final_message"]["content"] == "北京晴天"
     ToolRegistry.reset()
@@ -771,19 +787,68 @@ async def test_run_stream_tool_options_excludes_disabled_optional_tools(monkeypa
     assert "akm_read_image" in names
 
 
+def test_sse_accumulator_settles_segment_boundaries():
+    """段边界由服务端结算：推理段与正文段互斥，切段时先关旧段再开新段。
+
+    客户端据此拿到精确的段耗时，不必再靠「下一个事件是思考还是正文」反推上一段
+    何时结束（旧实现只能拿后续事件的 ts 凑，思考段耗时因此带误差）。
+    """
+    def frames(*payloads):
+        return "".join(_sse(payload) for payload in payloads)
+
+    # 同一帧里既有推理又有正文：必须先结算推理段，再开正文段
+    acc = _SSEStreamAccumulator()
+    assert acc.feed(frames({"choices": [{"delta": {"reasoning_content": "想", "content": "答"}}]})) == [
+        ("reasoning_start", None), ("reasoning_delta", "想"), ("reasoning_end", None),
+        ("text_start", None), ("model_delta", "答"),
+    ]
+    # 同段连续增量不重复开段，只在 flush 时结算一次
+    assert acc.feed(frames({"choices": [{"delta": {"content": "案"}}]})) == [("model_delta", "案")]
+    assert acc.finish() == [("text_end", None)]
+
+    # 纯推理流：finish() 必须补 reasoning_end，否则前端永远显示「思考中」
+    acc = _SSEStreamAccumulator()
+    assert acc.feed(frames({"choices": [{"delta": {"reasoning_content": "只有思考"}}]})) == [
+        ("reasoning_start", None), ("reasoning_delta", "只有思考"),
+    ]
+    assert acc.finish() == [("reasoning_end", None)]
+
+    # 无文本流（纯工具调用）：不产生任何段边界，finish() 也不补事件
+    acc = _SSEStreamAccumulator()
+    assert acc.feed(frames({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "f", "arguments": "{}"}}]}}]})) == []
+    assert acc.finish() == []
+
+
+def test_sse_accumulator_handles_split_frames_across_chunks():
+    """SSE 行跨 chunk 边界时不能丢事件，也不能提前开段。"""
+    acc = _SSEStreamAccumulator()
+    full = _sse({"choices": [{"delta": {"content": "完整"}}]})
+    # 在没有换行符的位置切开：数据行未完整，此时不应产出任何事件
+    split_at = full.index("{") + 5
+    assert acc.feed(full[:split_at]) == []
+    assert acc.feed(full[split_at:]) == [("text_start", None), ("model_delta", "完整")]
+    assert acc.finish() == [("text_end", None)]
+
+
 def test_sse_accumulator_supports_responses_and_messages_events():
     """原生 Responses/Messages 流也应能还原可见文本和工具调用。"""
     responses = _SSEStreamAccumulator()
-    assert responses.feed(_sse({"type": "response.output_text.delta", "delta": "你好"})) == ["你好"]
+    assert responses.feed(_sse({"type": "response.output_text.delta", "delta": "你好"})) == [
+        ("text_start", None), ("model_delta", "你好"),
+    ]
     responses.feed(_sse({"type": "response.output_item.added", "output_index": 3, "item": {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": ""}}))
     responses.feed(_sse({"type": "response.function_call_arguments.delta", "output_index": 3, "delta": "{\"id\":1}"}))
     assert _extract_calls(responses.response_body) == [{"id": "call_1", "name": "lookup", "arguments": '{"id":1}'}]
 
     messages = _SSEStreamAccumulator()
-    assert messages.feed(_sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "世界"}})) == ["世界"]
+    assert messages.feed(_sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "世界"}})) == [
+        ("text_start", None), ("model_delta", "世界"),
+    ]
     messages.feed(_sse({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tool_1", "name": "lookup", "input": {}}}))
     messages.feed(_sse({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"id\":2}"}}))
     assert _extract_calls(messages.response_body) == [{"id": "tool_1", "name": "lookup", "arguments": '{"id":2}'}]
+    # 工具增量不开启文本/思考段，但 finish() 必须结算仍在开启的段
+    assert messages.finish() == [("text_end", None)]
 
 
 def _extract_calls(response_body):
@@ -1169,8 +1234,11 @@ async def test_run_stream_reuses_proxy_prefetched_aiter(monkeypatch):
     loop = AgentLoop(http_client=None, tool_registry=ToolRegistry())
     events = _events([item async for item in loop.run_stream([{"role": "user", "content": "hi"}])])
 
-    assert [event["event"] for event in events] == ["model_delta", "model_delta", "turn_pause", "final"]
-    assert [event["data"]["content"] for event in events[:2]] == ["你", "好"]
+    # 预读缓存与后续流共用同一个累加器：整段正文只开一次段，边界不重复
+    assert [event["event"] for event in events] == [
+        "text_start", "model_delta", "model_delta", "text_end", "turn_pause", "final",
+    ]
+    assert [event["data"]["content"] for event in events if "content" in event["data"]] == ["你", "好"]
     assert events[-1]["data"]["final_message"]["content"] == "你好"
 
 
