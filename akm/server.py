@@ -1624,6 +1624,9 @@ def _extract_tokens(response_body: str) -> dict | None:
         "msg_input_tokens": 0,
         "msg_output_tokens": 0,
         "msg_cached_tokens": 0,
+        # Anthropic Messages 的 cache_creation_input_tokens（缓存写入量），
+        # 早期 state 没有这一项，导致该列始终写 0。
+        "msg_cache_creation_tokens": 0,
     }
     for line in response_body.split("\n"):
         line = line.strip()
@@ -1702,6 +1705,53 @@ def _extract_response_model(payload) -> str:
 
 
 
+def _extract_billing_usage(usage: dict) -> dict | None:
+    """取出中转包装在 ``billing_usage.openai_usage`` 里的内层用量。
+
+    背景：new-api 系中转会把 OpenAI 上游返回的用量原样塞进
+    ``usage.billing_usage.openai_usage``，而外层 Anthropic 字段
+    （``cache_read_input_tokens`` / ``cache_creation_input_tokens``）会被填成 0。
+    只读外层就会把「缓存命中」记成 0，因此这里把内层单独取出来解析。
+    """
+    if not isinstance(usage, dict):
+        return None
+    billing = usage.get("billing_usage")
+    if not isinstance(billing, dict):
+        return None
+    inner = billing.get("openai_usage")
+    if not isinstance(inner, dict) or not inner:
+        return None
+    # 防御：内层若又带 billing_usage 会形成递归，这里直接放弃使用外层包装。
+    if "billing_usage" in inner:
+        return None
+    return inner
+
+
+def _pick_usage_int(usage: dict, keys: tuple[str, ...]) -> int:
+    """按给定字段名顺序取第一个正整数，取不到返回 0。
+
+    不同上游对同一语义用的字段名不一致：
+    - Anthropic 官方 Messages：``cache_read_input_tokens`` / ``cache_creation_input_tokens``；
+    - OpenAI / 兼容实现：``cached_tokens`` / ``cache_creation_tokens``。
+
+    早期实现只认其中一种写法，导致另一种上游的缓存数据被整体漏记，
+    这里统一按优先级兼容，避免再按 provider 猜字段名。
+    """
+    if not isinstance(usage, dict):
+        return 0
+    for key in keys:
+        value = usage.get(key)
+        if not value:
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return 0
+
+
 def _parse_usage_metrics_object(usage: dict) -> dict | None:
     """从 usage 对象提取 token 数，统一兼容 chat、responses 与 messages 字段。
 
@@ -1735,30 +1785,54 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
     if not has_explicit_usage:
         return None
 
-    total = usage.get("total_tokens", 0)
-    completion = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
-    cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
-    # 安全提取缓存 token：先查 Chat 格式的 *_details，再查 Messages 格式的直接 cached_tokens 字段。
-    cached = usage.get("cached_tokens", 0) or 0
-    # Anthropic Messages: cache_read_input_tokens 表示缓存命中读取 token。
-    if not cached:
-        cached = usage.get("cache_read_input_tokens", 0) or 0
+    # 缓存字段名在不同上游不一致，统一走 _pick_usage_int 兼容。
+    # 说明：外层 Anthropic 字段被中转填 0 时，真实值可能只存在于
+    # billing_usage.openai_usage；内层与顶层用同一套优先级，取到即用。
+    billing = _extract_billing_usage(usage)
+    cache_keys = ("cache_read_input_tokens", "cached_tokens")
+    creation_keys = ("cache_creation_input_tokens", "cache_creation_tokens")
+
+    total = usage.get("total_tokens", 0) or (billing or {}).get("total_tokens", 0) or 0
+    completion = (
+        usage.get("completion_tokens", 0)
+        or usage.get("output_tokens", 0)
+        or (billing or {}).get("completion_tokens", 0)
+        or (billing or {}).get("output_tokens", 0)
+        or 0
+    )
+
+    cache_creation = _pick_usage_int(usage, creation_keys)
+    if not cache_creation and billing:
+        cache_creation = _pick_usage_int(billing, creation_keys)
+
+    cached = _pick_usage_int(usage, cache_keys)
+    # Chat 系常把命中量放在 *_details.cached_tokens，作为最后一级兜底。
     if not cached:
         for key in ("prompt_tokens_details", "input_tokens_details"):
             details = usage.get(key)
             if isinstance(details, dict):
-                cached = details.get("cached_tokens", 0)
+                cached = _pick_usage_int(details, ("cached_tokens",))
                 if cached:
                     break
-    prompt = usage.get("prompt_tokens", 0) or 0
+    if not cached and billing:
+        for key in ("prompt_tokens_details", "input_tokens_details"):
+            details = billing.get(key)
+            if isinstance(details, dict):
+                cached = _pick_usage_int(details, ("cached_tokens",))
+                if cached:
+                    break
+
+    prompt = usage.get("prompt_tokens", 0) or (billing or {}).get("prompt_tokens", 0) or 0
     if not prompt:
-        prompt = usage.get("input_tokens", 0) or 0
-        # 仅 Anthropic Messages 会把“净输入”放在 input_tokens，
-        # 并额外通过 cache_read_input_tokens 表示缓存命中。
-        # Responses/Chat 侧也可能出现 input_tokens，但其语义不一定是
-        # “未命中缓存后的净输入”，这里不能无条件补 cached，
-        # 否则会把 Responses 的总输入重复加大。
-        if "cache_read_input_tokens" in usage and cached > 0:
+        prompt = usage.get("input_tokens", 0) or (billing or {}).get("input_tokens", 0) or 0
+        # input_tokens 的语义在不同上游不一样，必须区分：
+        # - Anthropic 官方 Messages：放的是「未命中缓存的净输入」，
+        #   且顶层一定有 cache_read_input_tokens 字段（可能是 0），需要补回 cached；
+        # - 中转（如 new-api 把 Messages 转成 OpenAI chat 再调上游）：
+        #   input_tokens 已经是「总输入」，此时再补 cached 会把输入重复加大。
+        # 用两个信号判定：只有「顶层显式带 cache_read_input_tokens」且
+        # 「内层 billing_usage 不存在」时才按净输入处理。
+        if "cache_read_input_tokens" in usage and billing is None and cached > 0:
             prompt += cached
     if total == 0 and (prompt > 0 or completion > 0):
         total = prompt + completion
@@ -1781,19 +1855,26 @@ def _build_tokens_from_sse_usage_state(state: dict) -> dict | None:
             # input_tokens 需要从 message_start.message.usage 补齐。
             msg_input_tokens = int(state.get("msg_input_tokens", 0) or 0)
             msg_cached_tokens = int(state.get("msg_cached_tokens", 0) or 0)
+            msg_creation_tokens = int(state.get("msg_cache_creation_tokens", 0) or 0)
             if parsed.get("prompt_tokens", 0) == 0 and msg_input_tokens > 0:
                 # messages SSE 的 message_start 里记录的是净输入，
-                # 这里需要和 message_delta 里的 cached_tokens 合并后，
-                # 才能恢复成统一口径下的总输入 prompt_tokens。
+                # 这里需要和缓存命中量合并后，才能恢复成统一口径下的总输入 prompt_tokens。
                 parsed["prompt_tokens"] = msg_input_tokens + msg_cached_tokens
                 parsed["total_tokens"] = parsed.get("prompt_tokens", 0) + parsed.get("completion_tokens", 0)
-                if msg_cached_tokens > 0:
-                    parsed["cached_tokens"] = msg_cached_tokens
+            # 缓存量以 state 为准：message_delta 常只带 output_tokens，
+            # 真正的 cache_read/cache_creation 在 message_start 里，
+            # 早期实现只在 prompt_tokens==0 分支里回填，导致带 input_tokens 的
+            # 上游响应把缓存整体记成 0。
+            if msg_cached_tokens > 0:
+                parsed["cached_tokens"] = msg_cached_tokens
+            if msg_creation_tokens > 0:
+                parsed["cache_creation_tokens"] = msg_creation_tokens
             return parsed
 
     msg_input_tokens = int(state.get("msg_input_tokens", 0) or 0)
     msg_output_tokens = int(state.get("msg_output_tokens", 0) or 0)
     msg_cached_tokens = int(state.get("msg_cached_tokens", 0) or 0)
+    msg_creation_tokens = int(state.get("msg_cache_creation_tokens", 0) or 0)
     if msg_input_tokens > 0 or msg_output_tokens > 0:
         prompt_total = msg_input_tokens + msg_cached_tokens
         total = prompt_total + msg_output_tokens
@@ -1802,7 +1883,7 @@ def _build_tokens_from_sse_usage_state(state: dict) -> dict | None:
             "completion_tokens": msg_output_tokens,
             "total_tokens": total,
             "cached_tokens": msg_cached_tokens,
-            "cache_creation_tokens": 0,
+            "cache_creation_tokens": msg_creation_tokens,
         }
     return None
 
@@ -1832,11 +1913,27 @@ def _update_sse_usage_state(state: dict, chunk: dict) -> None:
         msg = chunk.get("message", {}) if isinstance(chunk.get("message"), dict) else {}
         usage = msg.get("usage", {}) if isinstance(msg.get("usage"), dict) else {}
         state["msg_input_tokens"] = usage.get("input_tokens", state.get("msg_input_tokens", 0)) or state.get("msg_input_tokens", 0)
+        # Anthropic 官方协议把缓存命中/写入量放在 message_start.message.usage 里，
+        # 早期实现只读 message_delta 的 cached_tokens，导致这部分整体丢失。
+        # 这里同时兼容两种字段名，命中即记录。
+        start_cached = _pick_usage_int(usage, ("cache_read_input_tokens", "cached_tokens"))
+        start_creation = _pick_usage_int(usage, ("cache_creation_input_tokens", "cache_creation_tokens"))
+        if start_cached:
+            state["msg_cached_tokens"] = start_cached
+        if start_creation:
+            state["msg_cache_creation_tokens"] = start_creation
 
     if chunk.get("type") == "message_delta":
         usage = chunk.get("usage", {}) if isinstance(chunk.get("usage"), dict) else {}
         state["msg_output_tokens"] = usage.get("output_tokens", state.get("msg_output_tokens", 0)) or state.get("msg_output_tokens", 0)
-        state["msg_cached_tokens"] = usage.get("cached_tokens", state.get("msg_cached_tokens", 0)) or state.get("msg_cached_tokens", 0)
+        # message_delta 同样兼容 cache_read_input_tokens（官方写法）与
+        # cached_tokens（部分兼容实现写法）；取不到就沿用 message_start 的值。
+        delta_cached = _pick_usage_int(usage, ("cache_read_input_tokens", "cached_tokens"))
+        if delta_cached:
+            state["msg_cached_tokens"] = delta_cached
+        delta_creation = _pick_usage_int(usage, ("cache_creation_input_tokens", "cache_creation_tokens"))
+        if delta_creation:
+            state["msg_cache_creation_tokens"] = delta_creation
 
 
 class _IncrementalSSEUsageTracker:
@@ -1855,6 +1952,7 @@ class _IncrementalSSEUsageTracker:
             "msg_input_tokens": 0,
             "msg_output_tokens": 0,
             "msg_cached_tokens": 0,
+            "msg_cache_creation_tokens": 0,  # 缓存写入量（Anthropic Messages）
             "model": "",  # 上游实际返回的 model（换模型检测用）
         }
 
