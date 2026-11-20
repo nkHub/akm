@@ -130,7 +130,10 @@ if (!customElements.get('akm-pagination')) {
         + ' class="akm-page-input w-12 px-1.5 py-1 text-xs text-center rounded bg-surface-light border border-border text-gray-300 focus:outline-none focus:border-indigo-500"'
         + ' title="输入页码后回车跳转（1-' + totalPages + '）">';
       html += '<span class="text-xs text-gray-600">/ ' + totalPages + '</span>';
-      html += '<akm-combobox data-role="page-select" compact menu-min-width="104" host-class="inline-block shrink-0"></akm-combobox>';
+      // 触发器与菜单同宽（104px）：只靠 menu-min-width 时触发器只有「第 1 页」那么宽（约 70px），
+      // 菜单却是 104px，视觉上像两个错开的块。这里给触发器固定宽度 + menu-same-width，
+      // 上下边缘严格对齐。
+      html += '<akm-combobox data-role="page-select" compact menu-same-width host-class="inline-block shrink-0" style="width:104px"></akm-combobox>';
       html += this._button('下一页', currentPage + 1, currentPage === totalPages, disabledClass, activeClass);
       html += this._button('末页', totalPages, currentPage === totalPages, disabledClass, activeClass);
       if (summary) html += '<span class="text-xs text-gray-500 ml-2">' + summary + '</span>';
@@ -1083,6 +1086,13 @@ if (!customElements.get('akm-combobox')) {
       var self = this;
       this._trigger = this.querySelector('[data-combobox-trigger]');
       this._valueEl = this.querySelector('[data-combobox-value]');
+      // menu-same-width 场景下，宿主宽度由调用方给定（如分页条 `style="width:104px"`），
+      // 需要把同一宽度落到触发器上：`.akm-cb--compact .akm-cb__trigger` 里写死了
+      // `width:auto`，类选择器优先级高于宿主的内联宽度继承，不同步就会「宿主 104px、
+      // 触发器 70px」，菜单再按触发器宽度算又变回错开。
+      if (this.hasAttribute('menu-same-width') && this.style.width) {
+        this._trigger.style.width = '100%';
+      }
 
       // 菜单挂到 body：弹窗正文是可滚动容器（overflow-y-auto），absolute 菜单会被
       // 裁掉（实测 clientHeight 只有 69px，表现是「点了没有下拉列表」）。
@@ -1373,6 +1383,25 @@ if (!customElements.get('akm-combobox')) {
       // 「第 12 页」这类更长文案会被 text-overflow 省略号截断。给菜单一个下限，
       // 同时右侧仍夹在视口内（右侧不够时改成左对齐到触发器右边缘向左展开）。
       var menuMinWidth = parseInt(this.getAttribute('menu-min-width') || 0, 10) || 0;
+      // menu-same-width：菜单宽度强制等于触发器宽度（不再取 max）。
+      // 用于分页这类「触发器本身就是固定宽度、希望上下对齐」的场景——
+      // 默认行为是「菜单至少和触发器一样宽、可以更宽」，视觉上会像两个错开的块。
+      if (this.hasAttribute('menu-same-width')) {
+        var sameWidth = Math.min(rect.width, window.innerWidth - 16);
+        var sameLeft = rect.left;
+        if (sameLeft + sameWidth > window.innerWidth - 8) {
+          sameLeft = Math.max(8, window.innerWidth - 8 - sameWidth);
+        }
+        this._menu.style.left = sameLeft + 'px';
+        this._menu.style.width = sameWidth + 'px';
+        this._menu.style.maxHeight = avail + 'px';
+        if (flipUp) {
+          this._menu.style.top = Math.max(8, rect.top - 4 - this._menu.offsetHeight) + 'px';
+        } else {
+          this._menu.style.top = (rect.bottom + 4) + 'px';
+        }
+        return;
+      }
       var width = Math.max(rect.width, menuMinWidth);
       var viewportLimit = window.innerWidth - 16;
       width = Math.min(width, viewportLimit);

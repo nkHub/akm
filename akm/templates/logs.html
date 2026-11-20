@@ -655,7 +655,9 @@ function renderLogTable() {
       cachedDisplay = '?';
       cachedClass = 'text-amber-400';
     } else if (cached > 0) {
-      cachedDisplay = cached.toLocaleString();
+      // 恢复历史格式 (R133,888)：R 前缀是「Read」缩写，圆括号表示它是输入的子集，
+      // 纯数字容易和上行混淆，加括号后一眼能看出「括号里是命中量」。
+      cachedDisplay = '(R' + cached.toLocaleString() + ')';
       cachedClass = 'text-teal-400';
     } else {
       cachedDisplay = '-';
