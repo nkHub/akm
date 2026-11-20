@@ -29,7 +29,9 @@ python -m ruff check .
 python -m pytest -q
 ```
 
-上述两项检查在提交前本地跑完（`ruff check .` + `pytest -q`）。仓库当前**没有**接入 GitHub Actions：CI 配置需要推送方具备 `workflow` scope，本地凭据不满足，故未入库；打包、签名与 DMG 生成依赖 macOS 与本地证书，本来也不适合放在 CI 里。
+上述两项检查在提交前本地跑完（`ruff check .` + `pytest -q`）。GitHub Actions 已配置（`.github/workflows/ci.yml`），在 **ubuntu + macos 双平台**上跑同样的两项：ubuntu 覆盖纯逻辑（`rumps` / `AppKit` 相关用例自动 skip），macos 覆盖真实菜单栏与原生通知路径。打包、签名与 DMG 生成依赖 macOS 与本地证书，不在 CI 范围内。
+
+> `.github/` 此前因推送凭据缺少 `workflow` scope 未入库，需要具备该 scope 的凭据推上去后 CI 才会真正触发。
 
 ## 打包为 macOS 应用
 
