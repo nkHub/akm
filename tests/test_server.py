@@ -2537,6 +2537,60 @@ def test_parse_usage_reads_billing_usage_without_double_counting_prompt():
     assert out["cached_tokens"] == 250000
     assert out["completion_tokens"] == 4
 
+
+def test_parse_usage_marks_cache_unknown_when_upstream_omits_cache_fields():
+    """回归：上游只回 ``magpie_cache_unknown: true`` 时，缓存必须记 None 而不是 0。
+
+    本机实测 ``deepseek-v4.1-flash`` 走 new-api 系中转时 usage 只有
+    ``prompt_tokens`` / ``completion_tokens`` / ``total_tokens`` 加一个
+    ``magpie_cache_unknown: true``，完全不提供任何缓存字段。此时把缓存记成 0
+    会让日志页显示「-」，与「确认没命中」不可区分，用户会误判成缓存失效。
+    """
+    from akm.server import _is_cache_unknown, _parse_usage_metrics_object
+
+    usage = {
+        "prompt_tokens": 1834,
+        "completion_tokens": 2,
+        "total_tokens": 1836,
+        "magpie_cache_unknown": True,
+    }
+    assert _is_cache_unknown(usage) is True
+    out = _parse_usage_metrics_object(usage)
+    assert out is not None
+    assert out["prompt_tokens"] == 1834
+    # 关键：None 表示「上游没上报」，与 0「确认没命中」严格区分
+    assert out["cached_tokens"] is None
+
+
+def test_parse_usage_keeps_zero_when_cache_explicitly_reported_as_zero():
+    """显式上报 cached_tokens=0 时必须保留 0，不能被当成「未知」。
+
+    否则会把「确认没命中」误标成「上游不上报」，让用户以为拿不到缓存数据。
+    """
+    from akm.server import _is_cache_unknown, _parse_usage_metrics_object
+
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "total_tokens": 105,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
+    assert _is_cache_unknown(usage) is False
+    out = _parse_usage_metrics_object(usage)
+    assert out is not None
+    assert out["cached_tokens"] == 0
+
+
+def test_parse_usage_marks_cache_unknown_inside_billing_usage():
+    """标记也可能出现在 billing_usage 内层，同样要识别。"""
+    from akm.server import _is_cache_unknown
+
+    usage = {
+        "prompt_tokens": 10,
+        "billing_usage": {"openai_usage": {"prompt_tokens": 10, "magpie_cache_unknown": True}},
+    }
+    assert _is_cache_unknown(usage) is True
+
 def test_extract_tokens_keeps_responses_input_tokens_without_cache_read_addback():
     from akm.server import _extract_tokens
     body = '{"usage":{"input_tokens":1200,"output_tokens":80,"cached_tokens":900,"total_tokens":1280}}'

@@ -49,6 +49,7 @@ plugin_manager: "PluginManager | None" = None
 from akm.error_log import write_error_log
 from akm.health import HealthMonitor
 from akm.usage_flags import (
+    FLAG_CACHE_UNKNOWN,
     FLAG_COUNT_TOKENS_FALLBACK,
     FLAG_USAGE_FALLBACK_ADAPTER,
     FLAG_USAGE_ESTIMATED_LIGHT,
@@ -1752,6 +1753,28 @@ def _pick_usage_int(usage: dict, keys: tuple[str, ...]) -> int:
     return 0
 
 
+def _is_cache_unknown(usage: dict) -> bool:
+    """判断上游是否**明确表示缓存数据不可知**。
+
+    背景：部分中转（本机实测 ``deepseek-v4.1-flash``）在 usage 里只回一个
+    ``magpie_cache_unknown: true``，完全不提供 ``cached_tokens`` /
+    ``cache_read_input_tokens`` / ``*_details`` 任何缓存字段。此时把缓存记成 0
+    是**错的**——0 的语义是「确认没有命中」，而这里真实情况是「上游不上报」。
+    两者在日志页看起来一模一样，用户会误以为缓存失效、去排查代理链路。
+
+    因此这里显式识别该标记，让上层把 cached_tokens 记成 None（未知），
+    日志页显示 ``-`` 而不是 0，统计页也不把它算进缓存命中率的分母。
+    """
+    if not isinstance(usage, dict):
+        return False
+
+    # 上游可能把标记放在顶层，也可能塞进 billing_usage 内层。
+    for source in (usage, _extract_billing_usage(usage)):
+        if isinstance(source, dict) and source.get("magpie_cache_unknown") is True:
+            return True
+    return False
+
+
 def _parse_usage_metrics_object(usage: dict) -> dict | None:
     """从 usage 对象提取 token 数，统一兼容 chat、responses 与 messages 字段。
 
@@ -1822,6 +1845,13 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
                 if cached:
                     break
 
+    # 上游明确表示缓存不可知（如 ``magpie_cache_unknown: true``）时，
+    # cached 记 None 而不是 0：0 表示「确认没命中」，None 表示「上游不上报」。
+    # 两者在日志页要能区分（- vs 0），统计页也不该把未知算进命中率分母。
+    cache_unknown = _is_cache_unknown(usage)
+    if cache_unknown and cached == 0:
+        cached = None
+
     prompt = usage.get("prompt_tokens", 0) or (billing or {}).get("prompt_tokens", 0) or 0
     if not prompt:
         prompt = usage.get("input_tokens", 0) or (billing or {}).get("input_tokens", 0) or 0
@@ -1832,7 +1862,9 @@ def _parse_usage_metrics_object(usage: dict) -> dict | None:
         #   input_tokens 已经是「总输入」，此时再补 cached 会把输入重复加大。
         # 用两个信号判定：只有「顶层显式带 cache_read_input_tokens」且
         # 「内层 billing_usage 不存在」时才按净输入处理。
-        if "cache_read_input_tokens" in usage and billing is None and cached > 0:
+        # cached 可能是 None（上游标记缓存未知），这里必须显式判空，
+        # 否则 None > 0 会抛 TypeError 把整个 usage 解析打挂。
+        if "cache_read_input_tokens" in usage and billing is None and (cached or 0) > 0:
             prompt += cached
     if total == 0 and (prompt > 0 or completion > 0):
         total = prompt + completion
@@ -2161,6 +2193,12 @@ async def _build_usage_metrics(
     """统一 usage 构建器：标准解析 -> CountTokens -> Adapter -> 轻量估算。"""
     flags: list[str] = []
     tokens = dict(precomputed_tokens or _extract_tokens(response_body) or {})
+    # 上游明确表示缓存不可知时，tokens["cached_tokens"] 会是 None。
+    # 这里补一个诊断 flag，日志页据此把缓存列显示成「?」而不是 0，
+    # 避免用户误以为「缓存失效了」而去排查代理链路。
+    if "cached_tokens" in tokens and tokens.get("cached_tokens") is None:
+        flags.append(FLAG_CACHE_UNKNOWN)
+
 
     has_tokens = bool(tokens)
     if not has_tokens:
@@ -3810,7 +3848,9 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "prompt_tokens": tokens.get("prompt_tokens", 0),
                         "completion_tokens": tokens.get("completion_tokens", 0),
                         "total_tokens": tokens.get("total_tokens", 0),
-                        "cached_tokens": tokens.get("cached_tokens", 0),
+                        # cached_tokens 可能是 None（上游标记缓存未知），DB 列是 INTEGER，
+                        # 落库统一写 0；「未知」语义靠 x-akm-flags 的 cache_unknown 标记区分
+                        "cached_tokens": tokens.get("cached_tokens") or 0,
                         "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
                         "client_request_headers": client_request_headers_for_log if save_request_body else "",
                         "client_request_body": client_request_body_for_log,
@@ -3895,7 +3935,9 @@ async def _handle_ai_request(request: Request, api_path: str):
             "prompt_tokens": tokens.get("prompt_tokens", 0),
             "completion_tokens": tokens.get("completion_tokens", 0),
             "total_tokens": tokens.get("total_tokens", 0),
-            "cached_tokens": tokens.get("cached_tokens", 0),
+            # cached_tokens 可能是 None（上游标记缓存未知），DB 列是 INTEGER，
+            # 落库统一写 0；「未知」语义靠 x-akm-flags 的 cache_unknown 标记区分
+            "cached_tokens": tokens.get("cached_tokens") or 0,
             "cache_creation_tokens": tokens.get("cache_creation_tokens", 0),
             "client_request_headers": client_request_headers_for_log if save_request_body else "",
             "client_request_body": client_request_body_for_log,
