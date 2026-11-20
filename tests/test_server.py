@@ -1218,6 +1218,77 @@ async def test_stream_audit_log_prefers_forwarded_request_body(monkeypatch, has_
     assert "13800138000" not in captured["request_body"]
 
 
+
+@pytest.mark.asyncio
+async def test_stream_audit_records_anthropic_cache_tokens(monkeypatch):
+    """端到端回归：Anthropic 流式缓存量必须落到审计的 cached/creation 列。
+
+    模拟上游真实报文（缓存量只在 message_start 里），走完整流式链路后检查
+    交给审计写入的数据，确认 cached_tokens / cache_creation_tokens 非 0。
+    """
+
+    captured = {}
+
+    class DummyResp:
+        async def aiter_bytes(self):
+            yield (
+                b'event: message_start\n'
+                b'data: {"type":"message_start","message":{"model":"claude-haiku-5.5",'
+                b'"usage":{"input_tokens":412,"cache_creation_input_tokens":1200,'
+                b'"cache_read_input_tokens":252000,"output_tokens":1}}}\n\n'
+            )
+            yield (
+                b'event: message_delta\n'
+                b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                b'"usage":{"output_tokens":976}}\n\n'
+            )
+
+        async def aclose(self):
+            return None
+
+    async def mock_forward(body, client, log_callback=None, api_path="messages", plugin_manager=None, request_timeout=None, original_user_agent="", passthrough_headers=None, client_headers=None):
+        return {
+            "stream": True,
+            "status_code": 200,
+            "response": DummyResp(),
+            "adapter": None,
+            "key_alias": "anthropic-key",
+            "provider": "anthropic",
+            "model": "claude-haiku-5.5",
+        }
+
+    async def fake_submit(app_obj, data):
+        captured.update(data)
+
+    monkeypatch.setattr("akm.server.forward_request", mock_forward)
+    monkeypatch.setattr("akm.server._submit_audit_log", fake_submit)
+    monkeypatch.setattr(
+        "akm.server.load_config",
+        lambda: {"log_request_body": False, "log_response_body": False, "stream_capture_max_bytes": 262144},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/v1/messages",
+            json={
+                "model": "claude-haiku-5.5",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            async for _ in resp.aiter_text():
+                pass
+
+    # 缓存量必须落库，且 prompt 是「净输入 + 命中量」的统一口径
+    assert captured["cached_tokens"] == 252000
+    assert captured["cache_creation_tokens"] == 1200
+    assert captured["prompt_tokens"] == 252412
+    assert captured["completion_tokens"] == 976
+
 @pytest.mark.asyncio
 async def test_audit_records_upstream_request_without_conversion(monkeypatch):
     """未发生协议转换时也按记录开关保存上游请求体和客户端响应体。"""
@@ -2398,6 +2469,73 @@ def test_extract_tokens_prefers_anthropic_cache_read_input_tokens():
     assert out["cache_creation_tokens"] == 300
     assert out["total_tokens"] == 2180
 
+
+
+def test_extract_tokens_from_messages_sse_reads_cache_in_message_start():
+    """回归：Anthropic 官方流式把缓存量放在 message_start，必须被记上。
+
+    真实报文形状：message_start.message.usage 带 cache_read_input_tokens /
+    cache_creation_input_tokens，message_delta.usage 只有 output_tokens。
+    早期实现只在 message_delta 里读 cached_tokens，导致缓存被整体记成 0。
+    """
+    from akm.server import _IncrementalSSEUsageTracker, _extract_tokens
+
+    sse = (
+        'event: message_start\n'
+        'data: {"type":"message_start","message":{"model":"claude-haiku-5.5",'
+        '"usage":{"input_tokens":412,"cache_creation_input_tokens":1200,'
+        '"cache_read_input_tokens":252000,"output_tokens":1}}}\n\n'
+        'event: message_delta\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+        '"usage":{"output_tokens":976}}\n\n'
+        'event: message_stop\n'
+        'data: {"type":"message_stop"}\n\n'
+    )
+
+    expected = {
+        "prompt_tokens": 252412,  # 净输入 412 + 命中 252000
+        "completion_tokens": 976,
+        "total_tokens": 253388,
+        "cached_tokens": 252000,
+        "cache_creation_tokens": 1200,
+    }
+
+    # 增量 tracker 与整段文本解析必须给出同一口径
+    tracker = _IncrementalSSEUsageTracker()
+    tracker.append(sse.encode())
+    assert tracker.build_tokens() == expected
+    assert _extract_tokens(sse) == expected
+
+
+def test_parse_usage_reads_billing_usage_without_double_counting_prompt():
+    """回归：中转把真实用量塞进 billing_usage.openai_usage 时也要取到。
+
+    该场景下外层 input_tokens 已经是「总输入」（不是净输入），
+    因此不能再用 cache_read 去补 prompt_tokens，否则输入会被重复加大。
+    """
+    from akm.server import _parse_usage_metrics_object
+
+    usage = {
+        "input_tokens": 4894,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 4,
+        "billing_usage": {
+            "source": "oai_chat",
+            "openai_usage": {
+                "prompt_tokens": 4894,
+                "completion_tokens": 4,
+                "total_tokens": 4898,
+                "prompt_tokens_details": {"cached_tokens": 250000},
+            },
+        },
+    }
+    out = _parse_usage_metrics_object(usage)
+    assert out is not None
+    # 关键：prompt 不能被加成 4894+250000
+    assert out["prompt_tokens"] == 4894
+    assert out["cached_tokens"] == 250000
+    assert out["completion_tokens"] == 4
 
 def test_extract_tokens_keeps_responses_input_tokens_without_cache_read_addback():
     from akm.server import _extract_tokens
@@ -4300,14 +4438,14 @@ async def test_markdown_kb_query_prefers_sqlite_vec_candidates_when_available(mo
                 "vec_enabled": True,
             }
 
-        def list_documents_by_scope(self, workspace_root="", selected_doc=None):
+        def list_documents_by_scope(self, workspace_root="", selected_doc=None, ignore_workspace=False):
             return [
                 {"id": "a", "doc_id": "d1", "file_name": "a.md", "workspace_root": "", "title": "A", "chunk_index": 0, "chunk_text": "A", "content_hash": "a", "embedding": [0.0, 1.0]},
                 {"id": "b", "doc_id": "d2", "file_name": "b.md", "workspace_root": "", "title": "B", "chunk_index": 0, "chunk_text": "B", "content_hash": "b", "embedding": [1.0, 0.0]},
                 {"id": "c", "doc_id": "d3", "file_name": "c.md", "workspace_root": "", "title": "C", "chunk_index": 0, "chunk_text": "C", "content_hash": "c", "embedding": [0.0, 1.0]},
             ]
 
-        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None):
+        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None, ignore_workspace=False):
             assert query_vector == [1.0, 0.0]
             assert limit >= 2
             return [
@@ -4382,17 +4520,23 @@ async def test_markdown_kb_query_passes_workspace_scope_into_sqlite_vec_search(m
                 "vec_enabled": True,
             }
 
-        def list_documents_by_scope(self, workspace_root="", selected_doc=None):
+        def list_documents_by_scope(self, workspace_root="", selected_doc=None, ignore_workspace=False):
             captured["scope_workspace"] = workspace_root
             captured["scope_selected_doc"] = dict(selected_doc or {})
+            captured["scope_ignore_workspace"] = ignore_workspace
             return [
                 {"id": "public", "doc_id": "d1", "file_name": "public.md", "workspace_root": "", "title": "Public", "chunk_index": 0, "chunk_text": "public", "content_hash": "p", "embedding": [1.0, 0.0]},
                 {"id": "ws", "doc_id": "d2", "file_name": "workspace.md", "workspace_root": "/Users/nk/Desktop/ccs", "title": "Workspace", "chunk_index": 0, "chunk_text": "workspace", "content_hash": "w", "embedding": [1.0, 0.0]},
             ]
 
-        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None):
+        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None, ignore_workspace=False):
             captured["search_workspace"] = workspace_root
             captured["search_selected_doc"] = dict(selected_doc or {})
+            captured["search_ignore_workspace"] = ignore_workspace
+            return [
+                {"id": "ws", "distance": 0.0},
+                {"id": "public", "distance": 0.2},
+            ]
             return [
                 {"id": "ws", "distance": 0.0},
                 {"id": "public", "distance": 0.2},
@@ -4945,3 +5089,228 @@ def test_build_sidebar_plugin_menu_uses_global_plugin_manager(monkeypatch):
     # 未初始化（None）时优雅返回空串，不抛错
     monkeypatch.setattr(srv, "plugin_manager", None)
     assert srv._build_sidebar_plugin_menu() == ""
+
+
+# ── ignore_workspace：MCP 未传 workspace 时必须真的跨工作区检索 ──────────────
+
+
+def _build_ignore_workspace_plugin(monkeypatch, captured, *, public_docs, bound_docs):
+    """构造一个只有内存文档集、无向量后端的 markdown_kb 插件。
+
+    返回的 plugin 上 `_retrieve` 会走 Python 回退路径，因此可以直接断言
+    「候选文档集是否包含绑定到其它工作区的文档」——这正是本次修复的核心。
+    """
+    from plugins.markdown_kb.index import Plugin
+
+    plugin = Plugin()
+    plugin.name = "markdown_kb"
+    plugin.logger = logging.getLogger("test.markdown_kb.ignore_workspace")
+    plugin.config = {
+        "embedding_model": "text-embedding-3-small",
+        "reranker_model": "",
+        "top_k": 5,
+        "semantic_weight": 1,
+        "keyword_weight": 0,
+        # 阈值取正数：正交向量的文档得分 0，应被过滤掉；
+        # 若设为 0，`score >= threshold` 会把所有零分文档也放行，测试就失去区分力。
+        "score_threshold": 0.2,
+        "memory_enabled": False,
+        "auto_organize_enabled": False,
+    }
+    plugin._embedding_cache_revision = None
+    plugin._embedding_cache_documents = []
+    plugin._bm25_cache_revision = None
+    plugin._bm25_cache_documents = []
+    plugin._bm25_cache_stats = None
+    # 缓存容器与分词器状态都是 on_start 时才建的，这里按既有测试的做法显式初始化，
+    # 否则 keyword 打分链路会取到未定义属性（_jieba3_warned_unavailable 等）。
+    plugin._query_embedding_cache = OrderedDict()
+    plugin._query_result_cache = OrderedDict()
+    plugin._jieba3_warned_unavailable = False
+    plugin._jieba3_small_tokenizer = None
+    plugin._jieba3_small_tokenizer_failed = True
+
+    all_docs = list(public_docs) + list(bound_docs)
+
+    class FakeStore:
+        def stats(self):
+            return {"document_count": len(all_docs), "last_rebuilt_at": "t0", "vec_enabled": False}
+
+        def list_documents_by_scope(self, workspace_root="", selected_doc=None, ignore_workspace=False):
+            captured["scope_workspace"] = workspace_root
+            captured["scope_ignore_workspace"] = ignore_workspace
+            if ignore_workspace:
+                return list(all_docs)
+            if workspace_root:
+                return [d for d in all_docs if not d["workspace_root"] or d["workspace_root"] == workspace_root]
+            return [d for d in all_docs if not d["workspace_root"]]
+
+        def search_by_vector(self, query_vector, limit, workspace_root="", selected_doc=None, ignore_workspace=False):
+            captured["search_ignore_workspace"] = ignore_workspace
+            return []
+
+        def get_documents_by_chunk_ids(self, chunk_ids):
+            return []
+
+        def read_memory_map(self, chunk_ids):
+            return {}
+
+        def update_memory(self, upserts, cap=1.0):
+            pass
+
+        def cleanup_expired_memory(self):
+            return 0
+
+    plugin._store = FakeStore()
+
+    async def fake_get_query_embedding(question, embedding_model):
+        return [1.0, 0.0]
+
+    monkeypatch.setattr(plugin, "_get_query_embedding", fake_get_query_embedding)
+    # 不让真实 embedding 计算介入：所有文档共用同一向量，靠关键词权重区分即可
+    monkeypatch.setattr(plugin, "_load_documents_for_retrieval", lambda: list(all_docs))
+    return plugin
+
+
+def _doc(chunk_id, doc_id, file_name, workspace_root, text, embedding=None):
+    """构造一条索引文档。
+
+    embedding 默认与查询向量正交（[0.0, 1.0]），保证「没被选进候选范围」的文档
+    不会因为向量恰好相同而命中——这样测试断言的才是范围过滤本身。
+    """
+    return {
+        "id": chunk_id,
+        "doc_id": doc_id,
+        "file_name": file_name,
+        "workspace_root": workspace_root,
+        "title": file_name,
+        "chunk_index": 0,
+        "chunk_text": text,
+        "content_hash": chunk_id,
+        "embedding": list(embedding) if embedding is not None else [0.0, 1.0],
+    }
+
+
+@pytest.mark.asyncio
+async def test_retrieve_ignore_workspace_searches_all_workspaces(monkeypatch):
+    """ignore_workspace=True 时必须跨工作区检索，而不是只查公共文档。
+
+    回归场景：知识库 261 篇里只有 2 篇公共文档，MCP 不传 workspace_root 时
+    传 ignore_workspace=True，但旧实现在 `if not documents:` 分支内判断，
+    公共文档非空 → 整段被跳过 → 实际只查了 2 篇，用户看到「检索不到」。
+    """
+    captured = {}
+    public_docs = [_doc("c1", "d1", "public.md", "", "公共文档内容")]
+    bound_docs = [_doc("c2", "d2", "project.md", "/Users/x/proj", "分页组件用法说明", embedding=[1.0, 0.0])]
+    plugin = _build_ignore_workspace_plugin(monkeypatch, captured, public_docs=public_docs, bound_docs=bound_docs)
+
+    hits = await plugin._retrieve(
+        "分页组件", 5, "text-embedding-3-small", "", {}, {}, ignore_workspace=True
+    )
+
+    # 关键断言：绑定到其它工作区的文档必须出现在候选里
+    assert captured["scope_ignore_workspace"] is True
+    assert [h["file_name"] for h in hits] == ["project.md"]
+    assert plugin._last_retrieval_scope == "all"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_without_workspace_defaults_to_public_only(monkeypatch):
+    """不传 workspace 且不要求跨域时，保持历史行为：只查公共文档。"""
+    captured = {}
+    public_docs = [_doc("c1", "d1", "public.md", "", "公共文档内容")]
+    bound_docs = [_doc("c2", "d2", "project.md", "/Users/x/proj", "分页组件用法说明", embedding=[1.0, 0.0])]
+    plugin = _build_ignore_workspace_plugin(monkeypatch, captured, public_docs=public_docs, bound_docs=bound_docs)
+
+    hits = await plugin._retrieve("分页组件", 5, "text-embedding-3-small", "", {}, {})
+
+    assert captured["scope_ignore_workspace"] is False
+    # 只有公共文档参与，绑定文档不会命中
+    assert hits == []
+    assert plugin._last_retrieval_scope == "public"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_with_workspace_includes_public_and_own(monkeypatch):
+    """带 workspace 时取「公共文档 + 该工作区文档」，其它工作区不参与。"""
+    captured = {}
+    public_docs = [_doc("c1", "d1", "public.md", "", "公共文档内容")]
+    bound_docs = [
+        _doc("c2", "d2", "own.md", "/Users/x/proj", "本项目分页说明", embedding=[1.0, 0.0]),
+        _doc("c3", "d3", "other.md", "/Users/x/other", "别的项目分页说明", embedding=[1.0, 0.0]),
+    ]
+    plugin = _build_ignore_workspace_plugin(monkeypatch, captured, public_docs=public_docs, bound_docs=bound_docs)
+
+    hits = await plugin._retrieve(
+        "分页", 5, "text-embedding-3-small", "", {"workspace_root": "/Users/x/proj"}, {}
+    )
+
+    names = sorted(h["file_name"] for h in hits)
+    # 公共文档参与了候选（在本工作区范围内），但它与查询向量正交、得分低于阈值，
+    # 所以最终命中里只有本项目文档；关键是**别的项目**不能出现。
+    assert names == ["own.md"]
+    assert "other.md" not in names
+    assert plugin._last_retrieval_scope == "workspace"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_ignore_workspace_passed_to_vector_search(monkeypatch):
+    """向量召回阶段也必须拿到 ignore_workspace，否则 SQL 仍只召回公共文档。"""
+    captured = {}
+    public_docs = [_doc("c1", "d1", "public.md", "", "公共")]
+    bound_docs = [_doc("c2", "d2", "project.md", "/Users/x/proj", "分页")]
+    plugin = _build_ignore_workspace_plugin(monkeypatch, captured, public_docs=public_docs, bound_docs=bound_docs)
+
+    # 直接调用候选召回，断言参数透传到 store
+    plugin._retrieve_candidates_with_sqlite_vec(
+        query_vector=[1.0, 0.0],
+        documents=list(public_docs) + list(bound_docs),
+        top_k=5,
+        project_context={},
+        selected_doc={},
+        request_workspace="",
+        ignore_workspace=True,
+    )
+    assert captured["search_ignore_workspace"] is True
+
+
+def test_query_cache_key_distinguishes_ignore_workspace(monkeypatch):
+    """缓存键必须区分 ignore_workspace，否则「查公共」的空结果会污染「查全部」。"""
+    captured = {}
+    plugin = _build_ignore_workspace_plugin(
+        monkeypatch, captured,
+        public_docs=[_doc("c1", "d1", "public.md", "", "公共")],
+        bound_docs=[_doc("c2", "d2", "project.md", "/Users/x/proj", "分页")],
+    )
+
+    common = dict(
+        question="q", top_k=5, embedding_model="m", reranker_model="",
+        semantic_weight=1.0, keyword_weight=0.0, score_threshold=0.0,
+        project_context=None, selected_doc=None,
+    )
+    key_public = plugin._query_cache_key(**common, ignore_workspace=False)
+    key_all = plugin._query_cache_key(**common, ignore_workspace=True)
+    assert key_public != key_all
+
+
+def test_describe_retrieval_scope_counts_public_and_all(monkeypatch):
+    """范围描述要给出可读文案与篇数，供空结果提示直接使用。"""
+    captured = {}
+    plugin = _build_ignore_workspace_plugin(
+        monkeypatch, captured,
+        public_docs=[_doc("c1", "d1", "public.md", "", "公共")],
+        bound_docs=[_doc("c2", "d2", "project.md", "/Users/x/proj", "分页")],
+    )
+
+    scope_all = plugin._describe_retrieval_scope("all")
+    assert scope_all["kind"] == "all"
+    assert scope_all["document_count"] == 2
+    assert "全部 2 篇文档" in scope_all["description"]
+
+    scope_public = plugin._describe_retrieval_scope("public")
+    assert scope_public["kind"] == "public"
+    assert "公共文档（1 篇" in scope_public["description"]
+
+    scope_ws = plugin._describe_retrieval_scope("workspace", request_workspace="/Users/x/proj")
+    assert scope_ws["kind"] == "workspace"
+    assert "/Users/x/proj" in scope_ws["description"]

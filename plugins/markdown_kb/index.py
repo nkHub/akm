@@ -263,6 +263,7 @@ class IndexStore(ABC):
         limit: int,
         workspace_root: str = "",
         selected_doc: dict | None = None,
+        ignore_workspace: bool = False,
     ) -> list[dict]:
         """按向量检索；无向量后端交由上层 Python 回退路径处理。"""
         return []
@@ -276,15 +277,27 @@ class IndexStore(ABC):
             if str(document.get("id") or "").strip() in requested_ids
         ]
 
-    def list_documents_by_scope(self, workspace_root: str = "", selected_doc: dict | None = None) -> list[dict]:
+    def list_documents_by_scope(
+        self,
+        workspace_root: str = "",
+        selected_doc: dict | None = None,
+        ignore_workspace: bool = False,
+    ) -> list[dict]:
         """按 workspace / selected_doc 返回当前候选文档集合。
 
         默认回退到全量 `list_documents()`，保证历史 backend 至少保持可用；
         更高效的 backend 可自行覆写，在存储层提前完成过滤。
+
+        `ignore_workspace=True` 表示**显式**要求跨工作区检索：此时完全跳过
+        workspace 收窄，只用 selected_doc 继续收口。这是 MCP `search_kb` /
+        `ask_kb` 未传 `workspace_root` 时的语义（用户意图是「查全部知识库」），
+        与「未传 workspace 就只查公共文档」的默认行为必须区分开。
         """
         documents = list(self.list_documents())
         normalized_workspace = str(workspace_root or "").strip()
-        if normalized_workspace:
+        if ignore_workspace:
+            pass
+        elif normalized_workspace:
             documents = [
                 item for item in documents
                 if not str(item.get("workspace_root") or "").strip()
@@ -826,6 +839,7 @@ class SqliteKbIndexStore(IndexStore):
         limit: int,
         workspace_root: str = "",
         selected_doc: dict | None = None,
+        ignore_workspace: bool = False,
     ) -> list[dict]:
         """使用 sqlite-vec 在数据库侧完成第一阶段向量召回。
 
@@ -833,6 +847,9 @@ class SqliteKbIndexStore(IndexStore):
         - 只返回候选 `chunk_id` 与原始 `distance`，由上层继续换算成 `vector_score`；
         - workspace / selected_doc 过滤会前推到 SQL 条件里，避免别的项目 chunk 先把
           top-N 名额挤满，再在 Python 里“后过滤”导致结果看起来不准。
+
+        `ignore_workspace=True` 时不下发 workspace 条件，直接在全库范围内召回——
+        对应 MCP 未传 workspace_root 的「查全部知识库」语义。
         """
         conn = self._connect()
         try:
@@ -848,7 +865,9 @@ class SqliteKbIndexStore(IndexStore):
             selected_doc = selected_doc if isinstance(selected_doc, dict) else {}
             params: list[Any] = [json.dumps(normalized_query, ensure_ascii=False), max(1, int(limit))]
             clauses = []
-            if normalized_workspace:
+            if ignore_workspace:
+                pass
+            elif normalized_workspace:
                 clauses.append("(c.workspace_root = '' OR c.workspace_root = ?)")
                 params.append(normalized_workspace)
             else:
@@ -919,15 +938,26 @@ class SqliteKbIndexStore(IndexStore):
         finally:
             conn.close()
 
-    def list_documents_by_scope(self, workspace_root: str = "", selected_doc: dict | None = None) -> list[dict]:
-        """在 SQLite 层按 scope 过滤文档，避免 fallback 前先把全量文档拉回内存。"""
+    def list_documents_by_scope(
+        self,
+        workspace_root: str = "",
+        selected_doc: dict | None = None,
+        ignore_workspace: bool = False,
+    ) -> list[dict]:
+        """在 SQLite 层按 scope 过滤文档，避免 fallback 前先把全量文档拉回内存。
+
+        `ignore_workspace=True` 时不下发任何 workspace 条件，直接返回全库 chunk，
+        供 MCP 未指定 workspace_root 的「查全部知识库」语义使用。
+        """
         conn = self._connect()
         try:
             normalized_workspace = str(workspace_root or "").strip()
             selected_doc = selected_doc if isinstance(selected_doc, dict) else {}
             params: list[Any] = []
             clauses = []
-            if normalized_workspace:
+            if ignore_workspace:
+                pass
+            elif normalized_workspace:
                 clauses.append("(c.workspace_root = '' OR c.workspace_root = ?)")
                 params.append(normalized_workspace)
             else:
@@ -1581,6 +1611,11 @@ class Plugin(PluginBase):
         self._jieba3_small_tokenizer_failed = False
         self._query_embedding_cache = OrderedDict()
         self._query_result_cache = OrderedDict()
+        # 最近一次 _retrieve 的检索范围（"all" / "workspace" / "public"），
+        # 由 query/ask 回传给调用方，用于在空结果时说明「本次实际查了什么范围」。
+        # 之所以用实例字段而不是返回值：_retrieve 的返回类型是 hits 列表，
+        # 已有调用方（含 hook 注入路径）都按列表消费，改成元组会破坏兼容性。
+        self._last_retrieval_scope = "public"
 
     def _load_doc_manifest(self) -> list[dict]:
         """读取文档清单；若不存在则从现有 docs 和旧绑定表自动迁移。"""
@@ -2540,6 +2575,9 @@ class Plugin(PluginBase):
             selected_doc,
             ignore_workspace=ignore_workspace,
         )
+        scope = self._describe_retrieval_scope(
+            self._last_retrieval_scope, request_workspace=project_context.get("workspace_root") if isinstance(project_context, dict) else ""
+        )
         return {
             "ok": True,
             "question": question,
@@ -2548,6 +2586,9 @@ class Plugin(PluginBase):
             "reranker_model": reranker_model,
             "workspace_root": project_context.get("workspace_root") if isinstance(project_context, dict) else "",
             "selected_doc_id": selected_doc.get("doc_id") if isinstance(selected_doc, dict) else "",
+            # 检索范围随结果一起回传：调用方（MCP / 前端）据此说明「本次查了什么」，
+            # 空结果时不会再被误读成「整个知识库都没有」。
+            "retrieval_scope": scope,
             "hits": hits,
         }
 
@@ -2565,8 +2606,23 @@ class Plugin(PluginBase):
         chat_model = str((payload or {}).get("chat_model") or settings["chat_model"]).strip() or settings["chat_model"]
         project_context = self._extract_project_context(payload)
         selected_doc = self._resolve_selected_doc_scope(payload)
-        hits = await self._retrieve(question, top_k, embedding_model, reranker_model, project_context, selected_doc)
+        # 与 query 保持一致：ask_kb 未传 workspace_root 时同样按「查全部知识库」处理。
+        # 此前 ask() 根本没接收该参数，MCP 传进来的 ignore_workspace 被静默丢弃，
+        # 导致 ask_kb 的「默认全库」语义同样失效。
+        ignore_workspace = bool((payload or {}).get("ignore_workspace", False))
+        hits = await self._retrieve(
+            question,
+            top_k,
+            embedding_model,
+            reranker_model,
+            project_context,
+            selected_doc,
+            ignore_workspace=ignore_workspace,
+        )
         answer = await self._generate_answer(question, hits, chat_model)
+        scope = self._describe_retrieval_scope(
+            self._last_retrieval_scope, request_workspace=project_context.get("workspace_root") if isinstance(project_context, dict) else ""
+        )
         return {
             "ok": True,
             "question": question,
@@ -2578,6 +2634,8 @@ class Plugin(PluginBase):
             "reranker_model": reranker_model,
             "workspace_root": project_context.get("workspace_root") if isinstance(project_context, dict) else "",
             "selected_doc_id": selected_doc.get("doc_id") if isinstance(selected_doc, dict) else "",
+            # 与 query 同口径：把本次实际检索范围回传，避免空回答被误读为「全库没有」。
+            "retrieval_scope": scope,
         }
 
     async def learn(self, payload: dict) -> dict:
@@ -3594,6 +3652,9 @@ class Plugin(PluginBase):
                 settings["score_threshold"],
                 project_context,
                 selected_doc,
+                # ignore_workspace 会实质改变候选文档集（全库 vs 公共文档），
+                # 必须进缓存键，否则「查全部」与「只查公共」会互相命中脏缓存。
+                ignore_workspace=ignore_workspace,
             )
             cached_hits = self._cache_get(self._query_result_cache, query_cache_key)
             if cached_hits is not None:
@@ -3607,14 +3668,34 @@ class Plugin(PluginBase):
                 or ""
             )
         query_vector = await self._get_query_embedding(question, embedding_model)
-        documents = self._store.list_documents_by_scope(request_workspace, selected_doc)
+        # 文档范围选择。三条互斥路径，顺序不能换：
+        #   ① ignore_workspace=True（MCP 未传 workspace_root 时的「查全部」语义）
+        #      —— 直接取全库，跳过 workspace 收窄。这是修复点：原先该分支写在
+        #      `if not documents:` 内部，而空 workspace 下 list_documents_by_scope("")
+        #      通常能返回公共文档（非空），导致整个分支被跳过、ignore_workspace 变成
+        #      死代码，实际只在公共文档里检索。
+        #   ② 请求带了 workspace —— 取「公共文档 + 该工作区文档」。
+        #   ③ 都没带 —— 只取公共文档（历史默认行为，保持向后兼容）。
+        # 检索范围同时记到 self._last_retrieval_scope，供 query/ask 回传给调用方，
+        # 让 AI 明确知道本次到底在什么范围内没搜到，而不是误以为查了全部文档。
+        documents = []
+        if ignore_workspace:
+            documents = self._store.list_documents_by_scope("", selected_doc, ignore_workspace=True)
+            if not documents:
+                # 该 backend 未实现 ignore_workspace 时回退到内存全量，避免静默退化成公共文档
+                documents = self._filter_documents_by_selected_doc(
+                    self._load_documents_for_retrieval(), selected_doc
+                )
+            self._last_retrieval_scope = "all"
+        else:
+            documents = self._store.list_documents_by_scope(request_workspace, selected_doc)
+            self._last_retrieval_scope = "workspace" if request_workspace else "public"
+
         if not documents:
             all_documents = self._load_documents_for_retrieval()
             if not all_documents:
                 raise HTTPException(status_code=400, detail="当前知识库为空，请先上传文档并执行重建")
             scoped_documents = self._filter_documents_by_workspace(all_documents, project_context)
-            if ignore_workspace:
-                scoped_documents = all_documents
             if not scoped_documents:
                 # 工作区范围为空属于有效查询的空结果，而非请求参数错误。
                 # 调用方可据此提示用户切换工作区或改查全局知识库。
@@ -3631,6 +3712,10 @@ class Plugin(PluginBase):
             project_context=project_context,
             selected_doc=selected_doc,
             request_workspace=request_workspace,
+            # 同一处 bug 在向量召回阶段也存在：search_by_vector 在 workspace_root 为空时
+            # 会拼 `c.workspace_root = ''`，只召回公共文档。ignore_workspace=True 必须
+            # 一起透传，否则「查全部」只修了 Python 回退路径、向量路径仍是 2 篇。
+            ignore_workspace=ignore_workspace,
         )
         candidate_documents = vector_candidates if vector_candidates else documents
         semantic_weight = settings["semantic_weight"]
@@ -3890,11 +3975,16 @@ class Plugin(PluginBase):
         project_context: dict | None,
         selected_doc: dict | None,
         request_workspace: str,
+        ignore_workspace: bool = False,
     ) -> list[dict]:
         """优先使用 sqlite-vec 完成第一阶段候选召回。
 
         返回空列表表示“当前这次请求没有走成 sqlite-vec”，调用方会自动退回原有
         的全量文档 + Python 相似度计算路径。
+
+        `ignore_workspace` 必须透传给 store：SQL 侧在 workspace_root 为空时会拼
+        `c.workspace_root = ''`，不透传的话「查全部知识库」在向量召回阶段仍只
+        召回公共文档，与 Python 回退路径的范围不一致。
         """
         if not documents:
             return []
@@ -3904,6 +3994,7 @@ class Plugin(PluginBase):
             limit=candidate_limit,
             workspace_root=request_workspace,
             selected_doc=selected_doc,
+            ignore_workspace=ignore_workspace,
         )
         if not rows:
             return []
@@ -3958,14 +4049,23 @@ class Plugin(PluginBase):
         score_threshold: float,
         project_context: dict | None,
         selected_doc: dict | None,
+        ignore_workspace: bool = False,
     ) -> tuple:
-        """构造 query 结果缓存 key。"""
+        """构造 query 结果缓存 key。
+
+        `ignore_workspace` 必须参与：它把候选文档集从「公共文档」换成「全库」，
+        若不入 key，同一个问题先查公共再查全库会直接命中前者的空结果缓存。
+        """
         project_id = ""
         project_name = ""
         selected_doc_id = ""
+        request_workspace = ""
         if isinstance(project_context, dict):
             project_id = str(project_context.get("project_id") or "")
             project_name = str(project_context.get("project_name") or "")
+            request_workspace = self._normalize_workspace_root(
+                project_context.get("workspace_root") or project_context.get("working_directory") or ""
+            )
         if isinstance(selected_doc, dict):
             selected_doc_id = str(selected_doc.get("doc_id") or "")
         return (
@@ -3979,6 +4079,9 @@ class Plugin(PluginBase):
             project_id,
             project_name,
             selected_doc_id,
+            # workspace 与 ignore_workspace 一起进 key：两者共同决定候选文档集。
+            request_workspace,
+            bool(ignore_workspace),
             self._current_embedding_cache_revision(),
         )
 
@@ -4078,6 +4181,58 @@ class Plugin(PluginBase):
             if Path(str(item.get("file_name") or "")).name == selected_file_name
             and self._normalize_workspace_root(item.get("workspace_root") or "") == selected_workspace
         ]
+
+
+    def _describe_retrieval_scope(self, scope: str, request_workspace: str = "") -> dict:
+        """把内部检索范围标记翻译成调用方可直接展示的结构。
+
+        存在的意义：`search_kb` / `ask_kb` 不传 workspace_root 时走的是「全库」，
+        但历史上后端实际只查了公共文档，空结果返回一句「未检索到相关内容」，
+        调用方（AI）无法区分「全库没有」与「只在公共文档里没有」。这里把
+        scope + 文档篇数一并回传，空结果时才能给出有信息量的说明。
+
+        返回值字段：
+        - kind：all / workspace / public，与 _retrieve 内部标记一致；
+        - document_count：本次候选文档篇数（去重后的 file_name+workspace 组合）；
+        - description：一句可直接拼进提示的中文说明。
+        """
+        # 统计候选文档篇数：同一文件可能被切成多个 chunk，按 doc_id 去重更准确；
+        # 老索引里个别条目可能没有 doc_id，回退用 file_name + workspace_root 组合。
+        try:
+            documents = self._load_documents_for_retrieval()
+        except Exception:  # noqa: BLE001 —— 统计失败不能影响检索主流程
+            documents = []
+        doc_keys = set()
+        for item in documents:
+            doc_id = str(item.get("doc_id") or "").strip()
+            if doc_id:
+                doc_keys.add(doc_id)
+            else:
+                doc_keys.add(
+                    f"{item.get('file_name') or ''}|{self._normalize_workspace_root(item.get('workspace_root') or '')}"
+                )
+        total_docs = len(doc_keys)
+
+        normalized_scope = str(scope or "public")
+        if normalized_scope == "all":
+            description = f"全部 {total_docs} 篇文档（未指定工作目录）"
+        elif normalized_scope == "workspace":
+            workspace = self._normalize_workspace_root(request_workspace or "")
+            description = f"工作目录 {workspace} 及其公共文档" if workspace else f"全部 {total_docs} 篇文档"
+        else:
+            # 公共文档篇数：只统计未绑定工作目录的条目，同样按 doc_id 去重。
+            public_keys = set()
+            for item in documents:
+                if self._normalize_workspace_root(item.get("workspace_root") or ""):
+                    continue
+                doc_id = str(item.get("doc_id") or "").strip()
+                public_keys.add(doc_id or f"{item.get('file_name') or ''}|")
+            description = f"公共文档（{len(public_keys)} 篇，未绑定工作目录）"
+        return {
+            "kind": normalized_scope,
+            "document_count": total_docs,
+            "description": description,
+        }
 
     def _is_hit_matching_project(self, hit: dict, project_name: str) -> bool:
         """判断单条命中是否属于当前项目候选。"""

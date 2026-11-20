@@ -778,3 +778,104 @@ async def test_mcp_maintenance_refresh_context_required_fields(monkeypatch):
     assert err["code"] == -32603
     assert "workspace_root 不能为空" in err["message"]
     assert called == []
+
+
+# ── 检索范围回传（修复「不带 workspace 只查公共文档」）────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_kb_reports_scope_when_no_hits(monkeypatch):
+    """空结果必须说明本次实际检索范围，避免被误读成「整个知识库都没有」。"""
+
+    async def fake_call(endpoint, payload, timeout=120.0):
+        return {
+            "ok": True,
+            "hits": [],
+            "retrieval_scope": {
+                "kind": "all",
+                "document_count": 261,
+                "description": "全部 261 篇文档（未指定工作目录）",
+            },
+        }
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "search_kb", "arguments": {"question": "分页组件怎么用"}},
+        )
+    text = resp.json()["result"]["content"][0]["text"]
+    # 必须带范围与篇数，并给出可执行的下一步建议
+    assert "全部 261 篇文档" in text
+    assert "未检索到相关内容" in text
+    assert "workspace_root" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_kb_scope_prefix_when_hits(monkeypatch):
+    """有命中时也要标明检索范围，便于判断结果来自公共还是某个项目。"""
+
+    async def fake_call(endpoint, payload, timeout=120.0):
+        return {
+            "ok": True,
+            "hits": [
+                {"title": "安装指南", "file_name": "install.md", "score": 0.8, "chunk_text": "步骤…"}
+            ],
+            "retrieval_scope": {"kind": "workspace", "document_count": 59, "description": "工作目录 /proj 及其公共文档"},
+        }
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "search_kb", "arguments": {"question": "如何安装", "workspace_root": "/proj"}},
+        )
+    text = resp.json()["result"]["content"][0]["text"]
+    assert text.startswith("检索范围：工作目录 /proj 及其公共文档")
+    assert "安装指南" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_ask_kb_reports_scope_when_no_citations(monkeypatch):
+    """ask_kb 无引用时同样要补检索范围，与 search_kb 同口径。"""
+
+    async def fake_call(endpoint, payload, timeout=120.0):
+        return {
+            "ok": True,
+            "answer": "知识库中没有相关记录。",
+            "citations": [],
+            "retrieval_scope": {"kind": "public", "document_count": 2, "description": "公共文档（2 篇，未绑定工作目录）"},
+        }
+
+    monkeypatch.setattr(markdown_kb_mcp, "_call_kb", fake_call)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(
+            client,
+            "tools/call",
+            {"name": "ask_kb", "arguments": {"question": "分页怎么用", "workspace_root": "/proj"}},
+        )
+    text = resp.json()["result"]["content"][0]["text"]
+    assert "本次检索范围：公共文档（2 篇，未绑定工作目录）" in text
+    assert "workspace_root" in text
+
+
+@pytest.mark.asyncio
+async def test_mcp_search_kb_schema_documents_workspace_semantics(monkeypatch):
+    """工具 schema 必须写清「不传 workspace_root = 跨项目检索全部」，让模型调用前就知道。"""
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await _rpc(client, "tools/list")
+    tools = resp.json()["result"]["tools"]
+    search = next(t for t in tools if t["name"] == "search_kb")
+    desc = search["inputSchema"]["properties"]["workspace_root"]["description"]
+    assert "全部" in desc
+    assert "公共文档" in desc

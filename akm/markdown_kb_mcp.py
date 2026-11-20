@@ -54,7 +54,13 @@ _SEARCH_SCHEMA: dict[str, Any] = {
         },
         "embedding_model": {"type": "string", "description": "向量化模型（可选，默认用插件配置）"},
         "reranker_model": {"type": "string", "description": "重排模型（可选，默认用插件配置）"},
-        "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；不传时检索全部文档）"},
+        "workspace_root": {
+            "type": "string",
+            "description": (
+                "工作目录绝对路径（可选）。传入时检索该目录下的文档 + 公共文档；"
+                "不传时检索**全部**工作区的文档（跨项目）。结果开头会标明本次实际检索范围。"
+            ),
+        },
     },
     "required": ["question"],
 }
@@ -65,7 +71,13 @@ _ASK_SCHEMA: dict[str, Any] = {
     "properties": {
         "question": {"type": "string", "description": "问题"},
         "chat_model": {"type": "string", "description": "问答模型（可选，默认用插件配置）"},
-        "workspace_root": {"type": "string", "description": "工作目录绝对路径（可选；不传时检索全部文档）"},
+        "workspace_root": {
+            "type": "string",
+            "description": (
+                "工作目录绝对路径（可选）。传入时在该目录文档 + 公共文档中检索；"
+                "不传时检索**全部**工作区的文档（跨项目）。回答末尾会标明本次实际检索范围。"
+            ),
+        },
     },
     "required": ["question"],
 }
@@ -427,10 +439,20 @@ async def _call_maintenance(name: str, args: dict[str, Any]) -> str:
 
 
 def _format_hits(data: dict[str, Any]) -> str:
-    """把 /query 返回的 hits 精简为便于 LLM/用户阅读的文本（截断正文）。"""
+    """把 /query 返回的 hits 精简为便于 LLM/用户阅读的文本（截断正文）。
+
+    空结果必须说明**本次实际检索的范围**：`search_kb` 不传 workspace_root 时
+    走的是「全库」，而历史上后端只查公共文档，一句「未检索到相关内容」会让
+    调用方误以为整个知识库都没有，从而放弃换关键词或限定 workspace 重试。
+    """
     hits = data.get("hits") or []
+    scope = data.get("retrieval_scope") or {}
+    scope_text = str(scope.get("description") or "") if isinstance(scope, dict) else ""
     if not hits:
+        if scope_text:
+            return f"在{scope_text}中未检索到相关内容。可换关键词重试，或传入 workspace_root 限定到具体项目。"
         return "未检索到相关内容。"
+    header = f"检索范围：{scope_text}\n\n" if scope_text else ""
     lines = []
     for i, hit in enumerate(hits, 1):
         title = str(hit.get("title") or hit.get("file_name") or "")
@@ -438,7 +460,7 @@ def _format_hits(data: dict[str, Any]) -> str:
         score = float(hit.get("score") or hit.get("vector_score") or 0)
         text = str(hit.get("chunk_text") or "")[:800]
         lines.append(f"[{i}] {title}（{file_name}，相关度 {score:.3f}）\n{text}")
-    return "\n\n".join(lines)
+    return header + "\n\n".join(lines)
 
 
 async def _handle(message: dict[str, Any], request: Request) -> dict[str, Any] | None:
@@ -539,11 +561,17 @@ async def _handle(message: dict[str, Any], request: Request) -> dict[str, Any] |
                     raise RuntimeError(str(data.get("error") or "知识库问答失败"))
                 text = str(data.get("answer") or "（无回答）")
                 citations = data.get("citations") or []
+                # 与 search_kb 同口径：回答为空/无引用时补一句检索范围，
+                # 否则调用方会以为「整个知识库都没有相关内容」。
+                scope = data.get("retrieval_scope") or {}
+                scope_text = str(scope.get("description") or "") if isinstance(scope, dict) else ""
                 if citations:
                     refs = "\n".join(
                         f"- {c.get('title') or c.get('file_name') or ''}" for c in citations
                     )
                     text += f"\n\n引用来源：\n{refs}"
+                elif scope_text:
+                    text += f"\n\n（本次检索范围：{scope_text}，未找到可用引用。可换关键词重试，或传入 workspace_root 限定到具体项目。）"
             elif name in {spec["name"] for spec in _MAINT_SPECS}:
                 text = await _call_maintenance(str(name), args)
             else:
