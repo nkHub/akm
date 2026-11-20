@@ -1,6 +1,13 @@
 # 版本变更记录
 
 ## 未发布
+**dafeiyu 动画资源迁入 Git LFS**：`plugins/dafeiyu/assets/**/*.webp` 共 3444 个文件、约 53MB，此前以普通 blob 直接躺在 git 历史里，仓库体积被动画帧撑大且每次 clone 都要拉全量二进制。
+**做法**：新增 `.gitattributes` 声明 `filter=lfs diff=lfs merge=lfs -text`，再用 `git lfs migrate import --include="plugins/dafeiyu/assets/**/*.webp" --include-ref=refs/heads/main` 改写 main 全历史（521 个提交），webp 从历史中彻底退出，历史最大 blob 由 12MB 级降为 3.0MB 的 `logo.png`。
+**只迁移 main**：`--include-ref` 限定单分支，未用 `--everything`。19 个 `flow/*`、`backup/*`、`chore/*` 分支仍持有旧 blob，需要时单独迁移。
+**踩到的坑（重要）**：`git lfs migrate import` 结束后工作区里的 webp **不会自动还原成真实文件，而是变成 130 字节的 LFS 指针文本**，此时直接打包会让所有动画资源变成空白且不报错。必须补跑一次 `git lfs checkout` 才会拉回真实二进制。校验方式：`find plugins/dafeiyu/assets -name "*.webp" | while read f; do [ "$(head -c 4 "$f")" = "RIFF" ] || echo "损坏: $f"; done`，全部无输出才算正常。
+**另一个假象**：`.gitattributes` 生效后 `git status` 会把 3444 个 webp 全部列为 modified，这是 LFS clean filter 的正常表现，不代表文件被改动。判断是否真的干净要用 `git diff --quiet`（退出码 0）或先跑 `git update-index --refresh`。
+**验证**：`git lfs ls-files` 计数 3444，与磁盘 webp 数量一致；3444 个文件全量 `RIFF` 魔数校验通过、0 个小于 1KB（确认没有残留指针文本）；`plugins/dafeiyu/` 的 16 个动画组 manifest 帧数与磁盘文件数全部吻合；`ruff check .` 通过、`pytest -q` **1484 passed**。
+**已知边界**：① 迁移改写了 main 全部 521 个提交的 hash，推送需要 `git push --force-with-lease`，远程 `origin/main`（`c41defc`）与本地已分叉，**尚未推送**；② 迁移前已用 `git bundle create --all` 备份两份 70MB bundle；③ 其他分支未迁移，若后续要统一需对每个分支重复 `migrate import`；④ 旧 blob 仍存在于远程 GitHub 仓库，需联系 GitHub Support 或等 GC 才能彻底回收空间。
 **拆分巨型工具装配函数：`build_builtin_tools` 1846 → 1378 行**：`akm/agent_runtime/tools.py` 里那个 1846 行、用 34 个嵌套闭包定义全部 34 个 Agent 工具的装配函数，按功能域拆出两个独立模块。
 **为什么只拆这两组**：拆分前先用 AST 测绘了每个工具域对 tools.py 模块级 helper 的依赖。`tasks`（3 个工具）与 `flow`（8 个工具）**零依赖**——只访问 `akm.db` / `akm.flow.db` 的 CRUD，不碰任何 tools.py 内的 helper，因此可以干净地搬走。其余组不行：`system`（7 个）依赖 9 个被 tools.py 其他地方大量复用的 helper（`_check_tool_enabled` 与 `_safe_resolve_workspace_path` 各被引用 16 次），`tools_system` 反向 import tools.py 会形成循环依赖；`media`（7 个）、`search`（2 个）、`status`（8 个）同理。硬拆这些组要么制造循环导入，要么把 helper 复制一份——两种都是在为"看起来更整齐"付真实代价，所以止步于此。
 **怎么保证没改坏**：拆分前先把 `build_builtin_tools` 输出的 34 个工具（name / description / parameters / max_result_chars）抓成 JSON 基线；拆分后逐字段比对，**34 个工具完全一致**。所有函数体与 ToolDef 段都是脚本按 AST 行号从原文机械切出的，不做手抄，避免文案漂移。

@@ -103,6 +103,7 @@ from akm import __version__
 - Python 3.12.13
 - macOS（py2app 仅支持 macOS）
 - 推荐先跑一次 `./scripts/make_signing_cert.sh`，让构建使用稳定签名身份；不跑则回退 ad-hoc（仍可构建，但每次重建都会被系统当成新 App，桌面/文稿/下载等目录授权会反复弹窗）
+- `git-lfs`（`brew install git-lfs && git lfs install`）：`plugins/dafeiyu/assets/**/*.webp` 由 Git LFS 托管，共 3444 个文件。**未装 git-lfs 时克隆下来的 webp 只有 130 字节的指针文本**，打包进插件后表现为资源全部损坏，且不会报错，只会看到静态资源空白。
 
 如果本次打包需要保留 `markdown_kb` 的 `sqlite-vec` 能力，建议先确认打包所用 Python 的 `sqlite3` 支持 `enable_load_extension()`，并且 `_sqlite3` 实际链接到了 Homebrew SQLite。当前仓库已经把 `sqlite_vec` 加进 `setup.py` 的 `packages/includes`，但运行时是否真的能加载扩展，仍取决于打包前那份 Python 本身的 SQLite 绑定方式。
 
