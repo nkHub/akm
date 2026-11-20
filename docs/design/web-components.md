@@ -20,7 +20,8 @@
 - `akm-pagination`
   - 用途：通用分页壳
   - 常用方法：`renderPagination({ totalPages, currentPage, onSelectName, summary })`
-  - 说明：`totalPages <= 1` 时组件自动隐藏；点击后回调 `window[onSelectName](page)`。使用方：审计日志（`log-pagination`）、统计页按 Key/模型/来源三张表（`pager-key`/`pager-model`/`pager-source`，每页 6 行）
+  - 说明：`totalPages <= 1` 时组件自动隐藏；点击后回调 `window[onSelectName](page)`。使用方：审计日志（`log-pagination`）、Key 管理（`key-pagination`）、统计页按 Key/模型/来源三张表（`pager-key`/`pager-model`/`pager-source`，每页 6 行）
+  - 约定：页码选择器用**内部渲染的 `akm-combobox`**（`data-role="page-select"`，带 `compact` 与 `menu-min-width="104"`），不再用原生 `<select>`——原生下拉的弹出层由系统绘制，浅色主题下与自建组件割裂。候选与选中值必须在 `innerHTML` 之后再 `setOptions(pages, currentPage)` 注入（combobox 的候选是组件内部状态，拼 `<option>` 无效），`change` 事件里取 `detail.value` 翻页。`totalPages <= 1` 时整条隐藏，此时 `querySelector('[data-role="page-select"]')` 返回 `null`
 
 - `akm-empty-state`
   - 用途：统一空态文案
@@ -53,7 +54,7 @@
 
 - `akm-combobox`
   - 交互形态对齐 shadcn / Radix Select：触发器是 `<button type="button" data-combobox-trigger>`（**不是输入框**），文案在 `[data-combobox-value]`；菜单 `role="listbox"`、选项 `role="option"`，每条选项为「`.akm-cb__label` 占满剩余宽度 + `.akm-cb__check` 固定 14px 在最右」两栏，未选中也留同宽空位，选中时文字不会左右跳动
-  - 常用属性：`placeholder`（关闭且无值时显示在触发器上，**不作为候选项**）、`host-class`
+  - 常用属性：`placeholder`（关闭且无值时显示在触发器上，**不作为候选项**）、`host-class`、`compact`（紧凑变体：触发器按内容宽度、与相邻文字按钮同高，选项行同步收紧；用于分页条这类并排位置）、`menu-min-width`（下拉菜单的最小宽度 px，缺省跟随触发器；触发器很窄时用它防止「第 12 页」被省略号截断，仍会夹在视口内）
   - 常用方法：`setOptions([{value,label,desc?,group?}], currentValue?)`、`setValue(v, silent?)`；`value` 可读写；`change` 事件照常触发
   - 约定：`setOptions` **不过滤空字符串**候选项，只丢弃 `value` 为 `null`/`undefined` 的项。空字符串在插件配置里是真实选项（`reranker_model` 的「不启用 rerank」、`chat_model` 的「不启用对话与碎碎念」）；不需要「未选择」项时由调用方自行过滤（`keys.html` 的供应商下拉即如此）
   - 约定：候选存在**组件内部**（`_options`），不能用 `querySelector('option')` 或 `sel.options` 读写；程序设值必须走 `setValue` / `setOptions`。`setOptions` 的第二个参数一次性设初值（静默，不派发 `change`）

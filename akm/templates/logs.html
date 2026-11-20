@@ -566,9 +566,9 @@ function renderLogTable() {
   //    「来源」留够 13%：兜底会直接显示 UA 产品名（如 deepseek-harness 共 16 字符 ≈118px）。
   //    「费用/状态/延迟/详情」改为固定 px：这四列内容是金额+图标、徽章、秒数、图标，
   //    宽度与视口无关，按百分比分配时窄窗口只分到 20~35px，会把表头压成两行（列名读不全）。──
-  var colWeights = [['时间',15.3],['Alias',7.5],['供应商',8.5],['模型',15.2],['来源',13],['输入(缓存)',10],['输出',6]];
-  // 「费用」列宽必须容得下「$0.xxxx」+ 末尾信息图标（w-3.5 图标 + ml-1 间距 ≈ 18px）：
-  // 实测文本+图标需 102px，只按文本宽度给 92px 会把图标挤到第二行。
+  // 「输入/缓存」列在表头与单元格里都固定两行（上行 = 输入、下行 = 缓存），不靠自动折行：
+  // 数字宽度一变（1,234 → 1,234,567）自动折行会让整表行高忽高忽低，滚动时视觉抖动。
+  var colWeights = [['时间',15.3],['Alias',7.5],['供应商',8.5],['模型',15.2],['来源',13],['输入/缓存',10],['输出',6]];
   if (_costStatsEnabled) colWeights.push(['费用','104px']);
   colWeights.push(['状态','56px'],['延迟','52px'],['详情','44px']);
   // 固定 px 的列不参与百分比分摊，只把数字权重累计成分母。
@@ -579,7 +579,14 @@ function renderLogTable() {
   }).join('') + '</colgroup>';
 
   var costHeader = _costStatsEnabled ? '<th class="text-right px-4 py-2.5 font-medium">费用</th>' : '';
-  var html = '<table class="w-full text-sm table-fixed">' + colgroup + '<thead><tr class="bg-surface-light text-gray-400 text-xs"><th class="text-left px-4 py-2.5 font-medium">时间</th><th class="text-left px-4 py-2.5 font-medium">Alias</th><th class="text-left px-4 py-2.5 font-medium">供应商</th><th class="text-left px-4 py-2.5 font-medium">模型</th><th class="text-left px-4 py-2.5 font-medium">来源</th><th class="text-center px-4 py-2.5 font-medium">输入(缓存)</th><th class="text-center px-4 py-2.5 font-medium">输出</th>'+costHeader+'<th class="text-center px-2 py-2.5 font-medium">状态</th><th class="text-right px-2 py-2.5 font-medium">延迟</th><th class="text-center px-2 py-2.5 font-medium">详情</th></tr></thead><tbody>';
+  // 「输入/缓存」表头与数据都固定两行：上行 = 输入（未命中缓存），下行 = 缓存命中。
+  // 用两个 span 各自 block 撑行，不用 <br>，这样行高由 line-height 决定、与字号解耦。
+  // 每行都加 whitespace-nowrap：「输入」「缓存」各 2 字，列宽被压到 60px 以下时
+  // 会各自再折一行、把表头顶成 4 行（实测 900px 视口下「供应商」列就是这样折的）。
+  // 两行文案需要「单行表头高度」的两倍垂直空间，所以该单元格的 py 收到 1（4px）：
+  // 2×15px 行高 + 8px = 38px，与其它单行表头（16px 行高 + 20px = 36px）基本齐平。
+  var ioHeader = '<th class="text-center px-2 py-1 font-medium leading-tight"><span class="block whitespace-nowrap">输入</span><span class="block whitespace-nowrap">缓存</span></th>';
+  var html = '<table class="w-full text-sm table-fixed">' + colgroup + '<thead><tr class="bg-surface-light text-gray-400 text-xs"><th class="text-left px-4 py-2.5 font-medium">时间</th><th class="text-left px-4 py-2.5 font-medium">Alias</th><th class="text-left px-4 py-2.5 font-medium">供应商</th><th class="text-left px-4 py-2.5 font-medium">模型</th><th class="text-left px-4 py-2.5 font-medium">来源</th>'+ioHeader+'<th class="text-center px-4 py-2.5 font-medium">输出</th>'+costHeader+'<th class="text-center px-2 py-2.5 font-medium">状态</th><th class="text-right px-2 py-2.5 font-medium">延迟</th><th class="text-center px-2 py-2.5 font-medium">详情</th></tr></thead><tbody>';
 
   _logsData.forEach(function(log, i){
     var headers = {};
@@ -629,7 +636,15 @@ function renderLogTable() {
     var effectivePrompt = Number(log.net_prompt_tokens != null ? log.net_prompt_tokens : Math.max(0, pt - cached));
     var hasPromptValue = log.prompt_tokens != null;
     var hasCompletionValue = log.completion_tokens != null;
-    var promptHtml = hasPromptValue ? '<span class="text-gray-300">'+effectivePrompt.toLocaleString()+'</span>' + (cached > 0 ? ' <span class="text-teal-400">(R'+cached.toLocaleString()+')</span>' : '') : '<span class="text-gray-600">-</span>';
+    // 「输入/缓存」固定两行：上行是未命中缓存的输入 token，下行是缓存命中 token（无命中显示 -）。
+    // 与表头同构，所以无论数字多长、是否命中缓存，单元格高度都恒定。
+    // 每行都加 whitespace-nowrap：7 位带千分位数字（1,234,567 ≈ 60px）在窄列里若折行，
+    // 该单元格就会变成 3~4 行，与表头两行对不上、整表行高再次抖动。
+    var promptHtml = hasPromptValue
+      ? '<span class="block leading-tight whitespace-nowrap text-gray-300">'+effectivePrompt.toLocaleString()+'</span>'
+        + '<span class="block leading-tight whitespace-nowrap ' + (cached > 0 ? 'text-teal-400' : 'text-gray-600') + '">'
+        + (cached > 0 ? cached.toLocaleString() : '-') + '</span>'
+      : '<span class="block leading-tight whitespace-nowrap text-gray-600">-</span><span class="block leading-tight whitespace-nowrap text-gray-600">-</span>';
     var completionHtml = hasCompletionValue ? '<span class="text-gray-300">'+ct.toLocaleString()+'</span>' : '<span class="text-gray-600">-</span>';
     var costCell = _costStatsEnabled ? '<td class="px-4 py-2.5 text-right text-xs text-rose-300">$'+Number(log.estimated_cost || 0).toFixed(4)+costTipIcon(log)+'</td>' : '';
 

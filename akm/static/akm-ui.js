@@ -111,19 +111,28 @@ if (!customElements.get('akm-pagination')) {
       var html = '';
       html += this._button('首页', 1, currentPage === 1, disabledClass, activeClass);
       html += this._button('上一页', currentPage - 1, currentPage === 1, disabledClass, activeClass);
-      html += '<select data-role="page-select" class="bg-surface-light border border-border rounded px-2 py-1 text-xs text-gray-300 cursor-pointer focus:outline-none focus:border-indigo-500">';
-      for (var p = 1; p <= totalPages; p++) {
-        html += '<option value="' + p + '"' + (p === currentPage ? ' selected' : '') + '>第 ' + p + ' 页</option>';
-      }
-      html += '</select>';
+      // 页码选择用 akm-combobox 而不是原生 <select>：原生下拉的弹出层由系统绘制，
+      // 深浅色、圆角、层级都不受页面控制（浅色主题下尤其割裂），与项目「组件优先」口径不一致。
+      //   compact          —— 触发器收紧到与左右文字按钮同一行高，且宽度按内容自适应；
+      //   menu-min-width   —— 下拉菜单至少 104px，否则「第 12 页」这类文案会被省略号截断；
+      //   host-class       —— 作为分页 flex 容器里的一个不收缩子项。
+      // 候选与选中值必须等 innerHTML 之后再注入：akm-combobox 的候选是组件内部状态，
+      // 拼 <option> 无效（见 docs/design/web-components.md 的约定）。
+      html += '<akm-combobox data-role="page-select" compact menu-min-width="104" host-class="inline-block shrink-0"></akm-combobox>';
       html += this._button('下一页', currentPage + 1, currentPage === totalPages, disabledClass, activeClass);
       html += this._button('末页', totalPages, currentPage === totalPages, disabledClass, activeClass);
       if (summary) html += '<span class="text-xs text-gray-500 ml-2">' + summary + '</span>';
       this.innerHTML = html;
       var self = this;
-      var select = this.querySelector('[data-role="page-select"]');
-      if (select) {
-        select.addEventListener('change', function() { self.invoke(onSelectName, parseInt(this.value, 10)); });
+      var pages = [];
+      for (var p = 1; p <= totalPages; p++) pages.push({ value: String(p), label: '第 ' + p + ' 页' });
+      var picker = this.querySelector('[data-role="page-select"]');
+      if (picker) {
+        // 第二个参数一次性设初值（静默，不派发 change），避免回填时误触发翻页
+        picker.setOptions(pages, String(currentPage));
+        picker.addEventListener('change', function(ev) {
+          self.invoke(onSelectName, parseInt(ev.detail && ev.detail.value, 10));
+        });
       }
       this.querySelectorAll('[data-role="page-btn"]').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -954,6 +963,14 @@ function ensureComboboxStyles() {
     '.akm-cb__value{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.akm-cb__chevron{flex:0 0 auto;width:14px;height:14px;opacity:.65;transition:transform .15s}',
     '.akm-cb__trigger[aria-expanded="true"] .akm-cb__chevron{transform:rotate(180deg)}',
+    /* ── 紧凑变体（compact）：用于分页条这类与文字按钮并排的位置 ──
+       触发器压到与左右「上一页 / 下一页」文字按钮同一行高（文字 12px + py-1 ≈ 26px），
+       宽度交给内容（不写 width:100%），chevron 缩到 12px 让整体更轻。 */
+    '.akm-cb--compact .akm-cb__trigger{width:auto;min-width:0;padding:2px 8px;font-size:12px;line-height:1.5;',
+    '  gap:4px;border-radius:4px}',
+    '.akm-cb--compact .akm-cb__chevron{width:12px;height:12px}',
+    /* 紧凑态的选项行同步收紧，与触发器观感一致 */
+    '[data-combobox-menu].akm-cb--compact [data-combobox-index]{padding:5px 10px;font-size:12px}',
     /* ── 菜单 ── */
     '[data-combobox-menu]{box-sizing:border-box;z-index:1000}',
     '[data-combobox-index]{display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;',
@@ -1012,6 +1029,12 @@ if (!customElements.get('akm-combobox')) {
     render() {
       var placeholder = this.getAttribute('placeholder') || this.getAttribute('label') || '';
       this.className = (this.getAttribute('host-class') || 'block').trim();
+      // compact：紧凑变体，触发器按内容宽度并与相邻文字按钮同高（分页条使用）。
+      // 这里把类名同时挂到宿主与触发器上——宿主负责布局（inline-block），
+      // 触发器负责视觉度量；两边都挂可以避免调用方再单独指定 host-class 才能生效。
+      var compact = this.hasAttribute('compact');
+      if (compact) this.classList.add('akm-cb--compact');
+      else this.classList.remove('akm-cb--compact');
       this.innerHTML = '' +
         '<button type="button" data-combobox-trigger class="akm-cb__trigger" ' +
           'aria-haspopup="listbox" aria-expanded="false">' +
@@ -1033,7 +1056,9 @@ if (!customElements.get('akm-combobox')) {
       this._menu = document.createElement('div');
       this._menu.setAttribute('data-combobox-menu', '');
       this._menu.setAttribute('role', 'listbox');
-      this._menu.className = 'hidden';
+      // 紧凑态（compact）把选项行的度量也收紧；类名挂在菜单上而不是宿主上，
+      // 因为菜单是 body 的子节点、不在宿主内部。
+      this._menu.className = this.hasAttribute('compact') ? 'hidden akm-cb--compact' : 'hidden';
       // 层级/定位/盒模型用内联样式写死，不依赖 Tailwind（插件页没有 utilities）
       this._menu.style.position = 'fixed';
       this._menu.style.zIndex = '1000';
@@ -1310,8 +1335,17 @@ if (!customElements.get('akm-combobox')) {
       var spaceAbove = rect.top;
       var flipUp = spaceBelow < MENU_MIN_SPACE && spaceAbove > spaceBelow;
       var avail = Math.max(120, Math.min(280, (flipUp ? spaceAbove : spaceBelow) - 12));
-      this._menu.style.left = rect.left + 'px';
-      this._menu.style.width = Math.min(rect.width, window.innerWidth - 16) + 'px';
+      // menu-min-width：紧凑触发器只有「第 1 页」那么宽，菜单若照抄宽度，
+      // 「第 12 页」这类更长文案会被 text-overflow 省略号截断。给菜单一个下限，
+      // 同时右侧仍夹在视口内（右侧不够时改成左对齐到触发器右边缘向左展开）。
+      var menuMinWidth = parseInt(this.getAttribute('menu-min-width') || 0, 10) || 0;
+      var width = Math.max(rect.width, menuMinWidth);
+      var viewportLimit = window.innerWidth - 16;
+      width = Math.min(width, viewportLimit);
+      var left = rect.left;
+      if (left + width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - width);
+      this._menu.style.left = left + 'px';
+      this._menu.style.width = width + 'px';
       this._menu.style.maxHeight = avail + 'px';
       if (flipUp) {
         this._menu.style.top = 'auto';
