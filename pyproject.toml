@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-key-manager"
-version = "0.1.59"
+# 版本号唯一来源是 akm/__init__.py 的 __version__（运行时、CLI、macOS .app 都读它），
+# 这里用 setuptools 的 dynamic attr 直接取同一个值，避免两处手写导致漂移。
+dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110.0",
@@ -13,7 +15,10 @@ dependencies = [
     "click>=8.1.0",
     "tinyaes>=1.1.0",
     "pydantic>=2.0.0",
-    "rumps>=0.4.0",
+    # rumps 只有 sdist 且在非 macOS 上无法编译（依赖 PyObjC），不加平台标记时
+    # Linux 上 `pip install -e .` 会直接失败，CI 只能手抄一份依赖清单绕过，
+    # 两份清单会随时间漂移。加标记后 CI 可直接用 `.[dev]`。
+    "rumps>=0.4.0; sys_platform == 'darwin'",
     "pillow>=10.0",
     "python-multipart>=0.0.5",
     "jieba3>=1.0.2",
@@ -35,6 +40,10 @@ dev = [
 [project.scripts]
 akm = "akm.cli:main"
 akm-menubar = "akm.menubar:main"
+
+[tool.setuptools.dynamic]
+# 从模块属性读取版本号，不执行包内代码（attr 会做静态解析，仅回退时才 import）
+version = {attr = "akm.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

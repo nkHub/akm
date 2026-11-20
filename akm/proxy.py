@@ -207,49 +207,52 @@ def redact_headers(headers: dict | None) -> dict:
 def _diagnose_no_key(model: str, tried_aliases: set[str] | None = None) -> str:
     """诊断为什么没有可用的 key，返回详细错误信息"""
     conn = get_connection()
-    total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
-    active = conn.execute(
-        "SELECT COUNT(*) FROM keys WHERE status = 'active'"
-    ).fetchone()[0]
-    disabled = conn.execute(
-        "SELECT COUNT(*) FROM keys WHERE status = 'disabled'"
-    ).fetchone()[0]
-    limited = conn.execute(
-        "SELECT COUNT(*) FROM keys WHERE status = 'rate_limited'"
-    ).fetchone()[0]
-    # 这里显式展开每个 key 的候选判定结果，便于事后复查“为什么当时没有选中某个 key”。
-    matching_disabled = []
-    candidate_details = []
-    for row in conn.execute(
-        "SELECT alias, models, provider_models, status FROM keys ORDER BY alias ASC"
-    ).fetchall():
-        item = dict(row)
-        alias = str(item.get("alias") or "")
-        status = str(item.get("status") or "")
-        models = str(item.get("models") or "").strip()
-        model_list = key_model_list(item)
-        if status != "active" and model in set(model_list):
-            matching_disabled.append(alias)
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
+        active = conn.execute(
+            "SELECT COUNT(*) FROM keys WHERE status = 'active'"
+        ).fetchone()[0]
+        disabled = conn.execute(
+            "SELECT COUNT(*) FROM keys WHERE status = 'disabled'"
+        ).fetchone()[0]
+        limited = conn.execute(
+            "SELECT COUNT(*) FROM keys WHERE status = 'rate_limited'"
+        ).fetchone()[0]
+        # 这里显式展开每个 key 的候选判定结果，便于事后复查“为什么当时没有选中某个 key”。
+        matching_disabled = []
+        candidate_details = []
+        for row in conn.execute(
+            "SELECT alias, models, provider_models, status FROM keys ORDER BY alias ASC"
+        ).fetchall():
+            item = dict(row)
+            alias = str(item.get("alias") or "")
+            status = str(item.get("status") or "")
+            models = str(item.get("models") or "").strip()
+            model_list = key_model_list(item)
+            if status != "active" and model in set(model_list):
+                matching_disabled.append(alias)
 
-        if not model_list:
-            if models == "*":
-                reason = "wildcard_no_provider_models"
+            if not model_list:
+                if models == "*":
+                    reason = "wildcard_no_provider_models"
+                else:
+                    reason = "empty_models"
+            elif model not in set(model_list):
+                reason = "model_not_matched"
+            elif status == "disabled":
+                reason = "disabled"
+            elif status == "rate_limited":
+                reason = "rate_limited"
+            elif tried_aliases and alias in tried_aliases:
+                reason = "tried_and_failed"
+            elif status == "active":
+                reason = "eligible"
             else:
-                reason = "empty_models"
-        elif model not in set(model_list):
-            reason = "model_not_matched"
-        elif status == "disabled":
-            reason = "disabled"
-        elif status == "rate_limited":
-            reason = "rate_limited"
-        elif tried_aliases and alias in tried_aliases:
-            reason = "tried_and_failed"
-        elif status == "active":
-            reason = "eligible"
-        else:
-            reason = status or "unknown"
-        candidate_details.append(f"{alias}:{reason}")
-    conn.close()
+                reason = status or "unknown"
+            candidate_details.append(f"{alias}:{reason}")
+    finally:
+        # 诊断路径同样要归还连接：它恰好在数据库异常时才会被调用
+        conn.close()
 
     parts = [f"没有可用的 API key (model={model})"]
     if total == 0:

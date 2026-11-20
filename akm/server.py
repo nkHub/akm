@@ -86,7 +86,8 @@ class _UsageQueryScheduler:
 
     async def _check_and_query(self) -> None:
         """扫描所有 key，对到期未查询的执行用量查询，存储原始响应供前端 extractor 解析"""
-        keys = list_keys()
+        # 后台用量查询循环：读取/写入均为同步 SQLite，统一丢到线程池
+        keys = await asyncio.to_thread(list_keys)
         for key in keys:
             interval_m = int(key.get("usage_query_interval_m", 0) or 0)
             # 开关与间隔已拆成两列：只有开关打开、且填了正的间隔才自动查询。
@@ -96,7 +97,7 @@ class _UsageQueryScheduler:
             if interval_m <= 0:
                 continue
             alias = key["alias"]
-            config = get_usage_query_config(alias, key.get("provider", ""))
+            config = await asyncio.to_thread(get_usage_query_config, alias, key.get("provider", ""))
             if config is None:
                 continue
             script_raw = config.get("script", "")
@@ -119,7 +120,7 @@ class _UsageQueryScheduler:
                 continue
             result = await execute_query_script(key, script_cfg)
             # 存储完整原始结果（含 raw_response），前端渲染时用 extractor 解析展示
-            update_usage_data(alias, result)
+            await asyncio.to_thread(update_usage_data, alias, result)
 
 
 @asynccontextmanager
@@ -1274,40 +1275,58 @@ def _write_key_change_log(event: str, alias: str, details: dict | None = None) -
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
+def _load_keys_with_latency() -> tuple[list[dict], list]:
+    """同步加载 Key 列表与「每个 Key 近 10 次成功请求的平均延迟」。
+
+    单独抽成同步函数是为了能整体丢进 ``asyncio.to_thread``：这里全是同步
+    SQLite 读取（keys 表 + audit_logs 聚合），直接在事件循环里跑会阻塞其它请求。
+    返回 ``(keys, latency_rows)``，由调用方组装响应。
+    """
+    keys = list_keys()
+    from akm.db import get_connection
+
+    conn = get_connection()
+    try:
+        latency_rows = conn.execute(
+            """
+            SELECT
+                k.alias AS alias,
+                (
+                    SELECT AVG(x.latency_ms)
+                    FROM (
+                        SELECT latency_ms
+                        FROM audit_logs
+                        WHERE key_alias = k.alias AND status_code = 200 AND latency_ms > 0
+                        ORDER BY id DESC
+                        LIMIT 10
+                    ) AS x
+                ) AS recent_avg_latency_ms,
+                (
+                    SELECT COUNT(1)
+                    FROM (
+                        SELECT 1
+                        FROM audit_logs
+                        WHERE key_alias = k.alias AND status_code = 200 AND latency_ms > 0
+                        ORDER BY id DESC
+                        LIMIT 10
+                    ) AS y
+                ) AS recent_latency_sample_count
+            FROM keys AS k
+            """
+        ).fetchall()
+    finally:
+        # 聚合查询失败时也必须归还连接
+        conn.close()
+    return keys, latency_rows
+
+
 @app.get("/api/keys")
 async def api_list_keys():
     """列出所有 key（api_key 脱敏）"""
-    keys = list_keys()
-    from akm.db import get_connection
-    conn = get_connection()
-    latency_rows = conn.execute(
-        """
-        SELECT
-            k.alias AS alias,
-            (
-                SELECT AVG(x.latency_ms)
-                FROM (
-                    SELECT latency_ms
-                    FROM audit_logs
-                    WHERE key_alias = k.alias AND status_code = 200 AND latency_ms > 0
-                    ORDER BY id DESC
-                    LIMIT 10
-                ) AS x
-            ) AS recent_avg_latency_ms,
-            (
-                SELECT COUNT(1)
-                FROM (
-                    SELECT 1
-                    FROM audit_logs
-                    WHERE key_alias = k.alias AND status_code = 200 AND latency_ms > 0
-                    ORDER BY id DESC
-                    LIMIT 10
-                ) AS y
-            ) AS recent_latency_sample_count
-        FROM keys AS k
-        """
-    ).fetchall()
-    conn.close()
+    # 该接口要读 keys 表并对 audit_logs 做「每 Key 近 10 次延迟」聚合，全是同步
+    # SQLite IO；直接跑在 async 路由里会阻塞事件循环。统一丢到线程池执行，
+    # 与 /api/stats、models.dev 同步等处的既有做法保持一致。
+    keys, latency_rows = await asyncio.to_thread(_load_keys_with_latency)
     latency_map = {
         row["alias"]: {
             "recent_avg_latency_ms": round(float(row["recent_avg_latency_ms"]), 1)
@@ -1472,11 +1491,12 @@ async def api_test_key(alias: str, request: Request):
 @app.get("/api/keys/export")
 async def api_export_keys():
     """导出所有 Key 配置（含完整 api_key），用于备份迁移"""
-    keys = list_keys()
+    # 读取 + 逐个解密全部 Key 属于同步 SQLite/CPU 工作，丢到线程池执行
+    keys = await asyncio.to_thread(list_keys)
     # 导出仅保留持久化字段，避免把 model_list 这类派生字段混入备份。
     full_keys = []
     for k in keys:
-        full = get_key(k["alias"])
+        full = await asyncio.to_thread(get_key, k["alias"])
         if full:
             full.pop("model_list", None)
             full_keys.append(full)
@@ -1488,7 +1508,7 @@ async def api_refresh_key_provider_models():
     """批量刷新所有 key 的提供商模型列表。"""
     refreshed = 0
     failed = []
-    for key in list_keys():
+    for key in await asyncio.to_thread(list_keys):
         try:
             before_models = list(key.get("provider_models") or [])
             provider_models = await _fetch_provider_models(
@@ -1623,12 +1643,12 @@ async def api_update_usage_data(alias: str, request: Request):
 @app.post("/api/keys/usage-query-all")
 async def api_query_all_keys_usage():
     """批量触发所有已配置用量查询的 key（仅执行，不阻塞返回）"""
-    keys = list_keys()
+    keys = await asyncio.to_thread(list_keys)
     queried = 0
     results = []
 
     for key in keys:
-        config = get_usage_query_config(key["alias"])
+        config = await asyncio.to_thread(get_usage_query_config, key["alias"])
         if config is None or not config.get("script"):
             continue
         # 只批量刷新「开关已打开」的 Key（开关与间隔已拆成两列，
@@ -2368,19 +2388,22 @@ def _get_stats(days: int) -> dict:
 
     from akm.db import get_connection
     conn = get_connection()
-    # 自然日范围：1=今天，7=最近7个自然日（含今天），30 同理。
-    day_offset = 1 - days
-    rows = conn.execute(
-        """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
-                  cache_creation_tokens,
-                  provider, model, key_alias, timestamp, response_body, request_headers, status_code,
-                  error, latency_ms
-           FROM audit_logs
-           WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
-           ORDER BY id DESC""",
-        (str(day_offset),),
-    ).fetchall()
-    conn.close()
+    try:
+        # 自然日范围：1=今天，7=最近7个自然日（含今天），30 同理。
+        day_offset = 1 - days
+        rows = conn.execute(
+            """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
+                      cache_creation_tokens,
+                      provider, model, key_alias, timestamp, response_body, request_headers, status_code,
+                      error, latency_ms
+               FROM audit_logs
+               WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
+               ORDER BY id DESC""",
+            (str(day_offset),),
+        ).fetchall()
+    finally:
+        # 统计查询是大范围扫描，异常时必须归还连接（本函数已在线程池中执行）
+        conn.close()
 
     total_requests = 0
     total_prompt = 0
@@ -3322,7 +3345,9 @@ async def list_models(
 
     data = []
     seen = set()
-    for k in list_keys():
+    # 读取并解密全部 Key 是同步 SQLite/CPU 工作；models_dev 取元数据有进程内索引缓存，
+    # 单次开销小，但 list_keys 每次都新建连接，放在事件循环里会阻塞并发请求。
+    for k in await asyncio.to_thread(list_keys):
         if k.get("status") != "active":
             continue
         provider_name = str(k.get("provider") or "")

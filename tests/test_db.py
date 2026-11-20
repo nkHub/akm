@@ -60,3 +60,47 @@ def test_audit_logs_table_schema(temp_db):
     assert columns["latency_ms"] == "INTEGER"
     assert columns["error"] == "TEXT"
     conn.close()
+
+
+def test_audit_key_latency_index_created(temp_db):
+    """api_list_keys 的「近 10 次延迟」聚合依赖 idx_audit_key_latency。
+
+    缺这条索引时该子查询会全表扫描 audit_logs，且每个 Key 各扫一遍；
+    这条查询跑在 async 路由里，实测 100 万行时阻塞 131ms。
+    """
+    conn = get_connection()
+    init_db(conn)
+    names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='audit_logs'"
+        )
+    }
+    assert "idx_audit_key_latency" in names
+    conn.close()
+
+
+def test_audit_key_latency_index_is_used(temp_db):
+    """确认查询计划真的走索引，而不是「索引存在但优化器不用」。"""
+    conn = get_connection()
+    init_db(conn)
+    # 灌入足够多的行，让优化器倾向于走索引
+    conn.executemany(
+        "INSERT INTO audit_logs(key_alias, status_code, latency_ms) VALUES(?, ?, ?)",
+        [("k1", 200, 100) for _ in range(2000)],
+    )
+    conn.commit()
+    plan = [
+        row[-1]
+        for row in conn.execute(
+            """EXPLAIN QUERY PLAN
+               SELECT latency_ms FROM audit_logs
+               WHERE key_alias = 'k1' AND status_code = 200 AND latency_ms > 0
+               ORDER BY id DESC LIMIT 10"""
+        )
+    ]
+    joined = " | ".join(plan)
+    assert "idx_audit_key_latency" in joined, f"未走索引: {joined}"
+    # 必须没有对 audit_logs 的全表扫描
+    assert "SCAN audit_logs" not in joined, f"仍存在全表扫描: {joined}"
+    conn.close()

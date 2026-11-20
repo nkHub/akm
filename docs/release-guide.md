@@ -25,7 +25,7 @@
 
 插件同理，但按单个插件的改动范围独立判断——**只有改动过的插件才需要 bump**，脚本用「插件目录是否在插件市场索引最后一次提交之后有改动」来区分「本次无需发布」与「改过但漏 bump」（后者判错）。
 
-发版时需同步更新 `akm/__init__.py`、`pyproject.toml`、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 **0.1.19**，包含已重建的相对路径资源产物，续跑改为按 `tool_call_id` 回填占位 tool 消息；该序列随后续版本累积推进到 0.1.19，涵盖过程时间线、AG-UI 卡片与暗色适配、markdown 代码块语法高亮、挂起引导「立即发送 / 撤回输入框」等 chat 侧改动）；v0.1.54 修复连接池代理探测与 Key 连通性测试的代理路径，只改现有 Python 模块、测试与说明，无新增模板 / 静态文件；v0.1.55 修正 `logo.icns` 按 Apple 规范补足透明边距（仅替换图标文件）并统一侧边栏动态菜单 hover 样式（只改 `akm/server.py` 一处 class），无新增模板 / 静态文件；v0.1.56 统计页折线图迁移 ApexCharts，`setup.py` 的 `DATA_FILES` 新增 `akm/static/akm-chart.js` 与 `akm/static/apexcharts.min.js` 两个静态文件（无新增模板）；同一版本新增运行时数据文件 `akm/agent_runtime/render_schema.json`（`akm_render` 的组件 schema 真源），已登记在 `DATA_FILES` 的 `lib/python3.12/akm/agent_runtime` 目标下——这类非 Python 资源 py2app 不会按 import 关系收集，漏登记时打包后读不到文件，工具描述会退化成一句「渲染结构化卡片」，模型不知道该填哪些块；同一版本另含过程时间线改动：`akm/agent_runtime/loop.py` 的 `_sse_event` 统一注入 `ts` 毫秒时间戳（只增字段），chat 前端新增分组/文案/时间线三处模块并重建 `plugins/agent_chat/dist/`，无新增模板 / 静态文件；v0.1.56 起 `scripts/build_app.sh` 增加**打包环境守卫**：强制使用项目 `.venv` 解释器（断言 `sys.prefix` 指向 `.venv`），并在 py2app 之后断言包内 `fastapi` 版本与 venv 一致，不一致立即中止——起因是一次用 pyenv 全局解释器（fastapi 0.136.3）打包，而 `akm/plugins/plugin_manager.py` 需要 0.142+ 的 `routing._IncludedRouter`，打出「启动即 ImportError」的包；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。v0.1.57 新增运行时模块 `akm/models_dev.py`，已登记在 `setup.py` 的 `includes`；同版本 `audit_logs` 增加 `response_model` / `model_mismatch` 两列、新增 `models_dev_providers` / `models_dev_models` / `models_dev_meta` 三张表，全部由 `akm/db.py` 的 `init_db` 在启动时 `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE` 自动补齐，**老库无需手工迁移**；`akm-ui.js` 增加 `akm-combobox` 组件（已登记文件，无新增静态文件）；`plugins/agent_chat/dist` 按 `VITE_BASE='./' VITE_AKM_API_URL='' npm run build` 重建（前端改为请求 `/v1/models?capability=chat`），产物需同步 `ccs/plugins/agent_chat/dist` 与 `~/.akm/plugins/agent_chat/dist` 两处，自检 `grep -c 'akm-api' dist/assets/*.js` 为 0。
+发版时需更新 `akm/__init__.py` 的 `__version__`（唯一版本源；`pyproject.toml` 已改为 `dynamic` 自动跟随，无需手改）、`uv.lock` 与 `README.md` 的版本号，并确认「二、打包流程」中「新增模板 / 静态文件必须登记」的清单自查通过（v0.1.50 起新增了 `akm/templates/pool.html`，需保留在 `setup.py` 的 `DATA_FILES` 中；v0.1.51 起新增运行时模块 `akm/secret_store.py`，已登记在 `setup.py` 的 `includes` 中；v0.1.52 起 `setup.py` 的 plist 增加桌面/文稿/下载目录用途声明、新增构建脚本 `scripts/make_signing_cert.sh`——脚本不是运行时资源、不进 `DATA_FILES`，两项改动均无新增模板 / 静态文件；v0.1.53 改动 `akm/agent_runtime/{loop,router,tools}.py`、`akm/config.py`、`akm/cleanup.py` 与文档（Agent 会话服务端落盘已移除，旧目录由更新维护流程清理），无新增模板 / 静态文件；`agent_chat` 插件包版本为 **0.1.19**，包含已重建的相对路径资源产物，续跑改为按 `tool_call_id` 回填占位 tool 消息；该序列随后续版本累积推进到 0.1.19，涵盖过程时间线、AG-UI 卡片与暗色适配、markdown 代码块语法高亮、挂起引导「立即发送 / 撤回输入框」等 chat 侧改动）；v0.1.54 修复连接池代理探测与 Key 连通性测试的代理路径，只改现有 Python 模块、测试与说明，无新增模板 / 静态文件；v0.1.55 修正 `logo.icns` 按 Apple 规范补足透明边距（仅替换图标文件）并统一侧边栏动态菜单 hover 样式（只改 `akm/server.py` 一处 class），无新增模板 / 静态文件；v0.1.56 统计页折线图迁移 ApexCharts，`setup.py` 的 `DATA_FILES` 新增 `akm/static/akm-chart.js` 与 `akm/static/apexcharts.min.js` 两个静态文件（无新增模板）；同一版本新增运行时数据文件 `akm/agent_runtime/render_schema.json`（`akm_render` 的组件 schema 真源），已登记在 `DATA_FILES` 的 `lib/python3.12/akm/agent_runtime` 目标下——这类非 Python 资源 py2app 不会按 import 关系收集，漏登记时打包后读不到文件，工具描述会退化成一句「渲染结构化卡片」，模型不知道该填哪些块；同一版本另含过程时间线改动：`akm/agent_runtime/loop.py` 的 `_sse_event` 统一注入 `ts` 毫秒时间戳（只增字段），chat 前端新增分组/文案/时间线三处模块并重建 `plugins/agent_chat/dist/`，无新增模板 / 静态文件；v0.1.56 起 `scripts/build_app.sh` 增加**打包环境守卫**：强制使用项目 `.venv` 解释器（断言 `sys.prefix` 指向 `.venv`），并在 py2app 之后断言包内 `fastapi` 版本与 venv 一致，不一致立即中止——起因是一次用 pyenv 全局解释器（fastapi 0.136.3）打包，而 `akm/plugins/plugin_manager.py` 需要 0.142+ 的 `routing._IncludedRouter`，打出「启动即 ImportError」的包；是否触及更新管理流程，按改动内容在本节或 [logs.md](logs.md) 中说明。v0.1.57 新增运行时模块 `akm/models_dev.py`，已登记在 `setup.py` 的 `includes`；同版本 `audit_logs` 增加 `response_model` / `model_mismatch` 两列、新增 `models_dev_providers` / `models_dev_models` / `models_dev_meta` 三张表，全部由 `akm/db.py` 的 `init_db` 在启动时 `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE` 自动补齐，**老库无需手工迁移**；`akm-ui.js` 增加 `akm-combobox` 组件（已登记文件，无新增静态文件）；`plugins/agent_chat/dist` 按 `VITE_BASE='./' VITE_AKM_API_URL='' npm run build` 重建（前端改为请求 `/v1/models?capability=chat`），产物需同步 `ccs/plugins/agent_chat/dist` 与 `~/.akm/plugins/agent_chat/dist` 两处，自检 `grep -c 'akm-api' dist/assets/*.js` 为 0。
 
 同一 v0.1.57 序列内另含两项改动，均**无新增模板 / 静态文件**：① Agent 审计覆盖面补齐——`akm/agent_runtime/tools.py` 为 `akm_render` 补一条工具调用级审计（`provider=akm`、`model=工具名`、token 为 0），`akm/agent_runtime/layout_agent.py` 增加可选 `on_attempt` 回调、`akm/agent_runtime/loop.py` 用它把后置布局小模型与上下文摘要写进审计，`akm/request_source.py` 新增 `layout` / `summary` / `tool` 三个来源映射（`audit_logs` 表结构不变，老库无需迁移）；② `akm_render` 新增 `flow` 流程图块，块白名单从 15 种收敛到 11 种（`render_schema.json` / `layout_schema.py` / `loop.py` 的 `_AGUI_SPEC` / 前端 `AGUIRenderer` 四处同步），并新增前端渲染组件 `chat/src/components/agui/flow-diagram.tsx`（自绘 SVG，无新增 npm 依赖）；`plugins/agent_chat/dist` 已按上述同一条构建命令重建并同步两处 `dist`，插件包版本仍为 **0.1.19**（本次未单独发插件包）。发布本版本前请按「二、打包流程」照常走一遍资源登记自查：这两项都只改已登记的 Python 模块与已存在的 `dist` 产物。
 
@@ -49,24 +49,35 @@ security: SecKeychainItemImport: MAC verification failed during PKCS12 import (w
 
 ### 当前问题
 
-版本号应以 `akm/__init__.py` 为唯一运行时来源；`pyproject.toml` 的包元数据也必须同步，避免 pip 安装包与应用显示版本不一致：
+版本号以 `akm/__init__.py` 的 `__version__` 为**唯一来源**。`pyproject.toml` 不再手写版本号，而是用 setuptools 的 `dynamic` 直接读取同一份值，因此发版时**只需改一处**：
 
 | 文件 | 位置 | 作用 |
 |------|------|------|
 | `akm/__init__.py` | `__version__` | 唯一运行时版本源 |
-| `pyproject.toml` | `version` | pip 包版本，发布时与运行时版本保持一致 |
+| `pyproject.toml` | `dynamic = ["version"]` + `[tool.setuptools.dynamic] version = {attr = "akm.__version__"}` | pip 包版本，自动跟随运行时版本源，**无需手改** |
 | `setup.py` | 读取 `akm/__init__.py` | macOS `.app` 版本 |
 | `akm/cli.py` | 导入 `__version__` | CLI 版本号显示 |
 | `akm/server.py` | 导入 `__version__` | API 服务版本 |
 
 ### 解决方案
 
-在 `akm/__init__.py` 中定义唯一运行时版本源，各处引用；发布时同步更新 `pyproject.toml`：
+在 `akm/__init__.py` 中定义唯一运行时版本源，其余各处（含 `pyproject.toml` 的构建元数据）全部引用它。**发版时只改这一个文件**：
 
 ```python
-# akm/__init__.py
+# akm/__init__.py —— 全仓唯一手写的版本号
 __version__ = "0.1.0"
 ```
+
+```toml
+# pyproject.toml —— 不写 version，改为从模块属性读取
+[project]
+dynamic = ["version"]
+
+[tool.setuptools.dynamic]
+version = {attr = "akm.__version__"}
+```
+
+`scripts/check_version.py app` 会校验这条链路仍然成立：一旦有人重新写死 `project.version`、从 `dynamic` 里删掉 `version`、或把 `attr` 指向别的模块，都会**直接判失败**（不再只是警告）。
 
 ```python
 # setup.py
@@ -324,7 +335,7 @@ python -c 'from akm import __version__; print(__version__)'
 git status
 ```
 
-> 发布时以 `akm/__init__.py` 中的 `__version__` 为主版本源；若同时维护 `pyproject.toml` 的包元数据版本，两者也应保持一致。例如本次发布若版本号为 `0.1.14`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.14` 保持一致。
+> 发布时以 `akm/__init__.py` 中的 `__version__` 为唯一版本源（`pyproject.toml` 通过 `dynamic` 自动跟随，无需手改）。例如本次发布若版本号为 `0.1.14`，则 Git tag、Release 标题、zip / DMG 文件名都应与 `0.1.14` 保持一致。
 
 1.5 **校验版本号（必做，防止跳版本号 / 版本倒挂）**
 
@@ -447,8 +458,8 @@ gh release create "$TAG" "$DMG" "$ZIP" --title "$TAG" --generate-notes
 
 ## 五、发布清单（每版发布前检查）
 
-- [ ] `akm/__init__.py` 与 `pyproject.toml` 版本号已更新并保持一致
-- [ ] 本地检查全绿：`python -m ruff check .` 与 `python -m pytest -q` 均无失败（当前无 CI，这两项是唯一门禁）；依赖有增减时 `uv.lock` 已刷新
+- [ ] `akm/__init__.py` 的 `__version__` 已更新（`pyproject.toml` 走 `dynamic` 自动跟随，无需手改）
+- [ ] 检查全绿：GitHub Actions（`.github/workflows/ci.yml`，ubuntu + macos 双平台）与本地 `python -m ruff check .` / `python -m pytest -q` 均无失败；依赖有增减时 `uv.lock` 已刷新
 - [ ] 功能开发完成，本地测试通过
 - [ ] 已检查并同步文档：`README.md`；版本变更追加到 `docs/logs.md`；如涉及更新管理同步 `docs/release-guide.md`；如涉及插件同步 `docs/design/plugin-system.md`；如涉及组件同步 `docs/design/web-components.md`
 - [ ] 新增的模板 / 静态文件已登记进 `setup.py` 的 `DATA_FILES`（用「二、打包流程」里的差集脚本自查，脚本会顺带列出 `.DS_Store`，那是无害噪音）；新增的核心运行时模块已登记进 `setup.py` 的 `includes`

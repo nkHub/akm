@@ -28,8 +28,10 @@ from akm.plugins.plugin_manager import PluginManager
 def _ensure_db():
     """确保数据库已初始化"""
     conn = get_connection()
-    init_db(conn)
-    conn.close()
+    try:
+        init_db(conn)
+    finally:
+        conn.close()
 
 
 def _format_config_value(value):
@@ -238,37 +240,39 @@ def _format_list(values: list[str]) -> str:
 def _collect_log_stats() -> dict:
     """聚合日志总量、成功失败数、供应商与模型分布，供 log stats 命令复用。"""
     conn = get_connection()
-    total = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
-    success = conn.execute(
-        "SELECT COUNT(*) FROM audit_logs WHERE status_code >= 200 AND status_code < 300"
-    ).fetchone()[0]
-    failed = conn.execute(
-        "SELECT COUNT(*) FROM audit_logs WHERE status_code < 200 OR status_code >= 300"
-    ).fetchone()[0]
-    avg_latency = conn.execute(
-        "SELECT AVG(latency_ms) FROM audit_logs WHERE latency_ms > 0"
-    ).fetchone()[0]
-    provider_rows = conn.execute(
-        """
-        SELECT provider, COUNT(*) AS count
-        FROM audit_logs
-        WHERE provider != ''
-        GROUP BY provider
-        ORDER BY count DESC, provider ASC
-        LIMIT 5
-        """
-    ).fetchall()
-    model_rows = conn.execute(
-        """
-        SELECT model, COUNT(*) AS count
-        FROM audit_logs
-        WHERE model != ''
-        GROUP BY model
-        ORDER BY count DESC, model ASC
-        LIMIT 5
-        """
-    ).fetchall()
-    conn.close()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
+        success = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE status_code >= 200 AND status_code < 300"
+        ).fetchone()[0]
+        failed = conn.execute(
+            "SELECT COUNT(*) FROM audit_logs WHERE status_code < 200 OR status_code >= 300"
+        ).fetchone()[0]
+        avg_latency = conn.execute(
+            "SELECT AVG(latency_ms) FROM audit_logs WHERE latency_ms > 0"
+        ).fetchone()[0]
+        provider_rows = conn.execute(
+            """
+            SELECT provider, COUNT(*) AS count
+            FROM audit_logs
+            WHERE provider != ''
+            GROUP BY provider
+            ORDER BY count DESC, provider ASC
+            LIMIT 5
+            """
+        ).fetchall()
+        model_rows = conn.execute(
+            """
+            SELECT model, COUNT(*) AS count
+            FROM audit_logs
+            WHERE model != ''
+            GROUP BY model
+            ORDER BY count DESC, model ASC
+            LIMIT 5
+            """
+        ).fetchall()
+    finally:
+        conn.close()
     return {
         "total": total,
         "success": success,
@@ -291,8 +295,10 @@ def _run_doctor_checks() -> list[tuple[str, str, str]]:
 
     try:
         conn = get_connection()
-        conn.execute("SELECT 1").fetchone()
-        conn.close()
+        try:
+            conn.execute("SELECT 1").fetchone()
+        finally:
+            conn.close()
         checks.append(("OK", "database", f"可访问 {get_db_path()}"))
     except Exception as exc:
         checks.append(("FAIL", "database", f"数据库不可访问: {exc}"))

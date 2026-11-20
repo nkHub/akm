@@ -160,8 +160,12 @@ class HealthMonitor:
         t0 = time.time()
         try:
             conn = get_connection()
-            conn.execute("SELECT 1").fetchone()
-            conn.close()
+            try:
+                conn.execute("SELECT 1").fetchone()
+            finally:
+                # 探针本身在线程池里跑，但连接仍必须在异常时归还，
+                # 否则数据库故障期间心跳会不断泄漏连接
+                conn.close()
             self.db_last_ok_at = time.time()
             self.db_last_latency_ms = int((time.time() - t0) * 1000)
             self.db_consecutive_failures = 0

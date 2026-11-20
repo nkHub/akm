@@ -73,6 +73,43 @@ def read_app_version() -> str:
     return match.group(1)
 
 
+def _check_pyproject_version_source(pyproject: Path, local: str) -> str | None:
+    """校验 pyproject.toml 的版本号来源是否仍指向 akm/__init__.py。
+
+    版本号已收敛为单一来源，pyproject 不再手写 ``version``，而是
+    ``dynamic = ["version"]`` + ``[tool.setuptools.dynamic] version = {attr = "akm.__version__"}``。
+    这里同时兜住三种破坏方式：
+
+    1. 有人重新写死 ``project.version``（会与运行时版本脱钩）；
+    2. ``dynamic`` 里漏了 ``version``；
+    3. ``attr`` 指向了别的模块/属性。
+
+    返回错误说明字符串；一切正常返回 ``None``。
+    """
+    text = pyproject.read_text("utf-8")
+    # ① 不允许再出现手写的 project.version
+    hardcoded = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    if hardcoded:
+        return (
+            f"pyproject.toml 又写死了 version = {hardcoded.group(1)}，"
+            f"应改用 dynamic = [\"version\"] + attr = \"akm.__version__\""
+            f"（唯一来源是 akm/__init__.py 的 {local}）"
+        )
+    # ② dynamic 必须声明 version
+    dynamic_match = re.search(r"^dynamic\s*=\s*\[([^\]]*)\]", text, re.M)
+    if not dynamic_match or "version" not in dynamic_match.group(1):
+        return "pyproject.toml 的 project.dynamic 未包含 \"version\"，版本号无法从 akm/__init__.py 读取"
+    # ③ attr 必须指向 akm.__version__
+    attr_match = re.search(r'^version\s*=\s*\{\s*attr\s*=\s*"([^"]+)"\s*\}', text, re.M)
+    if not attr_match:
+        return "pyproject.toml 缺少 [tool.setuptools.dynamic] 的 version = {attr = \"akm.__version__\"}"
+    if attr_match.group(1) != "akm.__version__":
+        return (
+            f"pyproject.toml 的 dynamic version 指向 {attr_match.group(1)}，"
+            f"应为 akm.__version__（唯一来源）"
+        )
+    return None
+
 def read_plugin_versions() -> dict[str, str]:
     """读取仓库内所有插件的 plugin.json 版本号。"""
     versions: dict[str, str] = {}
@@ -275,15 +312,16 @@ def run(mode: str, warn_only: bool, offline: bool, emit_pending: str | None = No
         print(f"       {msg}")
         if level == "error":
             failures.append(f"app: {msg}")
-        # 同步检查 pyproject.toml，避免两处版本号漂移
+        # 版本号已收敛为单一来源：pyproject.toml 用 dynamic = ["version"] +
+        # attr = "akm.__version__"，不再手写 version 字段。这里改为校验
+        # 「pyproject 确实走 dynamic 且解析结果与 akm/__init__.py 一致」，
+        # 一旦有人重新写死 version（或改坏 attr），构建包版本会与运行时脱钩。
         pyproject = ROOT_DIR / "pyproject.toml"
         if pyproject.exists():
-            match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text("utf-8"), re.M)
-            if match and match.group(1) != local:
-                print(
-                    f"       警告: pyproject.toml 版本为 {match.group(1)}，"
-                    f"与 akm/__init__.py 的 {local} 不一致"
-                )
+            drift = _check_pyproject_version_source(pyproject, local)
+            if drift:
+                print(f"       错误: {drift}")
+                failures.append(f"app: {drift}")
         return _finish(failures, warn_only)
 
     # 插件

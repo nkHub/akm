@@ -234,8 +234,12 @@ def add_key(
 def get_key(alias: str) -> dict | None:
     """获取指定 key 的完整信息（解密后）"""
     conn = get_connection()
-    row = conn.execute("SELECT * FROM keys WHERE alias = ?", (alias,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT * FROM keys WHERE alias = ?", (alias,)).fetchone()
+    finally:
+        # 用 try/finally 而非顺序 close：查询或解密抛异常时连接也必须归还，
+        # 否则 SQLite 连接与 WAL 句柄会泄漏，长期运行后句柄数持续上涨。
+        conn.close()
     if row is None:
         return None
     d = dict(row)
@@ -248,16 +252,20 @@ def get_key(alias: str) -> dict | None:
 def list_keys(provider: str | None = None) -> list[dict]:
     """列出所有 key，按 priority 升序排列，可筛选供应商"""
     conn = get_connection()
-    if provider:
-        rows = conn.execute(
-            "SELECT * FROM keys WHERE provider = ? ORDER BY priority ASC",
-            (provider,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM keys ORDER BY priority ASC"
-        ).fetchall()
-    conn.close()
+    try:
+        if provider:
+            rows = conn.execute(
+                "SELECT * FROM keys WHERE provider = ? ORDER BY priority ASC",
+                (provider,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM keys ORDER BY priority ASC"
+            ).fetchall()
+    finally:
+        # 连接必须在读完后立刻归还：下面的解密/解析若抛异常（例如密文损坏），
+        # 顺序 close 写法会让连接永久泄漏。
+        conn.close()
     result = []
     for row in rows:
         d = dict(row)
@@ -271,84 +279,101 @@ def list_keys(provider: str | None = None) -> list[dict]:
 def remove_key(alias: str) -> bool:
     """删除指定 key，返回是否删除成功"""
     conn = get_connection()
-    cursor = conn.execute("DELETE FROM keys WHERE alias = ?", (alias,))
-    conn.commit()
-    deleted = cursor.rowcount > 0
-    conn.close()
+    try:
+        cursor = conn.execute("DELETE FROM keys WHERE alias = ?", (alias,))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+    finally:
+        # DELETE 或 commit 抛异常时连接同样要归还，否则泄漏
+        conn.close()
     return deleted
 
 
 def set_priority(alias: str, priority: int) -> None:
     """设置 key 优先级"""
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET priority = ? WHERE alias = ?", (priority, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET priority = ? WHERE alias = ?", (priority, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_base_url(alias: str, base_url: str) -> None:
     """修改 key 的 base_url"""
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET base_url = ? WHERE alias = ?", (base_url, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET base_url = ? WHERE alias = ?", (base_url, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_models(alias: str, models: str) -> None:
     """修改指定 key 的模型匹配配置。"""
     normalized = _normalize_csv_models(models)
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET models = ? WHERE alias = ?", (normalized, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET models = ? WHERE alias = ?", (normalized, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_provider(alias: str, provider: str) -> None:
     """修改指定 key 的 provider。"""
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET provider = ? WHERE alias = ?", (provider, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET provider = ? WHERE alias = ?", (provider, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_auth_header(alias: str, auth_header: str) -> None:
     """修改指定 key 的认证头模板。"""
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET auth_header = ? WHERE alias = ?", (auth_header, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET auth_header = ? WHERE alias = ?", (auth_header, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_provider_models(alias: str, provider_models) -> None:
     """保存指定 key 同步得到的提供商模型列表。"""
     normalized = _normalize_provider_models(provider_models)
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET provider_models = ? WHERE alias = ?", (normalized, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET provider_models = ? WHERE alias = ?", (normalized, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_api_key(alias: str, api_key: str) -> None:
     """修改指定 key 的 API key 值"""
     enc_key = _encrypt(api_key)
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET api_key = ? WHERE alias = ?", (enc_key, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET api_key = ? WHERE alias = ?", (enc_key, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def reencrypt_all_keys() -> dict:
@@ -396,11 +421,13 @@ def reencrypt_all_keys() -> dict:
 def set_status(alias: str, status: str) -> None:
     """设置 key 状态：active / disabled / rate_limited"""
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET status = ? WHERE alias = ?", (status, alias)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET status = ? WHERE alias = ?", (status, alias)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # 限流冷却记录：{alias: 冷却截止时间戳}
@@ -432,10 +459,12 @@ def clear_expired_rate_limits() -> None:
 
     # 2. 检查数据库中 rate_limited 但内存无记录的 key（重启后场景）
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT alias FROM keys WHERE status = 'rate_limited'"
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT alias FROM keys WHERE status = 'rate_limited'"
+        ).fetchall()
+    finally:
+        conn.close()
     for row in rows:
         alias = row["alias"]
         if alias not in _rate_limit_timers:
@@ -455,24 +484,27 @@ def pick_key(model: str, exclude_aliases: list[str] | None = None) -> dict | Non
     clear_expired_rate_limits()
     model = model.strip()
     conn = get_connection()
-    # 先筛出 active key，再按优先级在 Python 侧做匹配。
-    # 这样可以让 models='*' 时结合 provider_models 精确判断是否命中。
-    if exclude_aliases:
-        placeholders = ",".join("?" * len(exclude_aliases))
-        rows = conn.execute(
-            f"""SELECT * FROM keys
-               WHERE status = 'active'
-                  AND alias NOT IN ({placeholders})
-               ORDER BY priority ASC""",
-            (*exclude_aliases,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT * FROM keys
-               WHERE status = 'active'
-               ORDER BY priority ASC""",
-        ).fetchall()
-    conn.close()
+    try:
+        # 先筛出 active key，再按优先级在 Python 侧做匹配。
+        # 这样可以让 models='*' 时结合 provider_models 精确判断是否命中。
+        if exclude_aliases:
+            placeholders = ",".join("?" * len(exclude_aliases))
+            rows = conn.execute(
+                f"""SELECT * FROM keys
+                   WHERE status = 'active'
+                      AND alias NOT IN ({placeholders})
+                   ORDER BY priority ASC""",
+                (*exclude_aliases,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM keys
+                   WHERE status = 'active'
+                   ORDER BY priority ASC""",
+            ).fetchall()
+    finally:
+        # 选 Key 是代理请求的每跳热路径，查询异常时必须归还连接
+        conn.close()
     # 先尝试显式模型 key，再回退到 `*` + provider_models 的兜底 key。
     # 这样即便优先级相同，也能保证“明确声明的模型绑定”优先于通配策略。
     for explicit_only in (True, False):
@@ -501,17 +533,19 @@ def pick_wildcard_key(model: str = "", exclude_aliases: list[str] | None = None)
     """
     clear_expired_rate_limits()
     conn = get_connection()
-    if exclude_aliases:
-        placeholders = ",".join("?" * len(exclude_aliases))
-        rows = conn.execute(
-            f"SELECT * FROM keys WHERE status = 'active' AND models = '*' AND alias NOT IN ({placeholders}) ORDER BY priority ASC",
-            (*exclude_aliases,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM keys WHERE status = 'active' AND models = '*' ORDER BY priority ASC",
-        ).fetchall()
-    conn.close()
+    try:
+        if exclude_aliases:
+            placeholders = ",".join("?" * len(exclude_aliases))
+            rows = conn.execute(
+                f"SELECT * FROM keys WHERE status = 'active' AND models = '*' AND alias NOT IN ({placeholders}) ORDER BY priority ASC",
+                (*exclude_aliases,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM keys WHERE status = 'active' AND models = '*' ORDER BY priority ASC",
+            ).fetchall()
+    finally:
+        conn.close()
     normalized_model = str(model or "").strip()
     # 空模型不允许走通配兜底：通配 Key 依赖 provider_models 做“可用模型集合”
     # 匹配，空模型会绕过包含检查，把“模型未指定”的请求误发给不支持空模型的
@@ -542,11 +576,13 @@ async def pick_wildcard_key_async(model: str = "", exclude_aliases: list[str] | 
 def get_usage_query_config(alias: str, provider: str = "") -> dict | None:
     """获取指定 key 的用量查询配置（开关 + 脚本 + 间隔 + 最近结果）"""
     conn = get_connection()
-    row = conn.execute(
-        "SELECT usage_query_script, usage_query_interval_m, usage_query_enabled, usage_queried_at, usage_data, usage_error, usage_query_endpoint FROM keys WHERE alias = ?",
-        (alias,),
-    ).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT usage_query_script, usage_query_interval_m, usage_query_enabled, usage_queried_at, usage_data, usage_error, usage_query_endpoint FROM keys WHERE alias = ?",
+            (alias,),
+        ).fetchone()
+    finally:
+        conn.close()
     if row is None:
         return None
     script_raw = row["usage_query_script"] or ""
@@ -583,30 +619,34 @@ def set_usage_query_config(
     用户下次重新打开时仍是上次填的值。
     """
     conn = get_connection()
-    if script is not None:
-        conn.execute("UPDATE keys SET usage_query_script = ? WHERE alias = ?", (script, alias))
-    if interval_m is not None:
-        conn.execute("UPDATE keys SET usage_query_interval_m = ? WHERE alias = ?", (int(interval_m or 0), alias))
-    if enabled is not None:
-        conn.execute(
-            "UPDATE keys SET usage_query_enabled = ? WHERE alias = ?",
-            (1 if enabled else 0, alias),
-        )
-    if query_endpoint is not None:
-        conn.execute("UPDATE keys SET usage_query_endpoint = ? WHERE alias = ?", (query_endpoint, alias))
-    conn.commit()
-    conn.close()
+    try:
+        if script is not None:
+            conn.execute("UPDATE keys SET usage_query_script = ? WHERE alias = ?", (script, alias))
+        if interval_m is not None:
+            conn.execute("UPDATE keys SET usage_query_interval_m = ? WHERE alias = ?", (int(interval_m or 0), alias))
+        if enabled is not None:
+            conn.execute(
+                "UPDATE keys SET usage_query_enabled = ? WHERE alias = ?",
+                (1 if enabled else 0, alias),
+            )
+        if query_endpoint is not None:
+            conn.execute("UPDATE keys SET usage_query_endpoint = ? WHERE alias = ?", (query_endpoint, alias))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def update_usage_data(alias: str, data: dict) -> None:
     """更新用量查询结果和错误信息（保留 raw_response 供前端 extractor 解析）"""
     conn = get_connection()
-    conn.execute(
-        "UPDATE keys SET usage_data = ?, usage_error = ?, usage_queried_at = datetime('now', 'localtime') WHERE alias = ?",
-        (json.dumps(data, ensure_ascii=False), data.get("error", ""), alias),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "UPDATE keys SET usage_data = ?, usage_error = ?, usage_queried_at = datetime('now', 'localtime') WHERE alias = ?",
+            (json.dumps(data, ensure_ascii=False), data.get("error", ""), alias),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _safe_json_parse(raw: str | None) -> dict | None:

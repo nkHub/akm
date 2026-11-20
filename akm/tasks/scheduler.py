@@ -98,7 +98,9 @@ class TaskScheduler:
     async def _check_due_tasks(self) -> None:
         """扫描启用中的任务，对到期任务逐个执行。"""
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for task in list_tasks(enabled_only=True):
+        # 任务表读取是同步 SQLite IO，丢到线程池避免阻塞后台调度循环
+        all_tasks = await asyncio.to_thread(list_tasks, enabled_only=True)
+        for task in all_tasks:
             next_run = task.get("next_run_at", "")
             # 到期判断：next_run_at 为空或早于等于当前时间
             if next_run and next_run > now_str:
@@ -161,7 +163,7 @@ class TaskScheduler:
         merged["last_result_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # 仅更新 last_result 相关字段，避免覆盖用户对 payload 的其它自定义
         try:
-            update_task(task["id"], payload=merged)
+            await asyncio.to_thread(update_task, task["id"], payload=merged)
         except Exception:
             logger.exception("[TaskScheduler] 更新任务结果失败: %s", task.get("id"))
 
@@ -175,12 +177,12 @@ class TaskScheduler:
         from akm.key_pool import list_keys, get_usage_query_config, update_usage_data
         from akm.usage_query import execute_query_script
 
-        keys = {key.get("alias"): key for key in list_keys()}
+        keys = {key.get("alias"): key for key in await asyncio.to_thread(list_keys)}
         key = keys.get(alias)
         if key is None:
             logger.warning("[TaskScheduler] usage_query 任务 %s 找不到 key: %s", task.get("id"), alias)
             return
-        config = get_usage_query_config(alias, key.get("provider", ""))
+        config = await asyncio.to_thread(get_usage_query_config, alias, key.get("provider", ""))
         if config is None:
             logger.warning("[TaskScheduler] usage_query 任务 %s 无查询配置: %s", task.get("id"), alias)
             return
@@ -195,7 +197,7 @@ class TaskScheduler:
             return
         http_client = getattr(self.app.state, "http_client", None)
         result = await execute_query_script(key, script_cfg, http_client=http_client)
-        update_usage_data(alias, result)
+        await asyncio.to_thread(update_usage_data, alias, result)
 
     async def _advance_task(self, task: dict) -> None:
         """推进任务执行状态：更新 last_run_at 与下一次执行时间。"""
@@ -226,4 +228,4 @@ class TaskScheduler:
             # 单次任务：执行后自动禁用
             fields["next_run_at"] = ""
             fields["enabled"] = False
-        update_task(task_id, **fields)
+        await asyncio.to_thread(update_task, task_id, **fields)

@@ -28,7 +28,8 @@ def write_log(data: dict) -> None:
 def _do_write(data: dict) -> None:
     """执行实际写入操作"""
     conn = get_connection()
-    conn.execute(
+    try:
+        conn.execute(
         """INSERT INTO audit_logs
            (timestamp, provider, key_alias, model, request_body,
              response_body, status_code, latency_ms, error,
@@ -61,10 +62,13 @@ def _do_write(data: dict) -> None:
             # None 表示「没取到」，与 0「确认一致」严格区分，避免统计把未知当干净
             data.get("response_model", ""),
             data.get("model_mismatch"),
-        ),
-    )
-    conn.commit()
-    conn.close()
+            ),
+        )
+        conn.commit()
+    finally:
+        # 审计写入在后台队列里高频调用，INSERT/commit 失败时若不归还连接，
+        # 长期运行会累积大量悬挂的 SQLite 句柄
+        conn.close()
 
 
 async def write_log_async(data: dict) -> None:
@@ -250,21 +254,24 @@ def list_logs(
         # 只筛「确认被换模型」的记录：NULL（没取到）与 0（一致）都不算
         filters += " AND model_mismatch = 1"
     conn = get_connection()
-    if provider:
-        rows = conn.execute(
-            f"""SELECT * FROM audit_logs
-               WHERE provider = ? {filters}
-               {order_clause} LIMIT ? OFFSET ?""",
-            (provider, *params, limit, offset),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            f"""SELECT * FROM audit_logs
-               WHERE 1=1 {filters}
-               {order_clause} LIMIT ? OFFSET ?""",
-            (*params, limit, offset),
-        ).fetchall()
-    conn.close()
+    try:
+        if provider:
+            rows = conn.execute(
+                f"""SELECT * FROM audit_logs
+                   WHERE provider = ? {filters}
+                   {order_clause} LIMIT ? OFFSET ?""",
+                (provider, *params, limit, offset),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""SELECT * FROM audit_logs
+                   WHERE 1=1 {filters}
+                   {order_clause} LIMIT ? OFFSET ?""",
+                (*params, limit, offset),
+            ).fetchall()
+    finally:
+        # 管理台日志页高频轮询，查询异常时必须归还连接
+        conn.close()
     return [dict(r) for r in rows]
 
 
@@ -300,17 +307,20 @@ def count_logs(
         # 只筛「确认被换模型」的记录：NULL（没取到）与 0（一致）都不算
         filters += " AND model_mismatch = 1"
     conn = get_connection()
-    if provider:
-        row = conn.execute(
-            f"SELECT COUNT(*) FROM audit_logs WHERE provider = ? {filters}",
-            (provider, *params),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            f"SELECT COUNT(*) FROM audit_logs WHERE 1=1 {filters}",
-            (*params,),
-        ).fetchone()
-    conn.close()
+    try:
+        if provider:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM audit_logs WHERE provider = ? {filters}",
+                (provider, *params),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM audit_logs WHERE 1=1 {filters}",
+                (*params,),
+            ).fetchone()
+    finally:
+        # 统计与列表成对调用，同样需要异常安全的连接归还
+        conn.close()
     return row[0] if row else 0
 
 
@@ -324,14 +334,17 @@ def clean_logs(before: str) -> int:
     except ValueError:
         raise ValueError(f"日期格式错误: {before}，需要 YYYY-MM-DD") from None
     conn = get_connection()
-    cursor = conn.execute(
-        "DELETE FROM audit_logs WHERE timestamp < ?", (before,)
-    )
-    conn.commit()
-    count = cursor.rowcount
-    # 回收被删除数据占用的磁盘空间，并截断 WAL，避免设置页里看到的占用长期虚高。
-    _compact_audit_db(conn)
-    conn.close()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM audit_logs WHERE timestamp < ?", (before,)
+        )
+        conn.commit()
+        count = cursor.rowcount
+        # 回收被删除数据占用的磁盘空间，并截断 WAL，避免设置页里看到的占用长期虚高。
+        _compact_audit_db(conn)
+    finally:
+        # VACUUM 失败（例如并发写锁）时也必须归还连接，否则清理链路会卡住句柄
+        conn.close()
     return count
 
 
@@ -343,20 +356,23 @@ async def clean_logs_async(before: str) -> int:
 def clean_log_bodies() -> int:
     """清空审计日志的请求体/响应体及大体积请求头快照，保留来源头。"""
     conn = get_connection()
-    cursor = conn.execute(
-        """UPDATE audit_logs
-           SET request_body = '', response_body = '',
-               client_request_body = '', upstream_response_body = '',
-               client_request_headers = '', upstream_request_headers = ''
-           WHERE request_body != '' OR response_body != ''
-              OR client_request_body != '' OR upstream_response_body != ''
-              OR client_request_headers != '' OR upstream_request_headers != ''"""
-    )
-    conn.commit()
-    count = cursor.rowcount
-    # 释放清空文本后仍占用的磁盘空间，并截断 WAL，避免“清空 body 后占用不变”。
-    _compact_audit_db(conn)
-    conn.close()
+    try:
+        cursor = conn.execute(
+            """UPDATE audit_logs
+               SET request_body = '', response_body = '',
+                   client_request_body = '', upstream_response_body = '',
+                   client_request_headers = '', upstream_request_headers = ''
+               WHERE request_body != '' OR response_body != ''
+                  OR client_request_body != '' OR upstream_response_body != ''
+                  OR client_request_headers != '' OR upstream_request_headers != ''"""
+        )
+        conn.commit()
+        count = cursor.rowcount
+        # 释放清空文本后仍占用的磁盘空间，并截断 WAL，避免“清空 body 后占用不变”。
+        _compact_audit_db(conn)
+    finally:
+        # 大批量 UPDATE/VACUUM 期间异常时必须归还连接
+        conn.close()
     return count
 
 

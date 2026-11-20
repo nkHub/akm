@@ -8,6 +8,7 @@
 ``X-Agent-Token`` 头。
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Request
@@ -42,7 +43,10 @@ async def list_task_route(request: Request, task_type: str = "", enabled: str = 
     if auth_error is not None:
         return auth_error
     try:
-        items = list_tasks(
+        # 任务表的增删改查都是同步 SQLite IO，统一丢到线程池，
+        # 避免管理台操作期间阻塞事件循环（与 akm/audit.py 的 *_async 一致）。
+        items = await asyncio.to_thread(
+            list_tasks,
             task_type=task_type or None,
             enabled_only=True if enabled == "1" else False,
         )
@@ -79,7 +83,8 @@ async def create_task_route(request: Request):
     if cron.strip() and not validate_cron_expr(cron):
         return JSONResponse(status_code=400, content={"detail": f"cron 表达式非法: {cron}"})
     try:
-        task = create_task(
+        task = await asyncio.to_thread(
+            create_task,
             name=name,
             task_type=task_type,
             payload=payload,
@@ -98,7 +103,7 @@ async def get_task_route(request: Request, task_id: str):
     auth_error = await _check_auth(request)
     if auth_error is not None:
         return auth_error
-    task = get_task(task_id)
+    task = await asyncio.to_thread(get_task, task_id)
     if task is None:
         return JSONResponse(status_code=404, content={"detail": "任务不存在"})
     return JSONResponse(content={"task": task})
@@ -116,10 +121,10 @@ async def update_task_route(request: Request, task_id: str):
         return JSONResponse(status_code=400, content={"detail": "请求体必须是 JSON"})
     if not isinstance(body, dict):
         return JSONResponse(status_code=400, content={"detail": "请求体必须是对象"})
-    if get_task(task_id) is None:
+    if await asyncio.to_thread(get_task, task_id) is None:
         return JSONResponse(status_code=404, content={"detail": "任务不存在"})
     try:
-        updated = update_task(task_id, **body)
+        updated = await asyncio.to_thread(lambda: update_task(task_id, **body))
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
     except Exception as exc:
@@ -133,7 +138,7 @@ async def delete_task_route(request: Request, task_id: str):
     auth_error = await _check_auth(request)
     if auth_error is not None:
         return auth_error
-    deleted = delete_task(task_id)
+    deleted = await asyncio.to_thread(delete_task, task_id)
     if not deleted:
         return JSONResponse(status_code=404, content={"detail": "任务不存在"})
     return JSONResponse(content={"ok": True, "deleted": task_id})
@@ -145,7 +150,7 @@ async def run_task_route(request: Request, task_id: str):
     auth_error = await _check_auth(request)
     if auth_error is not None:
         return auth_error
-    task = get_task(task_id)
+    task = await asyncio.to_thread(get_task, task_id)
     if task is None:
         return JSONResponse(status_code=404, content={"detail": "任务不存在"})
     scheduler = getattr(request.app.state, "task_scheduler", None)
