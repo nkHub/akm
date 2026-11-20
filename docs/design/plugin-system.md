@@ -37,7 +37,7 @@
 
 `agent_chat` 是同一模式的**内置产物型** `app` 插件：它把构建好的 `/v1/agent` Web 聊天界面（AetherAI 对话窗口）产物直接打进插件目录 `dist/`，`on_load` 用 `self._static_dir.parent / "dist"` 定位产物并挂载到 `route_prefix`（默认 `/chat`），启用即用、无需配置绝对路径，属于不带菜单、默认关闭的免配置前端站点。其产物以 `base: './'` 相对路径构建，并以空 `VITE_AKM_API_URL` 走同源 `/v1/agent`，因此可在任意子路径下运行且不依赖代理前缀。该界面同时是 `/v1/agent` **客户端工具执行协议**的第一个接入方：它把会话历史留在浏览器 IndexedDB，用顶层 `client_tools` 声明 `ui_list_sessions` / `ui_load_session` 两个客户端工具并本地执行（服务端只下发 `client_tool_call` 事件）。服务端原先读磁盘快照的 `akm_list_sessions` / `akm_load_session` 与 Agent 自动落盘链路均已整体删除——两套会话工具并存时模型会挑名字更眼熟的旧工具、读到过时数据，让错误选项不存在才是修复。旧版遗留的 `~/.akm/agent_sessions/` 会在更新包缓存清理开启时随本地维护流程永久删除；新版本不再创建该目录。协议细节见 [`akm/agent_runtime/agent.md`](../../akm/agent_runtime/agent.md) 的「客户端工具执行」，插件侧的配置/重建步骤见 `plugins/agent_chat/README.md`。
 
-`agent_chat` 对 `inner_name` 的消费约定（v0.1.59 起）：`/v1/agent` 的「工具按需加载」把长尾工具折叠到 `akm_list_tools` / `akm_call_tool` 后，`tool_call` / `tool_result` 事件会额外带 `inner_name`（内层真实执行的工具名；普通工具与旧服务端不带该字段）。前端过程时间线必须**优先用 `inner_name`** 生成动作标签与状态文案，否则用户看到的是 `call_tool` 这种网关名字而不是「检索知识库」「读取文件」；`src/lib/step-labels.ts` 另外收录 `akm_list_tools` / `akm_call_tool` 两条兜底（`akm_call_tool` 在没有内层名时才会显示）。缺 `inner_name` 时回落到事件的 `name`，因此对旧后端保持兼容。chat 主流程**不传 `tools`**（只传 `client_tools` 与 `tool_options`），走的是会被折叠的自动注入路径；定时任务页 `automation.tsx` 显式传 `tools` 白名单，按设计不折叠、不受影响。
+`agent_chat` 对 `inner_name` 的消费约定（v0.1.57 起）：`/v1/agent` 的「工具按需加载」把长尾工具折叠到 `akm_list_tools` / `akm_call_tool` 后，`tool_call` / `tool_result` 事件会额外带 `inner_name`（内层真实执行的工具名；普通工具与旧服务端不带该字段）。前端过程时间线必须**优先用 `inner_name`** 生成动作标签与状态文案，否则用户看到的是 `call_tool` 这种网关名字而不是「检索知识库」「读取文件」；`src/lib/step-labels.ts` 另外收录 `akm_list_tools` / `akm_call_tool` 两条兜底（`akm_call_tool` 在没有内层名时才会显示）。缺 `inner_name` 时回落到事件的 `name`，因此对旧后端保持兼容。chat 主流程**不传 `tools`**（只传 `client_tools` 与 `tool_options`），走的是会被折叠的自动注入路径；定时任务页 `automation.tsx` 显式传 `tools` 白名单，按设计不折叠、不受影响。
 
 `agent-tools` 是与 `agent_chat` 同构的**内置产物型** `app` 插件：把同级 `tools` 项目的构建产物打进插件目录 `dist/`，`on_load` 挂载到 `route_prefix`（默认 `/tools`），启用即用。它是纯前端离线工具箱（JSON/YAML 格式化、时间戳转换、哈希、二维码、颜色、正则、IP 查询、HTTP 请求调试等），除 IP 查询工具调用 ipapi.co / ipify / ipwho.is 等公共 API 外不依赖任何后端接口。产物同样以 `base: './'`（即 `VITE_BASE_PATH='./'`）相对路径构建，可在任意子路径下运行。
 
@@ -871,7 +871,7 @@ html[data-theme="light"] {
 4. 浅色下刷新页面 → **不出现深色闪帧**（首帧脚本生效）。
 5. 浅色下正文、辅助文字、边框、徽标都能看清（正文对比度 ≥ 4.5，参考管理台 `--c-gray-600` 的取值）。
 
-#### 9.3.4 当前兼容状态（v0.1.59）
+#### 9.3.4 当前兼容状态（v0.1.57）
 
 逐个核对仓库内全部插件的 `views/` 与 `dist/`：
 
@@ -879,7 +879,7 @@ html[data-theme="light"] {
 |---|---|---|---|
 | `markdown_kb` | 有菜单 app | 已兼容 | 三条通道齐全，含浅色 token 覆盖与首帧脚本 |
 | `dafeiyu` | 有菜单 app | 已兼容 | 同上 |
-| `prompt_booster` | 有菜单 app | 已兼容 | v0.1.59 补齐：首帧主题脚本 + 浅色 token 覆盖，原先写死的语义色抽成变量 |
+| `prompt_booster` | 有菜单 app | 已兼容 | v0.1.57 补齐：首帧主题脚本 + 浅色 token 覆盖，原先写死的语义色抽成变量 |
 | `agent_chat` | 无菜单 app（构建产物） | **部分接入** | `dist/index.html` 只按 `prefers-color-scheme` 判断，不读 `akm.theme`，管理台选浅色时聊天页仍按系统外观走 |
 | 其余 20 个插件 | 纯 hook，无前端界面 | 不适用 | 无需处理 |
 
@@ -894,7 +894,7 @@ html[data-theme="light"] {
 宿主在返回 `/plugins/{name}/raw` 时，会在 `</head>` 之前插入一行（带当前内核版本号，自动跟随升级）：
 
 ```html
-<!-- akm-plugin-host-assets --><script src="/static/akm-ui.js?v=0.1.59"></script>
+<!-- akm-plugin-host-assets --><script src="/static/akm-ui.js?v=0.1.57"></script>
 ```
 
 为什么由宿主注入而不是插件自己引：插件页是纯静态 HTML，没有模板引擎可用，**没法带版本号做缓存击穿**；硬编码版本号又会随 AKM 升级而漂移，用户升级后可能一直命中旧缓存。

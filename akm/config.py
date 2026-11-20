@@ -32,7 +32,7 @@ DEFAULTS = {
     "image_request_timeout_sec": 300,  # 图片生成/编辑请求超时（秒），默认比聊天接口更宽松
     "wake_recover_delay_sec": 8,  # 菜单栏应用在系统唤醒后等待网络/VPN恢复的秒数
     # 是否透传客户端原始 User-Agent 并携带客户端业务头到上游。
-    # v0.1.59 起默认 True：中转场景下游多是 Claude Code / Codex / pi-desktop 这类客户端，
+    # v0.1.57 起默认 True：中转场景下游多是 Claude Code / Codex / pi-desktop 这类客户端，
     # 它们靠 UA 触发上游的特定行为（如 Anthropic 的 OAuth 分支、Cloudflare 的放行策略），
     # 统一改写成 akm/<version> 反而容易被 WAF 拦或走进不同计费/能力分支。
     # 置 False 会回退为固定 akm/<version>。

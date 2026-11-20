@@ -278,7 +278,7 @@ def _sensitive_path_reason(path: Path) -> str:
         return f"{name} 属于密钥/证书文件，禁止通过文件工具访问"
     if _WORKSPACE_VCS_DIR in path.parts:
         # 不写死「请用 akm_run_git」：agent_git_enabled=false 时那个工具根本没注册，
-        # 提示会指向一个不存在的工具（v0.1.58 P2-2）
+        # 提示会指向一个不存在的工具（v0.1.57 P2-2）
         return (
             f"{path.name} 位于版本库内部目录 {_WORKSPACE_VCS_DIR}/ 下，文件工具不直接访问；"
             "如需操作版本库，请先开启 agent_git_enabled 再用 akm_run_git"
@@ -300,7 +300,7 @@ def _guard_sensitive_path(path: Path) -> None:
 def _normalize_tag_bytes(data: bytes) -> bytes:
     """把文件**字节**归一化成算 tag 用的规范形态（去 BOM、CRLF→LF、每行去尾部空格/Tab）。
 
-    为什么按字节而不是按解码后的文本（v0.1.58 的 P0 缺陷根因）：同一份内容可能有多种
+    为什么按字节而不是按解码后的文本（v0.1.57 的 P0 缺陷根因）：同一份内容可能有多种
     解码结果。read 走 `_decode_text_bytes`（GB18030 能正确解码）得到中文文本，而校验
     走 `read_text(utf-8, errors="replace")` 得到一串 U+FFFD，两条路径对**同一份内容**
     算出两个不同哈希 —— 于是 GBK/GB18030/Latin-1 文件「读得到、改不了」：read 给 A、
@@ -918,7 +918,7 @@ def _collect_window(
         used_bytes += len(line.encode("utf-8"))
         if used_bytes > max_bytes:
             # 超字节预算：窗口到此为止，但**不能 break**——footer 的「共 N 行」
-            # 必须是文件真实总行数，否则截断时会把它报成窗口行数（v0.1.58 P2-1：
+            # 必须是文件真实总行数，否则截断时会把它报成窗口行数（v0.1.57 P2-1：
             # 5000 行的文件被报成「共 1225 行」，模型据此以为已读到结尾）
             truncated = True
             stopped = True
@@ -942,7 +942,7 @@ def _read_window_sync(
     该函数在 asyncio.to_thread 中执行，避免阻塞事件循环。
 
     注意：返回的是原始字节而不是解码后的文本——tag 必须按字节口径计算，
-    否则 GB18030 文件会出现「read 给一个哈希、校验要另一个哈希」的死锁（v0.1.58 P0）。
+    否则 GB18030 文件会出现「read 给一个哈希、校验要另一个哈希」的死锁（v0.1.57 P0）。
     """
     try:
         size = target.stat().st_size
@@ -1527,7 +1527,7 @@ def _atomic_write_text(target: Path, text: str, encoding: str = "utf-8") -> str:
     """以「临时文件 + os.replace」原子写入文本，返回**实际使用的编码**。
 
     - `encoding` 传原文件编码时优先保持——否则把 GB18030/GBK 文件悄悄改写成 UTF-8，
-      用户在别的编辑器里会看到整文件 diff 甚至乱码（v0.1.58 只顾着写 tag 没管这件事）；
+      用户在别的编辑器里会看到整文件 diff 甚至乱码（v0.1.57 只顾着写 tag 没管这件事）；
     - 该编码表示不了新内容（UnicodeEncodeError）或编码名非法时回退 UTF-8，
       调用方据返回值得知「编码变了」，可以在结果里提示模型；
     - 临时文件创建在与目标同一目录，保证 os.replace 在同一文件系统内是原子操作；
@@ -2196,7 +2196,7 @@ def _seatbelt_profile(root: Path) -> str:
         f"(allow file-write* {allow_write})\n"
         f"(allow file-read* {allow_read})\n"
         f'(allow file-read-metadata (subpath "{ws}") (subpath "{tmp}"))\n'
-        # ── 工作区内敏感文件（补 v0.1.58 P1）──
+        # ── 工作区内敏感文件（补 v0.1.57 P1）──
         # 名单原先只在文件工具层生效，导致 shell 里 `cat .env`、`cat id_rsa` 秒过。
         # 这几条**必须写在上面 (allow file-read*) 之后**：SBPL 是 last-match-wins，
         # 写在 allow 前面会被直接覆盖掉，看着有规则实际不生效。

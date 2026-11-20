@@ -704,7 +704,7 @@ def _static_asset_version() -> str:
     """生成静态资源破缓存版本号：``<版本>-<内容指纹>``。
 
     为什么不能只用 ``__version__``：日常迭代经常只改 ``akm-ui.js`` / 模板而不
-    bump 版本号，此时 ``/static/akm-ui.js?v=0.1.59`` 的 URL 完全没变，浏览器
+    bump 版本号，此时 ``/static/akm-ui.js?v=0.1.57`` 的 URL 完全没变，浏览器
     会继续命中旧缓存 —— 表现是「代码明明改了，页面还是旧行为」。本机真实踩过：
     分页下拉已改成 ``akm-combobox``，但页面里仍是原生 ``<select>``。
 

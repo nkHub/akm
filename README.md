@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.59**：修复 Agent 自测报告里由 v0.1.58 引入的四个回归（文件 tag 死锁、sandbox 敏感名单、大文件总行数、`.git` 文案），并把长尾工具折叠为按需加载网关。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.57**：费用估算接入 models.dev 目录、Agent 工作区读写工具对齐参考实现并修复四个回归、工具按需加载网关，以及审计聚合索引与连接归还保护等一批性能与工程化收敛。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 
@@ -424,7 +424,7 @@ AKM 的 HTTP client 固定关闭 `trust_env`：不读取系统环境变量中的
 
 ### 原生透传（`use_native_user_agent`）
 
-**默认值自 v0.1.59 起改为 `true`（无需手动配置即启用）**，置 `false` 可回退为固定 `akm/<version>`。启用**原生透传**后：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。
+**默认值自 v0.1.57 起改为 `true`（无需手动配置即启用）**，置 `false` 可回退为固定 `akm/<version>`。启用**原生透传**后：User-Agent 透传客户端原始值（无则回退 `akm/<version>`），同时把客户端携带的请求头一并带给上游（排除 `Authorization`/`Content-Type`/`User-Agent` 及 `host`/`content-length`/`connection`/`accept-encoding` 等由本服务重建的认证与传输基础设施头），使依赖身份/会话头的上游网关（如 Codex 官方接口，要求 `originator`、`x-codex-turn-metadata`、`x-openai-internal-codex-responses-lite` 等原生标识）能识别为原生客户端。`Authorization` 始终替换为所选 Key 的密钥，不透传客户端认证头。未开启时，上游请求固定使用 `akm/<version>` 标识。
 
 若需要比原生透传更精细的头变换（重命名/补缺/加前后缀，并同时改写 `User-Agent`/`Content-Type`/`accept`），可用 `header_toolkit` 插件：读取客户端原始请求头快照按规则写入上游；`from_header` 支持逗号分隔多候选源顺序优先匹配。两者**叠加而非互斥**：开启原生透传时，客户端业务头先整体透传保留，插件在其上增量补写/覆写声明的头（如把 codex 会话 id 合成 `x-opencode-session` 补给要求该头的上游）；未开原生透传时插件单独生效。认证与传输基础设施头始终由本服务重建，插件与透传均不能覆盖（详见 `plugins/header_toolkit/README.md`）。
 
