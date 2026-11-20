@@ -118,6 +118,18 @@ if (!customElements.get('akm-pagination')) {
       //   host-class       —— 作为分页 flex 容器里的一个不收缩子项。
       // 候选与选中值必须等 innerHTML 之后再注入：akm-combobox 的候选是组件内部状态，
       // 拼 <option> 无效（见 docs/design/web-components.md 的约定）。
+      // 页码区 = 可手动输入的跳转框 + 候选下拉，两者联动：
+      //   输入框允许直接敲页码回车跳转（总页数多时翻几十页点下拉太累）；
+      //   下拉保持原有的「选一页」交互，选中后同步回填输入框。
+      // 用 input + combobox 而不是只靠 combobox 的过滤输入：过滤输入会把
+      // 「1」过滤成「1 / 10 / 11 ...」仍需再选一次，且输入法组字期间不拦截，
+      // 直接输入页码并回车才是「跳转」语义。
+      html += '<input type="text" inputmode="numeric" data-role="page-input"'
+        + ' value="' + currentPage + '"'
+        + ' aria-label="页码，输入后回车跳转"'
+        + ' class="akm-page-input w-12 px-1.5 py-1 text-xs text-center rounded bg-surface-light border border-border text-gray-300 focus:outline-none focus:border-indigo-500"'
+        + ' title="输入页码后回车跳转（1-' + totalPages + '）">';
+      html += '<span class="text-xs text-gray-600">/ ' + totalPages + '</span>';
       html += '<akm-combobox data-role="page-select" compact menu-min-width="104" host-class="inline-block shrink-0"></akm-combobox>';
       html += this._button('下一页', currentPage + 1, currentPage === totalPages, disabledClass, activeClass);
       html += this._button('末页', totalPages, currentPage === totalPages, disabledClass, activeClass);
@@ -132,6 +144,28 @@ if (!customElements.get('akm-pagination')) {
         picker.setOptions(pages, String(currentPage));
         picker.addEventListener('change', function(ev) {
           self.invoke(onSelectName, parseInt(ev.detail && ev.detail.value, 10));
+        });
+      }
+      // 手动输入跳转：只在回车时提交，失焦不跳（避免用户点到别处就误翻页）。
+      // 输入值夹紧到 [1, totalPages]，非法输入直接还原为当前页。
+      var pageInput = this.querySelector('[data-role="page-input"]');
+      if (pageInput) {
+        var commit = function() {
+          var raw = String(pageInput.value || '').trim();
+          var target = parseInt(raw, 10);
+          if (!isFinite(target)) { pageInput.value = currentPage; return; }
+          target = Math.min(totalPages, Math.max(1, target));
+          pageInput.value = target;
+          if (target !== currentPage) self.invoke(onSelectName, target);
+        };
+        pageInput.addEventListener('keydown', function(ev) {
+          if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+          else if (ev.key === 'Escape') { pageInput.value = currentPage; pageInput.blur(); }
+        });
+        pageInput.addEventListener('blur', function() {
+          // 失焦只做合法性还原，不触发跳转
+          var t = parseInt(String(pageInput.value || '').trim(), 10);
+          pageInput.value = isFinite(t) ? Math.min(totalPages, Math.max(1, t)) : currentPage;
         });
       }
       this.querySelectorAll('[data-role="page-btn"]').forEach(function(btn) {

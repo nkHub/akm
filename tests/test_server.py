@@ -5368,3 +5368,47 @@ def test_describe_retrieval_scope_counts_public_and_all(monkeypatch):
     scope_ws = plugin._describe_retrieval_scope("workspace", request_workspace="/Users/x/proj")
     assert scope_ws["kind"] == "workspace"
     assert "/Users/x/proj" in scope_ws["description"]
+
+
+def test_static_asset_version_includes_content_fingerprint():
+    """回归：静态资源版本号必须带内容指纹，不能只用应用版本号。
+
+    只用 ``__version__`` 时，改 ``akm-ui.js`` 而不 bump 版本号，URL 完全不变，
+    浏览器会继续命中旧缓存 —— 真实表现是「分页下拉已改成 akm-combobox，
+    但页面里还是原生 <select>」。
+    """
+    from akm import __version__
+    from akm.server import _static_asset_version
+
+    value = _static_asset_version()
+    assert value.startswith(f"{__version__}-")
+    suffix = value.split("-", 1)[1]
+    assert len(suffix) == 8
+    assert all(c in "0123456789abcdef" for c in suffix)
+    # 同一份静态资源快照必须稳定（否则每次请求 URL 都变，缓存彻底失效）
+    assert _static_asset_version() == value
+
+
+def test_static_asset_version_changes_when_static_file_mtime_changes(tmp_path, monkeypatch):
+    """静态文件修改时间变化时，版本号必须跟着变（这正是破缓存的目的）。"""
+    import os as _os
+
+    import akm.server as server_mod
+
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    target = static_dir / "akm-ui.js"
+    target.write_text("// v1", encoding="utf-8")
+
+    monkeypatch.setattr(server_mod, "__file__", str(tmp_path / "server.py"))
+    monkeypatch.setattr(server_mod, "_ASSET_VERSION_CACHE", {"key": None, "value": ""})
+
+    first = server_mod._static_asset_version()
+
+    # 改内容 + 显式推进 mtime（部分文件系统 mtime 精度为秒）
+    target.write_text("// v2", encoding="utf-8")
+    stat = _os.stat(target)
+    _os.utime(target, (stat.st_atime, stat.st_mtime + 10))
+
+    second = server_mod._static_asset_version()
+    assert first != second

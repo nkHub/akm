@@ -6,6 +6,7 @@ import asyncio
 import re
 import time
 import os
+import hashlib
 import sys
 import traceback
 import gc
@@ -695,10 +696,61 @@ def _build_plugin_dashboard_cards_section(pm) -> str:
     )
 
 
+_ASSET_VERSION_CACHE: dict[str, object] = {"key": None, "value": ""}
+
+
+def _static_asset_version() -> str:
+    """生成静态资源破缓存版本号：``<版本>-<内容指纹>``。
+
+    为什么不能只用 ``__version__``：日常迭代经常只改 ``akm-ui.js`` / 模板而不
+    bump 版本号，此时 ``/static/akm-ui.js?v=0.1.59`` 的 URL 完全没变，浏览器
+    会继续命中旧缓存 —— 表现是「代码明明改了，页面还是旧行为」。本机真实踩过：
+    分页下拉已改成 ``akm-combobox``，但页面里仍是原生 ``<select>``。
+
+    指纹只取静态目录里会被模板引用的文件（``.js`` / ``.css``），按
+    「文件名 + 大小 + 修改时间」求和后取 16 进制。**不做全量内容哈希**：静态目录
+    里有 apexcharts 这类 0.5MB 文件，每次渲染都读一遍会拖慢所有页面。
+    文件元信息变化已足以覆盖「改了文件」这个场景。
+
+    结果按「文件元信息快照」缓存：只有文件真的变了才重新计算，
+    正常情况下每次请求只是一次字典查找。
+    """
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    try:
+        names = sorted(
+            name
+            for name in os.listdir(static_dir)
+            if name.endswith((".js", ".css"))
+        )
+    except OSError:
+        return __version__
+
+    parts: list[str] = []
+    for name in names:
+        try:
+            stat = os.stat(os.path.join(static_dir, name))
+        except OSError:
+            continue
+        parts.append(f"{name}:{stat.st_size}:{int(stat.st_mtime)}")
+    snapshot = "|".join(parts)
+
+    if _ASSET_VERSION_CACHE.get("key") == snapshot:
+        return str(_ASSET_VERSION_CACHE.get("value") or __version__)
+
+    digest = hashlib.sha1(snapshot.encode("utf-8")).hexdigest()[:8]
+    value = f"{__version__}-{digest}"
+    _ASSET_VERSION_CACHE["key"] = snapshot
+    _ASSET_VERSION_CACHE["value"] = value
+    return value
+
+
 def _render_template(name: str, **kwargs) -> str:
     """读取模板文件，替换 {{ var }} 占位符，支持 {% extends %}, {% include %}, {% block %}"""
-    # 为静态资源提供默认版本参数，前端可用于 querystring 破缓存，避免替换 logo 后仍命中旧缓存。
-    kwargs.setdefault("asset_version", __version__)
+    # 静态资源破缓存版本号：用「应用版本 + 静态目录内容指纹」。
+    # 只写 __version__ 是不够的——日常迭代常常只改 akm-ui.js 而不 bump 版本号，
+    # 此时 URL 不变，浏览器会继续用旧缓存，表现为「代码已改但页面还是旧行为」
+    # （曾导致分页下拉改成 akm-combobox 后仍显示原生下拉）。
+    kwargs.setdefault("asset_version", _static_asset_version())
     # 为所有页面统一注入当前应用版本，供 header/about 等模板直接展示。
     kwargs.setdefault("version", __version__)
     # 为所有页面统一注入侧边栏插件菜单片段（has_menu 插件，插在「插件」之后「关于」之前）。

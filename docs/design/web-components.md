@@ -21,7 +21,7 @@
   - 用途：通用分页壳
   - 常用方法：`renderPagination({ totalPages, currentPage, onSelectName, summary })`
   - 说明：`totalPages <= 1` 时组件自动隐藏；点击后回调 `window[onSelectName](page)`。使用方：审计日志（`log-pagination`）、Key 管理（`key-pagination`）、统计页按 Key/模型/来源三张表（`pager-key`/`pager-model`/`pager-source`，每页 6 行）
-  - 约定：页码选择器用**内部渲染的 `akm-combobox`**（`data-role="page-select"`，带 `compact` 与 `menu-min-width="104"`），不再用原生 `<select>`——原生下拉的弹出层由系统绘制，浅色主题下与自建组件割裂。候选与选中值必须在 `innerHTML` 之后再 `setOptions(pages, currentPage)` 注入（combobox 的候选是组件内部状态，拼 `<option>` 无效），`change` 事件里取 `detail.value` 翻页。`totalPages <= 1` 时整条隐藏，此时 `querySelector('[data-role="page-select"]')` 返回 `null`
+  - 约定：页码区 = **可手动输入的跳转框 + `akm-combobox` 下拉**，不再用原生 `<select>`——原生下拉的弹出层由系统绘制，浅色主题下与自建组件割裂。输入框（`data-role="page-input"`）支持直接敲页码**回车跳转**（总页数多时点下拉太累），值夹紧到 `[1, totalPages]`，非法输入回车/失焦还原为当前页，**失焦不触发跳转**（避免点到别处误翻页），`Esc` 还原并失焦；输入框右侧有 `/ 总页数` 提示。下拉（`data-role="page-select"`，带 `compact` 与 `menu-min-width="104"`）保持「选一页」语义；候选与选中值必须在 `innerHTML` 之后再 `setOptions(pages, currentPage)` 注入（combobox 的候选是组件内部状态，拼 `<option>` 无效），`change` 事件里取 `detail.value` 翻页。`totalPages <= 1` 时整条隐藏，此时 `querySelector('[data-role="page-select"]')` 与 `[data-role="page-input"]` 均返回 `null`，调用方不能假设组件一定存在
 
 - `akm-empty-state`
   - 用途：统一空态文案
