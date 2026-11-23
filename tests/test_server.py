@@ -1132,6 +1132,8 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch, 
             "key_alias": "test-key",
             "provider": "openai",
             "model": "gpt-4",
+            "upstream_model": "deployment-chat",
+            "upstream_response_body_for_log": '{"model":"deployment-chat"}',
             "error": "",
             "latency_ms": 50,
         }
@@ -1155,6 +1157,8 @@ async def test_non_stream_audit_log_prefers_forwarded_request_body(monkeypatch, 
     assert bool(captured["client_request_body"]) is save_request_body
     assert captured["response_body"] == ('{"choices":[{"message":{"content":"ok"}}]}' if save_response_body else "")
     assert captured["converted"] == int(has_adapter)
+    assert captured["model_mismatch"] == 0  # 与出站上游名比较，而不是对外公开名
+    assert captured["upstream_model"] == "deployment-chat"
     assert "a@test.com" not in captured["request_body"]
 
 
@@ -1962,6 +1966,23 @@ async def test_list_models(monkeypatch):
     assert "gpt-4.1-mini" in model_ids
     # disabled key 的模型不出现
     assert len(data["data"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_key_mapping_public_catalog_and_invalid_update():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        alias = "mapped-deepseek"
+        resp = await client.post("/api/keys", json={"alias": alias, "provider": "deepseek",
+            "api_key": "test", "models": "deepseek-test>deepseek-v4.1-flash"})
+        assert resp.status_code == 200
+        for path in ("/v1/models", "/models?detail=basic"):
+            ids = [m["id"] for m in (await client.get(path)).json()["data"]]
+            assert ids == ["deepseek-test"]
+        resp = await client.put(f"/api/keys/{alias}", json={"provider": "openai", "models": "bad>"})
+        assert resp.status_code == 400
+        assert get_key(alias)["provider"] == "deepseek"
+        assert get_key(alias)["model_list"] == ["deepseek-test"]
 
 
 @pytest.mark.asyncio

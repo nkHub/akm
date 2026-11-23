@@ -573,6 +573,7 @@ async def _submit_agent_tool_audit(
         "provider": str(result.get("provider", "") or ""),
         "key_alias": str(result.get("key_alias", "") or ""),
         "model": model,
+        "upstream_model": str(result.get("upstream_model") or ""),
         "request_body": request_body_for_log,
         "response_body": response_body_for_log,
         "status_code": int(result.get("status_code", 0) or 0),

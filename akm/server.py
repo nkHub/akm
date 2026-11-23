@@ -29,6 +29,7 @@ from akm.key_pool import (
     set_priority, set_base_url, set_status, remove_key,
     set_provider, set_models, set_auth_header, set_provider_models, key_model_list,
     get_usage_query_config, set_usage_query_config, update_usage_data, _safe_json_parse,
+    _normalize_csv_models, resolve_upstream_model,
 )
 from akm.audit import (
     write_log_async,
@@ -401,12 +402,7 @@ def _has_active_key_for_image_model(model: str) -> bool:
 
 def _normalize_models_input(models: str) -> str:
     """规范模型输入，统一去除空白和多余逗号。"""
-    raw = str(models or "").strip()
-    if not raw:
-        return "*"
-    if raw == "*":
-        return "*"
-    return ",".join(m.strip() for m in raw.split(",") if m.strip())
+    return _normalize_csv_models(str(models or "").strip() or "*")
 
 
 def _parse_provider_model_ids(payload: dict) -> list[str]:
@@ -490,8 +486,6 @@ async def _resolve_key_save_payload(body: dict, existing: dict | None = None) ->
 
     if not alias or not provider or not api_key:
         raise ValueError("alias、provider、api_key 为必填项")
-    if models != "*" and any(part.strip() == "*" for part in models.split(",")):
-        raise ValueError("星号不能和自定义模型同时使用")
 
     if models == "*":
         provider_models = await _fetch_provider_models(provider, api_key, base_url, auth_header)
@@ -2394,7 +2388,7 @@ def _get_stats(days: int) -> dict:
         rows = conn.execute(
             """SELECT prompt_tokens, completion_tokens, total_tokens, cached_tokens,
                       cache_creation_tokens,
-                      provider, model, key_alias, timestamp, response_body, request_headers, status_code,
+                      provider, model, upstream_model, key_alias, timestamp, response_body, request_headers, status_code,
                       error, latency_ms
                FROM audit_logs
                WHERE timestamp >= datetime(date('now', 'localtime', ? || ' days'))
@@ -2571,7 +2565,7 @@ def _get_stats(days: int) -> dict:
         }
         if cost_enabled:
             row_cost, row_currency, row_cost_detail = estimate_row_cost_detail(
-                model=str(model or ""),
+                model=str(r.get("upstream_model") or model or ""),
                 prompt_tokens=int(p or 0),
                 completion_tokens=int(c or 0),
                 cached_tokens=int(cached or 0),
@@ -2766,7 +2760,7 @@ async def api_logs(
         log["net_prompt_tokens"] = max(0, p - cached)
         if cost_enabled:
             log["estimated_cost"], log["cost_currency"], log["cost_detail"] = estimate_row_cost_detail(
-                model=str(log.get("model") or ""),
+                model=str(log.get("upstream_model") or log.get("model") or ""),
                 prompt_tokens=int(p or 0),
                 completion_tokens=int(c or 0),
                 cached_tokens=int(cached or 0),
@@ -3357,8 +3351,9 @@ async def list_models(
             model_id = str(raw or "").strip()
             if not model_id or model_id in seen:
                 continue
-            meta = models_dev.model_meta(model_id) if full_detail else None
-            if want_chat and not models_dev.is_chat_capable(model_id, meta):
+            upstream_id = resolve_upstream_model(k, model_id)
+            meta = models_dev.model_meta(upstream_id) if full_detail else None
+            if want_chat and not models_dev.is_chat_capable(upstream_id, meta):
                 continue
             seen.add(model_id)
             item = {"id": model_id, "object": "model", "owned_by": provider_name}
@@ -3384,12 +3379,12 @@ async def list_models(
                 )
                 # 模型展示名优先用 models.dev 的 name（若有），这里从元数据里补
                 meta_name = meta.get("name")
-                if isinstance(meta_name, str) and meta_name.strip():
+                if model_id == upstream_id and isinstance(meta_name, str) and meta_name.strip():
                     item["name"] = meta_name.strip()
             # 单价：按三段式取（本供应商 → 官方兜底 → 无则不带 pricing 字段）
             found = models_dev.resolve_price(
                 provider_name,
-                model_id,
+                upstream_id,
                 official_fallback=official_fallback,
                 prefer_providers=prefer_providers or None,
             )
@@ -3581,6 +3576,7 @@ async def _handle_ai_request(request: Request, api_path: str):
             client_headers=dict(request.headers),
         )
         request_body_for_log = str(result.get("request_body_for_log", "") or "")
+        upstream_model = str(result.get("upstream_model") or "")
 
         # ── 503 无可用 key 时补充来源信息 ──
         if result["status_code"] == 503:
@@ -3937,7 +3933,8 @@ async def _handle_ai_request(request: Request, api_path: str):
                         "converted": 1 if adapter else 0,
                         # 换模型检测：从上游原始 SSE 里捕获的 model（不是转换后给客户端的）
                         "response_model": _stream_response_model,
-                        "model_mismatch": _is_model_mismatch(model, _stream_response_model),
+                        "upstream_model": upstream_model,
+                        "model_mismatch": _is_model_mismatch(upstream_model or model, _stream_response_model),
                     })
                     logger.info(f"[{key_alias}] {provider} model={model} → {status} {latency}ms (stream)")
 
@@ -4024,7 +4021,8 @@ async def _handle_ai_request(request: Request, api_path: str):
             "converted": 1 if result.get("adapter") else 0,
             # 换模型检测：上游原始响应里的 model + 三态标记（None=没取到）
             "response_model": _resp_model,
-            "model_mismatch": _is_model_mismatch(result["model"], _resp_model),
+            "upstream_model": upstream_model,
+            "model_mismatch": _is_model_mismatch(upstream_model or result["model"], _resp_model),
         })
 
         if result["key_alias"]:

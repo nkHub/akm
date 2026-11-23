@@ -1,6 +1,10 @@
 # 版本变更记录
 
 ## 未发布
+**Key 级模型映射（`对外名>上游名`）**：Key 管理页「模型」输入框现在支持 `deepseek-test>deepseek-v4.1-flash` 这种条目，逗号分隔可混用普通模型名。客户端在 `/v1/models` 只看到左侧公开名、也用公开名请求；选 Key 按公开名精确匹配，最终 Key 选定后才把出站请求的 `model` 换成该 Key 的上游名。同 Key 重试复用同一出站副本，换 Key 或 `fallback_router` 切换公开模型时重新解析，不把上游名写回插件上下文。`*` 仍是唯一通配写法，不能与自定义条目或映射混用；非法映射在写库前报错，不会部分更新 Key。
+**审计与费用口径**：`audit_logs` 新增 `upstream_model` 列（启动时自动加列，老库无需迁移），记录请求当时实际发出的模型名；换模型检测改为与它比较，映射到不同上游名不再被误报为「上游偷换模型」；费用统计优先用它取价，关闭请求体日志或日后改映射都不影响历史估价，旧记录回退按原 `model` 计算。
+**验证**：全量 `pytest -q` **1498 passed**；新增用例覆盖模型列表只出现公开名、非法更新返回 400 且原 Key 不变、同 Key 重试/跨 Key/跨模型 fallback 各自解析、协议转换与 multipart 实际报文、连通性测试、审计 `model_mismatch` 用出站名比较。本轮另用 `./scripts/build_app.sh` 打出本地验证包 `dist/AI Key Manager.app`（0.1.57，`fastapi 0.142.4` 断言与 `codesign --verify --deep --strict` 均通过，签名身份 `AKM Local Signing`，70MB），并从包内 `Resources/lib/python3.12` 直接加载 `akm.key_pool` 校验解析、公开名列表与上游名结果；**未 bump 版本、未安装替换 `/Applications`、未生成 DMG/zip、未提交**。
+**已知边界**：全局 `model_matcher` 的别名目标和 `fallback_router` 备用模型应写可路由的公开名；按模型名匹配的插件使用钩子执行时的路由名，读取上游请求/响应的插件可能看到真实上游名；另一把 Key 若单独公开同一上游名，`/v1/models` 仍会列出它。
 **dafeiyu 动画资源迁入 Git LFS**：`plugins/dafeiyu/assets/**/*.webp` 共 3444 个文件、约 53MB，此前以普通 blob 直接躺在 git 历史里，仓库体积被动画帧撑大且每次 clone 都要拉全量二进制。
 **做法**：新增 `.gitattributes` 声明 `filter=lfs diff=lfs merge=lfs -text`，再用 `git lfs migrate import --include="plugins/dafeiyu/assets/**/*.webp" --include-ref=refs/heads/main` 改写 main 全历史（521 个提交），webp 从历史中彻底退出，历史最大 blob 由 12MB 级降为 3.0MB 的 `logo.png`。
 **只迁移 main**：`--include-ref` 限定单分支，未用 `--everything`。19 个 `flow/*`、`backup/*`、`chore/*` 分支仍持有旧 blob，需要时单独迁移。

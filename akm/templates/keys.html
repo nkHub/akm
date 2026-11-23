@@ -24,9 +24,9 @@
     <div><label class="block text-xs text-gray-400 mb-1">API Key *</label><div class="relative"><input id="key-apikey" required type="password" class="w-full bg-surface border border-border rounded px-3 py-2 pr-10 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="sk-..."><button type="button" onclick="var e=document.getElementById('key-apikey');e.type=e.type==='password'?'text':'password';" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 cursor-pointer"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg></button></div></div>
     <div><label class="block text-xs text-gray-400 mb-1">Base URL</label><input id="key-baseurl" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 placeholder-gray-600" placeholder="留空使用默认地址"></div>
     <div>
-      <label class="block text-xs text-gray-400 mb-1">模型（逗号分隔，* 表示自动同步提供商模型列表）</label>
-      <input id="key-models" value="*" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
-      <p class="mt-1 text-[11px] text-gray-500">仅当填写 <code>*</code> 时，保存才会自动拉取 <code>{base_url}/models</code>。星号不能和自定义模型同时使用。</p>
+      <label for="key-models" class="block text-xs text-gray-400 mb-1">模型（多个条目用英文逗号分隔）</label>
+      <input id="key-models" name="models" value="*" aria-describedby="key-models-help" autocorrect="off" autocapitalize="none" spellcheck="false" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+      <p id="key-models-help" class="mt-1 text-[11px] text-gray-500">可填模型名，或填 <code>对外名&gt;上游名</code>，例如 <code>deepseek-test&gt;deepseek-v4.1-flash</code>。客户端只看到并请求左侧名称。单独填 <code>*</code> 时自动同步提供商模型列表，不能与其他条目混用。</p>
     </div>
     <div><label class="block text-xs text-gray-400 mb-1">优先级（越小越优先）</label><input id="key-priority" type="number" value="0" min="0" max="999" class="w-full bg-surface border border-border rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500"></div>
   </form>

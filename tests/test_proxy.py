@@ -903,6 +903,7 @@ async def test_forward_messages_converter_receives_provider_context(monkeypatch)
 
         def convert_request(self, body):
             out = dict(body)
+            assert body["model"] == "deployment-chat"
             out["provider_seen"] = self.provider
             return out
 
@@ -925,6 +926,7 @@ async def test_forward_messages_converter_receives_provider_context(monkeypatch)
         "alias": "k1",
         "provider": "openai",
         "api_key": "sk-openai",
+        "models": "gpt-5>deployment-chat",
         "base_url": "https://api.openai.com",
     }))
 
@@ -940,6 +942,8 @@ async def test_forward_messages_converter_receives_provider_context(monkeypatch)
 
     assert result["status_code"] == 200
     payload = send_calls[0]["req"].content.decode("utf-8")
+    assert result["model"] == "gpt-5"
+    assert json.loads(payload)["model"] == "deployment-chat"
     assert '"provider_seen":"openai"' in payload
     assert json.loads(result["request_body_for_log"]) == json.loads(payload)
 
@@ -1241,6 +1245,7 @@ async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatc
     monkeypatch.setattr("akm.proxy.pick_key_async", AsyncMock(return_value={
         "alias": "image", "provider": "openai", "api_key": "__AKM_CREDENTIAL_VALUE_63353636d4c9__",
         "base_url": "https://api.openai.com",
+        "models": "gpt-image-2>deployment-image",
     }))
 
     class DummyPM:
@@ -1253,11 +1258,12 @@ async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatc
     mock_client = AsyncMock()
     send_calls = _make_send_mock(mock_client, [FakeStreamResponse(200, '{"created":123,"data":[{"b64_json":"abc"}]}')])
 
+    fields = {"model": "gpt-image-2", "prompt": "edit it"}
     result = await forward_request(
         body={
             "model": "gpt-image-2",
             "__akm_multipart__": True,
-            "__akm_form_fields__": {"model": "gpt-image-2", "prompt": "edit it"},
+            "__akm_form_fields__": fields,
             "__akm_form_files__": {"image": ("cat.png", b"fake-bytes", "image/png")},
         },
         client=mock_client,
@@ -1272,6 +1278,13 @@ async def test_forward_image_edits_request_uses_multipart_passthrough(monkeypatc
     assert req.headers["User-Agent"] == f"akm/{__version__}"
     body = b"".join(req.stream)
     assert b"filename=\"cat.png\"" in body
+    assert b'name="model"\r\n\r\ndeployment-image\r\n' in body
+    assert b"fake-bytes" in body
+    assert fields["model"] == result["model"] == "gpt-image-2"
+    snapshot = json.loads(result["request_body_for_log"])
+    assert snapshot["model"] == "deployment-image"
+    assert snapshot["__akm_files__"]["image"] == {"filename": "cat.png", "content_type": "image/png"}
+    assert "fake-bytes" not in result["request_body_for_log"]
 
 
 @pytest.mark.asyncio
@@ -1568,6 +1581,7 @@ async def test_test_key_connectivity_uses_configured_outbound_proxy(monkeypatch)
 async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch):
     """显式开启 fallback 后，openai 类 key 可从 chat/completions 回退到 responses。"""
 
+    sent_models = []
     responses = [
         FakeTestResponse(404, '{"error":{"message":"not found"}}'),
         FakeTestResponse(200, '{"id":"ok"}'),
@@ -1583,6 +1597,7 @@ async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch)
             return False
 
         async def post(self, url, json=None, headers=None, timeout=None):
+            sent_models.append(json["model"])
             return responses.pop(0)
 
     monkeypatch.setattr("akm.proxy.httpx.AsyncClient", DummyAsyncClient)
@@ -1592,13 +1607,16 @@ async def test_test_key_connectivity_openai_falls_back_when_enabled(monkeypatch)
         "provider": "openai",
         "api_key": "sk-test",
         "base_url": "https://example.com",
-        "models": "gpt-5.4",
+        "models": "gpt-5.4>deployment-chat",
     }, allow_fallback=True)
 
     assert result["ok"] is True
     assert result["api_path"] == "responses"
     assert result["attempted_paths"] == ["chat/completions", "responses"]
     assert result["fallback_used"] is True
+    assert result["model"] == "gpt-5.4"
+    assert result["upstream_model"] == "deployment-chat"
+    assert sent_models == ["deployment-chat", "deployment-chat"]
 
 
 @pytest.mark.asyncio
@@ -2429,3 +2447,52 @@ async def test_test_key_connectivity_without_models_and_model_reports_error(monk
     )
     assert result["ok"] is False
     assert "没有可用模型列表" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True], ids=["switch-key", "switch-model"])
+async def test_forward_per_key_mapping_isolated_across_hooks_and_retries(monkeypatch, fallback):
+    """同 Key 重试复用出站名，换 Key 或降级模型则从公开名重新解析。"""
+    base = {"provider": "openai", "api_key": "test", "base_url": "https://example.com"}
+    candidate = {**base, "alias": "candidate", "models": "public>unused"}
+    final = {**base, "alias": "first", "models": "public>first-id,first-id>wrong"}
+    next_model = "backup" if fallback else "public"
+    second = {**base, "alias": "second", "models": f"{next_model}>second-id"}
+    pick = AsyncMock(side_effect=[candidate, second])
+    monkeypatch.setattr("akm.proxy.pick_key_async", pick)
+    monkeypatch.setattr("akm.proxy._proxy_max_retries_per_key", lambda: 1)
+    monkeypatch.setattr("akm.proxy._proxy_retry_backoff_base", lambda: 0)
+    hook_models = []
+
+    async def run_hook(hook, ctx, **kwargs):
+        if hook == "on_request":
+            ctx.set_request({**ctx.request, "model": "public"})
+        elif hook == "on_key_selected" and ctx.key == candidate:
+            ctx.key = final
+        elif hook == "on_upstream_error":
+            hook_models.append((ctx.model, ctx.request["model"]))
+            if kwargs["attempt"] == 0:
+                return "retry"
+            if fallback:
+                ctx.request["model"] = next_model
+                ctx.sync_model_from_request()
+                return "fallback"
+            return "switch"
+
+    client = AsyncMock()
+    sends = _make_send_mock(client, [FakeStreamResponse(code) for code in (503, 503, 200)])
+    body = {"model": "client-alias", "stream": True, "stream_options": {"include_usage": False}}
+    failed = []
+    pm = MagicMock(run_hook=run_hook)
+    result = await forward_request(body, client, log_callback=failed.append, plugin_manager=pm)
+
+    assert result["status_code"] == 200
+    assert [call.args for call in pick.await_args_list] == [("public", []), (next_model, [] if fallback else ["first"])]
+    assert hook_models == [("public", "public")] * 2
+    expected = ["first-id", "first-id", "second-id"]
+    assert [json.loads(call["req"].content)["model"] for call in sends] == expected
+    assert [attempt["upstream_model"] for attempt in result["attempts"]] == expected
+    assert result["model"] == result["request_context"].request["model"] == next_model
+    assert body == {"model": "client-alias", "stream": True, "stream_options": {"include_usage": False}}
+    assert failed[0]["model"] == "public"
+    assert json.loads(failed[0]["request_body"])["model"] == "first-id"

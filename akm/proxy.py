@@ -14,6 +14,7 @@ from akm.key_pool import (
     mark_rate_limited,
     set_status,
     key_model_list,
+    resolve_upstream_model,
 )
 from akm.db import get_connection, get_keys_log_path
 from akm.agent import BUILTIN_AGENTS, get_agent
@@ -398,6 +399,8 @@ async def forward_request(
             "latency_ms": int(meta.get("latency_ms", 0) or 0),
             "attempt": int(meta.get("attempt", 0) or 0),
         }
+        if "upstream_model" in meta:
+            entry["upstream_model"] = meta["upstream_model"]
         is_ok = bool(meta.get("ok", False))
         if is_ok:
             # 成功尝试不记录返回内容（上游正常响应已在其他 tab 展示，避免重复）
@@ -733,9 +736,14 @@ async def forward_request(
         # 插件跨阶段状态已迁入 RequestContext.bag，不再挂在 body 上。
         # 仍剥离遗留 __akm_* 字段，防止 multipart 传输标记或旧插件字段误入上游。
         forwardable_body = ctx.forwardable_request()
-        upstream_body = adapter.convert_request(forwardable_body) if adapter else dict(forwardable_body)
+        # 只在最终 Key 的出站副本上解析一次；插件和下一轮选 Key 继续使用公开名。
+        upstream_model = resolve_upstream_model(key, model)
+        forwardable_body["model"] = upstream_model
+        upstream_body = adapter.convert_request(forwardable_body) if adapter else forwardable_body
 
         if is_multipart_request:
+            # 表单字段来自 ctx.request 的嵌套字典，不能原地改写；文件保持原样。
+            multipart_fields = {**(multipart_fields or {}), "model": upstream_model}
             # multipart 由 httpx 自动生成 boundary；若保留 application/json 或裸 multipart/form-data，
             # 上游通常会因为缺失 boundary 直接 400，因此这里显式移除 Content-Type，交给 httpx 处理。
             headers.pop("Content-Type", None)
@@ -765,7 +773,7 @@ async def forward_request(
         if client_wants_stream and upstream_api_path == "chat/completions":
             stream_options = upstream_body.get("stream_options")
             if isinstance(stream_options, dict):
-                stream_options["include_usage"] = True
+                upstream_body["stream_options"] = {**stream_options, "include_usage": True}
             else:
                 upstream_body["stream_options"] = {"include_usage": True}
 
@@ -817,6 +825,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     "latency_ms": int((time.time() - t0) * 1000),
                     "error": error_msg,
                     "error_type": "timeout",
@@ -842,6 +851,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     "latency_ms": int((time.time() - t0) * 1000),
                     "error": str(e),
                     "error_type": error_type,
@@ -863,6 +873,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     "latency_ms": int((time.time() - t0) * 1000),
                     "error": str(e),
                     "error_type": "unknown",
@@ -929,6 +940,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     "latency_ms": int((time.time() - t0) * 1000),
                     "error": last_error,
                     "error_type": "http",
@@ -982,6 +994,7 @@ async def forward_request(
                             "key_alias": key["alias"],
                             "provider": key["provider"],
                             "model": model,
+                            "upstream_model": upstream_model,
                             "latency_ms": int((time.time() - t0) * 1000),
                             "error": last_error,
                             "error_type": "first_byte_timeout",
@@ -1010,6 +1023,7 @@ async def forward_request(
                             "key_alias": key["alias"],
                             "provider": key["provider"],
                             "model": model,
+                            "upstream_model": upstream_model,
                             "latency_ms": int((time.time() - t0) * 1000),
                             "error": last_error,
                             "error_type": "first_byte_error",
@@ -1041,6 +1055,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     "latency_ms": latency,
                     "error": "",
                     "attempt": attempt,
@@ -1062,6 +1077,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     # 延迟随结果回传：调用方（如 agent 运行时直接调 forward_request）需要它
                     # 写入审计日志的 latency_ms 列；此前该键缺失导致这类记录恒为 0ms。
                     "latency_ms": latency,
@@ -1084,6 +1100,7 @@ async def forward_request(
                     "key_alias": key["alias"],
                     "provider": key["provider"],
                     "model": model,
+                    "upstream_model": upstream_model,
                     "latency_ms": int((time.time() - t0) * 1000),
                     "error": last_error,
                     "error_type": "read",
@@ -1112,6 +1129,7 @@ async def forward_request(
                 "key_alias": key["alias"],
                 "provider": key["provider"],
                 "model": model,
+                "upstream_model": upstream_model,
                 "latency_ms": latency,
                 "error": "",
                 "attempt": attempt,
@@ -1132,12 +1150,24 @@ async def forward_request(
                 "key_alias": key["alias"],
                 "provider": key["provider"],
                 "model": model,
+                "upstream_model": upstream_model,
                 "error": response_meta.get("error", "") if isinstance(response_meta, dict) else "",
                 "latency_ms": latency,
                 "attempts": attempts,
             }
 
-        # 当前 key 彻底失败，日志回调记录失败尝试
+        # 在 fallback_router 的目标模型生效前，按刚刚失败的公开名和实际出站快照记账。
+        if log_callback:
+            log_callback({
+                "provider": key["provider"],
+                "key_alias": key["alias"],
+                "model": model,
+                "request_body": forwarded_request_body,
+                "response_body": "",
+                "status_code": 0,
+                "latency_ms": 0,
+                "error": last_error,
+            })
 
         # fallback_router 在 on_upstream_error 中改写 ctx.request.model 并返回
         # fallback。这里从 ctx 同步模型，使下一轮从目标模型重新选 Key。
@@ -1149,19 +1179,6 @@ async def forward_request(
             tried_aliases.clear()
             use_fallback = False
             selection_skip_reason = ""
-
-        # 当前 key 彻底失败，日志回调记录失败尝试
-        if log_callback:
-            log_callback({
-                "provider": key["provider"],
-                "key_alias": key["alias"],
-                "model": model,
-                "request_body": json.dumps(forwardable_body, ensure_ascii=False),
-                "response_body": "",
-                "status_code": 0,
-                "latency_ms": 0,
-                "error": last_error,
-            })
 
     # exhausted 兜底的本地合成 502 不进入 attempts：它没有真实 Key，
     # 与「逐次尝试」语义不符（各 Key 的失败已在前面逐条记录）
@@ -1227,6 +1244,7 @@ async def test_key_connectivity(
             "fallback_used": False,
         }
     model = explicit_model or str(resolved_models[0] or "").strip()
+    upstream_model = resolve_upstream_model(key, model)
 
     is_custom_agent = agent.name not in BUILTIN_AGENTS
     if is_custom_agent:
@@ -1276,18 +1294,18 @@ async def test_key_connectivity(
     def _make_body(api_path: str) -> dict:
         if api_path == "responses":
             return {
-                "model": model,
+                "model": upstream_model,
                 "input": "hi",
                 "max_output_tokens": 16,
             }
         if api_path == "messages":
             return {
-                "model": model,
+                "model": upstream_model,
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_tokens": 1,
             }
         return {
-            "model": model,
+            "model": upstream_model,
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 1,
         }
@@ -1297,6 +1315,7 @@ async def test_key_connectivity(
             "ok": False,
             "url": url,
             "model": model,
+            "upstream_model": upstream_model,
             "api_path": api_path,
             "status_code": 0,
             "latency_ms": 0,

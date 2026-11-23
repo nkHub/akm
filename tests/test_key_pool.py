@@ -10,6 +10,8 @@ from akm.key_pool import (
     set_status,
     mark_rate_limited,
     pick_key,
+    resolve_upstream_model,
+    set_models,
 )
 
 
@@ -148,6 +150,49 @@ def test_pick_key_prefers_exact_match_before_wildcard_provider_models(setup):
     key = pick_key(model="gpt-4")
     assert key is not None
     assert key["alias"] == "exact"
+
+
+def test_public_models_are_key_specific_and_upstream_names_are_private(setup):
+    add_key("first", "openai", "sk-a", models=" chat > vendor/a, plain, ,chat>vendor/a ")
+    add_key("second", "openai", "sk-b", models="chat>vendor/b", priority=1)
+    first = pick_key("chat")
+    assert first["alias"] == "first"
+    assert get_key("first")["model_list"] == ["chat", "plain"]
+    assert resolve_upstream_model(first, "chat") == "vendor/a"
+    assert pick_key("plain")["alias"] == "first"
+    assert resolve_upstream_model(first, "plain") == "plain"
+    assert resolve_upstream_model(first, " unknown ") == " unknown "
+    assert pick_key("vendor/a") is None
+    assert pick_key("chat>vendor/a") is None
+    second = pick_key("chat", exclude_aliases=["first"])
+    assert resolve_upstream_model(second, "chat") == "vendor/b"
+
+
+def test_set_models_switches_between_wildcard_and_public_names(setup):
+    add_key("k", "openai", "sk-a", provider_models=["vendor/a"])
+    set_models("k", "chat>vendor/a,other>vendor/a")
+    assert get_key("k")["model_list"] == ["chat", "other"]
+    assert resolve_upstream_model(pick_key("other"), "other") == "vendor/a"
+    assert pick_key("vendor/a") is None
+    set_models("k", " * ")
+    assert pick_key("chat") is None
+    assert get_key("k")["model_list"] == ["vendor/a"]
+    assert resolve_upstream_model(pick_key("vendor/a"), "vendor/a") == "vendor/a"
+
+
+@pytest.mark.parametrize(("models", "error"), [
+    (">up", "公开名>上游名"), ("pub> ", "公开名>上游名"), ("a>b>c", "公开名>上游名"),
+    ("*,plain", "通配"), ("a>b,*", "通配"), ("*>up", "通配"), ("pub>*", "通配"),
+    ("chat,chat>up", "公开名.*chat.*冲突"), ("chat>a,chat>b", "公开名.*chat.*冲突"),
+])
+def test_invalid_models_rejected_before_writing(setup, models, error):
+    with pytest.raises(ValueError, match=error):
+        add_key("new", "openai", "sk-a", models=models)
+    assert get_key("new") is None
+    add_key("old", "openai", "sk-b", models="plain")
+    with pytest.raises(ValueError, match=error):
+        set_models("old", models)
+    assert get_key("old")["models"] == "plain"
 
 
 # ── 用量查询：开关与自动查询间隔解耦 ────────────────────────

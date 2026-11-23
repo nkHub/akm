@@ -93,13 +93,37 @@ def get_default_usage_script(provider: str = "") -> str:
     return _PROVIDER_SCRIPTS.get(provider_lower, DEFAULT_USAGE_QUERY_SCRIPT)
 
 
+def _parse_model_map(models: str) -> dict[str, str]:
+    """解析 models 配置；保留公开名的输入顺序，空项沿用旧 CSV 规则忽略。"""
+    entries = [s.strip() for s in (models or "").split(",") if s.strip()]
+    result = {}
+    for entry in entries:
+        public, sep, upstream = entry.partition(">")
+        public = public.strip()
+        upstream = upstream.strip() if sep else public
+        if not public or not upstream or ">" in upstream:
+            raise ValueError(f"无效模型映射 {entry!r}，格式应为 公开名>上游名")
+        if "*" in (public, upstream) and (sep or len(entries) != 1):
+            raise ValueError("星号不能和自定义模型同时使用；通配符 '*' 不能参与映射")
+        if public in result and result[public] != upstream:
+            raise ValueError(f"公开名 {public!r} 的上游名冲突：{result[public]!r} 与 {upstream!r}")
+        result[public] = upstream
+    return result
+
+
 def _normalize_csv_models(models: str) -> str:
-    """规范逗号分隔模型串，避免因空格或空项导致匹配不一致。"""
-    if not models:
-        return ""
-    if models == "*":
-        return "*"
-    return ",".join(m.strip() for m in models.split(",") if m.strip())
+    return ",".join(
+        public if public == upstream else f"{public}>{upstream}"
+        for public, upstream in _parse_model_map(models).items()
+    )
+
+
+def _stored_model_map(models: str) -> dict[str, str]:
+    # 写入严格校验；历史配置若有歧义，不参与路由，也不阻断其他 key 的读取。
+    try:
+        return _parse_model_map(models)
+    except ValueError:
+        return {}
 
 
 def _normalize_provider_models(provider_models) -> str:
@@ -150,7 +174,7 @@ def key_model_list(key: dict) -> list[str]:
 
     规则：
     1. `models='*'` 时，返回已同步的 provider_models。
-    2. `models` 为显式逗号分隔串时，返回切分后的模型列表。
+    2. `models` 为显式逗号分隔串时，只返回公开名，不暴露映射目标。
     3. 其他异常/空值场景返回空数组，避免调用侧再写分支判断。
     """
     if not isinstance(key, dict):
@@ -163,9 +187,17 @@ def key_model_list(key: dict) -> list[str]:
         if isinstance(provider_models, list):
             return [str(item).strip() for item in provider_models if str(item).strip()]
         return _provider_models_list(provider_models)
-    if models != "*":
-        return [m.strip() for m in models.split(",") if m.strip()]
-    return []
+    return list(_stored_model_map(models))
+
+
+def resolve_upstream_model(key: dict, model: str) -> str:
+    """按选中的 key 解析一次映射；通配、普通名和未配置的模型均原样返回。"""
+    models = str(key.get("models") or "").strip()
+    if ">" not in models:
+        return model
+    public = model.strip()
+    upstream = _stored_model_map(models).get(public, public)
+    return upstream if upstream != public else model
 
 
 def _key_matches_model(row: dict, model: str) -> bool:
@@ -476,7 +508,7 @@ def pick_key(model: str, exclude_aliases: list[str] | None = None) -> dict | Non
     """根据 model 名选择优先级最高的可用 key
 
     匹配规则：
-    1. key 的 models 字段包含该 model（精确匹配），或 models 为 '*'
+    1. 精确匹配公开名，显式配置优先于 '*' 的 provider_models 清单
     2. status 为 'active'
     3. 按 priority ASC 排序，取第一个
     4. exclude_aliases 中的 alias 将被排除

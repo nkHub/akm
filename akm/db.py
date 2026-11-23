@@ -75,6 +75,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             -- 换模型检测：上游实际返回的 model 与请求 model 是否一致
             -- response_model：上游原始响应里的 model 名（未取到为空串）
             -- model_mismatch：NULL=没取到，0=一致，1=被换（三态必须区分，未知不能当干净）
+            upstream_model  TEXT DEFAULT '',
             response_model  TEXT DEFAULT '',
             model_mismatch  INTEGER
         );
@@ -179,6 +180,11 @@ def _migrate_audit_columns(conn: sqlite3.Connection) -> None:
     # audit_logs 表 — 协议转换标记列（converted：1=发生转换，0=明确未转换，NULL=旧数据未打标）
     try:
         conn.execute("ALTER TABLE audit_logs ADD COLUMN converted INTEGER")
+    except sqlite3.OperationalError:
+        pass
+    # 持久化请求当时实际发出的模型，而不是日后按可能已变更的 Key 配置推断。
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN upstream_model TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
     # audit_logs 表 — 换模型检测列
