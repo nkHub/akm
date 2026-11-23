@@ -13,9 +13,10 @@
 - ask_kb：POST /api/markdown-kb/ask 的基于知识库问答。
 
 另有文档维护类工具（list_kb_files / read_kb_file / write_kb_file / delete_kb_file /
-rebuild_kb / rebuild_kb_file / bind_kb_workspace / sync_kb / clear_kb / learn_kb /
+rebuild_kb_file / bind_kb_workspace / sync_kb / clear_kb / learn_kb /
 scan_kb_sessions / kb_status），其中 read_kb_file 读取单个知识条目的全文，
 write_kb_file 按文本写入/覆盖文档（写入后需重建索引）。
+全量重建刻意不暴露给 MCP：文档多时整库重建既慢又费 token，统一留给插件配置页人工触发。
 
 实现采用无状态会话（每次请求独立处理，不依赖 Mcp-Session-Id），MCP 客户端
 在 protocolVersion 2025-06-18 下可正常使用。工具内部通过 AKM 自身的 HTTP
@@ -177,12 +178,6 @@ _MAINT_SPECS: list[dict[str, Any]] = [
         "endpoint": "files/delete",
     },
     {
-        "name": "rebuild_kb",
-        "description": "全量重建知识库索引（重新切片并向量化所有文档）",
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "endpoint": "rebuild",
-    },
-    {
         "name": "rebuild_kb_file",
         "description": "只重建单个 Markdown 文件的索引",
         "inputSchema": {
@@ -285,7 +280,7 @@ _MAINT_SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "write_kb_file",
-        "description": "按文本内容写入（新建或覆盖）单个 Markdown 知识条目；写入后需调用 rebuild_kb_file 或 rebuild_kb 重建索引才会被检索到",
+        "description": "按文本内容写入（新建或覆盖）单个 Markdown 知识条目；写入后需调用 rebuild_kb_file 重建索引才会被检索到",
         "inputSchema": {
             "type": "object",
             "properties": {

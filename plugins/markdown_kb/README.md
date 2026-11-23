@@ -175,11 +175,10 @@ flowchart LR
 |------|------|------|
 | `list_kb_files` | `workspace_root`（可选） | 调用 `GET /api/markdown-kb/files`，列出已入库文档。传 `workspace_root` 时只返回绑定到该目录的文档 |
 | `read_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `GET /api/markdown-kb/files/{name}`，读取单个文档全文，便于「读→改→重建」闭环的读取端。`file_name` 传相对或绝对路径时按 basename 取（与插件侧 `Path(file_name).name` 同口径），避免路径里的斜杠把 URL 撑成多段而 404 |
-| `write_kb_file` | `file_name`（必填）、`content`（必填）、`workspace_root` | 调用 `POST /api/markdown-kb/files/write`，按 JSON 文本写入 / 覆盖文档（复用 upload 落盘语义，写入后需 `rebuild_kb` / `rebuild_kb_file` 重建索引才可被检索） |
+| `write_kb_file` | `file_name`（必填）、`content`（必填）、`workspace_root` | 调用 `POST /api/markdown-kb/files/write`，按 JSON 文本写入 / 覆盖文档（复用 upload 落盘语义，写入后需 `rebuild_kb_file` 重建索引才可被检索） |
 | `kb_status` | — | 调用 `GET /api/markdown-kb/status`，查看索引与 vec 状态 |
 | `bind_kb_workspace` | `file_name`（必填）、`workspace_root`（必填）、`doc_id` | 调用 `POST /api/markdown-kb/files/bind-workspace`，为文档绑定工作目录 |
 | `delete_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `POST /api/markdown-kb/files/delete`，删除文档 |
-| `rebuild_kb` | — | 调用 `POST /api/markdown-kb/rebuild`，全量重建索引 |
 | `rebuild_kb_file` | `file_name`（必填）、`workspace_root`、`doc_id` | 调用 `POST /api/markdown-kb/rebuild-file`，重建单个文档索引 |
 | `clear_kb` | `delete_docs`（bool，默认 true） | 调用 `POST /api/markdown-kb/clear`，清空索引（可同时删除文档） |
 | `sync_kb` | `apply`（bool） | 调用 `POST /api/markdown-kb/sync`，按 docs 目录做增量同步 |

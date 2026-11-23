@@ -96,7 +96,6 @@ async def test_mcp_tools_list(monkeypatch):
         "kb_status",
         "bind_kb_workspace",
         "delete_kb_file",
-        "rebuild_kb",
         "rebuild_kb_file",
         "clear_kb",
         "sync_kb",
@@ -528,7 +527,7 @@ async def test_mcp_maintenance_ok_false_raises(monkeypatch):
         resp = await _rpc(
             client,
             "tools/call",
-            {"name": "rebuild_kb", "arguments": {}},
+            {"name": "clear_kb", "arguments": {}},
         )
     assert resp.status_code == 200
     err = resp.json()["error"]
