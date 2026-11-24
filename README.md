@@ -2,7 +2,7 @@
 
 本地 AI API Key 管理代理服务。集中管理多个 AI 供应商的 API Key，自动根据优先级选择可用 Key，支持故障切换、请求代理转发及完整审计日志。
 
-当前版本 **v0.1.57**：费用估算接入 models.dev 目录、Agent 工作区读写工具对齐参考实现并修复四个回归、工具按需加载网关，以及审计聚合索引与连接归还保护等一批性能与工程化收敛。详细变更见 [docs/logs.md](docs/logs.md)。
+当前版本 **v0.1.57**：费用估算接入 models.dev 目录、Agent 工作区读写工具对齐参考实现并修复四个回归、工具按需加载网关（文件工具改为折叠，联网与图片保留直连）、Agent 接入 Skill（索引常驻 + `akm_load_skill` 按需取正文）与 MCP 代理工具（`akm_load_mcp`）、敏感目录整体拦截与 MCP 会话/缓存修复，以及审计聚合索引与连接归还保护等一批性能与工程化收敛。详细变更见 [docs/logs.md](docs/logs.md)。
 
 版本变更历史见 [docs/logs.md](docs/logs.md)；版本号与打包规范见 [docs/release-guide.md](docs/release-guide.md)。
 

@@ -107,6 +107,11 @@ DEFAULTS = {
     "agent_tool_retry_max_retries": 1,  # Agent 工具失败后的最大自愈修正轮次（0 关闭：失败结果照常回传，模型自主决定）
     "agent_tool_gateway_enabled": True,  # 工具按需加载：注册工具数超过阈值时，只下发常用工具 + akm_list_tools/akm_call_tool 两个网关工具（默认开启，设 false 回到全量下发）
     "agent_tool_gateway_threshold": 10,  # 工具按需加载的触发阈值：本次可下发的服务端工具数大于该值时才折叠（1~100）
+    "agent_skills_dir": "~/.agents/skills",  # Agent Skill 目录：其下每个子目录放一份 SKILL.md；索引注入系统提示，正文由 akm_load_skill 按需读取；留空关闭该能力
+    "agent_mcp_enabled": False,          # 是否把 akm_load_mcp 注册为主 Agent 工具（默认关闭：MCP 服务器能绕过写/shell 等全部安全开关，必须显式启用）
+    "agent_mcp_config_path": "~/.pi/agent/mcp.json",  # MCP 服务器配置（mcpServers 格式）；与 PI 等客户端共用，留空关闭
+    "agent_mcp_allowed_servers": "",     # MCP 服务器白名单（逗号分隔）；留空表示不额外限制，仅由 agent_mcp_enabled 把关
+    "agent_mcp_timeout_sec": 60,         # MCP 单次请求超时（秒）；stdio 服务器首次启动可能拉包，留宽
     "agent_api_token": "",              # /v1/agent 请求鉴权 token（Bearer）；留空表示不校验
     "agent_default_instructions": (
         "数学公式请使用 KaTeX 语法返回：行内公式用 \\(...\\)，"
@@ -165,6 +170,11 @@ AGENT_GROUP_KEYS: list[str] = [
     "agent_tool_retry_max_retries",
     "agent_tool_gateway_enabled",
     "agent_tool_gateway_threshold",
+    "agent_skills_dir",
+    "agent_mcp_enabled",
+    "agent_mcp_config_path",
+    "agent_mcp_allowed_servers",
+    "agent_mcp_timeout_sec",
     "agent_api_token",
     "agent_default_instructions",
     "tavily_api_key",
@@ -340,6 +350,9 @@ def load_config() -> dict:
     # 防止非法值把「折叠」变成恒定行为或彻底失效。
     merged["agent_tool_gateway_enabled"] = merged.get("agent_tool_gateway_enabled") is not False
     merged["agent_tool_gateway_threshold"] = max(1, min(100, _safe_int(merged.get("agent_tool_gateway_threshold"), 10)))
+    # MCP：默认关闭（能绕过写/shell 沙箱，必须显式启用）；超时夹到 5~600 秒
+    merged["agent_mcp_enabled"] = merged.get("agent_mcp_enabled") is True
+    merged["agent_mcp_timeout_sec"] = max(5, min(600, _safe_int(merged.get("agent_mcp_timeout_sec"), 60)))
     # Key 管理
     merged["rate_limit_cooldown_sec"] = max(1, int(merged.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列
@@ -426,6 +439,8 @@ def save_config(data: dict) -> None:
     current["agent_tool_retry_max_retries"] = max(0, _safe_int(current.get("agent_tool_retry_max_retries"), 1))
     current["agent_tool_gateway_enabled"] = current.get("agent_tool_gateway_enabled") is not False
     current["agent_tool_gateway_threshold"] = max(1, min(100, _safe_int(current.get("agent_tool_gateway_threshold"), 10)))
+    current["agent_mcp_enabled"] = current.get("agent_mcp_enabled") is True
+    current["agent_mcp_timeout_sec"] = max(5, min(600, _safe_int(current.get("agent_mcp_timeout_sec"), 60)))
     # Key 管理
     current["rate_limit_cooldown_sec"] = max(1, int(current.get("rate_limit_cooldown_sec", 60) or 60))
     # 审计队列

@@ -25,6 +25,58 @@ AKM `/v1/agent` 的 Web 聊天界面（AetherAI 对话窗口）。构建产物�
 | `route_prefix` | string | `/chat` | 聊天界面挂载路径。不能使用 `/`、`/api`、`/v1`、`/admin`、`/health`、`/debug`。修改后需重启服务 |
 | `spa_fallback` | boolean | `true` | 将不存在的无扩展名路径回退到 `index.html`。聊天界面为单页应用，建议保持开启 |
 
+## Skill 按需加载
+
+界面本身不需要为 skill 做任何事——它是服务端能力，启用 `agent_chat` 后自动生效。
+
+- **索引常驻**：服务端把 `agent_skills_dir`（默认 `~/.agents/skills`）下每个 skill 的
+  「名字 + 一句话描述」并进 system 提示，约 1.5k token；**正文不常驻**——本机 17 个
+  skill 全文约 55k token，是全部内置工具声明的十倍。
+- **按需取正文**：模型判断任务匹配后调 `akm_load_skill`，正文以工具结果形式进入
+ 上下文。正文很长时用 `section` 参数只取一节（如 `section="audit"`），标题匹配不到
+ 时会按文件名到 `references/`、`scripts/` 等附属目录里找。不传 `name`（或传空串）
+ 返回全部 skill 的清单，与 `akm_load_mcp` 不传 `server` 同构：三个入口统一成
+  「不传参 = 列清单，传参 = 取详情」；它只用于长对话里忘了索引内容时自查。
+- **脚本可运行**：skill 里带的 Python / Bash / 二进制脚本通过 `akm_run_shell` 执行
+  （传绝对路径）。该命令工具默认被折叠，模型会先用 `akm_list_tools` 取 schema、
+  再 `akm_call_tool` 执行。skill 目录对 shell 只读：能读、能执行，不能写回。
+- **时间线显示**：`akm_load_skill` 与普通工具一样出现在过程时间线里，显示为「加载 Skill」。
+
+关闭方式：把 `agent_config.agent_skills_dir` 设为空串（区分「未配置」与「留空」，
+后者才真正关闭）。
+
+## MCP 代理（`akm_load_mcp`）
+
+**默认关闭**，需在 `config.json` 的 `agent_config` 里设 `agent_mcp_enabled=true`，
+否则该工具根本不注册、模型也看不到。
+
+- **一个工具三种用法**：不传参数列出全部 MCP 服务器；只传 `server` 列出该服务器的
+  工具（名字/描述/参数结构）；传 `server` + `tool` + `arguments` 执行内层工具。
+- **配置来源**：`agent_mcp_config_path`（默认 `~/.pi/agent/mcp.json`，`mcpServers`
+  格式，与 PI 等客户端共用）。本机当前有 8 个服务器，7 个 stdio + 1 个 HTTP。
+- **白名单**：`agent_mcp_allowed_servers`（逗号分隔）限定只允许哪些服务器；
+  留空等于**不限制**（不是「全关」）——只开 `agent_mcp_enabled` 时 8 个服务器全部可用，
+  包括能直连生产机的 `ssh-mcp`。要收窄范围时填成如 `akm-md-kb,codegraph,officecli`，
+  改完需重启 AKM 才生效（服务器清单在启动时读配置）。
+- **为什么默认关闭**：MCP 服务器能执行任意操作（本机的 `ssh-mcp` 可直接连生产机），
+  接上后会绕过 `agent_write_tools_enabled`、`agent_run_shell_enabled` 与 seatbelt
+  沙箱等全部既有开关——这是与文件工具完全不同的权限面。
+- **会话复用**：stdio 服务器首次调用拉起子进程并完成握手，之后复用；进程死亡或
+  握手失败自动重建。会话按「event loop + 服务器名」缓存，跨 loop 不复用（stdio
+  会话绑在创建它的 loop 上）。`tools/list` 结果按 5 分钟缓存；按名字调而缓存里没有
+  时会强制刷新一次，避免服务器在 TTL 内新增工具被误报「没有工具 X」。
+
+## 工具折叠现状
+
+文件与工作区工具（read/write/edit/list/glob/grep/shell/git 等 13 个）**不再常驻**，
+需要时由模型走 `akm_list_tools` + `akm_call_tool` 两轮换取；联网搜索与图片类保持直连。
+本机默认配置下 tools 声明从 13,196 字节降到 7,299 字节（约省 2k token/轮）。
+代价是连续读写文件的任务每次多两轮，可用 `agent_tool_gateway_enabled=false` 回退。
+
+其中 `akm_read_file` **不受工作区限制**（只读不改盘）：可以读工作区外的绝对路径与
+`~` 开头的路径，敏感文件（`.env` / 私钥 / 凭据 / 证书 / `.git` 内部）仍被拒；
+写、删、移、复制、建目录、列表与搜索一律保持原限制。前端不需要区分这两种情况，
+时间线的 `[路径#TAG]` 头解析对相对路径与绝对路径同样生效。
 ## 过程时间线
 
 助手一轮里的思考与工具调用在前端聚合成一条**可折叠的过程时间线**（不是服务端能力，

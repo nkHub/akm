@@ -39,6 +39,8 @@ from akm.agent_runtime.loop import ToolDef
 # 工具域已按功能拆成独立模块，装配函数只负责把它们拼起来；
 # 各域模块的 build_*_tools() 返回的 ToolDef 与原内联定义逐字一致。
 from akm.agent_runtime.tools_flow import build_flow_tools
+from akm.agent_runtime import skills as _skills
+from akm.agent_runtime import mcp_client as _mcp
 from akm.agent_runtime.tools_tasks import build_task_tools
 from akm.agent_runtime.tavily_mcp import tavily_search
 from akm.audit import list_logs_async
@@ -104,6 +106,9 @@ _WORKSPACE_WRITE_MAX_BYTES = 10 * 1024 * 1024
 _WORKSPACE_SENSITIVE_NAMES = frozenset((
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials.json",
     ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".htpasswd",
+    # AWS 的规范文件名是不带扩展名的 credentials，此前只登记了 credentials.json，
+    # 正好漏掉最经典的那个；gh 的 token 在 hosts.yml 里，同理。
+    "credentials", "hosts.yml",
 ))
 # 敏感扩展名：私钥/证书/密钥库
 _WORKSPACE_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".jks")
@@ -111,6 +116,12 @@ _WORKSPACE_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".
 _ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist", ".defaults")
 # 工作区内 .git 目录下的文件一律不通过文件工具访问（config 里可能带远端凭据）
 _WORKSPACE_VCS_DIR = ".git"
+# 整目录敏感：按文件名逐个登记永远会漏（用户可能把私钥命名成任意名字），
+# 这些目录的定位就是「存凭据/存服务端私有状态」，整片拦掉才算边界。
+# 相对家目录的相对路径；~/.config/ssh-mcp 单独列出，.config 本身太宽不能整拦。
+_SENSITIVE_DIR_RELATIVE = (
+    ".ssh", ".aws", ".akm", ".docker", ".kube", ".pi", ".config/ssh-mcp",
+)
 # 全文解码上限：不超过该大小的文件整体解码（带编码回退 + 精确内容 tag），更大走流式
 _TEXT_FULL_DECODE_MAX_BYTES = 8 * 1024 * 1024
 # 二进制嗅探字节数：前 8KB 出现 NUL 即判为二进制（与 git 的判据一致）
@@ -259,6 +270,15 @@ def _is_ignored_dir_name(name: str) -> bool:
     return name.startswith(".") or name in _WORKSPACE_IGNORE_DIRS
 
 
+def _sensitive_dir_hit(path: Path) -> str:
+    """命中整目录敏感名单时返回该目录的相对路径，否则返回空串。"""
+    for rel in _SENSITIVE_DIR_RELATIVE:
+        base = Path("~").expanduser() / rel
+        if _path_is_under(path, base):
+            return rel
+    return ""
+
+
 def _sensitive_path_reason(path: Path) -> str:
     """返回该路径命中敏感名单的原因，非敏感时返回空串（供错误文案直接使用）。
 
@@ -266,7 +286,8 @@ def _sensitive_path_reason(path: Path) -> str:
     - 文件名命中 ``_WORKSPACE_SENSITIVE_NAMES``（私钥、凭据文件）；
     - 扩展名命中 ``_WORKSPACE_SENSITIVE_SUFFIXES``（.pem/.key/.p12…）；
     - 以 ``.env`` 开头且不是 ``.env.example`` 这类模板；
-    - 位于工作区内 ``.git/`` 目录之下（config 可能含远端凭据）。
+    - 位于 ``_SENSITIVE_DIR_RELATIVE`` 列出的家目录子目录下（~/.ssh、~/.aws、~/.akm…）；
+    - 位于 ``.git/`` 目录之下（config 可能含远端凭据）。
     """
     name = path.name
     if name in _WORKSPACE_SENSITIVE_NAMES:
@@ -276,6 +297,10 @@ def _sensitive_path_reason(path: Path) -> str:
     lowered = name.lower()
     if lowered.endswith(_WORKSPACE_SENSITIVE_SUFFIXES):
         return f"{name} 属于密钥/证书文件，禁止通过文件工具访问"
+    hit = _sensitive_dir_hit(path)
+    if hit:
+        # 目录级拦截不列具体文件名：那个目录里的东西对模型一律不可见
+        return f"{path.name} 位于敏感目录 ~/{hit}/ 下（存放凭据或服务私有状态），禁止通过文件工具访问"
     if _WORKSPACE_VCS_DIR in path.parts:
         # 不写死「请用 akm_run_git」：agent_git_enabled=false 时那个工具根本没注册，
         # 提示会指向一个不存在的工具（v0.1.57 P2-2）
@@ -283,6 +308,7 @@ def _sensitive_path_reason(path: Path) -> str:
             f"{path.name} 位于版本库内部目录 {_WORKSPACE_VCS_DIR}/ 下，文件工具不直接访问；"
             "如需操作版本库，请先开启 agent_git_enabled 再用 akm_run_git"
         )
+    return ""
     return ""
 
 
@@ -462,7 +488,9 @@ def _allowed_image_path(path: Path) -> bool:
     return workspace_root is not None and _path_is_under(path, workspace_root)
 
 
-def _safe_resolve_workspace_path(raw: str, *, must_exist: bool = True) -> Path:
+def _safe_resolve_workspace_path(
+    raw: str, *, must_exist: bool = True, allow_outside: bool = False
+) -> Path:
     """把模型传入的路径解析为工作区内的绝对路径，越界或缺失时抛 ValueError。
 
     安全约定：
@@ -472,26 +500,36 @@ def _safe_resolve_workspace_path(raw: str, *, must_exist: bool = True) -> Path:
     - must_exist 为 True 时目标必须存在（读写场景），False 时允许不存在
       （新建文件场景，但仍要求其父目录位于工作区内）。
 
+    ``allow_outside=True`` 跳过「必须在工作区内」这一条，只有 ``akm_read_file``
+    使用：读不改磁盘，放开范围换「能查项目外的配置与日志」的便利。敏感名单与
+    ``.git`` 拦截仍然生效（见 ``_guard_sensitive_path``）。**写类工具必须保持默认
+    值 False**，否则工作区不再意味着「模型只能改这一片」。
+
     Returns:
         规范化后的绝对路径（Path 对象）。
 
     Raises:
-        ValueError: 未配置工作区、路径越界或（must_exist 时）目标不存在。
+        ValueError: 未配置工作区（且未放开范围）、路径越界或（must_exist 时）目标不存在。
     """
     root = _workspace_root()
-    if root is None:
+    if root is None and not allow_outside:
         raise ValueError("未配置 agent_workspace_root，工作区文件工具不可用")
     raw = str(raw or "").strip()
     if not raw:
         raise ValueError("path 不能为空")
-    candidate = Path(raw)
+    # 放开范围后 `~` 是刚需（模型习惯写 ~/.zshrc）；工作区内原本也没有名为 ~ 的目录，
+    # 因此这个展开对旧行为没有影响。
+    candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
+        if root is None:
+            raise ValueError("未配置 agent_workspace_root，相对路径无法解析")
         candidate = root / candidate
     candidate = candidate.resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        raise ValueError(f"路径 {raw} 超出工作区范围，禁止访问") from None
+    if root is not None and not allow_outside:
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ValueError(f"路径 {raw} 超出工作区范围，禁止访问") from None
     if must_exist and not candidate.exists():
         raise ValueError(f"路径 {raw} 不存在")
     # 敏感文件（.env / 私钥 / 凭据 / .git 内部文件）即使在沙箱内也拒绝，
@@ -979,7 +1017,10 @@ async def _read_file_tool(
     offset: int = 1,
     limit: int = 0,
 ) -> str:
-    """读取工作区内的文本文件，返回「绝对行号 + 版本 tag」的纯文本窗口。
+    """读取文本文件，返回「绝对行号 + 版本 tag」的纯文本窗口。
+
+    路径不限于工作区：工作区外的文件也能读（写入仍受工作区限制）。
+    敏感名单（私钥/凭据/.env/.git）照旧拒绝。
 
     输出形态（纯文本而非 JSON：JSON 会把每个换行转义成 ``\\n``，既白烧 token
     也让模型难以按行号定位）::
@@ -1001,7 +1042,7 @@ async def _read_file_tool(
     - 失败仍返回 ``{"error": ...}``（与其它工具一致，供自愈重试识别）。
     """
     try:
-        target = _safe_resolve_workspace_path(path, must_exist=True)
+        target = _safe_resolve_workspace_path(path, must_exist=True, allow_outside=True)
     except ValueError as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
     if not target.is_file():
@@ -3533,6 +3574,37 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             )
         return json.dumps({"results": results}, ensure_ascii=False)
 
+    async def load_skill_tool(name: str = "", section: str = "") -> str:
+        """按需加载一个 skill 的正文或指定章节，返回 JSON 序列化结果。
+
+        为什么走服务端直读而不是文件工具：skills 目录（默认 ``~/.agents/skills``）
+        在工作区之外，``akm_read_file`` 的 ``_safe_resolve_workspace_path`` 会直接拒绝；
+        而名字白名单（只能取索引里出现的名字）已经把路径收窄到 skill 目录内。
+        """
+        try:
+            result = _skills.load_skill(name, section)
+        except Exception as exc:
+            logger.warning("[AgentTool] akm_load_skill 失败: %s", exc)
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
+
+    async def load_mcp_tool(
+        server: str = "",
+        tool: str = "",
+        arguments: dict[str, Any] | None = None,
+    ) -> str:
+        """代理 MCP：列服务器、列某服务器的工具，或用 server+tool+arguments 执行。
+
+        单个稳定工具而不是把 MCP 工具动态注册进 ToolRegistry——MCP 工具是运行时
+        才发现的，注册表是进程级静态的，动态塞进去会让 tools 声明随服务器状态漂移。
+        """
+        try:
+            result = await _mcp.load_mcp(server, tool, arguments)
+        except Exception as exc:  # noqa: BLE001 - 任何 MCP 异常都不能打穿 Agent 循环
+            logger.warning("[AgentTool] akm_load_mcp 失败: %s", exc)
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
+
     async def read_image_tool(
         prompt: str = "",
         image_path: str = "",
@@ -4188,6 +4260,26 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
             search_kb_tool,
         ),
         ToolDef(
+            "akm_load_skill",
+            (
+                "按需加载一个 skill 的完整操作指引。系统提示里已列出全部可用 skill 的名字与一句话描述；"
+                "当用户的任务与某条 skill 描述吻合时，用本工具取回该 skill 的正文再按它执行。"
+                "不传 name 时返回全部 skill 的清单（名字 + 一句话描述），只在忘了索引内容时用。"
+                "正文较长时可用 section 参数只取某一节（按标题或附属文件名匹配，如 section=\"audit\"），"
+                "避免整篇进入上下文。skill 名字只能取索引里出现的名字，任意路径都会拒绝"
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "skill 名字，必须与系统提示索引里列出的名字一致；留空返回 skill 清单"},
+                    "section": {"type": "string", "description": "可选：只取标题或附属文件名包含该关键字的某一节，正文很长时用"},
+                },
+                "required": [],
+            },
+            load_skill_tool,
+            max_result_chars=30_000,
+        ),
+        ToolDef(
             "akm_generate_image",
             "调用 AKM 配置的图片生成模型生成图片，返回图片资源列表。每项含 url，并附带保存到本地的 local_path 与可访问的 http_url（/agent-uploads/...），保存失败时含 save_error。需要配置 image_supported_models 对应的可用 API Key",
             {
@@ -4246,6 +4338,40 @@ def build_builtin_tools(app: FastAPI) -> list[ToolDef]:
     # akm_flow_* 工具组受 flow_enabled 总开关控制：关闭工作流引擎时不注册这些工具
     if load_config().get("flow_enabled", True):
         tools.extend(build_flow_tools(app))
+    # MCP 代理工具：默认不注册。MCP 服务器能执行任意操作（本机的 ssh-mcp 可直接连生产机），
+    # 接上后会绕过 agent_write_tools_enabled / agent_run_shell_enabled / seatbelt 沙箱等
+    # 全部既有开关——这是与文件工具完全不同的权限面，必须由管理员显式启用。
+    if load_config().get("agent_mcp_enabled"):
+        tools.append(
+            ToolDef(
+                "akm_load_mcp",
+                "使用本机配置的 MCP 服务器（外部工具服务）。三种用法：不传参数列出全部服务器；"
+                "只传 server 列出该服务器的工具（名字/描述/参数结构）；传 server + tool + arguments "
+                "执行其中一个工具并返回它的输出。任务需要的工具不在当前工具清单里、且明显属于某个"
+                "外部服务（如浏览器调试、小程序 IDE、代码图谱、Office 文档）时，先用它查一遍",
+                {
+                    "type": "object",
+                    "properties": {
+                        "server": {
+                            "type": "string",
+                            "description": "MCP 服务器名；留空则列出全部可用服务器",
+                        },
+                        "tool": {
+                            "type": "string",
+                            "description": "该服务器的工具名；留空则只列工具清单",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "执行工具时的参数对象，按上一步返回的 parameters 组织",
+                            "additionalProperties": True,
+                        },
+                    },
+                    "required": [],
+                },
+                load_mcp_tool,
+                max_result_chars=60_000,
+            )
+        )
     if load_config().get("agent_email_enabled"):
         tools.append(
             ToolDef(
@@ -4670,13 +4796,14 @@ def build_workspace_tools(app: FastAPI | None = None) -> list[ToolDef]:
     tools: list[ToolDef] = [
         ToolDef(
             "akm_read_file",
-            "读取工作区内文本文件，返回「行号: 内容」的纯文本窗口与版本 tag。offset 为 1-based 起始行"
+            "读取文本文件，返回「行号: 内容」的纯文本窗口与版本 tag。offset 为 1-based 起始行"
             "（与 akm_edit_file 的 start_line 完全一致），limit 默认 2000 行、上限 4000；"
-            "窗口未读完时末尾直接给出下一次的 offset。仅能访问 agent_workspace_root 工作区内的文件",
+            "窗口未读完时末尾直接给出下一次的 offset。可读工作区**之外**的文件（传绝对路径或 ~ 开头的路径），"
+            "但敏感文件（私钥/凭据/.env/.git 内部）一律拒绝；写入类工具仍只限于 agent_workspace_root 内",
             {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "工作区内的文件路径（绝对路径或相对工作区根目录的路径）"},
+                    "path": {"type": "string", "description": "文件路径：绝对路径、~ 开头的路径，或相对工作区根目录的路径"},
                     "offset": {"type": "integer", "description": "起始行号（1-based），默认 1"},
                     "limit": {"type": "integer", "description": "返回的最大行数，默认 2000，上限 4000；传 -1 表示尽量读到结尾"},
                 },

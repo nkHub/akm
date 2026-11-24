@@ -151,11 +151,39 @@ async def test_read_file_within_workspace(_workspace, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_read_file_outside_workspace_rejected(_workspace, monkeypatch):
-    """读取工作区外文件应返回错误，而不是泄露内容。"""
+async def test_read_file_outside_workspace_allowed(_workspace, monkeypatch, tmp_path):
+    """工作区外的文件现在可读；首行标签给绝对路径，避免与工作区内同名文件混淆。"""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("OUTSIDE_SENTINEL\n", encoding="utf-8")
     handlers = _handlers(monkeypatch)
 
-    out = json.loads(await handlers["akm_read_file"](path="/etc/passwd"))
+    out = await handlers["akm_read_file"](path=str(outside))
+
+    assert "OUTSIDE_SENTINEL" in out
+    assert out.splitlines()[0].startswith(f"[{outside.resolve()}#")
+
+
+@pytest.mark.asyncio
+async def test_read_file_outside_still_rejects_sensitive(_workspace, monkeypatch, tmp_path):
+    """放开工作区不等于放开敏感文件：工作区外的 .env 照旧拒绝。"""
+    secret = tmp_path / ".env"
+    secret.write_text("SECRET_KEY=1\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_read_file"](path=str(secret)))
+
+    assert "error" in out
+    assert "密钥" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_write_file_outside_workspace_still_rejected(_workspace, monkeypatch, tmp_path):
+    """读放开不能连带写：写类工具必须保持工作区限制。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(
+        await handlers["akm_write_file"](path=str(tmp_path / "x.txt"), content="x")
+    )
 
     assert "error" in out
     assert "超出工作区" in out["error"]
@@ -753,6 +781,54 @@ async def test_sensitive_paths_blocked(_workspace, monkeypatch):
     assert "禁止" in env_out["error"]
     assert "禁止" in key_out["error"]
     assert "SECRET=" in sample
+
+
+@pytest.mark.asyncio
+async def test_aws_and_gh_credentials_blocked(_workspace, monkeypatch):
+    """AWS 的规范文件名是不带扩展名的 credentials（此前只登记了 credentials.json）。"""
+    (_workspace / "credentials").write_text("[default]\naws_access_key_id=x\n", encoding="utf-8")
+    (_workspace / "hosts.yml").write_text("oauth_token: x\n", encoding="utf-8")
+    handlers = _handlers(monkeypatch)
+
+    aws = json.loads(await handlers["akm_read_file"](path="credentials"))
+    gh = json.loads(await handlers["akm_read_file"](path="hosts.yml"))
+
+    assert "禁止" in aws["error"]
+    assert "禁止" in gh["error"]
+
+
+def test_sensitive_home_dirs_blocked():
+    """整目录拦截：~/.ssh、~/.aws、~/.akm 等按前缀拦，不依赖具体文件名。"""
+    from akm.agent_runtime.tools import _sensitive_path_reason
+
+    blocked = [
+        "~/.ssh/config",
+        "~/.aws/config",
+        "~/.akm/config.json",
+        "~/.docker/config.json",
+        "~/.kube/config",
+        "~/.pi/agent/mcp.json",
+        "~/.config/ssh-mcp/ssh-config.json",
+        # 任意名字也要拦：目录级规则不看文件名
+        "~/.ssh/anything-at-all",
+    ]
+    for raw in blocked:
+        assert _sensitive_path_reason(Path(raw).expanduser()), f"{raw} 应被拦截"
+
+    # 不过度拦截：同名的宽目录与普通文件必须放行
+    for raw in ("~/.config/other/app.json", "~/Documents/notes.md", "~/.zshrc"):
+        assert not _sensitive_path_reason(Path(raw).expanduser()), f"{raw} 不应被拦截"
+
+
+@pytest.mark.asyncio
+async def test_read_outside_workspace_blocks_sensitive_dirs(monkeypatch):
+    """allow_outside 不能绕过目录级名单：工作区外的 ~/.akm 同样拒绝。"""
+    handlers = _handlers(monkeypatch)
+
+    out = json.loads(await handlers["akm_read_file"](path="~/.akm/config.json"))
+
+    assert "error" in out
+    assert "敏感目录" in out["error"]
 
 
 @pytest.mark.asyncio

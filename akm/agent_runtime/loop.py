@@ -11,6 +11,7 @@ import logging
 import time
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
+from akm.agent_runtime import skills as _skills
 from akm.config import load_config
 
 logger = logging.getLogger("akm.agent_runtime.loop")
@@ -134,27 +135,28 @@ _TOOL_GATEWAY_NAMES: frozenset[str] = frozenset({
     _TOOL_GATEWAY_CALL_NAME,
 })
 
-#: 折叠后仍然直接下发的工具名：文件/工作区/shell/git、渲染、知识库、读图、联网搜索。
+#: 折叠后仍然直接下发的工具名：渲染、知识库、skill、读图、联网搜索。
 #: 名字必须与 tools.py 里注册的工具名一致；改名时两处要同步（`akm_render` 与
 #: render_schema 的一致性由 tests/test_agent_tool_gateway.py 兜住）。
+#:
+#: **文件与工作区工具（read/write/edit/list/glob/grep/shell/git 等）刻意不常驻**：
+#: 按当前配置这 12 个占全部 tools 声明的大头，而多数对话并不改文件；需要时由模型
+#: 走 akm_list_tools + akm_call_tool 两轮换取 schema。代价是「真正要连续读写文件」
+#: 的任务每次都多两轮，可用 agent_tool_gateway_enabled=false 回退成全量下发。
+#: 联网搜索与图片类保留直连——它们是高频且用完即弃的单次调用，折叠只增加延迟。
 _GATEWAY_PINNED_TOOLS: frozenset[str] = frozenset({
-    "akm_read_file",
-    "akm_list_dir",
-    "akm_glob",
-    "akm_grep",
-    "akm_file_info",
-    "akm_write_file",
-    "akm_edit_file",
-    "akm_make_dir",
-    "akm_delete_file",
-    "akm_move_file",
-    "akm_copy_file",
-    "akm_run_shell",
-    "akm_run_git",
     "akm_render",
     "akm_search_kb",
+    "akm_load_skill",
     "akm_read_image",
+    "akm_generate_image",
+    "akm_edit_image",
     "tavily_search",
+    "akm_fetch_url",
+    # MCP 代理入口：它本身是「网关式」工具，折叠它会让使用链路变成三层
+    # （akm_call_tool → akm_load_mcp → 真正的 MCP 工具）。未启用 MCP 时该工具
+    # 根本不注册，这里写名字不影响折叠结果。
+    "akm_load_mcp",
 })
 
 #: 折叠生效时追加给模型的系统指引。不写这段，模型看到工具清单里没有某个能力，
@@ -181,6 +183,26 @@ def _inject_tool_gateway_guide(working_messages: list[dict]) -> None:
         first["content"] = str(first.get("content", "")) + "\n\n" + _TOOL_GATEWAY_GUIDE
     else:
         working_messages.insert(0, {"role": "system", "content": _TOOL_GATEWAY_GUIDE})
+
+def _inject_skills_index(working_messages: list[dict]) -> None:
+    """把 skills 索引追加到 system 消息（就地修改；没有 system 消息时插到最前）。
+
+    索引只是名字+描述，不是正文：全量正文实测约 55k token，无法常驻。
+    索引的引导话术和「工具按需加载」的措辞保持同一口径，避免模型把 skill
+    和工具网关当成两套机制去理解。
+    """
+    index_text = _skills.build_index_text()
+    if not index_text:
+        return
+    if not working_messages:
+        return
+    first = working_messages[0]
+    if isinstance(first, dict) and first.get("role") == "system":
+        first["content"] = str(first.get("content", "")) + "\n\n" + index_text
+    else:
+        working_messages.insert(0, {"role": "system", "content": index_text})
+
+
 #: 工具模式（akm_render）开启时追加给模型的系统指引。
 
 
@@ -1760,7 +1782,10 @@ class AgentLoop:
         # 准备 messages，如有 instructions 则注入为 system 消息
         # 工具模式开启时补上渲染指引：不写这段模型不会主动调 akm_render
         instructions = (instructions or "") + _render_guide()
-        working_messages: list[dict] = list(messages or [])
+        # 逐条拷贝字典：外层 list() 只是浅拷贝，而 _inject_skills_index 与
+        # _inject_tool_gateway_guide 都改 first["content"]，共享同一 dict 会把
+        # 索引写回调用方的 messages——复用消息列表的调用方会逐轮累积、system 越滚越长。
+        working_messages: list[dict] = [dict(m) for m in (messages or [])]
         if instructions and working_messages:
             if working_messages[0].get("role") == "system":
                 working_messages[0]["content"] = (
@@ -1789,6 +1814,7 @@ class AgentLoop:
         # 能力会直接回答「做不到」，而不是先去 akm_list_tools 查一次。
         if folded_tool_names:
             _inject_tool_gateway_guide(working_messages)
+        _inject_skills_index(working_messages)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0
@@ -2220,7 +2246,8 @@ class AgentLoop:
 
         # 工具模式开启时补上渲染指引：不写这段模型不会主动调 akm_render
         instructions = (instructions or "") + _render_guide()
-        working_messages: list[dict] = list(messages or [])
+        # 与非流式路径同口径：逐条拷贝，避免索引写回调用方的 messages
+        working_messages: list[dict] = [dict(m) for m in (messages or [])]
         if instructions and working_messages:
             if working_messages[0].get("role") == "system":
                 working_messages[0]["content"] = (
@@ -2242,6 +2269,7 @@ class AgentLoop:
         # 与非流式路径一致：折叠生效时补一段「按需加载」指引。
         if folded_tool_names:
             _inject_tool_gateway_guide(working_messages)
+        _inject_skills_index(working_messages)
 
         total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         compacted_count = 0

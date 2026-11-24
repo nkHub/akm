@@ -23,10 +23,12 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `akm_delete_task` | 按 `akm_list_tasks` 返回的 `task_id` 删除一条定时任务，返回是否删除成功 |
 | `tavily_search` | 通过 Tavily 实时联网搜索，返回含标题、链接和摘要的搜索结果；需先在 config.json 中配置 `tavily_api_key` |
 | `akm_search_kb` | 检索 `markdown_kb` 插件索引的 Markdown 知识库，返回命中文档片段（标题/文件名/分数/内容）；需本机已启用并索引 markdown_kb 插件 |
+| `akm_load_skill` | 按需加载一个 skill 的完整操作指引。系统提示里常驻全部可用 skill 的「名字 + 一句话描述」索引（来自 `agent_config.agent_skills_dir`，默认 `~/.agents/skills`），正文不进常驻上下文——17 个 skill 全文约 55k token，是全部内置工具声明的十倍。`name` 只能取索引里出现的名字（白名单匹配，任何路径构造都会被拒）。不传 `name` 或传空串时返回全部 skill 的清单（名字 + 一句话描述），用于长对话里忘了索引内容时自查；`section` 可只取标题包含该关键字的某一节，标题匹配不到时按文件名到 `references/`、`scripts/` 等附属目录里找（如 `impeccable` 的知识在 `reference/audit.md`）。正文超 24,000 字节截断并提示改用 `section`；返回里的 `files` 是限量后的附属文件清单，`scripts_note` 提示 skill 目录对 shell 只读（脚本可用 `akm_run_shell` 以绝对路径执行，但不能写回该目录） |
+| `akm_load_mcp` | 代理本机配置的 MCP 服务器（`agent_config.agent_mcp_config_path`，默认 `~/.pi/agent/mcp.json`，`mcpServers` 格式）。不传参数列出全部服务器；传 `server` 列出该服务器的工具（名字/描述/参数结构）；传 `server` + `tool` + `arguments` 执行并返回输出。**默认不注册**——需 `agent_mcp_enabled=true` 才可被模型看到，因为 MCP 服务器（如 `ssh-mcp`）能直接操作远端主机，会绕过 `agent_write_tools_enabled`、`agent_run_shell_enabled` 与 seatbelt 沙箱等全部既有开关。`agent_mcp_allowed_servers` 可进一步限定可用服务器（逗号分隔，留空=只由总开关把关）。服务器名只能取配置里的键，内层工具名必须出现在该服务器 `tools/list` 的返回里，模型无法构造命令或路径 |
 | `akm_generate_image` | 调用 AKM 配置的图片生成模型生成图片，返回图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；需配置 `image_supported_models` 对应的可用 API Key |
 | `akm_edit_image` | 编辑图片（如重绘局部、扩展内容），返回编辑后的图片资源（url + 本地路径 + `/agent-uploads/...` HTTP 地址）；本地路径仅允许工作区或上传目录，亦可传入 base64 数据 |
 | `akm_read_image` | 调用配置的视觉模型描述一张图片（图片来源 `image_path` 本地文件或 `image_base64` data URL），返回图片的文字描述；本质是一次多模态 chat/completions 请求，视觉模型取 `agent_config.agent_vision_model`（默认 `gpt-5.6-luna`，与图片生成的 `image_supported_models` 相互独立） |
-| `akm_read_file` | 读取工作区内的文本文件，返回「行号: 内容」的纯文本窗口 + 4 位版本 tag（`[路径#TAG]` 头）。`offset` 为 **1-based** 起始行（与 `akm_edit_file` 的 `start_line` 完全一致），`limit` 默认 2000 行、上限 4000；窗口未读完时 footer 直接给出下一次的 `offset`。单文件超 50MB 拒绝，单次窗口超 60KB 或单行超 2000 字符则截断并标注；编码按 utf-8 → gb18030 回退，tag 一律按**磁盘原始字节**计算（解码后的文本不参与），footer 的「共 N 行」在窗口被字节预算截断时也是文件真实总行数；二进制内容返回可操作错误 |
+| `akm_read_file` | 读取文本文件，返回「行号: 内容」的纯文本窗口 + 4 位版本 tag（`[路径#TAG]` 头）。**可读工作区之外的文件**（绝对路径或 `~` 开头路径；首行给绝对路径），敏感名单仍拒绝。`offset` 为 **1-based** 起始行（与 `akm_edit_file` 的 `start_line` 完全一致），`limit` 默认 2000 行、上限 4000；窗口未读完时 footer 直接给出下一次的 `offset`。单文件超 50MB 拒绝，单次窗口超 60KB 或单行超 2000 字符则截断并标注；编码按 utf-8 → gb18030 回退，tag 一律按**磁盘原始字节**计算（解码后的文本不参与），footer 的「共 N 行」在窗口被字节预算截断时也是文件真实总行数；二进制内容返回可操作错误 |
 | `akm_list_dir` | 列出工作区内目录的条目（名称、类型、大小、是否敏感），支持 `offset` / `limit` 分页（默认 500，上限 2000），被截断时返回 `truncated` 与 `next_offset` |
 | `akm_glob` | 按 glob 模式匹配工作区内文件（如 `**/*.py`），返回相对路径列表并**按 mtime 倒序**；支持 `path` 限定子目录与 `limit`（默认 100，上限 1000）；遍历统一跳过隐藏目录与 `node_modules`/`.git`/`build`/`dist` 等依赖构建目录，结果或扫描预算被截断时标记 `truncated` 并给 `notice` |
 | `akm_grep` | 在工作区内按正则搜索文件内容，**每个文件返回其全部命中行**（候选文件按 mtime 倒序扫描）；支持 `include`（glob 过滤）、`case_sensitive`、`output_mode`（`content` / `files_with_matches` / `count`）与 `head_limit`（默认 100，上限 4000）；单文件超 10MB 跳过，截断时返回 `truncated` 与 `notice` |
@@ -89,7 +91,7 @@ Agent 实现集中在 `akm/agent_runtime/`：`router.py` 提供端点、`loop.py
 | `agent_keep_recent_messages` | `10` | 压缩上下文时保留的最近消息条数，工具调用及其配对的 `tool_calls` 消息会整组保留 |
 | `agent_context_warning_ratio` | `0.8` | 上下文占用量超过上限该比例时，SSE 流式响应下发 `context_warning` 事件；`0` 表示关闭警告 |
 | `agent_upload_dir` | `~/.akm/cache` | Agent 上传文件（图片）的保存目录，路径支持 `~` 展开 |
-| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录，文件工具（`akm_read_file` 等）仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用 |
+| `agent_workspace_root` | `""` | Agent 工作区沙箱根目录。除 `akm_read_file`（只读，已放开范围）外的文件工具仅能在此目录内读写；请求级 `workspace_root` 只能选择其子目录；留空则文件工具不可用（`akm_read_file` 仍可用绝对路径读取） |
 | `agent_write_tools_enabled` | `false` | 是否启用 Agent 写工具（`akm_write_file` / `akm_edit_file` / `akm_make_dir` / `akm_delete_file` / `akm_move_file` / `akm_copy_file`），默认关闭需显式开启 |
 | `agent_write_requires_read` | `true` | 覆盖或编辑**已存在**文件前是否要求本会话先读过它（`akm_read_file` 会记录版本 tag 与已读行区间，编辑/覆盖时用它们做「先读后写」与版本校验）；设为 `false` 可退回旧行为（不校验直接改） |
 | `agent_sensitive_path_guard` | `true` | 是否拦截工作区内的敏感文件：`.env`（`.env.example` / `.env.sample` / `.env.template` 等模板除外）、`id_rsa` / `id_ed25519` 等私钥、`credentials.json` / `.netrc` 等凭据、`*.pem` / `*.key` / `*.p12` / `*.pfx` 等证书、`.git` 目录内部文件；读写删建与搜索全部生效 |
@@ -280,7 +282,7 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ### 读工具（默认可用）
 
-配置 `agent_workspace_root` 后，以下只读工具始终注册：`akm_read_file`、`akm_list_dir`、`akm_glob`、`akm_grep`、`akm_file_info`。它们只读取工作区内的文件，路径越界访问直接返回错误。
+配置 `agent_workspace_root` 后，以下只读工具始终注册：`akm_read_file`、`akm_list_dir`、`akm_glob`、`akm_grep`、`akm_file_info`。其中 `akm_read_file` 可读工作区外的文件，其余四个只读工作区内内容，路径越界访问直接返回错误。
 
 `akm_read_file` 的返回形态是**带行号的纯文本**而不是 JSON（JSON 会把每个换行转义成 `\n`，既白烧 token 又难按行号定位）：
 
@@ -319,15 +321,17 @@ curl -X POST http://127.0.0.1:8788/v1/agent \
 
 ### 路径沙箱
 
-所有文件工具的文件路径（相对/绝对路径）都会先解析，并校验解析结果必须位于 `agent_workspace_root` 目录内：
+所有文件工具的文件路径（相对/绝对路径）都会先解析，并校验解析结果必须位于 `agent_workspace_root` 目录内——**例外是 `akm_read_file`**：只读不改盘，已放开工作区限制，可读工作区外的绝对路径或 `~` 开头的路径（首行的 `[路径#TAG]` 头此时给绝对路径，避免与工作区内同名文件混淆）。其余工具（列表/搜索/写入/编辑/删除/移动/复制/建目录）仍严格受限，`akm_read_file` 的放开不传导给它们：
 
 - 绝对路径越界（如 `/etc/passwd`）被拒绝；
 - 相对路径中的 `..` 穿越工作区被拒绝；
 - 软链接指向工作区外时（resolve 后越界）被拒绝。
 
-越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv，`dir` 参数限定的仓库目录必须在工作区内。`akm_read_file` 单次窗口最多 60000 字节 / 2000 行（上限 4000 行），`akm_grep` 默认 100 条命中（`head_limit` 可调到 4000），`akm_glob` 默认 100 条（`limit` 可到 1000），`akm_list_dir` 默认 500 条（`limit` 可到 2000）；被截断时一律返回 `truncated` 与 `notice`，避免模型误以为拿到了完整结果。除各工具自身的限额，工具结果还有一层统一字符预算（`akm_run_shell` / `akm_grep` / `akm_glob` 等文本型工具 100–200KB，超出时按「首尾保留、中间省略」裁剪并标注），结构化结果（`akm_render` 的 layout）不受影响。
+越界访问统一返回「超出工作区范围」错误，不会读写工作区之外的任何文件（`akm_read_file` 除外，见上）；请求级 `workspace_root` 只能选择全局工作区的子目录。`akm_edit_image` 的本地图片和蒙版仅允许从工作区或 `agent_upload_dir` 读取，单个文件或 Base64 解码后的大小最多 20MB。`akm_run_shell` 以工作区目录为 cwd 用系统 shell 执行命令并受 `_WORKSPACE_SHELL_TIMEOUT_SEC`（默认 60 秒）超时保护，但它不是文件系统沙箱，启用前应确认调用方可信；默认开启的 `agent_run_shell_sandbox` 用 macOS seatbelt 对 shell 子进程做「限制敏感读写」级隔离。`akm_run_git` 只构造固定 operation 对应的 argv，`dir` 参数限定的仓库目录必须在工作区内。`akm_read_file` 单次窗口最多 60000 字节 / 2000 行（上限 4000 行），`akm_grep` 默认 100 条命中（`head_limit` 可调到 4000），`akm_glob` 默认 100 条（`limit` 可到 1000），`akm_list_dir` 默认 500 条（`limit` 可到 2000）；被截断时一律返回 `truncated` 与 `notice`，避免模型误以为拿到了完整结果。除各工具自身的限额，工具结果还有一层统一字符预算（`akm_run_shell` / `akm_grep` / `akm_glob` 等文本型工具 100–200KB，超出时按「首尾保留、中间省略」裁剪并标注），结构化结果（`akm_render` 的 layout）不受影响。
 
-敏感文件是**沙箱内的第二道闸**：工作区内的 `.env`（`.env.example` 等模板除外）、`id_rsa` / `id_ed25519` 等私钥、`credentials.json` / `.netrc` / `.npmrc` 等凭据、`*.pem` / `*.key` / `*.p12` / `*.pfx` 等证书、`.git` 目录内部文件，由 `agent_sensitive_path_guard`（默认开启）在路径解析层统一拒绝，读写删建与搜索全部生效，避免文件工具变成绕过隔离的后门。
+敏感文件是**沙箱内的第二道闸**：`.env`（`.env.example` 等模板除外）、`id_rsa` / `id_ed25519` 等私钥、`credentials` / `credentials.json` / `hosts.yml` / `.netrc` / `.npmrc` 等凭据、`*.pem` / `*.key` / `*.p12` / `*.pfx` 等证书、`.git` 目录内部文件，由 `agent_sensitive_path_guard`（默认开启）在路径解析层统一拒绝，读写删建与搜索全部生效，避免文件工具变成绕过隔离的后门。**`akm_read_file` 放开工作区后这道闸是它唯一的文件级保护**，范围也从「工作区内」扩展到任意路径——例如 `~/.npmrc` 无论工作区在哪都会被拒。
+
+除按文件名/扩展名匹配外，还有一层**整目录拦截**（`_SENSITIVE_DIR_RELATIVE`）：`~/.ssh/`、`~/.aws/`、`~/.akm/`、`~/.docker/`、`~/.kube/`、`~/.pi/`、`~/.config/ssh-mcp/` 下的**任何**文件都拒绝访问。按文件名逐个登记永远会漏（用户可以把私钥命名成任意名字，AWS 的规范文件名就是不带扩展名的 `credentials`），这几个目录的定位就是「存凭据或服务私有状态」，整片拦掉才算边界。注意 `~/.config/` 本身不在名单里（太宽，会挡住正常配置），只精确到 `~/.config/ssh-mcp/`。`akm_read_image` 走独立的图片路径校验（工作区或 `agent_upload_dir`），不经这层，因此不影响读 `~/.akm/cache` 里的上传图片。
 
 **这条名单是「防手滑」，不是安全边界**：`agent_run_shell_sandbox=true` 时 seatbelt 会用同一份名单再拦一层（工作区内 `.env` / 私钥 / 证书的 `file-read-data` deny，位置在 `allow file-read*` 之后才生效），但关掉沙箱后 shell 里 `cat .env` 就是能读——任何依赖这层名单「挡住模型读密钥」的假设都不成立。另外 `akm_delete_file` 同样受名单拦截，`.env` 之类删不掉（要删只能走 shell 或手工），这是有意的：宁可挡住清理动作，也不让模型顺手删凭据。
 

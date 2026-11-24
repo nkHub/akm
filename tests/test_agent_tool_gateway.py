@@ -58,7 +58,9 @@ def _build_registry(calls: list[tuple[str, dict]]) -> ToolRegistry:
 
         return handler
 
-    registry.register(ToolDef("akm_read_file", "读取文件", {"type": "object", "properties": {}}, make_handler("akm_read_file")))
+    # 用 akm_search_kb 当「常驻直连」样本：它仍在 _GATEWAY_PINNED_TOOLS 里。
+    # 文件工具已从常驻名单移除（见 loop.py 里 pinned 的注释），不能再拿它当常驻样本。
+    registry.register(ToolDef("akm_search_kb", "读取文件", {"type": "object", "properties": {}}, make_handler("akm_search_kb")))
     for name in _LONG_TAIL:
         registry.register(ToolDef(name, f"{name} 的描述", {"type": "object", "properties": {}}, make_handler(name)))
     return registry
@@ -82,7 +84,7 @@ def test_plan_tools_folds_long_tail_and_pins_common_tools(gateway_config):
     plan = AgentLoop(http_client=None, tool_registry=registry)._plan_tools(None, None, None)
     names = _tool_names(plan)
 
-    assert names[0] == "akm_read_file"
+    assert names[0] == "akm_search_kb"
     gateway_index = names.index("akm_list_tools")
     assert names[gateway_index:gateway_index + 2] == ["akm_list_tools", "akm_call_tool"]
     assert not set(_LONG_TAIL) & set(names)
@@ -196,7 +198,7 @@ async def test_gateway_call_rejects_tool_not_in_folded_set(monkeypatch, gateway_
                             "type": "function",
                             "function": {
                                 "name": "akm_call_tool",
-                                "arguments": json.dumps({"name": "akm_read_file", "arguments": {}}),
+                                "arguments": json.dumps({"name": "akm_search_kb", "arguments": {}}),
                             },
                         }],
                     }
@@ -284,7 +286,7 @@ async def test_list_tools_returns_schema_by_name_and_filters_by_query(gateway_co
 
         # 网关自身不出现在清单里（否则模型会递归调自己）
         assert "akm_call_tool" not in [item["name"] for item in summary["tools"]]
-        assert "akm_read_file" not in [item["name"] for item in summary["tools"]]
+        assert "akm_search_kb" not in [item["name"] for item in summary["tools"]]
     finally:
         reset_request_gateway_context(token)
 
