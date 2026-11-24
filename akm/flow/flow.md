@@ -58,9 +58,10 @@
 ## 节点能力
 
 - **LLM 节点**：执行提示词，输出以 `artifacts` 累积；对上游瞬时 5xx（网关时段性故障）自动重试（指数退避，默认最多重试 2 次，可用 `agent_flow.llm_retry_max` 调整），避免单次瞬时故障拖垮整个运行；4xx 视为请求本身问题不重试。
-- **流程控制**：拓扑排序 / 并行执行 / 条件分支 / loop 重入 / `merge` 汇聚 / `router` 路由。
+- **流程控制**：拓扑排序 / 并行执行 / 条件分支 / loop 重入 / `merge` 汇聚 / `router` 路由。**条件边的屏障语义**：入边只有在「源节点本次被激活」时才会阻塞目标，源从未激活（该分支没走）则这条边视同已决——因此 pass/fail 两条出边可以安全汇入同一节点（如双审查共用 `fix`），不会被另一条永远不成立的边卡死。无条件边仍是硬屏障，多前驱汇合必须等齐（fan-in）。
+- **运行状态判定**：条件分支可能把流程走成死路（如审查持续 fail、交付节点始终不可达），此时运行一律置 `failed`，不会因为「没有可执行节点了就退出循环」而误报 `succeeded`。
 - **编码节点**（`code` / `fix` / `test`）：通过节点 `data.executor` 选择执行器——`pi-agent`（默认，本机 `pi` CLI，失败回退 mock 摘要）、`opencode-cli`（本机 Opencode CLI `opencode run`）；`codex-cli`（本机 Codex CLI）已预留 runner 但当前暂缓上线，节点里配置该执行器时自动回退到 `pi-agent`。CLI 执行器启动失败或超时直接让节点 failed（不做 mock 兜底）。执行前后对项目目录做工作区快照 diff，产出写入 `run.fileDiffs`；同一项目路径通过路径锁串行化，避免并发写冲突。
-- **人工审批**（`human`）：默认自动放行（`flow_human_auto_approve` / `agent_flow.human_auto_approve` 为 `true`），设为 `false` 后运行在审批节点挂起（`waiting_human`），经 `resume` 批准/驳回后继续或终止。
+- **人工审批**（`human`）：默认自动放行（`flow_human_auto_approve` / `agent_flow.human_auto_approve` 为 `true`），自动放行会在节点日志留一条 `自动批准` 记录，避免事后无法区分人工批准与自动通过；设为 `false` 后运行在审批节点挂起（`waiting_human`），经 `resume` 批准/驳回后继续或终止。审批消息由 `data.userPromptTemplate` 经 `{{artifacts.*}}` 渲染后推送，不会把模板字面量展示给审批人。
 - **git worktree 沙箱**（`variables.useWorktree`）：`run` / `per-coding` 两种模式，隔离编码过程避免污染工作目录。
 - **节点级重试**：`data.retry` 字段支持 `{max: N, on: "error"}`（LLM/代理调用失败重试，指数退避 `400ms×attempt`）或 `{on: "review_fail"}`（审查结论为 `fail` 时同节点重执行）。
 

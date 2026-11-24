@@ -1,6 +1,8 @@
 # 版本变更记录
 
 ## 未发布
+**flow 引擎：修复条件边死锁与误报成功**（`akm/flow/engine.py`）：`_pick_ready` 原先把所有结构边（只排除 `loop`）都当作硬屏障，导致 pass/fail 双出边汇入同一节点的工作流永久卡死——「标准功能开发 v2（双审查 + 提交闸门）」里审查①判 fail 时审查②永远不执行，`node_fix` 的两条前驱只完成一条，修复节点再也跑不起来，整条链在审查后就断了。改为**条件边只在源节点本次被激活时才算屏障**：源从未激活说明该分支没走，这条边视同已决；无条件边仍是硬屏障，多前驱汇合照旧等齐（fan-in 未变，`test_engine_parallel_fan_in` 与独立验证脚本均通过）。同时补上同源的第二个问题：原先「没有就绪节点了就退出循环」会把任意死路都收成 `succeeded`，v2 那种审查持续 fail 的运行会报成功却没有任何产物；现在收尾时若所有 `output` 节点都未 succeeded，运行置 `failed` 并打 warn 日志。（`_execute_human_node`）审批消息改为经 `render_template` 渲染后再交给 `_wait_for_human`，此前直接把 `data.userPromptTemplate` 原串传进去，一旦有人把 `{{artifacts.plan}}` 写进闸门模板，审批人会看到模板字面量；（`_wait_for_human`）自动放行补一条 `自动批准（agent_flow.human_auto_approve 开启）：<渲染后的模板>` 的 warn 日志，此前 auto 分支建完 future 直接 return，既无日志也无事件，审批产物只剩裸字符串 `auto`，事后无法区分人工批准与自动通过。**验证**：`tests/test_flow.py` 39 passed（新增 4 例：条件边 fail 分支必须真跑到 fix 与 output、持续 fail 时 run 必须 failed、闸门消息不含 `{{` 且含上游产物、自动放行留痕），全量 `pytest -q` **1487 passed**，`ruff check` 通过；另用与线上 v2 同构的边结构跑真实引擎回归，修复前 `node_fix`/`node_output` 均 skipped 而 run 报 succeeded，修复后 `node_fix` 执行、持续 fail 时 run 正确 failed。**已知边界**：① v2 工作流的 `test → 提交闸门` 仍是无条件边，测试失败不阻断（属工作流定义问题，本次未动用户数据）；② 没有任何节点执行 `git commit`，`node_gate_commit` 是 `human` 类型只改状态，闸门 prompt 里「批准 → 执行 commit + push」并无实现；③ 三个编码节点绑同一 `projectPath` 时仍被路径锁串行化，「并行」只有开 `useWorktree=per-coding` 才成立。以上三点需改工作流定义或另加节点，不在引擎修复范围内。
+
 **后台侧边栏「设置」下移到「关于」之前**（`akm/templates/_sidebar.html`）：原顺序 统计→审计→管理→**设置**→连接池→插件→插件菜单→关于，设置夹在中段、与上下项无关联，且作为低频入口偏靠前。改为 统计→审计→管理→连接池→插件→插件菜单→**设置→关于**，把设置与关于一起归到末位。只调整 `<a>` 块的先后顺序，未改样式类、图标路径与 `active` 判断逻辑；HTML 标签配对校验通过（无未闭合/错配），包内 `_sidebar.html` 顺序已确认为新序。README 未描述侧边栏项顺序，无需同步。
 
 **文件工具改为折叠 + 新增 MCP 代理工具（`akm_load_mcp`）**：两处工具布局调整。

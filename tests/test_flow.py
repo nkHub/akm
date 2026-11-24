@@ -850,3 +850,193 @@ def test_db_list_runs_running(_isolated_db):
             "finishedAt": t if status != "running" else "",
         })
     assert {r["id"] for r in flow_db.list_runs_running()} == {"run_a"}
+
+
+# ── 条件边屏障 & 人工闸门消息 ───────────────────────────────────
+
+def _v2_style_workflow() -> dict:
+    """复刻「双审查 + 提交闸门」边结构：两条 fail 边汇入同一修复节点。
+
+    这是标准功能开发 v2 的真实形状：审查①fail 时审查②根本不会执行，
+    修复节点的第二条前驱会永远停在 pending。
+    """
+
+    def node(nid: str, ntype: str, artifact_key: str) -> dict:
+        return {
+            "id": nid,
+            "type": ntype,
+            "data": {
+                "label": nid,
+                "modelId": "gpt-test",
+                "executor": "llm",
+                "artifactKey": artifact_key,
+                "systemPrompt": nid,
+                "userPromptTemplate": f"USER:{nid}",
+            },
+        }
+
+    edges = [
+        {"source": "node_intake", "target": "node_plan"},
+        {"source": "node_plan", "target": "node_approve"},
+        {"source": "node_approve", "target": "node_code"},
+        {"source": "node_code", "target": "node_rev_req"},
+        {"source": "node_rev_req", "target": "node_rev_edge", "condition": "pass"},
+        {"source": "node_rev_req", "target": "node_fix", "condition": "fail"},
+        {"source": "node_rev_edge", "target": "node_test", "condition": "pass"},
+        {"source": "node_rev_edge", "target": "node_fix", "condition": "fail"},
+        {"source": "node_fix", "target": "node_rev_req", "loop": True},
+        {"source": "node_test", "target": "node_gate"},
+        {"source": "node_gate", "target": "node_output"},
+    ]
+    for idx, edge in enumerate(edges):
+        edge["id"] = f"edge_{idx}"
+    return {
+        "id": "wf_v2_style",
+        "name": "v2 风格",
+        "version": 1,
+        "variables": {"projectPath": ".", "maxNodeVisits": "3"},
+        "nodes": [
+            node("node_intake", "intake", "intake"),
+            node("node_plan", "plan", "plan"),
+            node("node_approve", "human", "approval"),
+            node("node_code", "code", "code"),
+            node("node_rev_req", "review", "review_req"),
+            node("node_rev_edge", "review", "review_edge"),
+            node("node_test", "test", "test"),
+            node("node_gate", "human", "commit_gate"),
+            node("node_fix", "fix", "fix"),
+            node("node_output", "output", "output"),
+        ],
+        "edges": edges,
+    }
+
+
+@pytest.mark.asyncio
+async def test_engine_conditional_fail_branch_runs_fix(_monkey_forward, monkeypatch):
+    """审查①判 fail 时必须真的跑修复节点，并最终走到交付汇总。
+
+    条件边只在命中时才成为屏障：未命中的 pass 边不该把审查②算作修复的前驱。
+    """
+    import json
+
+    import akm.flow.engine as fe
+
+    calls = {"node_rev_req": 0}
+
+    async def _forward(body, client, api_path="chat/completions", plugin_manager=None):
+        system = body["messages"][0]["content"]
+        if system == "node_rev_req":
+            calls["node_rev_req"] += 1
+            # 首次判 fail 进入修复环，修复后的复审转为 pass
+            text = "## 结论\nfail" if calls["node_rev_req"] == 1 else "## 结论\npass"
+        else:
+            text = "## 结论\npass"
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": text}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        return {
+            "status_code": 200,
+            "body": json.dumps(payload),
+            "key_alias": "t",
+            "provider": "p",
+            "model": "m",
+        }
+
+    monkeypatch.setattr(fe, "_forward_request", _forward)
+
+    wf = _v2_style_workflow()
+    engine = WorkflowEngine(_fake_app())
+    run = await engine.start(wf, "实现登录功能")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+
+    assert final["status"] == "succeeded"
+    assert final["nodeRuns"]["node_fix"]["status"] == "succeeded"
+    assert final["nodeRuns"]["node_rev_edge"]["status"] == "succeeded"
+    assert final["nodeRuns"]["node_output"]["status"] == "succeeded"
+    assert "output" in final["artifacts"]
+    # 修复产出确实进入了产物链
+    assert "fix" in final["artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_engine_human_gate_message_is_rendered(_monkey_forward, monkeypatch):
+    """人工闸门推送的消息必须渲染过模板，不能把 {{...}} 字面量给人看。"""
+    monkeypatch.setattr("akm.config.load_config", lambda: {"flow_human_auto_approve": False})
+
+    wf = hotfix_workflow()
+    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
+    human_node["data"]["userPromptTemplate"] = "请审阅方案：{{artifacts.intake}}"
+
+    engine = WorkflowEngine(_fake_app())
+    run = await engine.start(wf, "修复 bug")
+    for _ in range(50):
+        if engine.get_run(run["id"])["status"] == "waiting_human":
+            break
+        await asyncio.sleep(0.05)
+    cur = engine.get_run(run["id"])
+    assert cur["status"] == "waiting_human"
+
+    joined = "\n".join(log.get("message") or "" for log in cur["nodeRuns"][human_node["id"]]["logs"])
+    assert "{{" not in joined
+    assert "请审阅方案：" in joined
+    # 上游产物确实渲染进了消息
+    assert "你好，已完成处理" in joined
+
+    await engine.resume(run["id"], {"action": "approve", "note": "同意"})
+    await engine._tasks[run["id"]]
+
+
+@pytest.mark.asyncio
+async def test_engine_human_auto_approve_leaves_trace(_monkey_forward):
+    """自动放行要让人看得见：留一条日志说明是自动批准，而不是静默通过。"""
+    wf = hotfix_workflow()
+    human_node = next(n for n in wf["nodes"] if n["type"] == "human")
+
+    engine = WorkflowEngine(_fake_app())
+    run = await engine.start(wf, "修复 bug")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+
+    assert final["status"] == "succeeded"
+    assert final["nodeRuns"][human_node["id"]]["status"] == "succeeded"
+    joined = "\n".join(log.get("message") or "" for log in final["nodeRuns"][human_node["id"]]["logs"])
+    assert "自动" in joined
+
+
+@pytest.mark.asyncio
+async def test_engine_unreachable_output_marks_run_failed(_monkey_forward, monkeypatch):
+    """审查一直不过、交付节点永远走不到时，run 必须 failed 而不是 succeeded。
+
+    否则用户看到「成功」，却拿不到任何交付产物。
+    """
+    import json
+
+    import akm.flow.engine as fe
+
+    async def _forward(body, client, api_path="chat/completions", plugin_manager=None):
+        system = body["messages"][0]["content"]
+        text = "## 结论\nfail" if system == "node_rev_req" else "## 结论\npass"
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": text}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        return {
+            "status_code": 200,
+            "body": json.dumps(payload),
+            "key_alias": "t",
+            "provider": "p",
+            "model": "m",
+        }
+
+    monkeypatch.setattr(fe, "_forward_request", _forward)
+
+    wf = _v2_style_workflow()
+    engine = WorkflowEngine(_fake_app())
+    run = await engine.start(wf, "实现登录功能")
+    await engine._tasks[run["id"]]
+    final = engine.get_run(run["id"])
+
+    assert final["nodeRuns"]["node_output"]["status"] != "succeeded"
+    assert final["status"] == "failed"

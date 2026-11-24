@@ -488,6 +488,8 @@ class WorkflowEngine:
             loop = asyncio.get_event_loop()
             fut: asyncio.Future = loop.create_future()
             fut.set_result({"action": "approve", "note": "auto", "nodeId": node_id})
+            # 自动放行必须留痕：否则审批产物只有裸 "auto"，事后无法区分人工批准与自动通过
+            self._push_log(run, node_id, f"自动批准（agent_flow.human_auto_approve 开启）：{message}", "warn")
             return fut
         existing = self._human_waits.get(run_id)
         if existing is not None and not existing.done():
@@ -800,15 +802,21 @@ class WorkflowEngine:
         }
 
     def _pick_ready(self, workflow: dict, progress: dict, run: dict) -> list[dict]:
-        """挑选就绪节点（activated 且未完成/跳过 且非等待/运行 且所有结构前驱完成）。"""
+        """挑选就绪节点（activated 且未完成/跳过 且非等待/运行 且结构前驱已决）。
+
+        条件边只在「源节点被激活」时才算屏障：源从未激活说明这条分支不会走，
+        它的目标不该被一条永远不成立的边卡死。否则 pass/fail 双出边的汇合点
+        （如审查①fail → 修复，而审查②停在 pending）会永久阻塞。
+        """
         nodes = workflow.get("nodes") or []
         edges = structural_edges(workflow)
         by_id = {n["id"]: n for n in nodes}
-        pred: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+        # 前驱项带上「是否条件边」，两类边的屏障语义不同
+        pred: dict[str, list[tuple[str, bool]]] = {n["id"]: [] for n in nodes}
         for e in edges:
             s, t = e.get("source"), e.get("target")
             if isinstance(s, str) and isinstance(t, str) and s in by_id and t in by_id:
-                pred[t].append(s)
+                pred[t].append((s, bool(e.get("condition"))))
         ready: list[dict] = []
         for n in nodes:
             nid = n["id"]
@@ -819,7 +827,15 @@ class WorkflowEngine:
                 continue
             if nr is not None and nr.get("status") in ("waiting_human", "running"):
                 continue
-            if any(p not in progress["completed"] and p not in progress["skipped"] for p in pred.get(nid, [])):
+            blocked = False
+            for p, conditional in pred.get(nid, []):
+                if p in progress["completed"] or p in progress["skipped"]:
+                    continue
+                if conditional and p not in progress["activated"]:
+                    continue
+                blocked = True
+                break
+            if blocked:
                 continue
             ready.append(n)
         return ready
@@ -1108,7 +1124,14 @@ class WorkflowEngine:
         nr["startedAt"] = flow_db.now_iso()
         self._emit(run_id, {"type": "node_start", "runId": run_id, "nodeId": node_id, "modelId": nr["modelId"]})
         try:
-            fut = self._wait_for_human(run, node_id, data.get("userPromptTemplate") or "")
+            # 闸门消息要给审批人看真实产物，不能把模板字面量推过去
+            ctx = {
+                "input": run["input"],
+                "vars": workflow.get("variables") or {},
+                "artifacts": run["artifacts"],
+            }
+            message = render_template(data.get("userPromptTemplate") or "", ctx)
+            fut = self._wait_for_human(run, node_id, message)
             decision = await fut
             self._apply_human_decision(run, node_id, decision, workflow)
             if decision.get("action") == "approve":
@@ -1202,6 +1225,19 @@ class WorkflowEngine:
                         "nodeId": n["id"],
                         "status": "skipped",
                     })
+            # 交付节点没跑成就不算成功：条件分支可能把整条链走成死路，
+            # 若仍报 succeeded，用户会以为有交付物（v2 审查①失败即如此）
+            output_nodes = [n for n in workflow.get("nodes") or [] if n.get("type") == "output"]
+            if output_nodes and all(
+                (run.get("nodeRuns", {}).get(n["id"]) or {}).get("status") != "succeeded"
+                for n in output_nodes
+            ) and run.get("status") not in ("failed", "cancelled"):
+                run["status"] = "failed"
+                logger.warning(
+                    "[Flow] 运行 %s 未产出任何交付节点（%s），标记 failed",
+                    run_id,
+                    ", ".join(n["id"] for n in output_nodes),
+                )
             if run.get("status") not in ("failed", "cancelled"):
                 run["status"] = "succeeded"
             # 收尾清理 worktree（保留/等待/运行中除外）
